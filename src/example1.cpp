@@ -74,7 +74,7 @@ public:
 
 	void ask_to_quit()
     {
-        auto dlg = new MessageDialog(this, MessageDialog::Type::Question, "Warning!", "Do you want to quit?", "Yes", "No", true);
+        auto dlg = new MessageDialog(this, MessageDialog::Type::Information, "Warning!", "🛑 Quit?", "Yes", "No", true);
         dlg->set_callback([this](int result) { this->set_visible(result != 0); });
         dlg->request_focus();
     }
@@ -156,7 +156,7 @@ public:
 
 		// Move menubar to front
         move_window_to_front(m_menubar);
-        m_menubar->set_fixed_width(width());
+        m_menubar->set_min_width(width());
     }
 
     void CreateMainWindow()
@@ -182,7 +182,7 @@ public:
         b->set_tooltip("This button has a fairly long tooltip. It is so long, in "
             "fact, that the shown text will span several lines.");
 
-        new Label(ButtonDemoWindow, "🐺💺💆🐡🐛", "emoji");
+        new Label(ButtonDemoWindow, "EMOJI! 🐺💺💆🐡🐛", "sans");
 
         new Label(ButtonDemoWindow, "Toggle buttons", "sans-bold");
         b = new Button(ButtonDemoWindow, "Toggle me");
@@ -298,7 +298,8 @@ public:
         auto image_window = new Window(this, "Selected image", true);
 		addWindowButtons(image_window);
         image_window->set_position(Vector2i(710, 15));
-        image_window->set_layout(new GroupLayout(3));
+        //image_window->set_layout(new GroupLayout(3));
+        image_window->set_layout( new GridLayout(Orientation::Horizontal, 1, Alignment::Fill, 2, 2) );
 
         // Create a Texture instance for each object
         for (auto& icon : icons) {
@@ -380,7 +381,7 @@ public:
 
         Slider* slider = new Slider(panel);
         slider->set_value(0.5f);
-        slider->set_fixed_width(80);
+        slider->set_min_width(80);
 
         TextBox* text_box = new TextBox(panel);
         text_box->set_fixed_size(Vector2i(60, 25));
@@ -476,7 +477,7 @@ public:
 
         Button* b = panel->add<Button>("", FA_FORWARD);
         b->set_fixed_size(Vector2i(22, 22));
-        ib->set_fixed_height(22);
+        ib->set_min_height(22);
         b->set_callback([tab_widget, ib] {
             int value = ib->value();
             if (value >= 0 && value < tab_widget->tab_count())
@@ -676,7 +677,7 @@ public:
 
         b1 = new Button(AdvWid, "c0");
         layout->set_anchor(b1, AdvancedGridLayout::Anchor(1, 2));
-        
+
         b1 = new Button(AdvWid, "c0");
         layout->set_anchor(b1, AdvancedGridLayout::Anchor(1, 1,2,2));
 
@@ -706,7 +707,7 @@ public:
 
         auto WrapperWidget2 = new Widget(WrapperWidget1);
         WrapperWidget2->set_layout(new BoxLayout(Orientation::Vertical, Alignment::Fill, 15));// defaults: 2 columns
-*/		
+*/
 
         TextArea* CtrConsole_TextConsole = new TextArea(ScrollWidget);
         CtrConsole_TextConsole->set_padding(10);
@@ -741,7 +742,7 @@ public:
     }
 
 	// Necessary for closing open menus
-	bool mouse_button_event(const nanogui::Vector2i &p, int button, bool down, int modifiers) 
+	bool mouse_button_event(const nanogui::Vector2i &p, int button, bool down, int modifiers)
     {
         // close all popup menus
         if (down)
@@ -782,7 +783,7 @@ public:
         CreateBasicWindow();
         CreateMiscWindow();
         CreateSmallWindow();
-        CreateTreeViewWindow();
+        //CreateTreeViewWindow();
         CreateControlsDefault();
 
         perform_layout();

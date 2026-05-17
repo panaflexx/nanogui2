@@ -94,7 +94,7 @@ void Label::set_line_break_mode(LineBreakMode mode) {
 }
 
 void Label::set_fixed_size(const Vector2i &fixed_size) {
-    if (m_fixed_size != fixed_size) {
+    if (m_min_size != fixed_size) {
         Widget::set_fixed_size(fixed_size);
         m_cache_valid = false; // Invalidate cache
         m_selection_start = m_selection_end = -1; // Clear selection
@@ -123,23 +123,23 @@ Vector2i Label::preferred_size(NVGcontext *ctx) const {
         nvgFontFace(ctx, m_font.c_str());
         nvgFontSize(ctx, static_cast<float>(font_size()));
 
-        if (m_fixed_size.x() > 0) {
-            m_processed_text = process_text_for_mode(ctx, m_caption, m_fixed_size.x());
+        if (m_min_size.x() > 0) {
+                    m_processed_text = process_text_for_mode(ctx, m_caption, m_min_size.x());
             float bounds[4];
             nvgTextAlign(ctx, NVG_ALIGN_LEFT | NVG_ALIGN_TOP);
 
             switch (m_line_break_mode) {
                 case LineBreakMode::LineBreakByWordWrapping:
                 case LineBreakMode::LineBreakByCharWrapping:
-                    nvgTextBoxBounds(ctx, 0, 0, m_fixed_size.x(), m_processed_text.c_str(), nullptr, bounds);
-                    m_cached_size = Vector2i(m_fixed_size.x(), bounds[3] - bounds[1]);
+                    nvgTextBoxBounds(ctx, 0, 0, m_min_size.x(), m_processed_text.c_str(), nullptr, bounds);
+                    m_cached_size = Vector2i(m_min_size.x(), bounds[3] - bounds[1]);
                     break;
 
                 case LineBreakMode::LineBreakByClipping:
                 case LineBreakMode::LineBreakByTruncatingHead:
                 case LineBreakMode::LineBreakByTruncatingTail:
                 case LineBreakMode::LineBreakByTruncatingMiddle:
-                    m_cached_size = Vector2i(m_fixed_size.x(), font_size());
+                    m_cached_size = Vector2i(m_min_size.x(), font_size());
                     break;
             }
         } else {
@@ -174,12 +174,12 @@ void Label::draw(NVGcontext *ctx) {
     }
 
     // Draw text
-    if (m_fixed_size.x() > 0) {
+    if (m_min_size.x() > 0) {
         nvgTextAlign(ctx, NVG_ALIGN_LEFT | NVG_ALIGN_TOP);
         switch (m_line_break_mode) {
             case LineBreakMode::LineBreakByWordWrapping:
             case LineBreakMode::LineBreakByCharWrapping:
-                nvgTextBox(ctx, m_pos.x(), m_pos.y(), m_fixed_size.x(), m_processed_text.c_str(), nullptr);
+                nvgTextBox(ctx, m_pos.x(), m_pos.y(), m_min_size.x(), m_processed_text.c_str(), nullptr);
                 break;
 
             case LineBreakMode::LineBreakByClipping:
@@ -291,7 +291,7 @@ int Label::find_char_index(NVGcontext *ctx, const Vector2i &pos) const {
 
     nvgFontFace(ctx, m_font.c_str());
     nvgFontSize(ctx, static_cast<float>(font_size()));
-    nvgTextAlign(ctx, m_fixed_size.x() > 0 && (m_line_break_mode == LineBreakMode::LineBreakByWordWrapping ||
+    nvgTextAlign(ctx, m_min_size.x() > 0 && (m_line_break_mode == LineBreakMode::LineBreakByWordWrapping ||
                                                m_line_break_mode == LineBreakMode::LineBreakByCharWrapping)
                      ? NVG_ALIGN_LEFT | NVG_ALIGN_TOP
                      : NVG_ALIGN_LEFT | NVG_ALIGN_MIDDLE);
@@ -306,7 +306,7 @@ int Label::find_char_index(NVGcontext *ctx, const Vector2i &pos) const {
         lines.push_back(line);
     }
 
-    if (m_fixed_size.x() > 0 && (m_line_break_mode == LineBreakMode::LineBreakByWordWrapping ||
+    if (m_min_size.x() > 0 && (m_line_break_mode == LineBreakMode::LineBreakByWordWrapping ||
                                  m_line_break_mode == LineBreakMode::LineBreakByCharWrapping)) {
         // Multi-line text
         int line_index = static_cast<int>(y / line_height);
@@ -346,7 +346,7 @@ int Label::get_selection_bounds(NVGcontext *ctx, int start, int end, std::vector
 
     nvgFontFace(ctx, m_font.c_str());
     nvgFontSize(ctx, static_cast<float>(font_size()));
-    nvgTextAlign(ctx, m_fixed_size.x() > 0 && (m_line_break_mode == LineBreakMode::LineBreakByWordWrapping ||
+    nvgTextAlign(ctx, m_min_size.x() > 0 && (m_line_break_mode == LineBreakMode::LineBreakByWordWrapping ||
                                                m_line_break_mode == LineBreakMode::LineBreakByCharWrapping)
                      ? NVG_ALIGN_LEFT | NVG_ALIGN_TOP
                      : NVG_ALIGN_LEFT | NVG_ALIGN_MIDDLE);

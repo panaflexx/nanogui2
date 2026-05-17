@@ -37,9 +37,9 @@ class TestModeManager {
 private:
     bool m_testModeEnabled = false;
     static TestModeManager* instance;
-    
+
     TestModeManager() {}
-    
+
 public:
     static TestModeManager* getInstance() {
         if (!instance) {
@@ -47,7 +47,7 @@ public:
         }
         return instance;
     }
-    
+
     bool isTestModeEnabled() const { return m_testModeEnabled; }
     void setTestModeEnabled(bool enabled) { m_testModeEnabled = enabled; }
 };
@@ -58,7 +58,7 @@ TestModeManager* TestModeManager::instance = nullptr;
 class TestWidget : public Widget {
 public:
     TestWidget(Widget *parent) : Widget(parent) {}
-    
+
     /* OVERRIDE: Block input events when test mode is OFF */
     virtual bool mouse_button_event(const Vector2i &p, int button, bool down, int modifiers) override {
         if (!TestModeManager::getInstance()->isTestModeEnabled()) {
@@ -66,42 +66,42 @@ public:
         }
         return Widget::mouse_button_event(p, button, down, modifiers);
     }
-    
+
     virtual bool mouse_motion_event(const Vector2i &p, const Vector2i &rel, int button, int modifiers) override {
         if (!TestModeManager::getInstance()->isTestModeEnabled()) {
             return false;
         }
         return Widget::mouse_motion_event(p, rel, button, modifiers);
     }
-    
+
     virtual bool scroll_event(const Vector2i &p, const Vector2f &rel) override {
         if (!TestModeManager::getInstance()->isTestModeEnabled()) {
             return false;
         }
         return Widget::scroll_event(p, rel);
     }
-    
+
     virtual bool mouse_drag_event(const Vector2i &p, const Vector2i &rel, int button, int modifiers) override {
         if (!TestModeManager::getInstance()->isTestModeEnabled()) {
             return false;
         }
         return Widget::mouse_drag_event(p, rel, button, modifiers);
     }
-    
+
     virtual bool keyboard_event(int key, int scancode, int action, int modifiers) override {
         if (!TestModeManager::getInstance()->isTestModeEnabled()) {
             return false;
         }
         return Widget::keyboard_event(key, scancode, action, modifiers);
     }
-    
+
     virtual bool keyboard_character_event(unsigned int codepoint) override {
         if (!TestModeManager::getInstance()->isTestModeEnabled()) {
             return false;
         }
         return Widget::keyboard_character_event(codepoint);
     }
-    
+
     /* OVERRIDE: Draw border (green if selected, red if test mode is OFF and not selected) */
     virtual void draw(NVGcontext *ctx) override {
 		GUIEditor* editor = dynamic_cast<GUIEditor*>(screen());
@@ -115,9 +115,9 @@ public:
         }
 
         Widget::draw(ctx);
-        
+
         Color border = (editor && editor->selected_widget == this) ? Color(0, 255, 0, 255) : Color(255, 0, 0, 255);
-        
+
         // Draw border only when selected or test mode is OFF
         if ((editor && editor->selected_widget == this) || !TestModeManager::getInstance()->isTestModeEnabled()) {
             nvgSave(ctx);
@@ -134,57 +134,57 @@ public:
 /* NEW: TEST-MODE SPECIFIC WIDGET CLASSES */
 class TestLabel : public Label {
 public:
-    TestLabel(Widget *parent, const std::string &caption = "", const std::string &font = "sans") 
+    TestLabel(Widget *parent, const std::string &caption = "", const std::string &font = "sans")
         : Label(parent, caption, font) {}
-    
+
     virtual bool mouse_button_event(const Vector2i &p, int button, bool down, int modifiers) override {
         if (!TestModeManager::getInstance()->isTestModeEnabled()) {
             return false;
         }
         return Label::mouse_button_event(p, button, down, modifiers);
     }
-    
+
     virtual bool mouse_motion_event(const Vector2i &p, const Vector2i &rel, int button, int modifiers) override {
         if (!TestModeManager::getInstance()->isTestModeEnabled()) {
             return false;
         }
         return Label::mouse_motion_event(p, rel, button, modifiers);
     }
-    
+
     virtual bool scroll_event(const Vector2i &p, const Vector2f &rel) override {
         if (!TestModeManager::getInstance()->isTestModeEnabled()) {
             return false;
         }
         return Label::scroll_event(p, rel);
     }
-    
+
     virtual bool mouse_drag_event(const Vector2i &p, const Vector2i &rel, int button, int modifiers) override {
         if (!TestModeManager::getInstance()->isTestModeEnabled()) {
             return false;
         }
         return Label::mouse_drag_event(p, rel, button, modifiers);
     }
-    
+
     virtual bool keyboard_event(int key, int scancode, int action, int modifiers) override {
         if (!TestModeManager::getInstance()->isTestModeEnabled()) {
             return false;
         }
         return Label::keyboard_event(key, scancode, action, modifiers);
     }
-    
+
     virtual bool keyboard_character_event(unsigned int codepoint) override {
         if (!TestModeManager::getInstance()->isTestModeEnabled()) {
             return false;
         }
         return Label::keyboard_character_event(codepoint);
     }
-    
+
     virtual void draw(NVGcontext *ctx) override {
         Label::draw(ctx);
-        
+
         GUIEditor* editor = dynamic_cast<GUIEditor*>(screen());
         Color border = (editor && editor->selected_widget == this) ? Color(0, 255, 0, 255) : Color(255, 0, 0, 255);
-        
+
         // Draw border only when selected or test mode is OFF
         if ((editor && editor->selected_widget == this) || !TestModeManager::getInstance()->isTestModeEnabled()) {
             nvgSave(ctx);
@@ -200,57 +200,57 @@ public:
 
 class TestButton : public Button {
 public:
-    TestButton(Widget *parent, const std::string &caption = "", int icon = 0) 
+    TestButton(Widget *parent, const std::string &caption = "", int icon = 0)
         : Button(parent, caption, icon) {}
-    
+
     virtual bool mouse_button_event(const Vector2i &p, int button, bool down, int modifiers) override {
         if (!TestModeManager::getInstance()->isTestModeEnabled()) {
             return false;
         }
         return Button::mouse_button_event(p, button, down, modifiers);
     }
-    
+
     virtual bool mouse_motion_event(const Vector2i &p, const Vector2i &rel, int button, int modifiers) override {
         if (!TestModeManager::getInstance()->isTestModeEnabled()) {
             return false;
         }
         return Button::mouse_motion_event(p, rel, button, modifiers);
     }
-    
+
     virtual bool scroll_event(const Vector2i &p, const Vector2f &rel) override {
         if (!TestModeManager::getInstance()->isTestModeEnabled()) {
             return false;
         }
         return Button::scroll_event(p, rel);
     }
-    
+
     virtual bool mouse_drag_event(const Vector2i &p, const Vector2i &rel, int button, int modifiers) override {
         if (!TestModeManager::getInstance()->isTestModeEnabled()) {
             return false;
         }
         return Button::mouse_drag_event(p, rel, button, modifiers);
     }
-    
+
     virtual bool keyboard_event(int key, int scancode, int action, int modifiers) override {
         if (!TestModeManager::getInstance()->isTestModeEnabled()) {
             return false;
         }
         return Button::keyboard_event(key, scancode, action, modifiers);
     }
-    
+
     virtual bool keyboard_character_event(unsigned int codepoint) override {
         if (!TestModeManager::getInstance()->isTestModeEnabled()) {
             return false;
         }
         return Button::keyboard_character_event(codepoint);
     }
-    
+
     virtual void draw(NVGcontext *ctx) override {
         Button::draw(ctx);
-        
+
         GUIEditor* editor = dynamic_cast<GUIEditor*>(screen());
         Color border = (editor && editor->selected_widget == this) ? Color(0, 255, 0, 255) : Color(255, 0, 0, 255);
-        
+
         // Draw border only when selected or test mode is OFF
         if ((editor && editor->selected_widget == this) || !TestModeManager::getInstance()->isTestModeEnabled()) {
             nvgSave(ctx);
@@ -267,55 +267,55 @@ public:
 class TestTextBox : public TextBox {
 public:
     TestTextBox(Widget *parent) : TextBox(parent) {}
-    
+
     virtual bool mouse_button_event(const Vector2i &p, int button, bool down, int modifiers) override {
         if (!TestModeManager::getInstance()->isTestModeEnabled()) {
             return false;
         }
         return TextBox::mouse_button_event(p, button, down, modifiers);
     }
-    
+
     virtual bool mouse_motion_event(const Vector2i &p, const Vector2i &rel, int button, int modifiers) override {
         if (!TestModeManager::getInstance()->isTestModeEnabled()) {
             return false;
         }
         return TextBox::mouse_motion_event(p, rel, button, modifiers);
     }
-    
+
     virtual bool scroll_event(const Vector2i &p, const Vector2f &rel) override {
         if (!TestModeManager::getInstance()->isTestModeEnabled()) {
             return false;
         }
         return TextBox::scroll_event(p, rel);
     }
-    
+
     virtual bool mouse_drag_event(const Vector2i &p, const Vector2i &rel, int button, int modifiers) override {
         if (!TestModeManager::getInstance()->isTestModeEnabled()) {
             return false;
         }
         return TextBox::mouse_drag_event(p, rel, button, modifiers);
     }
-    
+
     virtual bool keyboard_event(int key, int scancode, int action, int modifiers) override {
         if (!TestModeManager::getInstance()->isTestModeEnabled()) {
             return false;
         }
         return TextBox::keyboard_event(key, scancode, action, modifiers);
     }
-    
+
     virtual bool keyboard_character_event(unsigned int codepoint) override {
         if (!TestModeManager::getInstance()->isTestModeEnabled()) {
             return false;
         }
         return TextBox::keyboard_character_event(codepoint);
     }
-    
+
     virtual void draw(NVGcontext *ctx) override {
         TextBox::draw(ctx);
-        
+
         GUIEditor* editor = dynamic_cast<GUIEditor*>(screen());
         Color border = (editor && editor->selected_widget == this) ? Color(0, 255, 0, 255) : Color(255, 0, 0, 255);
-        
+
         // Draw border and text when selected or test mode is OFF
         if ((editor && editor->selected_widget == this) || !TestModeManager::getInstance()->isTestModeEnabled()) {
             nvgSave(ctx);
@@ -324,7 +324,7 @@ public:
             nvgStrokeColor(ctx, border);
             nvgStrokeWidth(ctx, (editor && editor->selected_widget == this) ? 2.0f : 1.5f);
             nvgStroke(ctx);
-            
+
             // Draw "EDIT MODE OFF" text only when not selected and test mode is OFF
             if (!(editor && editor->selected_widget == this) && !TestModeManager::getInstance()->isTestModeEnabled()) {
                 nvgFontSize(ctx, 12.0f);
@@ -417,57 +417,57 @@ public:
 class TestCheckBox : public CheckBox {
 public:
     TestCheckBox(Widget *parent, const std::string &caption = "",
-                const std::function<void(bool)> &callback = {}) 
+                const std::function<void(bool)> &callback = {})
         : CheckBox(parent, caption, callback) {}
-    
+
     virtual bool mouse_button_event(const Vector2i &p, int button, bool down, int modifiers) override {
         if (!TestModeManager::getInstance()->isTestModeEnabled()) {
             return false;
         }
         return CheckBox::mouse_button_event(p, button, down, modifiers);
     }
-    
+
     virtual bool mouse_motion_event(const Vector2i &p, const Vector2i &rel, int button, int modifiers) override {
         if (!TestModeManager::getInstance()->isTestModeEnabled()) {
             return false;
         }
         return CheckBox::mouse_motion_event(p, rel, button, modifiers);
     }
-    
+
     virtual bool scroll_event(const Vector2i &p, const Vector2f &rel) override {
         if (!TestModeManager::getInstance()->isTestModeEnabled()) {
             return false;
         }
         return CheckBox::scroll_event(p, rel);
     }
-    
+
     virtual bool mouse_drag_event(const Vector2i &p, const Vector2i &rel, int button, int modifiers) override {
         if (!TestModeManager::getInstance()->isTestModeEnabled()) {
             return false;
         }
         return CheckBox::mouse_drag_event(p, rel, button, modifiers);
     }
-    
+
     virtual bool keyboard_event(int key, int scancode, int action, int modifiers) override {
         if (!TestModeManager::getInstance()->isTestModeEnabled()) {
             return false;
         }
         return CheckBox::keyboard_event(key, scancode, action, modifiers);
     }
-    
+
     virtual bool keyboard_character_event(unsigned int codepoint) override {
         if (!TestModeManager::getInstance()->isTestModeEnabled()) {
             return false;
         }
         return CheckBox::keyboard_character_event(codepoint);
     }
-    
+
     virtual void draw(NVGcontext *ctx) override {
         CheckBox::draw(ctx);
-        
+
         GUIEditor* editor = dynamic_cast<GUIEditor*>(screen());
         Color border = (editor && editor->selected_widget == this) ? Color(0, 255, 0, 255) : Color(255, 0, 0, 255);
-        
+
         // Draw borders when selected or test mode is OFF
         if ((editor && editor->selected_widget == this) || !TestModeManager::getInstance()->isTestModeEnabled()) {
             nvgSave(ctx);
@@ -476,7 +476,7 @@ public:
             nvgStrokeColor(ctx, border);
             nvgStrokeWidth(ctx, (editor && editor->selected_widget == this) ? 2.0f : 1.5f);
             nvgStroke(ctx);
-            
+
             // Draw red circle only when not selected and test mode is OFF
             if (!(editor && editor->selected_widget == this) && !TestModeManager::getInstance()->isTestModeEnabled()) {
                 nvgBeginPath(ctx);
@@ -493,55 +493,55 @@ public:
 class TestSlider : public Slider {
 public:
     TestSlider(Widget *parent) : Slider(parent) {}
-    
+
     virtual bool mouse_button_event(const Vector2i &p, int button, bool down, int modifiers) override {
         if (!TestModeManager::getInstance()->isTestModeEnabled()) {
             return false;
         }
         return Slider::mouse_button_event(p, button, down, modifiers);
     }
-    
+
     virtual bool mouse_motion_event(const Vector2i &p, const Vector2i &rel, int button, int modifiers) override {
         if (!TestModeManager::getInstance()->isTestModeEnabled()) {
             return false;
         }
         return Slider::mouse_motion_event(p, rel, button, modifiers);
     }
-    
+
     virtual bool scroll_event(const Vector2i &p, const Vector2f &rel) override {
         if (!TestModeManager::getInstance()->isTestModeEnabled()) {
             return false;
         }
         return Slider::scroll_event(p, rel);
     }
-    
+
     virtual bool mouse_drag_event(const Vector2i &p, const Vector2i &rel, int button, int modifiers) override {
         if (!TestModeManager::getInstance()->isTestModeEnabled()) {
             return false;
         }
         return Slider::mouse_drag_event(p, rel, button, modifiers);
     }
-    
+
     virtual bool keyboard_event(int key, int scancode, int action, int modifiers) override {
         if (!TestModeManager::getInstance()->isTestModeEnabled()) {
             return false;
         }
         return Slider::keyboard_event(key, scancode, action, modifiers);
     }
-    
+
     virtual bool keyboard_character_event(unsigned int codepoint) override {
         if (!TestModeManager::getInstance()->isTestModeEnabled()) {
             return false;
         }
         return Slider::keyboard_character_event(codepoint);
     }
-    
+
     virtual void draw(NVGcontext *ctx) override {
         Slider::draw(ctx);
-        
+
         GUIEditor* editor = dynamic_cast<GUIEditor*>(screen());
         Color border = (editor && editor->selected_widget == this) ? Color(0, 255, 0, 255) : Color(255, 0, 0, 255);
-        
+
         // Draw borders when selected or test mode is OFF
         if ((editor && editor->selected_widget == this) || !TestModeManager::getInstance()->isTestModeEnabled()) {
             nvgSave(ctx);
@@ -550,7 +550,7 @@ public:
             nvgStrokeColor(ctx, border);
             nvgStrokeWidth(ctx, (editor && editor->selected_widget == this) ? 2.0f : 1.5f);
             nvgStroke(ctx);
-            
+
             // Draw extra red border only when not selected and test mode is OFF
             if (!(editor && editor->selected_widget == this) && !TestModeManager::getInstance()->isTestModeEnabled()) {
                 nvgBeginPath(ctx);
@@ -566,57 +566,57 @@ public:
 
 class TestColorPicker : public ColorPicker {
 public:
-    TestColorPicker(Widget *parent, const Color &color = Color(0, 255)) 
+    TestColorPicker(Widget *parent, const Color &color = Color(0, 255))
         : ColorPicker(parent, color) {}
-    
+
     virtual bool mouse_button_event(const Vector2i &p, int button, bool down, int modifiers) override {
         if (!TestModeManager::getInstance()->isTestModeEnabled()) {
             return false;
         }
         return ColorPicker::mouse_button_event(p, button, down, modifiers);
     }
-    
+
     virtual bool mouse_motion_event(const Vector2i &p, const Vector2i &rel, int button, int modifiers) override {
         if (!TestModeManager::getInstance()->isTestModeEnabled()) {
             return false; // Fixed: Added return statement
         }
         return ColorPicker::mouse_motion_event(p, rel, button, modifiers);
     }
-    
+
     virtual bool scroll_event(const Vector2i &p, const Vector2f &rel) override {
         if (!TestModeManager::getInstance()->isTestModeEnabled()) {
             return false;
         }
         return ColorPicker::scroll_event(p, rel);
     }
-    
+
     virtual bool mouse_drag_event(const Vector2i &p, const Vector2i &rel, int button, int modifiers) override {
         if (!TestModeManager::getInstance()->isTestModeEnabled()) {
             return false;
         }
         return ColorPicker::mouse_drag_event(p, rel, button, modifiers);
     }
-    
+
     virtual bool keyboard_event(int key, int scancode, int action, int modifiers) override {
         if (!TestModeManager::getInstance()->isTestModeEnabled()) {
             return false;
         }
         return ColorPicker::keyboard_event(key, scancode, action, modifiers);
     }
-    
+
     virtual bool keyboard_character_event(unsigned int codepoint) override {
         if (!TestModeManager::getInstance()->isTestModeEnabled()) {
             return false;
         }
         return ColorPicker::keyboard_character_event(codepoint);
     }
-    
+
     virtual void draw(NVGcontext *ctx) override {
         ColorPicker::draw(ctx);
-        
+
         GUIEditor* editor = dynamic_cast<GUIEditor*>(screen());
         Color border = (editor && editor->selected_widget == this) ? Color(0, 255, 0, 255) : Color(255, 0, 0, 255);
-        
+
         // Draw borders and text when selected or test mode is OFF
         if ((editor && editor->selected_widget == this) || !TestModeManager::getInstance()->isTestModeEnabled()) {
             nvgSave(ctx);
@@ -625,7 +625,7 @@ public:
             nvgStrokeColor(ctx, border);
             nvgStrokeWidth(ctx, (editor && editor->selected_widget == this) ? 2.0f : 1.5f);
             nvgStroke(ctx);
-            
+
             // Draw extra red border and text only when not selected and test mode is OFF
             if (!(editor && editor->selected_widget == this) && !TestModeManager::getInstance()->isTestModeEnabled()) {
                 nvgBeginPath(ctx);
@@ -633,7 +633,7 @@ public:
                 nvgStrokeColor(ctx, Color(255, 0, 0, 255));
                 nvgStrokeWidth(ctx, 1.5f);
                 nvgStroke(ctx);
-                
+
                 nvgFontSize(ctx, 12.0f);
                 nvgFontFace(ctx, "sans");
                 nvgFillColor(ctx, Color(255, 255, 255, 255));
@@ -647,57 +647,57 @@ public:
 
 class TestWindow : public Window {
 public:
-    TestWindow(Widget *parent, const std::string &title = "", bool modal = false) 
+    TestWindow(Widget *parent, const std::string &title = "", bool modal = false)
         : Window(parent, title, modal) {}
-    
+
     virtual bool mouse_button_event(const Vector2i &p, int button, bool down, int modifiers) override {
         if (!TestModeManager::getInstance()->isTestModeEnabled()) {
             return false;
         }
         return Window::mouse_button_event(p, button, down, modifiers);
     }
-    
+
     virtual bool mouse_motion_event(const Vector2i &p, const Vector2i &rel, int button, int modifiers) override {
         if (!TestModeManager::getInstance()->isTestModeEnabled()) {
             return false;
         }
         return Window::mouse_motion_event(p, rel, button, modifiers);
     }
-    
+
     virtual bool scroll_event(const Vector2i &p, const Vector2f &rel) override {
         if (!TestModeManager::getInstance()->isTestModeEnabled()) {
             return false;
         }
         return Window::scroll_event(p, rel);
     }
-    
+
     virtual bool mouse_drag_event(const Vector2i &p, const Vector2i &rel, int button, int modifiers) override {
         if (!TestModeManager::getInstance()->isTestModeEnabled()) {
             return false;
         }
         return Window::mouse_drag_event(p, rel, button, modifiers);
     }
-    
+
     virtual bool keyboard_event(int key, int scancode, int action, int modifiers) override {
         if (!TestModeManager::getInstance()->isTestModeEnabled()) {
             return false;
         }
         return Window::keyboard_event(key, scancode, action, modifiers);
     }
-    
+
     virtual bool keyboard_character_event(unsigned int codepoint) override {
         if (!TestModeManager::getInstance()->isTestModeEnabled()) {
             return false;
         }
         return Window::keyboard_character_event(codepoint);
     }
-    
+
     virtual void draw(NVGcontext *ctx) override {
         Window::draw(ctx);
-        
+
         GUIEditor* editor = dynamic_cast<GUIEditor*>(screen());
         Color border = (editor && editor->selected_widget == this) ? Color(0, 255, 0, 255) : Color(255, 0, 0, 255);
-        
+
         // Draw border and text when selected or test mode is OFF
         if ((editor && editor->selected_widget == this) || !TestModeManager::getInstance()->isTestModeEnabled()) {
             nvgSave(ctx);
@@ -706,7 +706,7 @@ public:
             nvgStrokeColor(ctx, border);
             nvgStrokeWidth(ctx, (editor && editor->selected_widget == this) ? 2.0f : 2.0f);
             nvgStroke(ctx);
-            
+
             // Draw text only when not selected and test mode is OFF
             if (!(editor && editor->selected_widget == this) && !TestModeManager::getInstance()->isTestModeEnabled()) {
                 nvgFontSize(ctx, 14.0f);
@@ -722,9 +722,9 @@ public:
 
 class TestCanvasWindow : public Window {
 public:
-    TestCanvasWindow(Widget *parent, const std::string &title = "") 
+    TestCanvasWindow(Widget *parent, const std::string &title = "")
         : Window(parent, title) {}
-    
+
     virtual void draw(NVGcontext *ctx) override {
         // Draw yellow highlight if this is the potential parent during dragging
         GUIEditor* editor = dynamic_cast<GUIEditor*>(screen());
@@ -739,9 +739,9 @@ public:
             nvgFill(ctx);
             nvgRestore(ctx);
         }
-        
+
         Color border = (editor && editor->selected_widget == this) ? Color(0, 255, 0, 255) : Color(255, 0, 0, 255);
-        
+
         if ((editor && editor->selected_widget == this) || !TestModeManager::getInstance()->isTestModeEnabled()) {
             nvgSave(ctx);
             nvgBeginPath(ctx);
@@ -799,8 +799,8 @@ GUIEditor::GUIEditor() : Screen(Vector2i(1024, 768), "GUI Editor") {
     editor_win = new Window(this, "");
     editor_win->set_position(Vector2i(0, 0));
     editor_win->set_layout(new BoxLayout(Orientation::Vertical));
-    editor_win->set_fixed_width(250);
-    editor_win->set_fixed_height(size().y());
+    editor_win->set_min_width(250);
+    editor_win->set_min_height(size().y());
 
     // Toolbar: 4x4 grid
     Widget *toolbar = new Widget(editor_win);
@@ -861,21 +861,21 @@ GUIEditor::GUIEditor() : Screen(Vector2i(1024, 768), "GUI Editor") {
     // Test mode toggle
     Widget *testModeRow = new Widget(editor_win);
     testModeRow->set_layout(new BoxLayout(Orientation::Horizontal, Alignment::Fill, 0, 5));
-    
+
     test_mode_checkbox = new CheckBox(testModeRow, "Test Mode");
     test_mode_checkbox->set_height(25);
     test_mode_checkbox->set_min_height(25);
     test_mode_checkbox->set_callback([this](bool checked) {
         selected_widget = nullptr; // deselect current widget focus
         TestModeManager::getInstance()->setTestModeEnabled(checked);
-        
+
         // Force redraw to update all widgets' appearance
         perform_layout();
         draw_all();
 		//deferred_tasks.push_back([this] { update_properties(); });
 		async([this] { printf("run async\n"); update_properties(); });
     });
-    
+
     // Set initial state
     test_mode_checkbox->set_checked(false);
     TestModeManager::getInstance()->setTestModeEnabled(false);
@@ -885,7 +885,7 @@ GUIEditor::GUIEditor() : Screen(Vector2i(1024, 768), "GUI Editor") {
 	plabel->set_fixed_size( Vector2i(200,25) );
 
     properties_pane = new Widget(editor_win);
-    GridLayout* layout = new GridLayout(Orientation::Horizontal, 2, 
+    GridLayout* layout = new GridLayout(Orientation::Horizontal, 2,
                                        Alignment::Middle, 15, 5);
     layout->set_col_alignment({ Alignment::Maximum, Alignment::Fill });
     layout->set_spacing(Orientation::Horizontal, 10);
@@ -933,7 +933,7 @@ bool GUIEditor::update_properties() {
         snap_combo->set_selected_callback([this](int index) {
             snap_grid_size = (index == 0) ? 0 : (index * 5);
         });
-        snap_combo->set_fixed_height(20);
+        snap_combo->set_min_height(20);
 
         new Label(properties_pane, "Resizable:", "sans-bold");
 		CheckBox *resize_checkbox = new CheckBox(properties_pane, "");
@@ -943,7 +943,7 @@ bool GUIEditor::update_properties() {
 			// Force redraw to update all widgets' appearance
 			//canvas_win->perform_layout();
 		});
- 
+
     }
 
     /* WIDGET TYPE DISPLAY */
@@ -951,7 +951,7 @@ bool GUIEditor::update_properties() {
     TextBox *type_box = new TextBox(properties_pane);
     type_box->set_value(getWidgetTypeName(selected_widget));
     type_box->set_editable(false);
-    type_box->set_fixed_height(20);
+    type_box->set_min_height(20);
 
     /* PARENT ID DISPLAY */
     new Label(properties_pane, "Parent ID:", "sans-bold");
@@ -959,7 +959,7 @@ bool GUIEditor::update_properties() {
     Widget *parent = selected_widget->parent();
     parent_id_box->set_value(parent && parent != this ? parent->id() : "None");
     parent_id_box->set_editable(false);
-    parent_id_box->set_fixed_height(20);
+    parent_id_box->set_min_height(20);
 
     /* UNIQUE ID DISPLAY */
     new Label(properties_pane, "ID:", "sans-bold");
@@ -972,7 +972,7 @@ bool GUIEditor::update_properties() {
         redraw();
         return true;
     });
-    id_box->set_fixed_height(20);
+    id_box->set_min_height(20);
 
     /* TYPE-SPECIFIC TEXT PROPERTIES */
     if (Label *lbl = dynamic_cast<Label *>(selected_widget)) {
@@ -987,7 +987,7 @@ bool GUIEditor::update_properties() {
             redraw();
             return true;
         });
-        caption_box->set_fixed_height(20);
+        caption_box->set_min_height(20);
     } else if (CheckBox *cb = dynamic_cast<CheckBox *>(selected_widget)) {
         new Label(properties_pane, "Caption:", "sans-bold");
         TextBox *caption_box = new TextBox(properties_pane);
@@ -1000,7 +1000,7 @@ bool GUIEditor::update_properties() {
             redraw();
             return true;
         });
-        caption_box->set_fixed_height(20);
+        caption_box->set_min_height(20);
     } else if (Window *win = dynamic_cast<Window *>(selected_widget)) {
         new Label(properties_pane, "Title:", "sans-bold");
         TextBox *title_box = new TextBox(properties_pane);
@@ -1013,7 +1013,7 @@ bool GUIEditor::update_properties() {
             redraw();
             return true;
         });
-        title_box->set_fixed_height(20);
+        title_box->set_min_height(20);
     } else if (TextBox *tb = dynamic_cast<TextBox *>(selected_widget)) {
         new Label(properties_pane, "Value:", "sans-bold");
         TextBox *value_box = new TextBox(properties_pane);
@@ -1026,7 +1026,7 @@ bool GUIEditor::update_properties() {
             redraw();
             return true;
         });
-        value_box->set_fixed_height(20);
+        value_box->set_min_height(20);
     } else if (Dropdown *dropdown = dynamic_cast<Dropdown *>(selected_widget)) {
         new Label(properties_pane, "Items:", "sans-bold");
         Widget *items_container = new Widget(properties_pane);
@@ -1037,7 +1037,7 @@ bool GUIEditor::update_properties() {
                 row->set_layout(new BoxLayout(Orientation::Horizontal, Alignment::Middle, 0, 5));
                 TextBox *caption_box = new TextBox(row);
                 caption_box->set_value(mi->caption());
-                caption_box->set_fixed_width(150);
+                caption_box->set_min_width(150);
                 caption_box->set_callback([this, mi](const std::string &v) {
                     mi->set_caption(v);
 					/*
@@ -1054,13 +1054,13 @@ bool GUIEditor::update_properties() {
                     return true;
                 });
                 Button *remove_btn = new Button(row, "", FA_MINUS);
-                remove_btn->set_fixed_width(30);
+                remove_btn->set_min_width(30);
                 remove_btn->set_callback([this, idx, dropdown] {
 					//deferred_tasks.push_back([this] { update_properties(); });
 					dropdown->remove_item(idx);
-					async([this] { 
+					async([this] {
 						printf("run async\n");
-						update_properties(); 
+						update_properties();
 					});
                 });
             }
@@ -1069,7 +1069,7 @@ bool GUIEditor::update_properties() {
         Widget *add_row = new Widget(items_container);
         add_row->set_layout(new BoxLayout(Orientation::Horizontal));
         Button *add_btn = new Button(add_row, "", FA_PLUS);
-        add_btn->set_fixed_width(30);
+        add_btn->set_min_width(30);
         add_btn->set_callback([this, dropdown] {
             std::string new_caption = "New";
             Widget *child = dropdown->add_item({new_caption, new_caption + "_tooltip"}, 0, nullptr, {0,0}, true);
@@ -1090,8 +1090,8 @@ bool GUIEditor::update_properties() {
             redraw();
             return true;
         });
-        caption_box->set_fixed_height(20);
-    }  
+        caption_box->set_min_height(20);
+    }
 
     /* LAYOUT CONTROLS - Only for container widgets */
     if (canHaveLayout(selected_widget)) {
@@ -1099,16 +1099,16 @@ bool GUIEditor::update_properties() {
         ComboBox *layout_combo = new ComboBox(properties_pane, {
             "None", "Box Layout", "Grid Layout", "Advanced Grid", "Flex Layout", "Group Layout"
         });
-        
+
         std::string current_layout = getCurrentLayoutType(selected_widget);
         layout_combo->set_selected_index(getLayoutTypeIndex(current_layout));
-        
+
         layout_combo->set_callback([this](int index) {
             if (!selected_widget) return;
             applyLayoutType(selected_widget, index);
             update_properties();
         });
-        layout_combo->set_fixed_height(20);
+        layout_combo->set_min_height(20);
 
         addLayoutSpecificControls(selected_widget);
     }
@@ -1127,7 +1127,7 @@ bool GUIEditor::update_properties() {
         redraw();
         return true;
     });
-    pos_x->set_fixed_height(20);
+    pos_x->set_min_height(20);
 
     /* POSITION Y */
     new Label(properties_pane, "Position Y:", "sans-bold");
@@ -1143,7 +1143,7 @@ bool GUIEditor::update_properties() {
         redraw();
         return true;
     });
-    pos_y->set_fixed_height(20);
+    pos_y->set_min_height(20);
 
     /* WIDTH */
     new Label(properties_pane, "Width:", "sans-bold");
@@ -1159,7 +1159,7 @@ bool GUIEditor::update_properties() {
         redraw();
         return true;
     });
-    width_box->set_fixed_height(20);
+    width_box->set_min_height(20);
 
     /* HEIGHT */
     new Label(properties_pane, "Height:", "sans-bold");
@@ -1175,7 +1175,7 @@ bool GUIEditor::update_properties() {
         redraw();
         return true;
     });
-    height_box->set_fixed_height(20);
+    height_box->set_min_height(20);
 
 	/* FIXED WIDTH */
     new Label(properties_pane, "Fxd Width:", "sans-bold");
@@ -1191,7 +1191,7 @@ bool GUIEditor::update_properties() {
         redraw();
         return true;
     });
-    fwidth_box->set_fixed_height(20);
+    fwidth_box->set_min_height(20);
 
     /* FIXED HEIGHT */
     new Label(properties_pane, "Fxd Height:", "sans-bold");
@@ -1207,7 +1207,7 @@ bool GUIEditor::update_properties() {
         redraw();
         return true;
     });
-    fheight_box->set_fixed_height(20);
+    fheight_box->set_min_height(20);
 
 
     /* BACKGROUND COLOR */
@@ -1220,7 +1220,7 @@ bool GUIEditor::update_properties() {
         redraw();
         return true;
     });
-    bg_color->set_fixed_height(20);
+    bg_color->set_min_height(20);
 
     perform_layout();
     redraw();
@@ -1228,7 +1228,7 @@ bool GUIEditor::update_properties() {
 }
 
 bool GUIEditor::canHaveLayout(Widget* widget) {
-    return dynamic_cast<Window*>(widget) || 
+    return dynamic_cast<Window*>(widget) ||
            dynamic_cast<TestWindow*>(widget) ||
            dynamic_cast<TestWidget*>(widget) ||
            (widget != canvas_win && widget->child_count() > 0);
@@ -1237,13 +1237,13 @@ bool GUIEditor::canHaveLayout(Widget* widget) {
 std::string GUIEditor::getCurrentLayoutType(Widget* widget) {
     Layout* layout = widget->layout();
     if (!layout) return "None";
-    
+
     if (dynamic_cast<BoxLayout*>(layout)) return "Box Layout";
     if (dynamic_cast<GridLayout*>(layout)) return "Grid Layout";
     if (dynamic_cast<AdvancedGridLayout*>(layout)) return "Advanced Grid";
     if (dynamic_cast<FlexLayout*>(layout)) return "Flex Layout";
     if (dynamic_cast<GroupLayout*>(layout)) return "Group Layout";
-    
+
     return "Unknown";
 }
 
@@ -1259,7 +1259,7 @@ int GUIEditor::getLayoutTypeIndex(const std::string& type) {
 
 void GUIEditor::applyLayoutType(Widget* widget, int type_index) {
     Layout* new_layout = nullptr;
-    
+
     switch (type_index) {
         case 0: // None
             new_layout = nullptr;
@@ -1274,14 +1274,14 @@ void GUIEditor::applyLayoutType(Widget* widget, int type_index) {
             new_layout = new AdvancedGridLayout({100, 100}, {30, 30}, 10);
             break;
         case 4: // Flex Layout
-            new_layout = new FlexLayout(FlexDirection::Column, JustifyContent::FlexStart, 
+            new_layout = new FlexLayout(FlexDirection::Column, JustifyContent::FlexStart,
                                       AlignItems::Stretch, 10, 5);
             break;
         case 5: // Group Layout
             new_layout = new GroupLayout(10, 5, 15, 5);
             break;
     }
-    
+
     widget->set_layout(new_layout);
     widget->perform_layout(m_nvg_context);
     // Ensure parent widgets update their layout
@@ -1300,7 +1300,7 @@ void GUIEditor::addLayoutSpecificControls(Widget* widget) {
     if (BoxLayout* box_layout = dynamic_cast<BoxLayout*>(layout)) {
         addBoxLayoutControls(box_layout);
     }
-    // Grid Layout Controls  
+    // Grid Layout Controls
     else if (GridLayout* grid_layout = dynamic_cast<GridLayout*>(layout)) {
         addGridLayoutControls(grid_layout);
     }
@@ -1328,7 +1328,7 @@ void GUIEditor::addBoxLayoutControls(BoxLayout* layout) {
         perform_layout();
         redraw();
     });
-    orientation_combo->set_fixed_height(20);
+    orientation_combo->set_min_height(20);
 
     // Alignment
     new Label(properties_pane, "Alignment:", "sans-bold");
@@ -1343,7 +1343,7 @@ void GUIEditor::addBoxLayoutControls(BoxLayout* layout) {
         perform_layout();
         redraw();
     });
-    align_combo->set_fixed_height(20);
+    align_combo->set_min_height(20);
 
     // Margin
     new Label(properties_pane, "Margin:", "sans-bold");
@@ -1359,7 +1359,7 @@ void GUIEditor::addBoxLayoutControls(BoxLayout* layout) {
         redraw();
         return true;
     });
-    margin_box->set_fixed_height(20);
+    margin_box->set_min_height(20);
 
     // Spacing
     new Label(properties_pane, "Spacing:", "sans-bold");
@@ -1375,7 +1375,7 @@ void GUIEditor::addBoxLayoutControls(BoxLayout* layout) {
         redraw();
         return true;
     });
-    spacing_box->set_fixed_height(20);
+    spacing_box->set_min_height(20);
 }
 
 void GUIEditor::addGridLayoutControls(GridLayout* layout) {
@@ -1393,9 +1393,9 @@ void GUIEditor::addGridLayoutControls(GridLayout* layout) {
         redraw();
         return true;
     });
-    resolution_box->set_fixed_height(20);
+    resolution_box->set_min_height(20);
 
-    // Orientation  
+    // Orientation
     new Label(properties_pane, "Orientation:", "sans-bold");
     ComboBox *orientation_combo = new ComboBox(properties_pane, {"Horizontal", "Vertical"});
     orientation_combo->set_selected_index(layout->orientation() == Orientation::Horizontal ? 0 : 1);
@@ -1408,7 +1408,7 @@ void GUIEditor::addGridLayoutControls(GridLayout* layout) {
         perform_layout();
         redraw();
     });
-    orientation_combo->set_fixed_height(20);
+    orientation_combo->set_min_height(20);
 
     // Tables
 	// TODO add themes
@@ -1436,7 +1436,7 @@ void GUIEditor::addGridLayoutControls(GridLayout* layout) {
         perform_layout();
         redraw();
     });
-    orientation_combo->set_fixed_height(20);
+    orientation_combo->set_min_height(20);
 }
 
 void GUIEditor::addFlexLayoutControls(FlexLayout* layout) {
@@ -1455,7 +1455,7 @@ void GUIEditor::addFlexLayoutControls(FlexLayout* layout) {
         perform_layout();
         redraw();
     });
-    direction_combo->set_fixed_height(20);
+    direction_combo->set_min_height(20);
 
     // Justify Content
     new Label(properties_pane, "Justify:", "sans-bold");
@@ -1472,7 +1472,7 @@ void GUIEditor::addFlexLayoutControls(FlexLayout* layout) {
         perform_layout();
         redraw();
     });
-    justify_combo->set_fixed_height(20);
+    justify_combo->set_min_height(20);
 
     // Align Items
     new Label(properties_pane, "Align Items:", "sans-bold");
@@ -1489,7 +1489,7 @@ void GUIEditor::addFlexLayoutControls(FlexLayout* layout) {
         perform_layout();
         redraw();
     });
-    align_combo->set_fixed_height(20);
+    align_combo->set_min_height(20);
 }
 
 void GUIEditor::addGroupLayoutControls(GroupLayout* layout) {
@@ -1507,7 +1507,7 @@ void GUIEditor::addGroupLayoutControls(GroupLayout* layout) {
         redraw();
         return true;
     });
-    margin_box->set_fixed_height(20);
+    margin_box->set_min_height(20);
 
     // Spacing
     new Label(properties_pane, "Spacing:", "sans-bold");
@@ -1523,7 +1523,7 @@ void GUIEditor::addGroupLayoutControls(GroupLayout* layout) {
         redraw();
         return true;
     });
-    spacing_box->set_fixed_height(20);
+    spacing_box->set_min_height(20);
 }
 
 std::string GUIEditor::getWidgetTypeName(Widget *widget) {
@@ -1659,7 +1659,7 @@ bool GUIEditor::mouse_button_event(const Vector2i &p, int button, bool down, int
 
         if (current_tool == FA_MOUSE_POINTER) {
             // Selection logic: Select the deepest widget, or the container if no child is hit
-			
+
             if (clicked_widget && (clicked_widget==canvas_win || is_child(clicked_widget, canvas_win) )) {
                 // Select the deepest widget (could be a container or child), excluding editor_win and its children
                 printf("Selected widget %s\n", clicked_widget->id().c_str());
@@ -1813,7 +1813,7 @@ bool GUIEditor::mouse_button_event(const Vector2i &p, int button, bool down, int
                 }
             }
             // Only reparent if the new parent is different, not editor_win, and not the widget itself
-            if (new_parent != selected_widget->parent() && new_parent->window() != editor_win && 
+            if (new_parent != selected_widget->parent() && new_parent->window() != editor_win &&
                 new_parent != selected_widget) {
                 // Reparent the widget
                 Widget* current_parent = selected_widget->parent();
@@ -1879,7 +1879,7 @@ bool GUIEditor::mouse_button_event(const Vector2i &p, int button, bool down, int
     if (!TestModeManager::getInstance()->isTestModeEnabled() && button == GLFW_MOUSE_BUTTON_1 && down) {
         // Find the deepest widget at the click position
         Widget *clicked_widget = find_widget(p);
-        
+
         if (current_tool == FA_TRASH) {
             // Delete tool: Remove the clicked widget if valid
             if (clicked_widget && clicked_widget->window() != editor_win && clicked_widget != canvas_win) {
@@ -1928,7 +1928,7 @@ bool GUIEditor::mouse_button_event(const Vector2i &p, int button, bool down, int
 
         if (current_tool == FA_MOUSE_POINTER) {
             // Selection logic: Select the deepest widget, or the container if no child is hit
-			
+
             if (clicked_widget && (clicked_widget==canvas_win || is_child(clicked_widget, canvas_win) )) {
                 // Select the deepest widget (could be a container or child), excluding editor_win and its children
                 printf("Selected widget %s\n", clicked_widget->id().c_str());
@@ -2082,7 +2082,7 @@ bool GUIEditor::mouse_button_event(const Vector2i &p, int button, bool down, int
                 }
             }
             // Only reparent if the new parent is different, not editor_win, and not the widget itself
-            if (new_parent != selected_widget->parent() && new_parent->window() != editor_win && 
+            if (new_parent != selected_widget->parent() && new_parent->window() != editor_win &&
                 new_parent != selected_widget) {
                 // Reparent the widget
                 Widget* current_parent = selected_widget->parent();
@@ -2137,7 +2137,7 @@ bool GUIEditor::mouse_motion_event(const Vector2i &p, const Vector2i &rel, int b
         return true;
     }
 
-    if (dragging && !TestModeManager::getInstance()->isTestModeEnabled() && 
+    if (dragging && !TestModeManager::getInstance()->isTestModeEnabled() &&
         (button & (1 << GLFW_MOUSE_BUTTON_1)) && selected_widget) {
         // Find the container under the mouse
         Widget *current_parent = selected_widget->parent();
@@ -2180,7 +2180,7 @@ bool GUIEditor::mouse_motion_event(const Vector2i &p, const Vector2i &rel, int b
             }
         }
         // Only set potential parent if it's a valid reparenting target
-        if (new_potential_parent != selected_widget->parent() && new_potential_parent->window() != editor_win && 
+        if (new_potential_parent != selected_widget->parent() && new_potential_parent->window() != editor_win &&
             new_potential_parent != selected_widget) {
             if (potential_parent != new_potential_parent) {
                 potential_parent = new_potential_parent;
@@ -2207,7 +2207,7 @@ bool GUIEditor::mouse_motion_event(const Vector2i &p, const Vector2i &rel, int b
         return true;
     }
 
-    if (dragging && !TestModeManager::getInstance()->isTestModeEnabled() && 
+    if (dragging && !TestModeManager::getInstance()->isTestModeEnabled() &&
         (button & (1 << GLFW_MOUSE_BUTTON_1)) && selected_widget) {
         // Find the container under the mouse
         Widget *current_parent = selected_widget->parent();
@@ -2250,7 +2250,7 @@ bool GUIEditor::mouse_motion_event(const Vector2i &p, const Vector2i &rel, int b
             }
         }
         // Only set potential parent if it's a valid reparenting target
-        if (new_potential_parent != selected_widget->parent() && new_potential_parent->window() != editor_win && 
+        if (new_potential_parent != selected_widget->parent() && new_potential_parent->window() != editor_win &&
             new_potential_parent != selected_widget) {
             if (potential_parent != new_potential_parent) {
                 potential_parent = new_potential_parent;
@@ -2340,7 +2340,7 @@ bool GUIEditor::mouse_motion_event(const Vector2i &p, const Vector2i &rel, int b
 }
 
 bool GUIEditor::mouse_drag_event(const Vector2i &p, const Vector2i &rel, int button, int modifiers) {
-    if (!TestModeManager::getInstance()->isTestModeEnabled() && 
+    if (!TestModeManager::getInstance()->isTestModeEnabled() &&
         dragging && selected_widget && (button & (1 << GLFW_MOUSE_BUTTON_1))) {
 
 		if(selected_widget == canvas_win) {
@@ -2442,8 +2442,8 @@ Widget* GUIEditor::find_widget_with_handle_recursive(Widget* w, const Vector2i& 
 // Makes background window resize with system window (screen)
 bool GUIEditor::resize_event(const Vector2i &size) {
 	if (editor_win) {
-		editor_win->set_fixed_height(size.y());
-		perform_layout(); 
+		editor_win->set_min_height(size.y());
+		perform_layout();
 	}
 	Screen::resize_event(size);
 	return true;

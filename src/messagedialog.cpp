@@ -36,11 +36,11 @@ MessageDialog::MessageDialog(Widget *parent, Type type, const std::string &title
     Label *icon_label = new Label(panel1, std::string(utf8(icon).data()), "icons");
     icon_label->set_font_size(50);
     m_message_label = new Label(panel1, message);
-    m_message_label->set_fixed_width(200);
+    m_message_label->set_min_width(200);
     Widget *panel2 = new Widget(this);
     panel2->set_layout(new BoxLayout(Orientation::Horizontal,
                                      Alignment::Middle, 0, 15));
-   
+
     if (alt_button) {
         Button *button = new Button(panel2, alt_button_text, m_theme->m_message_alt_button_icon);
         button->set_callback([&] { if (m_callback) m_callback(1); dispose(); });

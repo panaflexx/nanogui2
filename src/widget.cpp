@@ -29,7 +29,7 @@ NAMESPACE_BEGIN(nanogui)
 
 Widget::Widget(Widget* parent)
     : m_parent(nullptr), m_theme(nullptr), m_layout(nullptr),
-    m_pos(0), m_size(0), m_fixed_size(0), m_visible(true), m_enabled(true),
+    m_pos(0), m_size(0), m_min_size(0), m_max_size(0), m_visible(true), m_enabled(true),
     m_focused(false), m_mouse_focus(false), m_tooltip(""), m_font_size(-1.f),
     m_icon_extra_scale(1.f), m_cursor(Cursor::Arrow),
     m_animation_type(AnimationType::None), m_animation_start(-1.0), m_animation_duration(0.5) {
@@ -168,6 +168,18 @@ bool Widget::scroll_event(const Vector2i& p, const Vector2f& rel) {
         if (!child->visible())
             continue;
         if (child->contains(p - m_pos) && child->scroll_event(p - m_pos, rel))
+            return true;
+    }
+    return false;
+}
+
+bool Widget::zoom_event(double magnification, const Vector2i& pos) {
+    for (auto it = m_children.rbegin(); it != m_children.rend(); ++it) {
+        Widget* child = *it;
+        if (!child->visible())
+            continue;
+        Vector2i rel = pos - m_pos;
+        if (child->contains(rel) && child->zoom_event(magnification, rel))
             return true;
     }
     return false;

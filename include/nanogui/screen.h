@@ -278,6 +278,7 @@ public:
     void drop_callback_event(int count, const char** filenames);
     void scroll_callback_event(double x, double y);
     void resize_callback_event(int width, int height);
+    bool zoom_callback_event(double magnification, const Vector2i& pos);
 
     /* Internal helper functions */
     void update_focus(Widget* widget);

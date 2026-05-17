@@ -1,5 +1,6 @@
 cmake_minimum_required (VERSION 3.13..3.18)
 
+set(CMAKE_EXPORT_COMPILE_COMMANDS ON CACHE INTERNAL "")
 project(nanogui
   DESCRIPTION
     "NanoGUI"
@@ -351,7 +352,7 @@ endif()
 
 
 # Compile main NanoGUI library
-add_library(nanogui ${NANOGUI_LIBRARY_TYPE} 
+add_library(nanogui ${NANOGUI_LIBRARY_TYPE}
   # Merge NanoVG into the NanoGUI library
   ext/nanovg/src/nanovg.c
   ext/nanovg/src/stb_image.h
@@ -381,6 +382,8 @@ add_library(nanogui ${NANOGUI_LIBRARY_TYPE}
   include/nanogui/textarea.h src/textarea.cpp
   include/nanogui/imagepanel.h src/imagepanel.cpp
   include/nanogui/scrollpanel.h src/scrollpanel.cpp
+    include/nanogui/cachedwidget.h src/cachedwidget.cpp
+    include/nanogui/zoomscrollpanel.h src/zoomscrollpanel.cpp
   include/nanogui/colorwheel.h src/colorwheel.cpp
   include/nanogui/colorpicker.h src/colorpicker.cpp
   include/nanogui/graph.h src/graph.cpp

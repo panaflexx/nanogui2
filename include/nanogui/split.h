@@ -160,36 +160,29 @@ public:
 		*/
         // Apply min/max constraints
         if (m_firstWidget && m_firstWidget->visible()) {
-            Vector2i preferred = m_firstWidget->preferred_size(ctx);
-            int minSize = (m_orientation == Orientation::Horizontal) ? 
-                std::max(m_minSplitSize.x(), preferred.x()) : 
-                std::max(m_minSplitSize.y(), preferred.y());
-                
-            // For vertical layout, use height; for horizontal, use width
-            int maxSize = (m_orientation == Orientation::Horizontal) ? 
-                std::min(m_maxSplitSize.x(), areaSize.x()) : 
-                std::min(m_maxSplitSize.y(), areaSize.y());
-                
-            firstSize = std::max(minSize, std::min(firstSize, maxSize));
+                    Vector2i childMin1 = m_firstWidget->min_size();
+                    Vector2i childMax1 = m_firstWidget->max_size();
+                    int splitDim = (m_orientation == Orientation::Horizontal) ? 0 : 1;
+                    int dimMin1 = childMin1[splitDim];
+                    int dimMax1 = childMax1[splitDim];
+                    int minSize = std::max((int)m_minSplitSize[splitDim], dimMin1);
+                    int maxSize = std::min((int)m_maxSplitSize[splitDim], areaSize[splitDim]);
+                    firstSize = std::max(minSize, std::min(firstSize, maxSize));
 			//printf("perform_layout: 4 firstSize=%d\n");
         } else {
 			//printf("m_firstWidget = %p \n", m_firstWidget);
 		}
         
         if (m_secondWidget && m_secondWidget->visible()) {
-            Vector2i preferred = m_secondWidget->preferred_size(ctx);
-            int minSize = (m_orientation == Orientation::Horizontal) ? 
-                std::max(m_minSplitSize.x(), preferred.x()) : 
-                std::max(m_minSplitSize.y(), preferred.y());
-                
-            // The second panel's size is constrained by available space minus first panel size
-            int secondPanelSize = availableSpace - firstSize;
-            secondPanelSize = std::max(minSize, secondPanelSize);
-            
-            // Adjust first panel if needed
-            if (secondPanelSize + firstSize > availableSpace) {
-                firstSize = availableSpace - secondPanelSize;
-            }
+                    Vector2i childMin2 = m_secondWidget->min_size();
+                    Vector2i childMax2 = m_secondWidget->max_size();
+                    int splitDim = (m_orientation == Orientation::Horizontal) ? 0 : 1;
+                    int dimMin2 = childMin2[splitDim];
+                    int secondPanelSize = availableSpace - firstSize;
+                    secondPanelSize = std::max(dimMin2, secondPanelSize);
+                    if (secondPanelSize + firstSize > availableSpace) {
+                        firstSize = availableSpace - secondPanelSize;
+                    }
 
 			//printf("perform_layout: 5 firstSize=%d\n");
         } else {

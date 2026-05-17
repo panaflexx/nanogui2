@@ -80,12 +80,12 @@ public:
     //const Vector2i& size() const { if (this == NULL) return 0; else  return m_size; }
     const Vector2i& size() const { return m_size; }
     /// set the size of the widget
-    void set_size(const Vector2i& size) 
+    void set_size(const Vector2i& size)
     {  m_size = size; }
 
 	const Vector2i& min_size() const { return m_min_size; }
     void set_min_size(const Vector2i& size) {  m_min_size = size; }
-	const Vector2i& max_size() const { return m_min_size; }
+	const Vector2i& max_size() const { return m_max_size; }
     void set_max_size(const Vector2i& size) {  m_max_size = size; }
 
     /// Return the width of the widget
@@ -111,23 +111,23 @@ public:
 	virtual void set_fixed_size(const Vector2i& fixed_size) {  m_min_size = fixed_size; }
 
     /// Return the fixed size (see \ref set_fixed_size())
-	// FIXME Should be min size??
-    const Vector2i& fixed_size() const { return m_fixed_size; }
+
+    const Vector2i& fixed_size() const { return m_min_size; }
 
     // Return the fixed width (see \ref set_fixed_size())
-    int fixed_width() const { return m_fixed_size.x(); }
+    int fixed_width() const { return m_min_size.x(); }
     // Return the fixed height (see \ref set_fixed_size())
-    int fixed_height() const { return m_fixed_size.y(); }
+    int fixed_height() const { return m_min_size.y(); }
     /// Set the fixed width (see \ref set_fixed_size())
-    void set_fixed_width(int width) { m_fixed_size.x() = width; }
-    /// Set the fixed height (see \ref set_fixed_size())
-    void set_fixed_height(int height) { m_fixed_size.y() = height; }
-	/// Set the fixed width (see \ref set_fixed_size())
     void set_min_width(int width) { m_min_size.x() = width; }
     /// Set the fixed height (see \ref set_fixed_size())
     void set_min_height(int height) { m_min_size.y() = height; }
+	/// Set the fixed width (see \ref set_fixed_size())
+    void set_max_width(int width) { m_min_size.x() = width; }
+    /// Set the fixed height (see \ref set_fixed_size())
+    void set_max_height(int height) { m_min_size.y() = height; }
 
-	// New flex sizing 
+	// New flex sizing
 	void set_width_flex(SizeMode mode) { m_width_mode = mode; }
     void set_height_flex(SizeMode mode) { m_height_mode = mode; }
     SizeMode width_mode() const { return m_width_mode; }
@@ -267,6 +267,9 @@ public:
     /// Handle a mouse scroll event (default implementation: propagate to children)
     virtual bool scroll_event(const Vector2i& p, const Vector2f& rel);
 
+    /// Handle a pinch-to-zoom gesture (default: propagate to children)
+    virtual bool zoom_event(double magnification, const Vector2i& pos);
+
     /// Handle a focus change event (default implementation: record the focus status, but do nothing)
     virtual bool focus_event(bool focused);
 
@@ -320,7 +323,7 @@ protected:
     ref<Theme> m_theme;
     ref<Layout> m_layout;
     //Vector2i m_pos, m_size, m_fixed_size;
-	Vector2i m_pos, m_size, m_fixed_size, m_min_size, m_max_size;
+	Vector2i m_pos, m_size, m_min_size, m_max_size;
     std::vector<Widget*> m_children;
 
 	SizeMode m_width_mode = SizeMode::Preferred;

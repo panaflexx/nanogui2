@@ -495,7 +495,7 @@ extern NVG_EXPORT void nvgArcTo(NVGcontext* ctx, float x1, float y1, float x2, f
 // Closes current sub-path with a line segment.
 extern NVG_EXPORT void nvgClosePath(NVGcontext* ctx);
 
-// Sets the current sub-path winding, see NVGwinding and NVGsolidity. 
+// Sets the current sub-path winding, see NVGwinding and NVGsolidity.
 extern NVG_EXPORT void nvgPathWinding(NVGcontext* ctx, int dir);
 
 // Creates new circle arc shaped sub-path. The arc center is at cx,cy, the arc radius is r,
@@ -515,7 +515,7 @@ extern NVG_EXPORT void nvgRoundedRectVarying(NVGcontext* ctx, float x, float y, 
 // Creates new ellipse shaped sub-path.
 extern NVG_EXPORT void nvgEllipse(NVGcontext* ctx, float cx, float cy, float rx, float ry);
 
-// Creates new circle shaped sub-path. 
+// Creates new circle shaped sub-path.
 extern NVG_EXPORT void nvgCircle(NVGcontext* ctx, float cx, float cy, float r);
 
 // Fills the current path with current fill style.
@@ -575,6 +575,19 @@ extern NVG_EXPORT int nvgAddFallbackFontId(NVGcontext* ctx, int baseFont, int fa
 // Adds a fallback font by name.
 extern NVG_EXPORT int nvgAddFallbackFont(NVGcontext* ctx, const char* baseFont, const char* fallbackFont);
 
+// Sets a global emoji fallback font. Once configured, the specified font is automatically
+// added as a fallback for every currently loaded font and for every font created later via
+// nvgCreateFont / nvgCreateFontMem. As a result, nvgText, nvgTextBox, nvgTextBounds,
+// nvgTextBoxBounds, nvgTextGlyphPositions and nvgTextBreakLines will transparently render
+// emoji codepoints (or any glyph missing from the active font) using this font without the
+// caller changing the font face, while continuing to draw all other glyphs with the active
+// font. Returns the emoji font id on success, or -1 (FONS_INVALID) on failure.
+extern NVG_EXPORT int nvgSetEmojiFont(NVGcontext* ctx, const char* name);
+extern NVG_EXPORT int nvgSetEmojiFontId(NVGcontext* ctx, int fontId);
+
+// Returns the currently configured emoji font id, or -1 if none has been set.
+extern NVG_EXPORT int nvgGetEmojiFontId(NVGcontext* ctx);
+
 // Sets the font size of current text style.
 extern NVG_EXPORT void nvgFontSize(NVGcontext* ctx, float size);
 
@@ -584,7 +597,7 @@ extern NVG_EXPORT void nvgFontBlur(NVGcontext* ctx, float blur);
 // Sets the letter spacing of current text style.
 extern NVG_EXPORT void nvgTextLetterSpacing(NVGcontext* ctx, float spacing);
 
-// Sets the proportional line height of current text style. The line height is specified as multiple of font size. 
+// Sets the proportional line height of current text style. The line height is specified as multiple of font size.
 extern NVG_EXPORT void nvgTextLineHeight(NVGcontext* ctx, float lineHeight);
 
 // Sets the text align of current text style, see NVGalign for options.

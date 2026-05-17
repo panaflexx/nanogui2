@@ -24,6 +24,8 @@
 #include <nanogui/checkbox.h>
 #include <nanogui/combobox.h>
 #include <nanogui/scrollpanel.h>
+#include <nanogui/zoomscrollpanel.h>
+#include <nanogui/cachedwidget.h>
 #include <map>
 #include <iostream>
 
@@ -437,6 +439,35 @@ Screen::Screen(const Vector2i& size, const std::string& caption, bool resizable,
     );
     initialize(m_glfw_window, true);
 
+    /* -------------------------------------------------------------- */
+    /*  Register platform-specific pinch-to-zoom handlers            */
+    /* -------------------------------------------------------------- */
+#if defined(__APPLE__)
+    // darwin.mm provides these
+    extern void enable_macos_pinch_zoom(void*);
+    extern void set_macos_zoom_callback(const std::function<void(double,int,int)>&);
+    enable_macos_pinch_zoom(m_glfw_window);
+    set_macos_zoom_callback(
+        [this](double mag, int x, int y) {
+            this->zoom_callback_event(mag, Vector2i(x, y));
+        });
+#elif defined(WAYLAND)
+    // wayland.cpp provides these
+    extern void enable_wayland_pinch_zoom(struct wl_display*, struct wl_surface*);
+    extern void set_wayland_zoom_callback(const std::function<void(double,int,int)>&);
+    struct wl_display* dpy = glfwGetWaylandDisplay();
+    struct wl_surface* srf = glfwGetWaylandWindow(m_glfw_window);
+    if (dpy && srf) {
+        enable_wayland_pinch_zoom(dpy, srf);
+        set_wayland_zoom_callback(
+            [this](double mag, int x, int y) {
+                this->zoom_callback_event(mag, Vector2i(x, y));
+            });
+    }
+#else
+	printf("Pinch zoom not enabled\n");
+#endif
+
 #if defined(NANOGUI_USE_METAL)
     if (depth_buffer) {
         m_depth_stencil_texture = new Texture(
@@ -663,6 +694,10 @@ void Screen::nvg_flush() {
 }
 
 void Screen::draw_widgets() {
+    // Update any CachedWidget FBOs BEFORE we begin the screen frame so
+    // they don't disturb ancestor NanoVG transform/scissor state.
+    CachedWidget::process_pending_updates(m_nvg_context);
+
     nvgBeginFrame(m_nvg_context, m_size[0], m_size[1], m_pixel_ratio);
 
     draw(m_nvg_context);
@@ -675,18 +710,37 @@ void Screen::draw_widgets() {
 
         // Don't draw focus on windows
         if (focused_widget->enabled() && dynamic_cast<Window*>(focused_widget) == nullptr) {
-            // Check if the focused widget is inside a VScrollPanel
+            // Check if the focused widget is inside a (Zoom)ScrollPanel
             Widget* parent = focused_widget->parent();
             ScrollPanel* scroll_panel = nullptr;
-            while (parent && !scroll_panel) {
-                scroll_panel = dynamic_cast<ScrollPanel*>(parent);
+            ZoomScrollPanel* zoom_panel = nullptr;
+            while (parent && !scroll_panel && !zoom_panel) {
+                zoom_panel = dynamic_cast<ZoomScrollPanel*>(parent);
+                if (!zoom_panel)
+                    scroll_panel = dynamic_cast<ScrollPanel*>(parent);
                 parent = parent->parent();
             }
 
-            if (scroll_panel) {
+            // For ZoomScrollPanel: re-project pos/size through the zoom transform
+            // (absolute_position() walks logical positions and doesn't know about zoom).
+            if (zoom_panel) {
+                Vector2i panel_abs = zoom_panel->absolute_position();
+                Vector2i rel = pos - panel_abs;                  // logical offset within child
+                double z = zoom_panel->zoom();
+                auto pan = zoom_panel->pan_offset();
+                pos.x() = panel_abs.x() + (int)std::lround(pan.x() + rel.x() * z);
+                pos.y() = panel_abs.y() + (int)std::lround(pan.y() + rel.y() * z);
+                size.x() = (int)std::lround(size.x() * z);
+                size.y() = (int)std::lround(size.y() * z);
+            }
+
+            if (zoom_panel || scroll_panel) {
+                Widget* clip_panel = zoom_panel
+                    ? static_cast<Widget*>(zoom_panel)
+                    : static_cast<Widget*>(scroll_panel);
                 // Get the scroll panel's absolute position and size
-                Vector2i panel_pos = scroll_panel->absolute_position();
-                Vector2i panel_size = scroll_panel->size();
+                Vector2i panel_pos = clip_panel->absolute_position();
+                Vector2i panel_size = clip_panel->size();
 
                 // Compute the visible bounds of the focused widget within the scroll panel
                 int x_min = std::max(pos.x(), panel_pos.x());
@@ -1296,6 +1350,18 @@ void Screen::update_focus(Widget* widget) {
 
     if (window)
         move_window_to_front((Window*)window);
+}
+
+bool Screen::zoom_callback_event(double magnification, const Vector2i& pos) {
+    // First try the focused widget / path
+    if (!m_focus_path.empty()) {
+        for (auto it = m_focus_path.rbegin(); it != m_focus_path.rend(); ++it) {
+            if ((*it)->zoom_event(magnification, pos))
+                return true;
+        }
+    }
+    // Fall back to normal widget traversal
+    return Widget::zoom_event(magnification, pos);
 }
 
 void Screen::dispose_window(Window* window) {

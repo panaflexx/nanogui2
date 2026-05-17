@@ -279,7 +279,7 @@ bool Window::mouse_drag_event(const Vector2i& p, const Vector2i& rel, int button
         else
             m_pos += rel;
         m_pos = max(m_pos, Vector2i(0));
-		// If screen size, let the move extend past the edges 
+		// If screen size, let the move extend past the edges
 		if(parent() == dynamic_cast<Widget*>(this->screen())) {
 			m_pos = min(m_pos, parent()->size() - Vector2i(25));
 		} else {
@@ -381,7 +381,12 @@ bool Window::mouse_drag_event(const Vector2i& p, const Vector2i& rel, int button
                 m_size.y() = temp_size.y();
         }
 
-        m_size = max(m_size, m_min_size);
+        // Clamp to min size (only enforce non-zero components)
+        if (m_min_size.x() > 0) m_size.x() = std::max(m_size.x(), m_min_size.x());
+        if (m_min_size.y() > 0) m_size.y() = std::max(m_size.y(), m_min_size.y());
+        // Clamp to max size (only enforce non-zero components)
+        if (m_max_size.x() > 0) m_size.x() = std::min(m_size.x(), m_max_size.x());
+        if (m_max_size.y() > 0) m_size.y() = std::min(m_size.y(), m_max_size.y());
 
         if (resized)
             perform_layout(ctx);
@@ -396,11 +401,11 @@ bool Window::mouse_drag_event(const Vector2i& p, const Vector2i& rel, int button
 
 bool Window::mouse_motion_event(const Vector2i& p, const Vector2i& rel, int button, int modifiers) {
 
-    if (m_resizable && m_fixed_size.x() == 0 && check_horizontal_resize(p) && check_vertical_resize(p))
+    if (m_resizable && check_horizontal_resize(p) && check_vertical_resize(p))
         m_cursor = Cursor::HVResize;
-    else if (m_resizable && m_fixed_size.x() == 0 && check_horizontal_resize(p))
+    else if (m_resizable && check_horizontal_resize(p))
         m_cursor = Cursor::HResize;
-    else if (m_resizable && m_fixed_size.y() == 0 && check_vertical_resize(p))
+    else if (m_resizable && check_vertical_resize(p))
         m_cursor = Cursor::VResize;
     else
     {
@@ -427,15 +432,15 @@ bool Window::mouse_button_event(const Vector2i& p, int button, bool down, int mo
             return true;
         }
         else if (m_resizable && down) {
-            m_resize_dir.x() = (m_fixed_size.x() == 0) ? check_horizontal_resize(p) : 0;
-            m_resize_dir.y() = (m_fixed_size.y() == 0) ? check_vertical_resize(p) : 0;
+            m_resize_dir.x() = check_horizontal_resize(p) ? 1 : 0;
+            m_resize_dir.y() = check_vertical_resize(p) ? 1 : 0;
             m_resize = m_resize_dir.x() != 0 || m_resize_dir.y() != 0;
             m_snap_init = size();
             m_snap_tot_rel = Vector2f(0, 0);
             if (m_resize)
                 return true;
         }
-        
+
     }
 
     return false;

@@ -52,7 +52,7 @@ void ComboBox::set_items(const std::vector<std::string> &items, const std::vecto
 
     if (m_scroll == nullptr && items.size() > 8) {
         m_scroll = new ScrollPanel(m_popup);
-        m_scroll->set_fixed_height(300);
+        m_scroll->set_min_height(300);
         m_container = new Widget(m_scroll);
         m_popup->set_layout(new BoxLayout(Orientation::Horizontal, Alignment::Middle));
     }

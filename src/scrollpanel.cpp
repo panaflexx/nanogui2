@@ -173,7 +173,9 @@ bool ScrollPanel::mouse_button_event(const Vector2i& p, int button, bool down, i
 }
 
 bool ScrollPanel::scroll_event(const Vector2i& p, const Vector2f& rel) {
-    if (!m_children.empty() && m_child_preferred_size.y() > m_size.y() && VScrollable()) {
+    bool used = false;
+
+    if (!m_children.empty() && m_child_preferred_size.y() > m_size.y() && VScrollable() && rel.y() != 0.f) {
         auto child = m_children[0];
         float scroll_amount = rel.y() * m_size.y() * .25f;
 
@@ -184,10 +186,9 @@ bool ScrollPanel::scroll_event(const Vector2i& p, const Vector2f& rel) {
         Vector2i new_pos = child->position();
         m_update_layout = true;
         child->mouse_motion_event(p - m_pos, old_pos - new_pos, 0, 0);
-
-        return true;
+        used = true;
     }
-    if (!m_children.empty() && m_child_preferred_size.x() > m_size.x() && HScrollable()) {
+    if (!m_children.empty() && m_child_preferred_size.x() > m_size.x() && HScrollable() && rel.y() != 0.f) {
         auto child = m_children[0];
         float scroll_amount = rel.y() * m_size.x() * .25f;
 
@@ -198,8 +199,24 @@ bool ScrollPanel::scroll_event(const Vector2i& p, const Vector2f& rel) {
         Vector2i new_pos = child->position();
         m_update_layout = true;
         child->mouse_motion_event(p - m_pos, old_pos - new_pos, 0, 0);
-        return true;
+        used = true;
     }
+    if (!m_children.empty() && m_child_preferred_size.x() > m_size.x() && HScrollable() && rel.x() != 0.f) {
+        // True 2D scroll deltas (trackpads, horizontal wheels, etc.)
+        auto child = m_children[0];
+        float scroll_amount = rel.x() * m_size.x() * .25f;
+
+        m_scroll.x() = std::max(0.f, std::min(1.f, m_scroll.x() - scroll_amount / m_child_preferred_size.x()));
+
+        Vector2i old_pos = child->position();
+        child->set_position(Vector2i(-m_scroll.x() * (m_child_preferred_size.x() - m_size.x()), old_pos.y()));
+        Vector2i new_pos = child->position();
+        m_update_layout = true;
+        child->mouse_motion_event(p - m_pos, old_pos - new_pos, 0, 0);
+        used = true;
+    }
+    if (used)
+        return true;
     return Widget::scroll_event(p, rel);
 }
 

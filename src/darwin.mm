@@ -85,6 +85,51 @@ void metal_shutdown() {
 void* metal_device() { return s_metal_device; }
 void* metal_command_queue() { return s_metal_command_queue; }
 
+/* ------------------------------------------------------------------ */
+/*  Pinch-to-zoom support (macOS 10.12+)                               */
+/* ------------------------------------------------------------------ */
+
+static std::function<void(double, int, int)> g_macosZoomCallback;
+
+void set_macos_zoom_callback(const std::function<void(double, int, int)>& cb) {
+    g_macosZoomCallback = cb;
+}
+
+@interface _NanoGUIPinchTarget : NSObject
++ (void)handleMagnify:(NSMagnificationGestureRecognizer *)recognizer;
+@end
+
+@implementation _NanoGUIPinchTarget
++ (void)handleMagnify:(NSMagnificationGestureRecognizer *)recognizer {
+    if (!g_macosZoomCallback) return;
+
+    double mag = [recognizer magnification];
+    NSPoint loc = [recognizer locationInView:recognizer.view];
+
+    // Flip Y to match NanoGUI coordinate system (origin top-left)
+    NSSize size = recognizer.view.bounds.size;
+    int x = (int)loc.x;
+    int y = (int)(size.height - loc.y);
+
+    g_macosZoomCallback(mag, x, y);
+}
+@end
+
+void enable_macos_pinch_zoom(void *nswindow) {
+    NSWindow *win = (__bridge NSWindow *)nswindow;
+    if (!win) return;
+
+    NSView *view = win.contentView;
+    if (!view) return;
+
+    NSMagnificationGestureRecognizer *recognizer =
+        [[NSMagnificationGestureRecognizer alloc]
+         initWithTarget:[_NanoGUIPinchTarget class]
+         action:@selector(handleMagnify:)];
+
+    [view addGestureRecognizer:recognizer];
+}
+
 void metal_window_init(void *nswin_, bool float_buffer) {
     CAMetalLayer *layer = [CAMetalLayer layer];
     if (!layer)

@@ -141,6 +141,7 @@ struct NVGcontext {
 	int fillTriCount;
 	int strokeTriCount;
 	int textTriCount;
+	int emojiFontId;
 };
 
 static float nvg__sqrtf(float a) { return sqrtf(a); }
@@ -304,6 +305,7 @@ NVGcontext* nvgCreateInternal(NVGparams* params)
 	memset(ctx, 0, sizeof(NVGcontext));
 
 	ctx->params = *params;
+	ctx->emojiFontId = FONS_INVALID;
 	for (i = 0; i < NVG_MAX_FONTIMAGES; i++)
 		ctx->fontImages[i] = 0;
 
@@ -2298,16 +2300,46 @@ void nvgStroke(NVGcontext* ctx)
 		ctx->drawCallCount++;
 	}
 }
+// Returns 1 if 'fallback' is already registered as a fallback font for 'base'.
+static int nvg__hasFallbackFont(FONScontext* fs, int base, int fallback)
+{
+	FONSfont* baseFont;
+	int i;
+	if (fs == NULL || base < 0 || base >= fs->nfonts) return 0;
+	baseFont = fs->fonts[base];
+	if (baseFont == NULL) return 0;
+	for (i = 0; i < baseFont->nfallbacks; i++) {
+		if (baseFont->fallbacks[i] == fallback)
+			return 1;
+	}
+	return 0;
+}
+
+// Ensure the configured emoji font is registered as a fallback for the given base font.
+// Skips if no emoji font is set, if base == emoji, or if already registered.
+static void nvg__ensureEmojiFallback(NVGcontext* ctx, int baseFont)
+{
+	if (ctx == NULL || ctx->fs == NULL) return;
+	if (ctx->emojiFontId == FONS_INVALID) return;
+	if (baseFont == FONS_INVALID) return;
+	if (baseFont == ctx->emojiFontId) return;
+	if (nvg__hasFallbackFont(ctx->fs, baseFont, ctx->emojiFontId)) return;
+	fonsAddFallbackFont(ctx->fs, baseFont, ctx->emojiFontId);
+}
 
 // Add fonts
 int nvgCreateFont(NVGcontext* ctx, const char* name, const char* path)
 {
-	return fonsAddFont(ctx->fs, name, path);
+	int id = fonsAddFont(ctx->fs, name, path);
+	nvg__ensureEmojiFallback(ctx, id);
+	return id;
 }
 
 int nvgCreateFontMem(NVGcontext* ctx, const char* name, unsigned char* data, int ndata, int freeData)
 {
-	return fonsAddFontMem(ctx->fs, name, data, ndata, freeData);
+	int id = fonsAddFontMem(ctx->fs, name, data, ndata, freeData);
+	nvg__ensureEmojiFallback(ctx, id);
+	return id;
 }
 
 int nvgFindFont(NVGcontext* ctx, const char* name)
@@ -2315,7 +2347,6 @@ int nvgFindFont(NVGcontext* ctx, const char* name)
 	if (name == NULL) return -1;
 	return fonsGetFontByName(ctx->fs, name);
 }
-
 
 int nvgAddFallbackFontId(NVGcontext* ctx, int baseFont, int fallbackFont)
 {
@@ -2326,6 +2357,44 @@ int nvgAddFallbackFontId(NVGcontext* ctx, int baseFont, int fallbackFont)
 int nvgAddFallbackFont(NVGcontext* ctx, const char* baseFont, const char* fallbackFont)
 {
 	return nvgAddFallbackFontId(ctx, nvgFindFont(ctx, baseFont), nvgFindFont(ctx, fallbackFont));
+}
+
+// Configure an emoji fallback font. Once set, the emoji font is automatically registered
+// as a fallback for every currently loaded font (other than itself) and for any font
+// created afterward via nvgCreateFont / nvgCreateFontMem. This lets nvgText / nvgTextBox /
+// nvgTextBounds / nvgTextBoxBounds / nvgTextGlyphPositions / nvgTextBreakLines transparently
+// render emoji code points interspersed in a string using the configured emoji font, while
+// continuing to use the currently selected font for everything else.
+//
+// Returns the font id on success, or FONS_INVALID (-1) on failure.
+int nvgSetEmojiFontId(NVGcontext* ctx, int fontId)
+{
+	int i;
+	if (ctx == NULL || ctx->fs == NULL) return FONS_INVALID;
+	if (fontId == FONS_INVALID) return FONS_INVALID;
+	if (fontId < 0 || fontId >= ctx->fs->nfonts) return FONS_INVALID;
+
+	ctx->emojiFontId = fontId;
+
+	// Add the emoji font as a fallback to every currently loaded base font
+	// (except the emoji font itself), unless already present.
+	for (i = 0; i < ctx->fs->nfonts; i++) {
+		if (i == fontId) continue;
+		if (nvg__hasFallbackFont(ctx->fs, i, fontId)) continue;
+		fonsAddFallbackFont(ctx->fs, i, fontId);
+	}
+	return fontId;
+}
+
+int nvgSetEmojiFont(NVGcontext* ctx, const char* name)
+{
+	return nvgSetEmojiFontId(ctx, nvgFindFont(ctx, name));
+}
+
+int nvgGetEmojiFontId(NVGcontext* ctx)
+{
+	if (ctx == NULL) return FONS_INVALID;
+	return ctx->emojiFontId;
 }
 
 // State setting

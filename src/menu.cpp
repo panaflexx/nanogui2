@@ -14,6 +14,7 @@
 #include <nanogui/screen.h>
 #include <nanogui/theme.h>
 #include <nanogui/scrollpanel.h>
+#include <nanogui/zoomscrollpanel.h>
 #include <stdexcept> // for runtime_error
 #include <map>
 
@@ -163,7 +164,7 @@ int nth_visible_child_index(const Widget *w, int n)
 MenuItem::MenuItem(Widget *parent, const std::string &caption, int button_icon, const std::vector<Shortcut> &s) :
     Button(parent, caption, button_icon), m_shortcuts(s)
 {
-    set_fixed_height(menu_item_height);
+    set_min_height(menu_item_height);
     m_icon_position = IconPosition::Left;
 }
 
@@ -359,7 +360,7 @@ void MenuItem::draw(NVGcontext *ctx)
 Separator::Separator(Widget *parent) : MenuItem(parent, "--separator--")
 {
     set_enabled(false);
-    set_fixed_height(seperator_height);
+    set_min_height(seperator_height);
 }
 
 void Separator::draw(NVGcontext *ctx)
@@ -662,7 +663,7 @@ Dropdown::Dropdown(Widget *parent, Mode mode, const string &caption) : MenuItem(
     if (m_mode == Menu)
         set_fixed_size(preferred_size(screen()->nvg_context()));
 
-    set_fixed_height(menu_item_height);
+    set_min_height(menu_item_height);
 }
 
 Dropdown::Dropdown(Widget *parent, const vector<string> &items, const vector<int> &icons, Mode mode,
@@ -792,6 +793,32 @@ void Dropdown::update_popup_geometry() const
 
     Vector2i abs_pos = absolute_position() + offset;
 
+    // Adjust position & size for any ancestor ZoomScrollPanel (zoom + pan)
+    {
+        const Widget* w = this;
+        const ZoomScrollPanel* zsp = nullptr;
+        while (w && !zsp) {
+            zsp = dynamic_cast<const ZoomScrollPanel*>(w);
+            w = w->parent();
+        }
+        if (zsp) {
+            double   z   = zsp->zoom();
+            auto     pan = zsp->pan_offset();
+            Vector2i zsp_abs = zsp->absolute_position();
+            Vector2i logical_rel = absolute_position() - zsp_abs;
+
+            // visual screen position = panel_abs + pan + logical_offset * zoom
+            abs_pos = zsp_abs + Vector2i(int(std::lround(pan.x() + logical_rel.x() * z)),
+                                         int(std::lround(pan.y() + logical_rel.y() * z)));
+            abs_pos += Vector2i(int(std::lround(offset.x() * z)),
+                                int(std::lround(offset.y() * z)));
+
+            // Scale popup width to match zoom
+            int zoomed_width = int(std::lround((width() + font_size * icon_scale() + 4) * z));
+            m_popup->set_width(std::max(m_popup->width(), zoomed_width));
+        }
+    }
+
     // prevent bottom of menu from getting clipped off screen
     abs_pos.y() += std::min(0, screen()->height() - (abs_pos.y() + m_popup->size().y() + 2));
 
@@ -800,7 +827,6 @@ void Dropdown::update_popup_geometry() const
         abs_pos.y() = absolute_position().y() + size().y() - 2;
 
     m_popup->set_position(abs_pos);
-    m_popup->set_width(std::max(m_popup->width(), width() + int(font_size * icon_scale()) + 4));
 }
 
 bool Dropdown::mouse_enter_event(const Vector2i &p, bool enter)

@@ -45,12 +45,12 @@ void TreeView::create_tree_object(std::string object_name, int Index)
     Widget* CurrWidget = new Widget(nullptr);
     CurrWidget->set_layout(new BoxLayout(Orientation::Horizontal, Alignment::Minimum));
     Label* CurrLabel = new Label(CurrWidget, "");
-    CurrLabel->set_fixed_width(20 * m_data_tree->Objects[object_name]->Level);
+    CurrLabel->set_min_width(20 * m_data_tree->Objects[object_name]->Level);
     Button* NewButton = new Button(CurrWidget, "", (m_data_tree->Objects[object_name]->Children.size() == 0 ? 0: (m_data_tree->Objects[object_name]->Expanded ? FA_CARET_DOWN : FA_CARET_RIGHT)));
     NewButton->set_transparent(true);
     NewButton->set_icon_extra_scale(2);
     NewButton->set_font_size(15);
-    NewButton->set_fixed_width(15);
+    NewButton->set_min_width(15);
     NewButton->set_callback([=] {arrow_callback(object_name); });
     NewButton->DebugName = "arrow_" + object_name;
     if (m_data_tree->Objects[object_name]->Children.size() == 0)NewButton->set_enabled(false);
@@ -91,7 +91,7 @@ void TreeView::arrow_callback(std::string keystring)
     m_data_tree->Objects[keystring]->Expanded = !m_data_tree->Objects[keystring]->Expanded;
 
     ((Button*)(m_data_tree->Objects[keystring]->NodeWidget->children()[1]))->set_icon((m_data_tree->Objects[keystring]->Expanded ? FA_CARET_DOWN : FA_CARET_RIGHT));
-    
+
     if (m_expand_callback && m_data_tree->Objects[keystring]->Expanded)m_expand_callback(keystring);
 
     int ChildrenCnt = 0;

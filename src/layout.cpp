@@ -1106,19 +1106,22 @@ Vector2i FlexLayout::preferred_size(NVGcontext *ctx, const Widget *widget) const
         Vector2i min_s = child->min_size();
         Vector2i max_s = child->max_size();
 
-        Vector2i clamped_pref = child_pref;
-        clamped_pref = max(clamped_pref, min_s);
-        if (max_s.x() == 0) clamped_pref.x() = std::min(clamped_pref.x(), parent_size.x() - 2 * m_margin);
-        if (max_s.y() == 0) clamped_pref.y() = std::min(clamped_pref.y(), parent_size.y() - 2 * m_margin);
+        // Effective minimums: fall back to intrinsic preferred (CSS 'min: auto' behavior)
+        int eff_main_min = min_s[main_axis_idx] > 0 ? min_s[main_axis_idx] : child_pref[main_axis_idx];
+        int eff_cross_min = min_s[cross_axis_idx] > 0 ? min_s[cross_axis_idx] : child_pref[cross_axis_idx];
+
+        // NOTE: Do NOT clamp preferred size DOWN to current parent size; doing so creates a one-way
+        // ratchet where children stay shrunk after the container grows back. Preferred = intrinsic.
+        Vector2i clamped_pref = max(child_pref, min_s);
 
         FlexItem flex_item = get_flex_item(child);
 
         int main_size = flex_item.flex_basis >= 0 ? flex_item.flex_basis : clamped_pref[main_axis_idx];
-        main_size = std::max(min_s[main_axis_idx], std::min(main_size, max_s[main_axis_idx] > 0 ? max_s[main_axis_idx] : main_size));
+        main_size = std::max(eff_main_min, std::min(main_size, max_s[main_axis_idx] > 0 ? max_s[main_axis_idx] : main_size));
         total_main_size += main_size;
 
         int cross_size = clamped_pref[cross_axis_idx];
-        cross_size = std::max(min_s[cross_axis_idx], std::min(cross_size, max_s[cross_axis_idx] > 0 ? max_s[cross_axis_idx] : cross_size));
+        cross_size = std::max(eff_cross_min, std::min(cross_size, max_s[cross_axis_idx] > 0 ? max_s[cross_axis_idx] : cross_size));
         max_cross_size = std::max(max_cross_size, cross_size);
 
         if (i < visible_children.size() - 1)
@@ -1165,6 +1168,7 @@ void FlexLayout::perform_layout(NVGcontext *ctx, Widget *widget) const {
 
     std::vector<int> base_sizes;
     std::vector<int> final_sizes;
+    std::vector<Vector2i> pref_sizes;  // Cache for second/third loops (preserves intrinsic prefs)
     float total_flex_grow = 0.0f;
     float total_flex_shrink_scaled = 0.0f;
     int total_base_size = 0;
@@ -1178,20 +1182,24 @@ void FlexLayout::perform_layout(NVGcontext *ctx, Widget *widget) const {
         } else {
             child_pref = child->preferred_size(ctx);
         }
+        pref_sizes.push_back(child_pref);
+
         Vector2i min_s = child->min_size();
         Vector2i max_s = child->max_size();
 
-        Vector2i clamped_pref = child_pref;
-        clamped_pref = max(clamped_pref, min_s);
-        if (max_s.x() == 0) clamped_pref.x() = std::min(clamped_pref.x(), available_main_space);
-        if (max_s.y() == 0) clamped_pref.y() = std::min(clamped_pref.y(), available_cross_space);
+        // Effective minimum on main axis: user-set min, or intrinsic preferred when unset (CSS 'min: auto')
+        int eff_main_min = min_s[main_axis_idx] > 0 ? min_s[main_axis_idx] : child_pref[main_axis_idx];
+
+        // NOTE: Do NOT clamp preferred DOWN to available container space; the flex shrink algorithm
+        // below handles fitting into the available space. Clamping here causes a permanent shrink
+        // ratchet (items never grow back when container expands).
+        Vector2i clamped_pref = max(child_pref, min_s);
 
         FlexItem flex_item = get_flex_item(child);
 
         int base_size = flex_item.flex_basis >= 0 ? flex_item.flex_basis : clamped_pref[main_axis_idx];
-        int axis_min = min_s[main_axis_idx];
-        int axis_max = max_s[main_axis_idx] > 0 ? max_s[main_axis_idx] : available_main_space;
-        base_size = std::max(axis_min, std::min(base_size, axis_max));
+        int axis_max = max_s[main_axis_idx] > 0 ? max_s[main_axis_idx] : INT_MAX;
+        base_size = std::max(eff_main_min, std::min(base_size, axis_max));
 
         base_sizes.push_back(base_size);
         total_base_size += base_size;
@@ -1215,8 +1223,10 @@ void FlexLayout::perform_layout(NVGcontext *ctx, Widget *widget) const {
             final_size = std::max(0, final_size);
         }
 
-        int axis_min = child->min_size()[main_axis_idx];
-        int axis_max = child->max_size()[main_axis_idx] > 0 ? child->max_size()[main_axis_idx] : available_main_space;
+        // Effective min on main axis: respect user min, else fall back to intrinsic preferred
+        int user_min = child->min_size()[main_axis_idx];
+        int axis_min = user_min > 0 ? user_min : pref_sizes[i][main_axis_idx];
+        int axis_max = child->max_size()[main_axis_idx] > 0 ? child->max_size()[main_axis_idx] : INT_MAX;
         final_size = std::max(axis_min, std::min(final_size, axis_max));
 
         final_sizes.push_back(final_size);
@@ -1303,18 +1313,15 @@ void FlexLayout::perform_layout(NVGcontext *ctx, Widget *widget) const {
         child_pos[main_axis_idx] = positions[i];
         child_size[main_axis_idx] = final_sizes[i];
 
-        Vector2i child_pref;
-        if (dynamic_cast<const ScrollPanel*>(child) || dynamic_cast<const Window*>(child)) {
-            child_pref = default_child_size;
-        } else {
-            child_pref = child->preferred_size(ctx);
-        }
+        // Use cached intrinsic preferred (avoids redundant recomputation and preserves spring-back)
+        Vector2i child_pref = pref_sizes[i];
         Vector2i min_s = child->min_size();
         Vector2i max_s = child->max_size();
 
         AlignItems align = (flex_item.align_self != AlignItems::FlexStart) ? flex_item.align_self : m_align_items;
         int cross_size = child_pref[cross_axis_idx];
-        int cross_min = min_s[cross_axis_idx];
+        // Effective cross min: respect user min, else intrinsic preferred (CSS 'min: auto')
+        int cross_min = min_s[cross_axis_idx] > 0 ? min_s[cross_axis_idx] : child_pref[cross_axis_idx];
         int cross_max = max_s[cross_axis_idx] > 0 ? max_s[cross_axis_idx] : available_cross_space;
         cross_size = std::max(cross_min, std::min(cross_size, cross_max));
 
