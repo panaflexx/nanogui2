@@ -1412,10 +1412,17 @@ static FONSglyph* fons__getGlyph(FONScontext* stash, FONSfont* font, unsigned in
         glyph->x1 = (short)(gx + gw);
         glyph->y1 = (short)(gy + gh);
     } else {
+        // No atlas spot allocated (OPTIONAL path).  Use a negative origin
+        // sentinel so that callers can detect the missing bitmap, but still
+        // store the *width* and *height* of the glyph cell so that
+        // fons__getQuad() can produce a correct visual bounding box.  Without
+        // this, nvgTextBounds() under-reports the right edge by the width of
+        // the last character on the very first call (before any glyph has
+        // been rasterised into the atlas).
         glyph->x0 = -1;
-        glyph->y0 = 0;
-        glyph->x1 = -1;
-        glyph->y1 = 0;
+        glyph->y0 = -1;
+        glyph->x1 = (short)(-1 + gw);
+        glyph->y1 = (short)(-1 + gh);
     }
     glyph->xoff = calc_xoff;
     glyph->yoff = calc_yoff;
