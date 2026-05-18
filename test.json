@@ -2,16 +2,16 @@
 "type": "Canvas",
 "id": "CANVAS",
 "size": [
-  700,
-  700
+  372,
+  413
   ],
 "children": [
   {
     "id": "PANE1",
     "type": "Pane",
     "position": [
-      95,
-      103
+      10,
+      35
       ],
     "size": [
       352,
@@ -109,43 +109,73 @@
         "value": 0
         },
       {
-        "id": "COLORPICKER1",
-        "type": "Color Picker",
-        "position": [
-          15,
-          171
-          ],
-        "size": [
-          322,
-          100
-          ],
-        "fixed_size": [
-          100,
-          100
-          ],
-        "color": [
-          255,
-          0,
-          0,
-          255
-          ]
-        },
-      {
         "id": "LABEL1",
         "type": "Label",
         "position": [
           15,
-          285
+          179
           ],
         "size": [
           322,
           33
           ],
         "fixed_size": [
-          100,
-          20
+          0,
+          33
           ],
         "caption": "Nyuck nyuck nyuck"
+        },
+      {
+        "id": "TEXTBOX1",
+        "type": "Text Box",
+        "position": [
+          35,
+          218
+          ],
+        "size": [
+          302,
+          25
+          ],
+        "fixed_size": [
+          150,
+          25
+          ],
+        "value": "Say Something!"
+        },
+      {
+        "id": "CHECKBOX1",
+        "type": "Checkbox",
+        "position": [
+          35,
+          249
+          ],
+        "size": [
+          302,
+          25
+          ],
+        "fixed_size": [
+          150,
+          25
+          ],
+        "caption": "Checkbox",
+        "checked": false
+        },
+      {
+        "id": "SLIDER1",
+        "type": "Slider",
+        "position": [
+          35,
+          280
+          ],
+        "size": [
+          302,
+          25
+          ],
+        "fixed_size": [
+          150,
+          25
+          ],
+        "value": 0
         }
       ]
     }

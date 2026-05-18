@@ -21,7 +21,7 @@ NAMESPACE_BEGIN(nanogui)
  *
  * \brief Fractional slider widget with mouse control.
  */
-class NANOGUI_EXPORT Slider : public Widget {
+class NANOGUI_EXPORT Slider : public WidgetCRTP<Slider> {
 public:
     Slider(Widget *parent);
 

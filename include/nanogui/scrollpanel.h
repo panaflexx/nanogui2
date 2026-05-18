@@ -23,7 +23,7 @@ NAMESPACE_BEGIN(nanogui)
  * \brief Adds a vertical scrollbar around a widget that is too big to fit into
  *        a certain area.
  */
-    class NANOGUI_EXPORT ScrollPanel : public Widget {
+    class NANOGUI_EXPORT ScrollPanel : public WidgetCRTP<ScrollPanel> {
     public:
         enum class ScrollTypes
         {

@@ -23,7 +23,7 @@
 NAMESPACE_BEGIN(nanogui)
 
 TextBox::TextBox(Widget *parent, const std::string &value)
-    : Widget(parent),
+    : WidgetCRTP<TextBox>(parent),
       m_editable(true),
       m_spinnable(false),
       m_committed(true),

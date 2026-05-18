@@ -47,7 +47,7 @@ Widget::~Widget() {
 #ifdef DEBUG
     #warning DEBUG ENABLED
     if(m_id.length())
-        printf("~Widget id=%s debugname=%s\n", 
+        printf("~Widget id=%s debugname=%s\n",
         this->m_id.c_str(),
         this->DebugName.c_str()
     );
@@ -289,13 +289,16 @@ std::pair<bool, float> Widget::get_animation_progress() {
     bool anim_active = m_animation_start >= 0.0;
 
     if (anim_active) {
-        printf("anim_active TRUE for %s\n", m_id.c_str());
+        //printf("anim_active TRUE for %s\n", m_id.c_str());
         double elapsed = current_time - m_animation_start;
         if (elapsed >= m_animation_duration) {
             progress = 1.0f;
             end_animation();
             m_animation_start = -1.0;
-            m_animation_type = AnimationType::None;
+            /* NOTE: we intentionally keep m_animation_type set so that a
+               subsequent start_animation() call (with the default
+               AnimationType::None argument) re-runs the same animation
+               the user previously selected. */
         } else {
             progress = static_cast<float>(elapsed / m_animation_duration);
         }
@@ -310,6 +313,18 @@ void Widget::start_animation(AnimationType type) {
     }
     if (m_animation_type != AnimationType::None) {
         m_animation_start = glfwGetTime();
+
+        // Capture the widget's current size so SlideUp / SlideDown have a
+        // reference "full" height to interpolate against, and so we can
+        // restore it when the animation finishes.
+        m_animation_original_size = m_size;
+        m_animation_original_min_size = m_min_size;
+
+        if (m_animation_type == AnimationType::SlideDown) {
+            // SlideDown grows from collapsed to original; start collapsed.
+            m_size.y() = 0;
+            m_min_size.y() = 0;
+        }
         printf("Start animation %0.1f for %s\n", m_animation_start, m_id.c_str());
     }
 }
@@ -349,6 +364,18 @@ void Widget::apply_animation_transform(NVGcontext* ctx, float progress) {
             nvgGlobalAlpha(ctx, 1.0f - progress);
             break;
         }
+        case AnimationType::SlideUp: {
+            // Height is animated by changing m_size in Widget::draw().
+            // Here we just apply the fade-out.
+            nvgGlobalAlpha(ctx, 1.0f - progress);
+            break;
+        }
+        case AnimationType::SlideDown: {
+            // Height is animated by changing m_size in Widget::draw().
+            // Here we just apply the fade-in.
+            nvgGlobalAlpha(ctx, progress);
+            break;
+        }
         default:
             break;
     }
@@ -360,6 +387,18 @@ void Widget::end_animation() {
     if (m_animation_type == AnimationType::SlideClose) {
         m_visible = false;
         printf("End animation for %s\n", m_id.c_str());
+    } else if (m_animation_type == AnimationType::SlideUp) {
+        // After collapsing, hide the widget but restore its size so it can
+        // be shown again later (e.g. via SlideDown) at the right dimensions.
+        m_visible = false;
+        m_size = m_animation_original_size;
+        m_min_size = m_animation_original_min_size;
+        printf("End SlideUp animation for %s\n", m_id.c_str());
+    } else if (m_animation_type == AnimationType::SlideDown) {
+        // Ensure we end at exactly the original size (avoids rounding drift).
+        m_size = m_animation_original_size;
+        m_min_size = m_animation_original_min_size;
+        printf("End SlideDown animation for %s\n", m_id.c_str());
     }
     // Subclasses can override for more logic
 }
@@ -377,17 +416,45 @@ void Widget::draw(NVGcontext* ctx) {
     if (!m_visible)
         return;
 
+    // Apply animation transform for this widget
+    auto [anim_active, progress] = get_animation_progress();
+
+    // For SlideUp / SlideDown we drive the widget's *actual* height so that
+    // the parent's layout reflows around us, giving a true collapse / expand
+    // effect (rather than just a visual scale).
+    bool size_anim = anim_active &&
+        (m_animation_type == AnimationType::SlideUp ||
+         m_animation_type == AnimationType::SlideDown);
+    if (size_anim) {
+        float t = progress;
+        if (t < 0.0f) t = 0.0f;
+        if (t > 1.0f) t = 1.0f;
+        if (progress < 1.0f) {
+            int orig_h = m_animation_original_size.y();
+            int new_h = (m_animation_type == AnimationType::SlideUp)
+                ? (int)(orig_h * (1.0f - t))
+                : (int)(orig_h * t);
+            m_size.y() = new_h;
+            // Keep fixed/min size in sync so the parent layout honors the
+            // shrinking/growing height.
+            if (m_animation_original_min_size.y() > 0)
+                m_min_size.y() = new_h;
+        }
+        // Reflow siblings every frame (and on the final frame, after
+        // end_animation() restored the original size).
+        if (m_parent)
+            m_parent->perform_layout(ctx);
+    }
+
     nvgSave(ctx);
     nvgTranslate(ctx, m_pos.x(), m_pos.y());
 
-    // Apply animation transform for this widget
-    auto [anim_active, progress] = get_animation_progress();
     if (anim_active) {
         apply_animation_transform(ctx, progress);
     }
 
 	// Draw table layout if enabled
-	if(layout()) { 
+	if(layout()) {
 		layout()->draw_table(ctx, this);
 	}
 
@@ -398,8 +465,22 @@ void Widget::draw(NVGcontext* ctx) {
                 continue;
         #if !defined(NANOGUI_SHOW_WIDGET_BOUNDS)
             nvgSave(ctx);
-            nvgIntersectScissor(ctx, child->m_pos.x(), child->m_pos.y(),
-                child->m_size.x(), child->m_size.y());
+            /* Sproing / Warble / Rotate visually grow past the widget's
+               static rectangle, so we drop the scissor while they're
+               running. Slide animations, on the other hand, depend on the
+               parent's scissor to make the widget appear to enter / exit
+               from off-screen, so we keep clipping them. */
+            bool overflow_anim =
+                child->animating() &&
+                (child->animation_type() == AnimationType::Sproing ||
+                 child->animation_type() == AnimationType::Warble  ||
+                 child->animation_type() == AnimationType::Rotate);
+            if (overflow_anim) {
+                nvgResetScissor(ctx);
+            } else {
+                nvgIntersectScissor(ctx, child->m_pos.x(), child->m_pos.y(),
+                    child->m_size.x(), child->m_size.y());
+            }
         #endif
 
             child->draw(ctx);

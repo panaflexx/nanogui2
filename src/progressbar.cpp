@@ -15,7 +15,7 @@
 NAMESPACE_BEGIN(nanogui)
 
 ProgressBar::ProgressBar(Widget *parent)
-    : Widget(parent), m_value(0.0f) {
+    : WidgetCRTP<ProgressBar>(parent), m_value(0.0f) {
     DebugName = m_parent->DebugName + ",PrgBar";
 }
 

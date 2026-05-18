@@ -39,7 +39,7 @@ static float measure_text_width(NVGcontext* ctx, const std::string& text) {
 }
 
 Label::Label(Widget *parent, const std::string &caption, const std::string &font, int font_size)
-    : Widget(parent), m_caption(caption), m_font(font.empty() ? "sans" : font),
+    : WidgetCRTP<Label>(parent), m_caption(caption), m_font(font.empty() ? "sans" : font),
       m_line_break_mode(LineBreakMode::LineBreakByWordWrapping), m_cache_valid(false),
       m_selectable(false), m_selection_color(DEFAULT_SELECTION_COLOR),
       m_selection_start(-1), m_selection_end(-1), m_selecting(false),

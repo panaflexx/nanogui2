@@ -26,7 +26,7 @@ NAMESPACE_BEGIN(nanogui)
  * boundaries, clip text, or truncate it with an ellipsis at the head, tail, or middle.
  * Optionally, the text can be made selectable and copyable to the system clipboard.
  */
-class NANOGUI_EXPORT Label : public Widget {
+class NANOGUI_EXPORT Label : public WidgetCRTP<Label> {
 public:
  /// Line breaking modes for text rendering.
  enum class LineBreakMode {

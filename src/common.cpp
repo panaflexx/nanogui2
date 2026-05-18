@@ -157,20 +157,42 @@ void mainloop(float refresh, bool show_fps) {
         quantum_count = std::numeric_limits<size_t>::max();
     }
 
+    /* Quantum used while an animation is running. We want a much higher
+       refresh rate (~60 FPS) so animations look smooth, independent of
+       the user-supplied `refresh` argument. */
+    const std::chrono::microseconds animation_quantum(16'667);
+
     /* If there are no mouse/keyboard events, try to refresh the
        view roughly every 50 ms (default); this is to support animations
        such as progress bars while keeping the system load
-       reasonably low */
+       reasonably low. While a widget animation is in progress we tick
+       faster so the animation runs smoothly. */
     refresh_thread = std::thread(
-        [quantum, quantum_count]() {
+        [quantum, quantum_count, animation_quantum]() {
             while (true) {
                 for (size_t i = 0; i < quantum_count; ++i) {
                     if (!mainloop_active)
                         return;
-                    std::this_thread::sleep_for(quantum);
+
+                    bool any_animating = false;
                     for (auto kv : __nanogui_screens) {
-                        if (kv.second->tooltip_fade_in_progress())
-                            kv.second->redraw();
+                        if (kv.second->animation_in_progress()) {
+                            any_animating = true;
+                            break;
+                        }
+                    }
+
+                    /* Use a smaller sleep when animating so we wake up
+                       often enough to drive ~60 FPS redraws. */
+                    std::this_thread::sleep_for(
+                        any_animating ? std::min(quantum, animation_quantum)
+                                      : quantum);
+
+                    for (auto kv : __nanogui_screens) {
+                        Screen* s = kv.second;
+                        if (s->tooltip_fade_in_progress() ||
+                            s->animation_in_progress())
+                            s->redraw();
                     }
                 }
                 for (auto kv : __nanogui_screens)

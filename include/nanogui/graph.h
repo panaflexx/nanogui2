@@ -21,7 +21,7 @@ NAMESPACE_BEGIN(nanogui)
  *
  * \brief Simple graph widget for showing a function plot.
  */
-class NANOGUI_EXPORT Graph : public Widget {
+class NANOGUI_EXPORT Graph : public WidgetCRTP<Graph> {
 public:
     Graph(Widget *parent, const std::string &caption = "Untitled");
 

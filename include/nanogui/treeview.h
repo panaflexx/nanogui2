@@ -132,7 +132,7 @@ private:
  *
  * \brief Simple treeview widget .
  */
-class NANOGUI_EXPORT TreeView : public Widget {
+class NANOGUI_EXPORT TreeView : public WidgetCRTP<TreeView> {
     friend class FolderDialog;
 
 public:

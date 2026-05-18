@@ -28,7 +28,7 @@ class Texture;
  * \brief Represents a display surface (i.e. a full-screen or windowed GLFW window)
  * and forms the root element of a hierarchy of nanogui widgets.
  */
-class NANOGUI_EXPORT Screen : public Widget {
+class NANOGUI_EXPORT Screen : public WidgetCRTP<Screen> {
     friend class Widget;
     friend class Window;
 public:
@@ -228,6 +228,9 @@ public:
 
     /// Is a tooltip currently fading in?
     bool tooltip_fade_in_progress() const;
+
+    /// Is any widget in this screen currently running an animation?
+    bool animation_in_progress() const;
 
     using Widget::perform_layout;
 

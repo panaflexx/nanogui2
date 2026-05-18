@@ -29,10 +29,10 @@ struct WindowConfig {
  *
  * \brief Top-level window widget.
  */
-    class NANOGUI_EXPORT Window : public Widget {
+    class NANOGUI_EXPORT Window : public WidgetCRTP<Window> {
     friend class Popup;
     public:
-	    Window(Widget* parent, const WindowConfig& config) : Widget(parent), m_title(config.title), m_resizable(config.resizable) {
+	    Window(Widget* parent, const WindowConfig& config) : WidgetCRTP<Window>(parent), m_title(config.title), m_resizable(config.resizable) {
 			m_pos = config.position;
 			m_size = config.size;
 			if (config.layout) {

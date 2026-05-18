@@ -168,7 +168,7 @@ static EM_BOOL nanogui_emscripten_resize_callback(int eventType, const Emscripte
 #endif
 
 Screen::Screen()
-    : Widget(nullptr), m_glfw_window(nullptr), m_nvg_context(nullptr),
+    : WidgetCRTP<Screen>(nullptr), m_glfw_window(nullptr), m_nvg_context(nullptr),
     m_cursor(Cursor::Arrow), m_background(0.3f, 0.3f, 0.32f, 1.f),
     m_shutdown_glfw(false), m_fullscreen(false), m_depth_buffer(false),
     m_stencil_buffer(false), m_float_buffer(false), m_redraw(false) {
@@ -191,7 +191,7 @@ Screen::Screen()
 Screen::Screen(const Vector2i& size, const std::string& caption, bool resizable,
     bool fullscreen, bool depth_buffer, bool stencil_buffer,
     bool float_buffer, unsigned int gl_major, unsigned int gl_minor)
-    : Widget(nullptr), m_glfw_window(nullptr), m_nvg_context(nullptr),
+    : WidgetCRTP<Screen>(nullptr), m_glfw_window(nullptr), m_nvg_context(nullptr),
     m_cursor(Cursor::Arrow), m_background(0.3f, 0.3f, 0.32f, 1.f), m_caption(caption),
     m_shutdown_glfw(false), m_fullscreen(fullscreen), m_depth_buffer(depth_buffer),
     m_stencil_buffer(stencil_buffer), m_float_buffer(float_buffer), m_redraw(false) {
@@ -1400,6 +1400,20 @@ void Screen::move_window_to_front(Window* window) {
             }
         }
     } while (changed);
+}
+
+static bool widget_animation_active(const Widget* w) {
+    if (!w) return false;
+    if (w->animating()) return true;
+    for (int i = 0; i < w->child_count(); ++i) {
+        if (widget_animation_active(w->child_at(i)))
+            return true;
+    }
+    return false;
+}
+
+bool Screen::animation_in_progress() const {
+    return widget_animation_active(this);
 }
 
 bool Screen::tooltip_fade_in_progress() const {

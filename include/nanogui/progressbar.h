@@ -21,7 +21,7 @@ NAMESPACE_BEGIN(nanogui)
  *
  * \brief Standard widget for visualizing progress.
  */
-class NANOGUI_EXPORT ProgressBar : public Widget {
+class NANOGUI_EXPORT ProgressBar : public WidgetCRTP<ProgressBar> {
 public:
     ProgressBar(Widget *parent);
 

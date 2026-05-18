@@ -78,6 +78,10 @@ public:
 
     string generateUniqueId(int icon);
 
+    /* JSON load/save helpers */
+    Widget* create_widget_by_type(const std::string& type, Widget* parent);
+    void clear_canvas();
+
     bool mouse_button_event(const Vector2i &p, int button, bool down, int modifiers) override;
 
     bool mouse_motion_event(const Vector2i &p, const Vector2i &rel, int button, int modifiers) override;

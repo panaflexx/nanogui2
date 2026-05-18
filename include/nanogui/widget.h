@@ -49,14 +49,14 @@ public:
     /// Return the parent widget
     const Widget* parent() const { return m_parent; }
     /// Set the parent widget
-    void set_parent(Widget* parent) { m_parent = parent; }
+    Widget& set_parent(Widget* parent) { m_parent = parent; return *this; }
 
     /// Return the used \ref Layout generator
     Layout* layout() { return m_layout; }
     /// Return the used \ref Layout generator
     const Layout* layout() const { return m_layout.get(); }
     /// Set the used \ref Layout generator
-    void set_layout(Layout* layout) { m_layout = layout; }
+    Widget& set_layout(Layout* layout) { m_layout = layout; return *this; }
 
     /// Return the \ref Theme used to draw this widget
     Theme* theme() { return m_theme; }
@@ -68,7 +68,7 @@ public:
     /// Return the position relative to the parent widget
     const Vector2i& position() const { return m_pos; }
     /// Set the position relative to the parent widget
-    void set_position(const Vector2i& pos)  {m_pos = pos; }
+    Widget& set_position(const Vector2i& pos) { m_pos = pos; return *this; }
 
     /// Return the absolute position on screen
     Vector2i absolute_position() const {
@@ -80,23 +80,22 @@ public:
     //const Vector2i& size() const { if (this == NULL) return 0; else  return m_size; }
     const Vector2i& size() const { return m_size; }
     /// set the size of the widget
-    void set_size(const Vector2i& size)
-    {  m_size = size; }
+    Widget& set_size(const Vector2i& size) { m_size = size; return *this; }
 
 	const Vector2i& min_size() const { return m_min_size; }
-    void set_min_size(const Vector2i& size) {  m_min_size = size; }
+    Widget& set_min_size(const Vector2i& size) { m_min_size = size; return *this; }
 	const Vector2i& max_size() const { return m_max_size; }
-    void set_max_size(const Vector2i& size) {  m_max_size = size; }
+    Widget& set_max_size(const Vector2i& size) { m_max_size = size; return *this; }
 
     /// Return the width of the widget
     int width() const { return m_size.x(); }
     /// Set the width of the widget
-    void set_width(int width) { m_size.x() = width; m_min_size.x() = width; }
+    Widget& set_width(int width) { m_size.x() = width; m_min_size.x() = width; return *this; }
 
     /// Return the height of the widget
     int height() const { return m_size.y(); }
     /// Set the height of the widget
-    void set_height(int height) { m_size.y() = height; }
+    Widget& set_height(int height) { m_size.y() = height; return *this; }
 
     /**
      * \brief Set the fixed size of this widget
@@ -107,8 +106,7 @@ public:
      * size; this is done with a call to \ref set_size or a call to \ref perform_layout()
      * in the parent widget.
      */
-    //virtual void set_fixed_size(const Vector2i& fixed_size) {  m_fixed_size = fixed_size; }
-	virtual void set_fixed_size(const Vector2i& fixed_size) {  m_min_size = fixed_size; }
+    virtual void set_fixed_size(const Vector2i& fixed_size) { m_min_size = fixed_size; }
 
     /// Return the fixed size (see \ref set_fixed_size())
 
@@ -119,24 +117,24 @@ public:
     // Return the fixed height (see \ref set_fixed_size())
     int fixed_height() const { return m_min_size.y(); }
     /// Set the fixed width (see \ref set_fixed_size())
-    void set_min_width(int width) { m_min_size.x() = width; }
+    Widget& set_min_width(int width) { m_min_size.x() = width; return *this; }
     /// Set the fixed height (see \ref set_fixed_size())
-    void set_min_height(int height) { m_min_size.y() = height; }
+    Widget& set_min_height(int height) { m_min_size.y() = height; return *this; }
 	/// Set the fixed width (see \ref set_fixed_size())
-    void set_max_width(int width) { m_min_size.x() = width; }
+    Widget& set_max_width(int width) { m_min_size.x() = width; return *this; }
     /// Set the fixed height (see \ref set_fixed_size())
-    void set_max_height(int height) { m_min_size.y() = height; }
+    Widget& set_max_height(int height) { m_min_size.y() = height; return *this; }
 
 	// New flex sizing
-	void set_width_flex(SizeMode mode) { m_width_mode = mode; }
-    void set_height_flex(SizeMode mode) { m_height_mode = mode; }
+    Widget& set_width_flex(SizeMode mode) { m_width_mode = mode; return *this; }
+    Widget& set_height_flex(SizeMode mode) { m_height_mode = mode; return *this; }
     SizeMode width_mode() const { return m_width_mode; }
     SizeMode height_mode() const { return m_height_mode; }
 
     /// Return whether or not the widget is currently visible (assuming all parents are visible)
     bool visible() const { return m_visible; }
     /// Set whether or not the widget is currently visible (assuming all parents are visible)
-    void set_visible(bool visible) { m_visible = visible; }
+    Widget& set_visible(bool visible) { m_visible = visible; return *this; }
 
     /// Check if this widget is currently visible, taking parent widgets into account
     bool visible_recursive() const {
@@ -202,25 +200,25 @@ public:
     /// Return whether or not this widget is currently enabled
     bool enabled() const { return m_enabled; }
     /// Set whether or not this widget is currently enabled
-    void set_enabled(bool enabled) { m_enabled = enabled; }
+    Widget& set_enabled(bool enabled) { m_enabled = enabled; return *this; }
 
     /// Return whether or not this widget is currently focused
     bool focused() const { return m_focused; }
     /// Set whether or not this widget is currently focused
-    void set_focused(bool focused) { m_focused = focused; }
+    Widget& set_focused(bool focused) { m_focused = focused; return *this; }
     /// Request the focus to be moved to this widget
     void request_focus();
 
     const std::string& tooltip() const { return m_tooltip; }
-    void set_tooltip(const std::string& tooltip) { m_tooltip = tooltip; }
+    Widget& set_tooltip(const std::string& tooltip) { m_tooltip = tooltip; return *this; }
 
     const std::string& id() const { return m_id; }
-    void set_id(const std::string& id) { m_id = id; }
+    Widget& set_id(const std::string& id) { m_id = id; return *this; }
 
     /// Return current font size. If not set the default of the current theme will be returned
     int font_size() const;
     /// Set the font size of this widget
-    void set_font_size(int font_size) { m_font_size = font_size; }
+    Widget& set_font_size(int font_size) { m_font_size = font_size; return *this; }
     /// Return whether the font size is explicitly specified for this widget
     bool has_font_size() const { return m_font_size > 0; }
 
@@ -234,12 +232,12 @@ public:
      * Sets the amount of extra scaling applied to *icon* fonts.
      * See \ref nanogui::Widget::m_icon_extra_scale.
      */
-    void set_icon_extra_scale(float scale) { m_icon_extra_scale = scale; }
+    Widget& set_icon_extra_scale(float scale) { m_icon_extra_scale = scale; return *this; }
 
     /// Return a pointer to the cursor of the widget
     Cursor cursor() const { return m_cursor; }
     /// Set the cursor of the widget
-    void set_cursor(Cursor cursor) { m_cursor = cursor; }
+    Widget& set_cursor(Cursor cursor) { m_cursor = cursor; return *this; }
 
     /// Check if the widget contains a certain position
     bool contains(const Vector2i& p) const {
@@ -291,17 +289,62 @@ public:
 	// Animation
 	enum class AnimationType {
         None,
-        Sproing,   // Bounce/scale effect (expands then contracts with decay)
-        Warble,    // Oscillating/wavy scale effect
-        Rotate,    // Smooth rotation effect
-        SlideOpen, // Slide in (e.g., from left, animating translate/alpha)
-        SlideClose // Slide out (e.g., to left, then hide)
+        Sproing,    // Bounce/scale effect (expands then contracts with decay)
+        Warble,     // Oscillating/wavy scale effect
+        Rotate,     // Smooth rotation effect
+        SlideOpen,  // Slide in horizontally (translate from left + fade in)
+        SlideClose, // Slide out horizontally (translate to left + fade out)
+        SlideUp,    // Collapse vertically to 0 height + fade out (hides at end)
+        SlideDown   // Expand vertically from 0 height + fade in
         // Add more types here as needed, e.g., Fade, Pulse
     };
 
 	void set_animation_type(AnimationType type) { m_animation_type = type; }
     void set_animation_duration(double duration) { m_animation_duration = duration; }
+    AnimationType animation_type() const { return m_animation_type; }
+    double animation_duration() const { return m_animation_duration; }
+    bool animating() const { return m_animation_start >= 0.0; }
     void start_animation(AnimationType type = AnimationType::None);
+    /// Stop any running animation immediately
+    void stop_animation() {
+        end_animation();
+        m_animation_start = -1.0;
+    }
+
+    /**
+     * Returns true if a currently-running animation wants to override the
+     * widget's effective layout size (e.g. SlideUp / SlideDown which drive
+     * the widget's height directly). Layouts that honor this override
+     * (BoxLayout, FlexLayout) ask the widget via \ref layout_min_size and
+     * \ref layout_preferred_size rather than reading m_min_size / calling
+     * preferred_size() directly.
+     */
+    bool animation_overrides_layout_size() const {
+        return animating() &&
+               (m_animation_type == AnimationType::SlideUp ||
+                m_animation_type == AnimationType::SlideDown);
+    }
+
+    /// Min size a layout should use for this widget. Identical to
+    /// min_size() except that SlideUp / SlideDown drop the height floor
+    /// to 0 so the widget can shrink past its normal minimum.
+    Vector2i layout_min_size() const {
+        Vector2i ms = m_min_size;
+        if (animation_overrides_layout_size())
+            ms.y() = 0;
+        return ms;
+    }
+
+    /// Preferred size a layout should use for this widget. Identical to
+    /// preferred_size(ctx) except that SlideUp / SlideDown substitute the
+    /// current animated height so the layout honors the collapse / expand
+    /// effect instead of snapping back to the intrinsic preferred height.
+    Vector2i layout_preferred_size(NVGcontext* ctx) const {
+        Vector2i ps = preferred_size(ctx);
+        if (animation_overrides_layout_size())
+            ps.y() = m_size.y();
+        return ps;
+    }
 
 protected:
     /// Free all resources used by the widget and any children
@@ -387,9 +430,43 @@ protected:
 	AnimationType m_animation_type = AnimationType::None;
     double m_animation_start = -1.0;
     double m_animation_duration = 0.5;  // Default duration in seconds
+    // Captured at start_animation() time; used by SlideUp / SlideDown to
+    // restore the widget's size / fixed-size when the animation ends.
+    Vector2i m_animation_original_size = Vector2i(0, 0);
+    Vector2i m_animation_original_min_size = Vector2i(0, 0);
 	virtual void apply_animation_transform(NVGcontext* ctx, float progress);
-    virtual void end_animation();
+	virtual void end_animation();
 	std::pair<bool, float> get_animation_progress();
+};
+
+/**
+ * CRTP mixin that provides fluent setters returning the derived type.
+ * Concrete widgets should inherit from WidgetCRTP<TheirClass>.
+ */
+template <typename Derived>
+class WidgetCRTP : public Widget {
+public:
+    using Widget::Widget;
+
+    Derived& set_size(const Vector2i& size) {
+        Widget::set_size(size);
+        return static_cast<Derived&>(*this);
+    }
+
+    Derived& set_position(const Vector2i& pos) {
+        Widget::set_position(pos);
+        return static_cast<Derived&>(*this);
+    }
+
+    Derived& set_enabled(bool enabled) {
+        Widget::set_enabled(enabled);
+        return static_cast<Derived&>(*this);
+    }
+
+    Derived& set_visible(bool visible) {
+        Widget::set_visible(visible);
+        return static_cast<Derived&>(*this);
+    }
 };
 
 NAMESPACE_END(nanogui)

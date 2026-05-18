@@ -27,7 +27,7 @@ NAMESPACE_BEGIN(nanogui)
  * Appended text can use different colors, but the font size is
  * fixed for the entire widget.
  */
-class NANOGUI_EXPORT TextArea : public Widget {
+class NANOGUI_EXPORT TextArea : public WidgetCRTP<TextArea> {
 public:
     TextArea(Widget *parent);
 

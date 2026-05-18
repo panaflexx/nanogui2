@@ -26,7 +26,7 @@ NAMESPACE_BEGIN(nanogui)
  * closeable tabs and popup menus. No rendering of the content is done---for an
  * example implementation, refer to \ref TabWidget.
  */
-class NANOGUI_EXPORT TabWidgetBase : public Widget {
+class NANOGUI_EXPORT TabWidgetBase : public WidgetCRTP<TabWidgetBase> {
 public:
     /// Construct a new tab widget
     TabWidgetBase(Widget *parent, const std::string &font = "sans-bold");

@@ -5,6 +5,10 @@
 #include <nanogui/label.h>
 #include <nanogui/button.h>
 #include <nanogui/widget.h>
+#include <nanogui/textbox.h>
+#include <nanogui/checkbox.h>
+#include <nanogui/slider.h>
+#include <nanogui/colorpicker.h>
 #include <iostream>
 #include <string>
 #include <fstream>
@@ -14,6 +18,7 @@
 
 // Include the dict.h for JSON parsing
 #include "dict.h"
+#include "guieditor_json.h"
 
 using namespace nanogui;
 
@@ -193,6 +198,116 @@ protected:
 class JsonGuiApplication : public Screen {
 private:
 	EventWindow* m_rootWindow = nullptr;
+	float m_scale = 1.0f;
+
+	static Vector2i scaleVec(const Vector2i& v, float s) {
+		return Vector2i((int)std::round(v.x() * s), (int)std::round(v.y() * s));
+	}
+
+	void applyScaleRecursive(Widget* w) {
+		if (!w || m_scale == 1.0f) return;
+		if (w != m_rootWindow) {
+			if (w->fixed_size().x() != 0 || w->fixed_size().y() != 0)
+				w->set_fixed_size(scaleVec(w->fixed_size(), m_scale));
+			w->set_size(scaleVec(w->size(), m_scale));
+			w->set_position(scaleVec(w->position(), m_scale));
+			// font_size() returns the effective size (theme default if not set
+			// explicitly), so we always materialize a scaled value.
+			w->set_font_size((int)std::round(w->font_size() * m_scale));
+		}
+		for (Widget* c : w->children())
+			applyScaleRecursive(c);
+	}
+
+public:
+	void setScale(float s) { m_scale = s; }
+private:
+
+    // Build a WidgetFactory that creates Event* widgets from JSON nodes
+    // and applies ngserver-specific behavior (rootWindow sizing, default
+    // layouts, etc.). Common properties (id, position, size, caption,
+    // value, ...) are applied by guieditor_json after the factory returns.
+    guieditor_json::WidgetFactory makeFactory() {
+        return [this](const std::string& type, Widget* parent,
+                      DictValue* json) -> Widget* {
+            std::string id;
+            DictValue* idVal = dict_object_get(json, "id");
+            if (idVal && idVal->type == DICT_STRING && idVal->string_value)
+                id = idVal->string_value;
+            if (id.empty()) {
+                std::cerr << "Missing/empty 'id' in widget of type '" << type << "'\n";
+                return nullptr;
+            }
+
+            Widget* widget = nullptr;
+            if (type == "Window") {
+                std::string title;
+                DictValue* v = dict_object_get(json, "title");
+                if (v && v->type == DICT_STRING) title = v->string_value;
+
+                bool resizable = false;
+                v = dict_object_get(json, "resizable");
+                if (v && v->type == DICT_BOOL) resizable = v->bool_value != 0;
+
+                EventWindow* window = new EventWindow(this, title, id, resizable);
+                widget = window;
+
+                DictValue* rootVal = dict_object_get(json, "rootWindow");
+                bool isRoot = rootVal && rootVal->type == DICT_BOOL && rootVal->bool_value;
+                if (isRoot) {
+                    window->set_size(this->size());
+                    m_rootWindow = window;
+                } else {
+                    DictValue* wv = dict_object_get(json, "width");
+                    DictValue* hv = dict_object_get(json, "height");
+                    if (wv && hv) {
+                        int w = 400, h = 300;
+                        if (wv->type == DICT_NUMBER) w = (int)wv->number_value;
+                        else if (wv->type == DICT_INT64) w = (int)wv->int64_value;
+                        if (hv->type == DICT_NUMBER) h = (int)hv->number_value;
+                        else if (hv->type == DICT_INT64) h = (int)hv->int64_value;
+                        window->set_fixed_size(Vector2i(w, h));
+                    }
+                }
+                // Default layout if not specified (loader sets it if present)
+                if (!dict_object_get(json, "layout"))
+                    window->set_layout(new GroupLayout());
+            } else if (type == "View" || type == "Widget" || type == "Pane") {
+                widget = new EventWidget(parent, id);
+                if (!dict_object_get(json, "layout"))
+                    widget->set_layout(new GroupLayout());
+            } else if (type == "Button") {
+                std::string label = "Button";
+                DictValue* v = dict_object_get(json, "label");
+                if (!v) v = dict_object_get(json, "caption");
+                if (v && v->type == DICT_STRING) label = v->string_value;
+                widget = new EventButton(parent, label, id);
+            } else if (type == "Label") {
+                std::string text = "Label";
+                DictValue* v = dict_object_get(json, "text");
+                if (!v) v = dict_object_get(json, "caption");
+                if (v && v->type == DICT_STRING) text = v->string_value;
+                widget = new EventLabel(parent, text, id);
+            } else if (type == "Text Box" || type == "TextBox") {
+                TextBox* tb = new TextBox(parent);
+                widget = tb;
+            } else if (type == "Checkbox" || type == "CheckBox") {
+                std::string caption;
+                DictValue* v = dict_object_get(json, "caption");
+                if (v && v->type == DICT_STRING) caption = v->string_value;
+                widget = new CheckBox(parent, caption);
+            } else if (type == "Slider") {
+                widget = new Slider(parent);
+            } else if (type == "Color Picker" || type == "ColorPicker") {
+                widget = new ColorPicker(parent);
+            } else {
+                std::cerr << "Warning: Unknown widget type '" << type
+                          << "', creating generic EventWidget\n";
+                widget = new EventWidget(parent, id);
+            }
+            return widget;
+        };
+    }
 
     // Extract and validate ID from JSON object
     std::string extractId(DictValue* jsonObj) {
@@ -360,7 +475,7 @@ private:
 public:
     JsonGuiApplication() : Screen(Vector2i(800, 600), "JSON GUI Application") {
         inc_ref();
-        
+
         // JSON string with mandatory IDs
         const char* jsonString = R"({
           "id": "main_window",
@@ -394,82 +509,23 @@ public:
           ]
         })";
         
-        try {
-            // Parse JSON
-            char errorBuffer[1000];
-            DictValue* root = dict_deserialize_json(
-                jsonString, 
-                strlen(jsonString), 
-                strlen(jsonString),
-                errorBuffer,
-                sizeof(errorBuffer)
-            );
-            
-            if (!root) {
-                std::cerr << "JSON parsing failed: " << errorBuffer << std::endl;
-                return;
-            }
-            
-            std::cout << "JSON parsed successfully!" << std::endl;
-            
-            // Build the GUI from JSON
-            buildWidgetHierarchy(root, nullptr);
-            
-            // Clean up JSON data
-            dict_destroy(root);
-            
-            // Perform layout
+        if (guieditor_json::load_layout_from_string(this, jsonString, makeFactory())) {
+            applyScaleRecursive(this);
             perform_layout();
-            
-        } catch (const std::exception& e) {
-            std::cerr << "Error building GUI: " << e.what() << std::endl;
-        }
+        } else
+            std::cerr << "Error building GUI from embedded JSON" << std::endl;
     }
-    
-    // Alternative constructor that reads from file
-    JsonGuiApplication(const std::string& jsonFilePath) : Screen(Vector2i(800, 600), "JSON GUI Application") {
-        inc_ref();
-        
-        try {
-            // Read JSON from file
-            std::ifstream file(jsonFilePath);
-            if (!file.is_open()) {
-                throw std::runtime_error("Failed to open JSON file: " + jsonFilePath);
-            }
-            
-            std::string jsonContent((std::istreambuf_iterator<char>(file)),
-                                   std::istreambuf_iterator<char>());
-            file.close();
-            
-            // Parse JSON
-            char errorBuffer[1000];
-            DictValue* root = dict_deserialize_json(
-                jsonContent.c_str(),
-                jsonContent.length(),
-                jsonContent.length(),
-                errorBuffer,
-                sizeof(errorBuffer)
-            );
-            
-            if (!root) {
-                throw std::runtime_error("JSON parsing failed: " + std::string(errorBuffer));
-            }
-            
-            std::cout << "JSON file parsed successfully!" << std::endl;
-            
-            // Build the GUI from JSON
-            buildWidgetHierarchy(root, nullptr);
-            
-            // Clean up JSON data
-            dict_destroy(root);
-            
-            // Perform layout
-            perform_layout();
 
-            
-        } catch (const std::exception& e) {
-            std::cerr << "Error: " << e.what() << std::endl;
-        }
+    // Alternative constructor that reads from file
+    JsonGuiApplication(const std::string& jsonFilePath, float scale = 1.0f)
+        : Screen(Vector2i(800, 600), "JSON GUI Application") {
+        inc_ref();
+        m_scale = scale;
+        if (guieditor_json::load_layout_into(this, jsonFilePath, makeFactory())) {
+            applyScaleRecursive(this);
+            perform_layout();
+        } else
+            std::cerr << "Error loading GUI from " << jsonFilePath << std::endl;
     }
 
 	virtual bool resize_event(const Vector2i& size) override {
@@ -532,19 +588,37 @@ void handleGuiEvent(const GuiEvent& event) {
 int main(int argc, char** argv) {
     try {
         nanogui::init();
-        
+
         // Set up event callback before creating the application
         JsonGuiRuntime::setEventCallback(handleGuiEvent);
-        
+
+        // Parse command line arguments
+        std::string jsonPath;
+        float scale = 1.0f;
+        for (int i = 1; i < argc; ++i) {
+            std::string a = argv[i];
+            if ((a == "--scale" || a == "-s") && i + 1 < argc) {
+                scale = (float)std::atof(argv[++i]);
+                if (scale <= 0.0f) scale = 1.0f;
+            } else if (a == "--help" || a == "-h") {
+                std::cout << "Usage: " << argv[0]
+                          << " [--scale|-s FACTOR] [layout.json]\n";
+                nanogui::shutdown();
+                return 0;
+            } else {
+                jsonPath = a;
+            }
+        }
+
         {
             ref<JsonGuiApplication> app;
-            
-            // Check if JSON file path provided as argument
-            if (argc > 1) {
-                app = new JsonGuiApplication(std::string(argv[1]));
+
+            if (!jsonPath.empty()) {
+                app = new JsonGuiApplication(jsonPath, scale);
             } else {
-                // Use embedded JSON
+                // Use embedded JSON (scaling applies in this path too)
                 app = new JsonGuiApplication();
+                app->setScale(scale);
             }
             
             app->dec_ref();

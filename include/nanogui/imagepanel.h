@@ -22,7 +22,7 @@ NAMESPACE_BEGIN(nanogui)
  *
  * \brief Image panel widget which shows a number of square-shaped icons.
  */
-class NANOGUI_EXPORT ImagePanel : public Widget {
+class NANOGUI_EXPORT ImagePanel : public WidgetCRTP<ImagePanel> {
 public:
     typedef std::vector<std::pair<int, std::string>> Images;
 public:

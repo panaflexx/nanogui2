@@ -8,6 +8,7 @@
 */
 
 #include "guieditor.h"
+#include "guieditor_json.h"
 #include <nanogui/toolbutton.h>
 #include <nanogui/icons.h>
 #include <nanogui/messagedialog.h>
@@ -858,6 +859,39 @@ GUIEditor::GUIEditor() : Screen(Vector2i(1024, 768), "GUI Editor") {
         tool_buttons.push_back(tb);
     }
 
+    // Load/Save buttons row
+    Widget *fileRow = new Widget(editor_win);
+    fileRow->set_layout(new BoxLayout(Orientation::Horizontal, Alignment::Middle, 0, 5));
+    Button *load_btn = new Button(fileRow, "Load", FA_FOLDER_OPEN);
+    load_btn->set_tooltip("Load layout from JSON file");
+    load_btn->set_callback([this] {
+        auto results = nanogui::file_dialog(
+            { {"json", "JSON Layout"} }, false, false, "");
+        if (results.empty()) return;
+        std::string path = results.front();
+        if (path.empty()) return;
+        if (!guieditor_json::load_layout(this, path)) {
+            new MessageDialog(this, MessageDialog::Type::Warning,
+                              "Load failed", "Could not load JSON layout from " + path);
+        } else {
+            perform_layout();
+            redraw();
+        }
+    });
+    Button *save_btn = new Button(fileRow, "Save", FA_SAVE);
+    save_btn->set_tooltip("Save layout to JSON file");
+    save_btn->set_callback([this] {
+        auto results = nanogui::file_dialog(
+            { {"json", "JSON Layout"} }, true, false, "");
+        if (results.empty()) return;
+        std::string path = results.front();
+        if (path.empty()) return;
+        if (!guieditor_json::save_layout(this, path)) {
+            new MessageDialog(this, MessageDialog::Type::Warning,
+                              "Save failed", "Could not save JSON layout to " + path);
+        }
+    });
+
     // Test mode toggle
     Widget *testModeRow = new Widget(editor_win);
     testModeRow->set_layout(new BoxLayout(Orientation::Horizontal, Alignment::Fill, 0, 5));
@@ -1210,6 +1244,59 @@ bool GUIEditor::update_properties() {
     fheight_box->set_min_height(20);
 
 
+    /* ANIMATION CONTROLS */
+    new Label(properties_pane, "Animation:", "sans-bold");
+    ComboBox *anim_combo = new ComboBox(properties_pane, {
+        "None", "Sproing", "Warble", "Rotate",
+        "SlideOpen", "SlideClose", "SlideUp", "SlideDown"
+    });
+    anim_combo->set_selected_index((int)selected_widget->animation_type());
+    anim_combo->set_callback([this](int index) {
+        if (!selected_widget) return;
+        selected_widget->set_animation_type(
+            static_cast<Widget::AnimationType>(index));
+    });
+    anim_combo->set_min_height(20);
+
+    /* ANIMATION DURATION (seconds) */
+    new Label(properties_pane, "Anim Time:", "sans-bold");
+    FloatBox<double> *anim_duration = new FloatBox<double>(properties_pane);
+    anim_duration->set_value(selected_widget->animation_duration());
+    anim_duration->set_units("s");
+    anim_duration->set_editable(true);
+    anim_duration->set_spinnable(true);
+    anim_duration->set_value_increment(0.1);
+    anim_duration->set_min_max_values(0.0, 60.0);
+    anim_duration->set_callback([this](double v) {
+        if (!selected_widget) return false;
+        selected_widget->set_animation_duration(v);
+        return true;
+    });
+    anim_duration->set_min_height(20);
+
+    /* ANIMATION START / STOP BUTTONS */
+    new Label(properties_pane, "Anim Run:", "sans-bold");
+    Widget *anim_buttons = new Widget(properties_pane);
+    anim_buttons->set_layout(new BoxLayout(Orientation::Horizontal,
+                                           Alignment::Middle, 0, 5));
+    Button *anim_start_btn = new Button(anim_buttons, "Start", FA_PLAY);
+    anim_start_btn->set_tooltip("Start the selected widget's animation");
+    anim_start_btn->set_callback([this]() {
+        if (!selected_widget) return;
+        // Ensure visibility so animations like SlideOpen are observable
+        selected_widget->set_visible(true);
+        selected_widget->start_animation();
+        redraw();
+    });
+    Button *anim_stop_btn = new Button(anim_buttons, "Stop", FA_STOP);
+    anim_stop_btn->set_tooltip("Stop the selected widget's animation");
+    anim_stop_btn->set_callback([this]() {
+        if (!selected_widget) return;
+        selected_widget->stop_animation();
+        redraw();
+    });
+
+
     /* BACKGROUND COLOR */
     new Label(properties_pane, "BG Color:", "sans-bold");
     ColorPicker *bg_color = new ColorPicker(properties_pane);
@@ -1555,6 +1642,64 @@ std::string GUIEditor::generateUniqueId(int icon) {
         case FA_IMAGE: return "IMAGE" + std::to_string(++image_count);
         default: return "WIDGET" + std::to_string(window_count + label_count + button_count + 1);
     }
+}
+
+Widget* GUIEditor::create_widget_by_type(const std::string& type, Widget* parent) {
+    if (!parent) parent = canvas_win;
+    Widget* w = nullptr;
+    if (type == "Window") {
+        TestWindow *sub_win = new TestWindow(parent, "New Window");
+        sub_win->set_size(Vector2i(200, 150));
+        sub_win->set_layout(new GroupLayout());
+        w = sub_win;
+    } else if (type == "Pane" || type == "View" || type == "Widget") {
+        TestWidget *pane = new TestWidget(parent);
+        pane->set_fixed_size(Vector2i(150, 100));
+        pane->set_layout(new GroupLayout());
+        w = pane;
+    } else if (type == "Label") {
+        TestLabel *lbl = new TestLabel(parent, "Label");
+        lbl->set_fixed_size(Vector2i(100, 20));
+        w = lbl;
+    } else if (type == "Button") {
+        TestButton *btn = new TestButton(parent, "Button");
+        btn->set_fixed_size(Vector2i(100, 25));
+        w = btn;
+    } else if (type == "Text Box" || type == "TextBox") {
+        TestTextBox *tb = new TestTextBox(parent);
+        tb->set_fixed_size(Vector2i(150, 25));
+        tb->set_value("Text");
+        w = tb;
+    } else if (type == "Dropdown") {
+        TestDropdown *dropdown = new TestDropdown(parent);
+        dropdown->set_fixed_size(Vector2i(150, 25));
+        dropdown->set_width(150);
+        dropdown->set_text_color(Color(255, 255, 255, 255));
+        w = dropdown;
+    } else if (type == "Checkbox" || type == "CheckBox") {
+        TestCheckBox *cb = new TestCheckBox(parent, "Checkbox");
+        cb->set_fixed_size(Vector2i(150, 25));
+        w = cb;
+    } else if (type == "Slider") {
+        TestSlider *sl = new TestSlider(parent);
+        sl->set_fixed_size(Vector2i(150, 25));
+        w = sl;
+    } else if (type == "Color Picker" || type == "ColorPicker") {
+        TestColorPicker *cp = new TestColorPicker(parent, Color(255, 0, 0, 255));
+        cp->set_fixed_size(Vector2i(100, 100));
+        w = cp;
+    }
+    return w;
+}
+
+void GUIEditor::clear_canvas() {
+    selected_widget = nullptr;
+    if (!canvas_win) return;
+    // Remove all children of canvas_win
+    while (canvas_win->child_count() > 0) {
+        canvas_win->remove_child_at(0);
+    }
+    update_properties();
 }
 
 // Recursive search widget tree

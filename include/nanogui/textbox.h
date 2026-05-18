@@ -31,7 +31,7 @@ NAMESPACE_BEGIN(nanogui)
  *     which affects all subclasses of this Widget.  Subclasses must explicitly
  *     set a different value if needed (e.g., in their constructor).
  */
-class NANOGUI_EXPORT TextBox : public Widget {
+class NANOGUI_EXPORT TextBox : public WidgetCRTP<TextBox> {
 public:
     /// How to align the text in the text box.
     enum class Alignment {

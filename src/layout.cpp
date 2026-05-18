@@ -90,8 +90,9 @@ void BoxLayout::perform_layout(NVGcontext* ctx, Widget* widget) const {
     for (auto w : widget->children()) {
         if (w->visible()) {
             visible_children.push_back(w);
-            Vector2i ps = w->preferred_size(ctx);
-            Vector2i min_s = w->min_size();
+            // layout_*_size honors animation overrides (SlideUp/SlideDown)
+            Vector2i ps = w->layout_preferred_size(ctx);
+            Vector2i min_s = w->layout_min_size();
             Vector2i max_s = w->max_size();
 
             int axis_pref = ps[axis1];
@@ -118,8 +119,9 @@ void BoxLayout::perform_layout(NVGcontext* ctx, Widget* widget) const {
     }
 
     for (auto w : visible_children) {
-        Vector2i ps = w->preferred_size(ctx);
-        Vector2i min_s = w->min_size();
+        // layout_*_size honors animation overrides (SlideUp/SlideDown)
+        Vector2i ps = w->layout_preferred_size(ctx);
+        Vector2i min_s = w->layout_min_size();
         Vector2i max_s = w->max_size();
 
         int axis_pref = ps[axis1];
@@ -1180,11 +1182,13 @@ void FlexLayout::perform_layout(NVGcontext *ctx, Widget *widget) const {
         if (dynamic_cast<const ScrollPanel*>(child) || dynamic_cast<const Window*>(child)) {
             child_pref = default_child_size;
         } else {
-            child_pref = child->preferred_size(ctx);
+            // layout_preferred_size honors animation overrides (SlideUp/SlideDown)
+            child_pref = child->layout_preferred_size(ctx);
         }
         pref_sizes.push_back(child_pref);
 
-        Vector2i min_s = child->min_size();
+        // layout_min_size drops the height floor to 0 during SlideUp/SlideDown
+        Vector2i min_s = child->layout_min_size();
         Vector2i max_s = child->max_size();
 
         // Effective minimum on main axis: user-set min, or intrinsic preferred when unset (CSS 'min: auto')
@@ -1223,9 +1227,13 @@ void FlexLayout::perform_layout(NVGcontext *ctx, Widget *widget) const {
             final_size = std::max(0, final_size);
         }
 
-        // Effective min on main axis: respect user min, else fall back to intrinsic preferred
-        int user_min = child->min_size()[main_axis_idx];
-        int axis_min = user_min > 0 ? user_min : pref_sizes[i][main_axis_idx];
+        // Effective min on main axis: respect user min, else fall back to intrinsic preferred.
+        // During SlideUp/SlideDown, layout_min_size drops to 0 so the widget can collapse.
+        Vector2i layout_min = child->layout_min_size();
+        int user_min = layout_min[main_axis_idx];
+        int axis_min = child->animation_overrides_layout_size()
+            ? user_min
+            : (user_min > 0 ? user_min : pref_sizes[i][main_axis_idx]);
         int axis_max = child->max_size()[main_axis_idx] > 0 ? child->max_size()[main_axis_idx] : INT_MAX;
         final_size = std::max(axis_min, std::min(final_size, axis_max));
 
@@ -1315,13 +1323,18 @@ void FlexLayout::perform_layout(NVGcontext *ctx, Widget *widget) const {
 
         // Use cached intrinsic preferred (avoids redundant recomputation and preserves spring-back)
         Vector2i child_pref = pref_sizes[i];
-        Vector2i min_s = child->min_size();
+        // layout_min_size honors animation overrides on the cross axis too,
+        // so e.g. a horizontal flex can shrink a SlideUp child's height to 0.
+        Vector2i min_s = child->layout_min_size();
         Vector2i max_s = child->max_size();
 
         AlignItems align = (flex_item.align_self != AlignItems::FlexStart) ? flex_item.align_self : m_align_items;
         int cross_size = child_pref[cross_axis_idx];
-        // Effective cross min: respect user min, else intrinsic preferred (CSS 'min: auto')
-        int cross_min = min_s[cross_axis_idx] > 0 ? min_s[cross_axis_idx] : child_pref[cross_axis_idx];
+        // Effective cross min: respect user min, else intrinsic preferred (CSS 'min: auto').
+        // Animations override this to allow collapsing past the intrinsic floor.
+        int cross_min = child->animation_overrides_layout_size()
+            ? min_s[cross_axis_idx]
+            : (min_s[cross_axis_idx] > 0 ? min_s[cross_axis_idx] : child_pref[cross_axis_idx]);
         int cross_max = max_s[cross_axis_idx] > 0 ? max_s[cross_axis_idx] : available_cross_space;
         cross_size = std::max(cross_min, std::min(cross_size, cross_max));
 

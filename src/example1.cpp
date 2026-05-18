@@ -40,6 +40,7 @@
 #include <nanogui/renderpass.h>
 #include <nanogui/textarea.h>
 #include <nanogui/folderdialog.h>
+#include <nanogui/fluent.h>
 #include <iostream>
 #include <memory>
 #include <vector>
@@ -66,61 +67,68 @@ public:
 
 	void addWindowButtons(Window *w)
 	{
-		Widget *panel = w->button_panel();
-
-		Button* b = new Button(panel, "X");
-        b->set_callback([w] { w->dispose(); });
+		Make<Button>(w->button_panel(), "X")
+		    .tap([w](Button* b) { b->set_callback([w] { w->dispose(); }); });
 	}
 
 	void ask_to_quit()
     {
-        auto dlg = new MessageDialog(this, MessageDialog::Type::Information, "Warning!", "🛑 Quit?", "Yes", "No", true);
-        dlg->set_callback([this](int result) { this->set_visible(result != 0); });
-        dlg->request_focus();
+        Make<MessageDialog>(this, MessageDialog::Type::Information, "Warning!", "🛑 Quit?", "Yes", "No", true)
+            .tap([this](MessageDialog* dlg) {
+                dlg->set_callback([this](int result) { this->set_visible(result != 0); });
+                dlg->request_focus();
+            });
     }
 
     void CreateMovingMenuBar()
     {
-        Window* MenuBar1 = new Window(this, "Try to move this around");
-        BoxLayout* MenuLayout = new BoxLayout(Orientation::Horizontal);
-        MenuBar1->set_layout(MenuLayout);
-        MenuBar1->set_position(Vector2i(15, 600));
+        Window* MenuBar1 = Make<Window>(this, "Try to move this around")
+            .pos({15, 600})
+            .layout(new BoxLayout(Orientation::Horizontal));
 
-        PopupButton* FileBtn = new PopupButton(MenuBar1, "File");
-        FileBtn->popup()->set_layout(new BoxLayout(Orientation::Vertical, Alignment::Fill));
-        FileBtn->set_side(Popup::Left);
-
-        Button* FolderDialogButt = new Button(FileBtn->popup(), "Folder Dialog");
-        std::string getBackValue;
-        FolderDialogButt->set_callback([&] {
-			printf("**BEEP**\n");
-            //auto dlg = new FolderDialog(this, "Select Folder");
-            //dlg->set_callback([&](std::string result) {std::cout << "Folder Selected: " << result << std::endl; });
+        PopupButton* FileBtn = Make<PopupButton>(MenuBar1, "File")
+            .tap([](PopupButton* p) {
+                p->popup()->set_layout(new BoxLayout(Orientation::Vertical, Alignment::Fill));
+                p->set_side(Popup::Left);
             });
-        new Button(FileBtn->popup(), "Do File Stuff 2");
-        new Button(FileBtn->popup(), "Do File Stuff 3");
-        new Label(FileBtn->popup(), "-------------");
-        new Button(FileBtn->popup(), "short Stuff 4");
-        new Button(FileBtn->popup(), "short Stuff 5");
-        new Button(FileBtn->popup(), "Do File Stuff 6");
-        PopupButton* EditBtn = new PopupButton(MenuBar1, "Edit");
-        EditBtn->popup()->set_layout(new BoxLayout(Orientation::Vertical));
-        EditBtn->set_side(Popup::Bottom);
-        new Button(EditBtn->popup(), "This is avery long button that will hit the borders when the popup is opened");
-        new Button(EditBtn->popup(), "Do File Stuff 2");
-        PopupButton* HelpBtn = new PopupButton(MenuBar1, "Help");
-        HelpBtn->popup()->set_layout(new BoxLayout(Orientation::Vertical));
-        HelpBtn->set_side(Popup::Right);
-        new Button(HelpBtn->popup(), "Help");
-        new Button(HelpBtn->popup(), "About");
-        new Button(HelpBtn->popup(), "About2");
-        new Button(HelpBtn->popup(), "About3");
-        new Button(HelpBtn->popup(), "About4");
 
+        Make<Button>(FileBtn->popup(), "Folder Dialog")
+            .tap([this](Button* b) {
+                b->set_callback([&] {
+                    printf("**BEEP**\n");
+                    //auto dlg = new FolderDialog(this, "Select Folder");
+                    //dlg->set_callback([&](std::string result) {std::cout << "Folder Selected: " << result << std::endl; });
+                });
+            });
+        Make<Button>(FileBtn->popup(), "Do File Stuff 2");
+        Make<Button>(FileBtn->popup(), "Do File Stuff 3");
+        Make<Label>(FileBtn->popup(), "-------------");
+        Make<Button>(FileBtn->popup(), "short Stuff 4");
+        Make<Button>(FileBtn->popup(), "short Stuff 5");
+        Make<Button>(FileBtn->popup(), "Do File Stuff 6");
+
+        PopupButton* EditBtn = Make<PopupButton>(MenuBar1, "Edit")
+            .tap([](PopupButton* p) {
+                p->popup()->set_layout(new BoxLayout(Orientation::Vertical));
+                p->set_side(Popup::Bottom);
+            });
+        Make<Button>(EditBtn->popup(), "This is avery long button that will hit the borders when the popup is opened");
+        Make<Button>(EditBtn->popup(), "Do File Stuff 2");
+
+        PopupButton* HelpBtn = Make<PopupButton>(MenuBar1, "Help")
+            .tap([](PopupButton* p) {
+                p->popup()->set_layout(new BoxLayout(Orientation::Vertical));
+                p->set_side(Popup::Right);
+            });
+        Make<Button>(HelpBtn->popup(), "Help");
+        Make<Button>(HelpBtn->popup(), "About");
+        Make<Button>(HelpBtn->popup(), "About2");
+        Make<Button>(HelpBtn->popup(), "About3");
+        Make<Button>(HelpBtn->popup(), "About4");
     }
     void CreateMenuBar()
     {
-		MenuBar *m_menubar = new MenuBar(this, "");
+		MenuBar *m_menubar = Make<MenuBar>(this, "");
         auto menu = m_menubar->add_menu("File");
 
         auto add_item = [this, &menu](const vector<std::string> &aliases, int icon, const function<void(void)> &cb,
@@ -149,7 +157,7 @@ public:
                  {{SYSTEM_COMMAND_MOD, 'Z'}});
         add_item({"Redo", "Step forward in history"}, FA_SHARE, [this] { printf("redo()"); },
                  {{SYSTEM_COMMAND_MOD | GLFW_MOD_SHIFT, 'Z'}});
-        menu->popup()->add<Separator>();
+        Make<Separator>(menu->popup());
         add_item({"Cut"}, FA_CUT, [this] { printf("cut()"); }, {{SYSTEM_COMMAND_MOD, 'X'}});
         add_item({"Copy"}, FA_COPY, [this] { printf("copy()"); }, {{SYSTEM_COMMAND_MOD, 'C'}});
         add_item({"Paste"}, FA_PASTE, [this] { printf("paste()"); }, {{SYSTEM_COMMAND_MOD, 'V'}});
@@ -161,110 +169,117 @@ public:
 
     void CreateMainWindow()
     {
-        Window* ButtonDemoWindow = new Window(this, "", true);
-		addWindowButtons(ButtonDemoWindow);
-        ButtonDemoWindow->set_position(Vector2i(15, 40));
-        ButtonDemoWindow->set_layout(new GroupLayout());
+        Window* ButtonDemoWindow = Make<Window>(this, "", true)
+            .pos({15, 40})
+            .layout(new GroupLayout());
+        addWindowButtons(ButtonDemoWindow);
 
         /* No need to store a pointer, the data structure will be automatically
            freed when the parent window is deleted */
-        new Label(ButtonDemoWindow, "Push buttons", "sans-bold");
+        Make<Label>(ButtonDemoWindow, "Push buttons", "sans-bold");
 
-        Button* b = new Button(ButtonDemoWindow, "Plain button");
-        b->set_callback([] { std::cout << "pushed!" << std::endl; });
-        b->set_tooltip("short tooltip");
+        Make<Button>(ButtonDemoWindow, "Plain button")
+            .tooltip("short tooltip")
+            .tap([](Button* b) { b->set_callback([] { std::cout << "pushed!" << std::endl; }); });
 
         /* Alternative construction notation using variadic template */
 
-        b = ButtonDemoWindow->add<Button>("Styled", FA_ROCKET);
-        b->set_background_color(Color(0, 0, 255, 25));
-        b->set_callback([] { std::cout << "pushed!" << std::endl; });
-        b->set_tooltip("This button has a fairly long tooltip. It is so long, in "
-            "fact, that the shown text will span several lines.");
+        Make<Button>(ButtonDemoWindow, "Styled", FA_ROCKET)
+            .tooltip("This button has a fairly long tooltip. It is so long, in "
+                     "fact, that the shown text will span several lines.")
+            .tap([](Button* b) {
+                b->set_background_color(Color(0, 0, 255, 25));
+                b->set_callback([] { std::cout << "pushed!" << std::endl; });
+            });
 
-        new Label(ButtonDemoWindow, "EMOJI! 🐺💺💆🐡🐛", "sans");
+        Make<Label>(ButtonDemoWindow, "EMOJI! 🐺💺💆🐡🐛", "sans");
 
-        new Label(ButtonDemoWindow, "Toggle buttons", "sans-bold");
-        b = new Button(ButtonDemoWindow, "Toggle me");
-        b->set_flags(Button::ToggleButton);
-        b->set_change_callback([](bool state) { std::cout << "Toggle button state: " << state << std::endl; });
+        Make<Label>(ButtonDemoWindow, "Toggle buttons", "sans-bold");
+        Make<Button>(ButtonDemoWindow, "Toggle me")
+            .tap([](Button* b) {
+                b->set_flags(Button::ToggleButton);
+                b->set_change_callback([](bool state) {
+                    std::cout << "Toggle button state: " << state << std::endl;
+                });
+            });
 
-        new Label(ButtonDemoWindow, "Radio buttons", "sans-bold");
-        b = new Button(ButtonDemoWindow, "Radio button 1");
-        b->set_flags(Button::RadioButton);
-        b = new Button(ButtonDemoWindow, "Radio button 2");
-        b->set_flags(Button::RadioButton);
+        Make<Label>(ButtonDemoWindow, "Radio buttons", "sans-bold");
+        Make<Button>(ButtonDemoWindow, "Radio button 1")
+            .tap([](Button* b) { b->set_flags(Button::RadioButton); });
+        Make<Button>(ButtonDemoWindow, "Radio button 2")
+            .tap([](Button* b) { b->set_flags(Button::RadioButton); });
 
-        new Label(ButtonDemoWindow, "A tool palette", "sans-bold");
-        Widget* tools = new Widget(ButtonDemoWindow);
+        Make<Label>(ButtonDemoWindow, "A tool palette", "sans-bold");
         GridLayout* layout = new GridLayout(Orientation::Horizontal, 4, Alignment::Maximum, 0, 0);
-        tools->set_layout(layout);
-        layout->set_col_alignment(
-            { Alignment::Fill });
+        layout->set_col_alignment({ Alignment::Fill });
+        Widget* tools = Make<Widget>(ButtonDemoWindow).layout(layout);
 
-        b = new ToolButton(tools, FA_CLOUD);
-        b = new ToolButton(tools, FA_FAST_FORWARD);
-        b = new ToolButton(tools, FA_COMPASS);
-        b = new ToolButton(tools, FA_UTENSILS);
+        Make<ToolButton>(tools, FA_CLOUD);
+        Make<ToolButton>(tools, FA_FAST_FORWARD);
+        Make<ToolButton>(tools, FA_COMPASS);
+        Make<ToolButton>(tools, FA_UTENSILS);
 
-
-        new Label(ButtonDemoWindow, "Popup buttons", "sans-bold");
-        PopupButton* popup_btn = new PopupButton(ButtonDemoWindow, "Popup", FA_FLASK);
-        Popup* popup = popup_btn->popup();
-        popup->set_layout(new GroupLayout());
-        new Label(popup, "Arbitrary widgets can be placed here");
-        new CheckBox(popup, "A check box");
+        Make<Label>(ButtonDemoWindow, "Popup buttons", "sans-bold");
+        PopupButton* popup_btn = Make<PopupButton>(ButtonDemoWindow, "Popup", FA_FLASK);
+        Popup* popup = Make(popup_btn->popup()).layout(new GroupLayout());
+        Make<Label>(popup, "Arbitrary widgets can be placed here");
+        Make<CheckBox>(popup, "A check box");
         // popup right
-        popup_btn = new PopupButton(popup, "Recursive popup", FA_CHART_PIE);
-        Popup* popup_right = popup_btn->popup();
-        popup_right->set_layout(new GroupLayout());
-        new CheckBox(popup_right, "Another check box");
+        popup_btn = Make<PopupButton>(popup, "Recursive popup", FA_CHART_PIE);
+        Popup* popup_right = Make(popup_btn->popup()).layout(new GroupLayout());
+        Make<CheckBox>(popup_right, "Another check box");
         // popup left
-        popup_btn = new PopupButton(popup, "Recursive popup", FA_DNA);
-        popup_btn->set_side(Popup::Side::Left);
-        Popup* popup_left = popup_btn->popup();
-        popup_left->set_layout(new GroupLayout());
-        new CheckBox(popup_left, "Another check box");
-
+        popup_btn = Make<PopupButton>(popup, "Recursive popup", FA_DNA)
+            .tap([](PopupButton* p) { p->set_side(Popup::Side::Left); });
+        Popup* popup_left = Make(popup_btn->popup()).layout(new GroupLayout());
+        Make<CheckBox>(popup_left, "Another check box");
     }
     void CreateBasicWindow()
     {
         //int TempWidth = 100;
         //int TempHeight = 200;
-        Window* BasicWidgetsWindow = new Window(this, "Basic widgets", true);
-		addWindowButtons(BasicWidgetsWindow);
-        BasicWidgetsWindow->set_position(Vector2i(200, 15));
-        BasicWidgetsWindow->set_layout(new BoxLayout(Orientation::Vertical, Alignment::Middle, 0, 6));
+        Window* BasicWidgetsWindow = Make<Window>(this, "Basic widgets", true)
+            .pos({200, 15})
+            .layout(new BoxLayout(Orientation::Vertical, Alignment::Middle, 0, 6));
+        addWindowButtons(BasicWidgetsWindow);
         // BasicWidgetsWindow->set_fixed_size({ TempWidth/2, TempHeight/2 });
 
         // // attach a vertical scroll panel
-        ScrollPanel* vscroll = new ScrollPanel(BasicWidgetsWindow);
-        vscroll->set_scroll_type(ScrollPanel::ScrollTypes::Both);
+        ScrollPanel* vscroll = Make<ScrollPanel>(BasicWidgetsWindow)
+            .tap([](ScrollPanel* s) { s->set_scroll_type(ScrollPanel::ScrollTypes::Both); });
 
         // vscroll should only have *ONE* child. this is what `wrapper` is for
-        auto wrapper = new Widget(vscroll);
-        wrapper->set_layout(new GroupLayout());// defaults: 2 columns
+        auto wrapper = Make<Widget>(vscroll).layout(new GroupLayout()); // defaults: 2 columns
         //wrapper->set_fixed_size({ TempWidth, TempHeight });
 
-        new Label(wrapper, "Message dialog", "sans-bold");
-        Widget* tools = new Widget(wrapper);
-        tools->set_layout(new BoxLayout(Orientation::Horizontal,
-            Alignment::Middle, 0, 6));
-        Button* b = new Button(tools, "Info");
-        b->set_callback([&] {
-            auto dlg = new MessageDialog(this, MessageDialog::Type::Information, "Title", "This is an information message");
-            dlg->set_callback([](int result) { std::cout << "Dialog result: " << result << std::endl; });
+        Make<Label>(wrapper, "Message dialog", "sans-bold");
+        Widget* tools = Make<Widget>(wrapper)
+            .layout(new BoxLayout(Orientation::Horizontal, Alignment::Middle, 0, 6));
+
+        Make<Button>(tools, "Info").tap([this](Button* b) {
+            b->set_callback([this] {
+                Make<MessageDialog>(this, MessageDialog::Type::Information, "Title", "This is an information message")
+                    .tap([](MessageDialog* d) {
+                        d->set_callback([](int result) { std::cout << "Dialog result: " << result << std::endl; });
+                    });
             });
-        b = new Button(tools, "Warn");
-        b->set_callback([&] {
-            auto dlg = new MessageDialog(this, MessageDialog::Type::Warning, "Title", "This is a warning message");
-            dlg->set_callback([](int result) { std::cout << "Dialog result: " << result << std::endl; });
+        });
+        Make<Button>(tools, "Warn").tap([this](Button* b) {
+            b->set_callback([this] {
+                Make<MessageDialog>(this, MessageDialog::Type::Warning, "Title", "This is a warning message")
+                    .tap([](MessageDialog* d) {
+                        d->set_callback([](int result) { std::cout << "Dialog result: " << result << std::endl; });
+                    });
             });
-        b = new Button(tools, "Ask");
-        b->set_callback([&] {
-            auto dlg = new MessageDialog(this, MessageDialog::Type::Warning, "Title", "This is a question message", "Yes", "No", true);
-            dlg->set_callback([](int result) { std::cout << "Dialog result: " << result << std::endl; });
+        });
+        Make<Button>(tools, "Ask").tap([this](Button* b) {
+            b->set_callback([this] {
+                Make<MessageDialog>(this, MessageDialog::Type::Warning, "Title", "This is a question message", "Yes", "No", true)
+                    .tap([](MessageDialog* d) {
+                        d->set_callback([](int result) { std::cout << "Dialog result: " << result << std::endl; });
+                    });
             });
+        });
 
 #if defined(_WIN32)
         /// Executable is in the Debug/Release/.. subdirectory
@@ -283,23 +298,26 @@ public:
         }
 #endif
 
-        new Label(wrapper, "Image panel & scroll panel", "sans-bold");
-        PopupButton* image_panel_btn = new PopupButton(wrapper, "Image Panel");
-        image_panel_btn->set_icon(FA_IMAGES);
-        image_panel_btn->set_side(Popup::Side::Left);
+        Make<Label>(wrapper, "Image panel & scroll panel", "sans-bold");
+        PopupButton* image_panel_btn = Make<PopupButton>(wrapper, "Image Panel")
+            .tap([](PopupButton* p) {
+                p->set_icon(FA_IMAGES);
+                p->set_side(Popup::Side::Left);
+            });
 
-        Popup* popup = image_panel_btn->popup();
-        popup->set_fixed_size(Vector2i(245, 150));
+        Popup* popup = Make(image_panel_btn->popup())
+            .fixed_size({245, 150})
+            .get();
 
-        vscroll = new ScrollPanel(popup);
-        ImagePanel* img_panel = new ImagePanel(vscroll);
-        img_panel->set_images(icons);
+        vscroll = Make<ScrollPanel>(popup);
+        ImagePanel* img_panel = Make<ImagePanel>(vscroll)
+            .tap([&icons](ImagePanel* p) { p->set_images(icons); });
 
-        auto image_window = new Window(this, "Selected image", true);
-		addWindowButtons(image_window);
-        image_window->set_position(Vector2i(710, 15));
-        //image_window->set_layout(new GroupLayout(3));
-        image_window->set_layout( new GridLayout(Orientation::Horizontal, 1, Alignment::Fill, 2, 2) );
+        auto image_window = Make<Window>(this, "Selected image", true)
+            .pos({710, 15})
+            //.layout(new GroupLayout(3))
+            .layout(new GridLayout(Orientation::Horizontal, 1, Alignment::Fill, 2, 2));
+        addWindowButtons(image_window);
 
         // Create a Texture instance for each object
         for (auto& icon : icons) {
@@ -322,10 +340,12 @@ public:
             m_images.emplace_back(tex, std::move(texture_data));
         }
 
-        ImageView* image_view = new ImageView(image_window);
-        if (!m_images.empty())
-            image_view->set_image(m_images[0].first);
-        image_view->center();
+        ImageView* image_view = Make<ImageView>(image_window)
+            .tap([this](ImageView* iv) {
+                if (!m_images.empty())
+                    iv->set_image(m_images[0].first);
+                iv->center();
+            });
         m_current_image = 0;
 
         img_panel->set_callback([this, image_view](int i) {
@@ -345,88 +365,86 @@ public:
             }
         );
 
-        new Label(wrapper, "File dialog", "sans-bold");
-        tools = new Widget(wrapper);
-        tools->set_layout(new BoxLayout(Orientation::Horizontal,
-            Alignment::Middle, 0, 6));
-        b = new Button(tools, "Open");
-        b->set_callback([&] {
-            std::cout << "File dialog result: " << file_dialog(
-                { {"png", "Portable Network Graphics"}, {"txt", "Text file"} }, false, "c:") << std::endl;
+        Make<Label>(wrapper, "File dialog", "sans-bold");
+        tools = Make<Widget>(wrapper)
+            .layout(new BoxLayout(Orientation::Horizontal, Alignment::Middle, 0, 6));
+        Make<Button>(tools, "Open").tap([](Button* b) {
+            b->set_callback([&] {
+                std::cout << "File dialog result: " << file_dialog(
+                    { {"png", "Portable Network Graphics"}, {"txt", "Text file"} }, false, "c:") << std::endl;
             });
-        b = new Button(tools, "Save");
-        b->set_callback([&] {
-            std::cout << "File dialog result: " << file_dialog(
-                { {"png", "Portable Network Graphics"}, {"txt", "Text file"} }, true, "c:") << std::endl;
+        });
+        Make<Button>(tools, "Save").tap([](Button* b) {
+            b->set_callback([&] {
+                std::cout << "File dialog result: " << file_dialog(
+                    { {"png", "Portable Network Graphics"}, {"txt", "Text file"} }, true, "c:") << std::endl;
+            });
+        });
+
+        Make<Label>(wrapper, "Combo box", "sans-bold");
+        Make<ComboBox>(wrapper, std::vector<std::string>{ "Combo box item 1", "Combo box item 2", "Combo box item 3", "Combo box item 3", "Combo box item 3", "Combo box item 3", "Combo box item 3", "Combo box item 3", "Combo box item 3" });
+        Make<Label>(wrapper, "Check box", "sans-bold");
+        Make<CheckBox>(wrapper, "Flag 1",
+            std::function<void(bool)>([](bool state) { std::cout << "Check box 1 state: " << state << std::endl; }))
+            .tap([](CheckBox* c) { c->set_checked(true); });
+        Make<CheckBox>(wrapper, "Flag 2",
+            std::function<void(bool)>([](bool state) { std::cout << "Check box 2 state: " << state << std::endl; }));
+        Make<Label>(wrapper, "Progress bar", "sans-bold");
+        m_progress = Make<ProgressBar>(wrapper);
+
+        Make<Label>(wrapper, "Slider and text box", "sans-bold");
+
+        Widget* panel = Make<Widget>(wrapper)
+            .layout(new BoxLayout(Orientation::Horizontal, Alignment::Middle, 0, 20));
+
+        Slider* slider = Make<Slider>(panel)
+            .min_size({80, 0})
+            .tap([](Slider* s) { s->set_value(0.5f); });
+
+        TextBox* text_box = Make<TextBox>(panel)
+            .fixed_size({60, 25})
+            .font_size(20)
+            .tap([](TextBox* t) {
+                t->set_value("50");
+                t->set_units("%");
+                t->set_editable(false);
+                t->set_alignment(TextBox::Alignment::Right);
             });
 
-        new Label(wrapper, "Combo box", "sans-bold");
-        new ComboBox(wrapper, { "Combo box item 1", "Combo box item 2", "Combo box item 3", "Combo box item 3", "Combo box item 3", "Combo box item 3", "Combo box item 3", "Combo box item 3", "Combo box item 3" });
-        new Label(wrapper, "Check box", "sans-bold");
-        CheckBox* cb = new CheckBox(wrapper, "Flag 1",
-            [](bool state) { std::cout << "Check box 1 state: " << state << std::endl; }
-        );
-        cb->set_checked(true);
-        cb = new CheckBox(wrapper, "Flag 2",
-            [](bool state) { std::cout << "Check box 2 state: " << state << std::endl; }
-        );
-        new Label(wrapper, "Progress bar", "sans-bold");
-        m_progress = new ProgressBar(wrapper);
-
-        new Label(wrapper, "Slider and text box", "sans-bold");
-
-        Widget* panel = new Widget(wrapper);
-        panel->set_layout(new BoxLayout(Orientation::Horizontal,
-            Alignment::Middle, 0, 20));
-
-        Slider* slider = new Slider(panel);
-        slider->set_value(0.5f);
-        slider->set_min_width(80);
-
-        TextBox* text_box = new TextBox(panel);
-        text_box->set_fixed_size(Vector2i(60, 25));
-        text_box->set_value("50");
-        text_box->set_units("%");
-        text_box->set_editable(false);
         slider->set_callback([text_box](float value) {
             text_box->set_value(std::to_string((int)(value * 100)));
-            });
+        });
         slider->set_final_callback([&](float value) {
             std::cout << "Final slider value: " << (int)(value * 100) << std::endl;
-            });
-        text_box->set_fixed_size(Vector2i(60, 25));
-        text_box->set_font_size(20);
-        text_box->set_alignment(TextBox::Alignment::Right);
-
+        });
     }
     void CreateMiscWindow()
     {
-        Window* MiscWidgetsWindow = new Window(this, "Misc. widgets", true);
-		addWindowButtons(MiscWidgetsWindow);
-        MiscWidgetsWindow->set_position(Vector2i(425, 15));
-        GroupLayout* MyGroupLayout = new GroupLayout();
-        MiscWidgetsWindow->set_layout(MyGroupLayout);
+        Window* MiscWidgetsWindow = Make<Window>(this, "Misc. widgets", true)
+            .pos({425, 15})
+            .layout(new GroupLayout());
+        addWindowButtons(MiscWidgetsWindow);
 
-        TabWidget* tab_widget = MiscWidgetsWindow->add<TabWidget>();
+        TabWidget* tab_widget = Make<TabWidget>(MiscWidgetsWindow);
 
-        Widget* layer = new Widget(tab_widget);
-        layer->set_layout(new GroupLayout());
+        Widget* layer = Make<Widget>(tab_widget).layout(new GroupLayout());
         tab_widget->append_tab("Color Wheel", layer);
 
-        // Use overloaded variadic add to fill the tab widget with Different tabs.
-        layer->add<Label>("Color wheel widget", "sans-bold");
-        layer->add<ColorWheel>();
+        // Fill the tab with widgets via Make<>().
+        Make<Label>(layer, "Color wheel widget", "sans-bold");
+        Make<ColorWheel>(layer);
 
-        layer = new Widget(tab_widget);
-        layer->set_layout(new GroupLayout());
+        layer = Make<Widget>(tab_widget).layout(new GroupLayout());
         tab_widget->append_tab("Function Graph", layer);
 
-        layer->add<Label>("Function graph widget", "sans-bold");
+        Make<Label>(layer, "Function graph widget", "sans-bold");
 
-        Graph* graph = layer->add<Graph>("Some Function");
+        Graph* graph = Make<Graph>(layer, "Some Function")
+                .tap([](Graph* g) {
+                    g->set_header("E = 2.35e-3");
+                    g->set_footer("Iteration 89");
+                });
 
-        graph->set_header("E = 2.35e-3");
-        graph->set_footer("Iteration 89");
         std::vector<float>& func = graph->values();
         func.resize(100);
         for (int i = 0; i < 100; ++i)
@@ -434,7 +452,7 @@ public:
                 0.5f * std::cos(i / 23.f) + 1);
 
         // Dummy tab used to represent the last tab button.
-        Widget* PlusTab = new Widget(tab_widget);
+        Widget* PlusTab = Make<Widget>(tab_widget);
 
         int plus_id = tab_widget->append_tab("+", PlusTab);
         // A simple counter.
@@ -443,15 +461,15 @@ public:
             if (id == plus_id) {
                 // When the "+" tab has been clicked, simply add a new tab.
                 std::string tab_name = "Dynamic " + std::to_string(counter);
-                Widget* layer_dyn = new Widget(tab_widget);
+                Widget* layer_dyn = Make<Widget>(tab_widget).layout(new GroupLayout());
                 int new_id = tab_widget->insert_tab(tab_widget->tab_count() - 1,
                     tab_name, layer_dyn);
-                layer_dyn->set_layout(new GroupLayout());
-                layer_dyn->add<Label>("Function graph widget", "sans-bold");
-                Graph* graph_dyn = layer_dyn->add<Graph>("Dynamic function");
-
-                graph_dyn->set_header("E = 2.35e-3");
-                graph_dyn->set_footer("Iteration " + std::to_string(new_id * counter));
+                Make<Label>(layer_dyn, "Function graph widget", "sans-bold");
+                Graph* graph_dyn = Make<Graph>(layer_dyn, "Dynamic function")
+                    .tap([new_id, counter](Graph* g) {
+                        g->set_header("E = 2.35e-3");
+                        g->set_footer("Iteration " + std::to_string(new_id * counter));
+                    });
                 std::vector<float>& func_dyn = graph_dyn->values();
                 func_dyn.resize(100);
                 for (int i = 0; i < 100; ++i)
@@ -467,112 +485,114 @@ public:
             });
 
         // A button to go back to the first tab and scroll the window.
-        Widget* panel = MiscWidgetsWindow->add<Widget>();
-        panel->add<Label>("Jump to tab: ");
-        panel->set_layout(new BoxLayout(Orientation::Horizontal,
-            Alignment::Middle, 0, 6));
+        Widget* panel = Make<Widget>(MiscWidgetsWindow)
+            .layout(new BoxLayout(Orientation::Horizontal, Alignment::Middle, 0, 6));
+        Make<Label>(panel, "Jump to tab: ");
 
-        auto ib = panel->add<IntBox<int>>();
-        ib->set_enabled(true);
+        auto ib = Make<IntBox<int>>(panel)
+            .enabled(true)
+            .min_size({0, 22})
+            .get();
 
-        Button* b = panel->add<Button>("", FA_FORWARD);
-        b->set_fixed_size(Vector2i(22, 22));
-        ib->set_min_height(22);
-        b->set_callback([tab_widget, ib] {
-            int value = ib->value();
-            if (value >= 0 && value < tab_widget->tab_count())
-                tab_widget->set_selected_index(value);
+        Make<Button>(panel, "", FA_FORWARD)
+            .fixed_size({22, 22})
+            .tap([tab_widget, ib](Button* b) {
+                b->set_callback([tab_widget, ib] {
+                    int value = ib->value();
+                    if (value >= 0 && value < tab_widget->tab_count())
+                        tab_widget->set_selected_index(value);
+                });
             });
-
     }
     void CreateSmallWindow()
     {
-        Window* GridWindow = new Window(this, "Grid of small widgets", true);
-		addWindowButtons(GridWindow);
-        GridWindow->set_position(Vector2i(200, 520));
-        GridLayout* layout =
-            new GridLayout(Orientation::Horizontal, 2,
-                Alignment::Middle, 15, 5);
-        layout->set_col_alignment(
-            { Alignment::Maximum, Alignment::Fill });
-		layout->set_spacing(Orientation::Horizontal, 10);
-        GridWindow->set_layout(layout);
+        GridLayout* layout = new GridLayout(Orientation::Horizontal, 2,
+            Alignment::Middle, 15, 5);
+        layout->set_col_alignment({ Alignment::Maximum, Alignment::Fill });
+        layout->set_spacing(Orientation::Horizontal, 10);
+
+        Window* GridWindow = Make<Window>(this, "Grid of small widgets", true)
+            .pos({200, 520})
+            .layout(layout);
+        addWindowButtons(GridWindow);
 
         /* FP widget */ {
-            new Label(GridWindow, "Floating point :", "sans-bold");
-            TextBox* text_box = new TextBox(GridWindow);
-            text_box->set_enabled(true);
-            text_box->set_fixed_size(Vector2i(100, 20));
-            text_box->set_value("50");
-            text_box->set_units("GiB");
-            text_box->set_default_value("0.0");
-            text_box->set_font_size(16);
-            text_box->set_format("[-]?[0-9]*\\.?[0-9]+");
+            Make<Label>(GridWindow, "Floating point :", "sans-bold");
+            Make<TextBox>(GridWindow)
+                .enabled(true)
+                .fixed_size({100, 20})
+                .font_size(16)
+                .tap([](TextBox* t) {
+                    t->set_value("50");
+                    t->set_units("GiB");
+                    t->set_default_value("0.0");
+                    t->set_format("[-]?[0-9]*\\.?[0-9]+");
+                });
         }
 
         /* Positive integer widget */ {
-            new Label(GridWindow, "Positive integer :", "sans-bold");
-            auto int_box = new IntBox<int>(GridWindow);
-            int_box->set_enabled(true);
-            int_box->set_fixed_size(Vector2i(100, 20));
-            int_box->set_value(50);
-            int_box->set_units("Mhz");
-            int_box->set_default_value("0");
-            int_box->set_font_size(16);
-            int_box->set_format("[1-9][0-9]*");
-            int_box->set_spinnable(true);
-            int_box->set_min_value(1);
-            int_box->set_value_increment(2);
+            Make<Label>(GridWindow, "Positive integer :", "sans-bold");
+            Make<IntBox<int>>(GridWindow)
+                .enabled(true)
+                .fixed_size({100, 20})
+                .font_size(16)
+                .tap([](IntBox<int>* ib) {
+                    ib->set_value(50);
+                    ib->set_units("Mhz");
+                    ib->set_default_value("0");
+                    ib->set_format("[1-9][0-9]*");
+                    ib->set_spinnable(true);
+                    ib->set_min_value(1);
+                    ib->set_value_increment(2);
+                });
         }
 
         /* Checkbox widget */ {
-            new Label(GridWindow, "Checkbox :", "sans-bold");
-
-            CheckBox* cb = new CheckBox(GridWindow, "Check me");
-            cb->set_font_size(16);
-            cb->set_checked(true);
+            Make<Label>(GridWindow, "Checkbox :", "sans-bold");
+            Make<CheckBox>(GridWindow, "Check me")
+                .font_size(16)
+                .tap([](CheckBox* c) { c->set_checked(true); });
         }
 
-        new Label(GridWindow, "Combo box :", "sans-bold");
-        ComboBox* cobo =
-            new ComboBox(GridWindow, { "Item 1", "Item 2", "Item 3" });
-        cobo->set_font_size(16);
-        cobo->set_fixed_size(Vector2i(100, 20));
+        Make<Label>(GridWindow, "Combo box :", "sans-bold");
+        Make<ComboBox>(GridWindow, std::vector<std::string>{ "Item 1", "Item 2", "Item 3" })
+            .font_size(16)
+            .fixed_size({100, 20});
 
-        new Label(GridWindow, "Color picker :", "sans-bold");
-        auto cp = new ColorPicker(GridWindow, { 255, 120, 0, 255 });
-        cp->set_fixed_size({ 100, 20 });
-        cp->set_final_callback([](const Color& c) {
-            std::cout << "ColorPicker final callback: ["
-                << c.r() << ", "
-                << c.g() << ", "
-                << c.b() << ", "
-                << c.w() << "]" << std::endl;
-            });
+        Make<Label>(GridWindow, "Color picker :", "sans-bold");
+        auto cp = Make<ColorPicker>(GridWindow, Color{ 255, 120, 0, 255 })
+            .fixed_size({100, 20})
+            .tap([](ColorPicker* p) {
+                p->set_final_callback([](const Color& c) {
+                    std::cout << "ColorPicker final callback: ["
+                        << c.r() << ", " << c.g() << ", "
+                        << c.b() << ", " << c.w() << "]" << std::endl;
+                });
+            })
+            .get();
+
         // setup a fast callback for the color picker widget on a new window
         // for demonstrative purposes
-        Window* ColorPickerWindow = new Window(this, "Color Picker Fast Callback", true);
-		addWindowButtons(ColorPickerWindow );
-        layout = new GridLayout(Orientation::Horizontal, 2,
+        GridLayout* layout2 = new GridLayout(Orientation::Horizontal, 2,
             Alignment::Middle, 15, 5);
-        layout->set_col_alignment(
-            { Alignment::Maximum, Alignment::Fill });
-		layout->set_spacing(Orientation::Horizontal, 10);
-        ColorPickerWindow->set_layout(layout);
-        ColorPickerWindow->set_position(Vector2i(425, 500));
-        new Label(ColorPickerWindow, "Combined: ");
-        Button* b = new Button(ColorPickerWindow, "ColorWheel", FA_INFINITY);
-        new Label(ColorPickerWindow, "Red: ");
-        auto red_int_box = new IntBox<int>(ColorPickerWindow);
-        red_int_box->set_enabled(false);
-        new Label(ColorPickerWindow, "Green: ");
-        auto green_int_box = new IntBox<int>(ColorPickerWindow);
-        green_int_box->set_enabled(false);
-        new Label(ColorPickerWindow, "Blue: ");
-        auto blue_int_box = new IntBox<int>(ColorPickerWindow);
-        blue_int_box->set_enabled(false);
-        new Label(ColorPickerWindow, "Alpha: ");
-        auto alpha_int_box = new IntBox<int>(ColorPickerWindow);
+        layout2->set_col_alignment({ Alignment::Maximum, Alignment::Fill });
+        layout2->set_spacing(Orientation::Horizontal, 10);
+
+        Window* ColorPickerWindow = Make<Window>(this, "Color Picker Fast Callback", true)
+            .pos({425, 500})
+            .layout(layout2);
+        addWindowButtons(ColorPickerWindow);
+
+        Make<Label>(ColorPickerWindow, "Combined: ");
+        Button* b = Make<Button>(ColorPickerWindow, "ColorWheel", FA_INFINITY);
+        Make<Label>(ColorPickerWindow, "Red: ");
+        auto red_int_box   = Make<IntBox<int>>(ColorPickerWindow).enabled(false).get();
+        Make<Label>(ColorPickerWindow, "Green: ");
+        auto green_int_box = Make<IntBox<int>>(ColorPickerWindow).enabled(false).get();
+        Make<Label>(ColorPickerWindow, "Blue: ");
+        auto blue_int_box  = Make<IntBox<int>>(ColorPickerWindow).enabled(false).get();
+        Make<Label>(ColorPickerWindow, "Alpha: ");
+        auto alpha_int_box = Make<IntBox<int>>(ColorPickerWindow).get();
 
         cp->set_callback([b, red_int_box, blue_int_box, green_int_box, alpha_int_box](const Color& c) {
             b->set_background_color(c);
@@ -590,19 +610,19 @@ public:
     }
     void CreateTreeViewWindow()
     {
-        Window* TreeViewWindow = new Window(this, "TreeView Example", true);
-		addWindowButtons(TreeViewWindow);
-        TreeViewWindow->set_position(Vector2i(700, 350));
-        TreeViewWindow->set_layout(new BoxLayout(Orientation::Vertical, Alignment::Middle, 15));
+        Window* TreeViewWindow = Make<Window>(this, "TreeView Example", true)
+            .pos({700, 350})
+            .layout(new BoxLayout(Orientation::Vertical, Alignment::Middle, 15));
+        addWindowButtons(TreeViewWindow);
 
-        ScrollPanel* scroll = new ScrollPanel(TreeViewWindow);
-        scroll->set_scroll_type(ScrollPanel::ScrollTypes::Both);
+        ScrollPanel* scroll = Make<ScrollPanel>(TreeViewWindow)
+            .tap([](ScrollPanel* s) { s->set_scroll_type(ScrollPanel::ScrollTypes::Both); });
 
-        Widget* Container = new Widget(scroll);
-        Container->set_layout(new BoxLayout(Orientation::Horizontal, Alignment::Middle));
+        Widget* Container = Make<Widget>(scroll)
+            .layout(new BoxLayout(Orientation::Horizontal, Alignment::Middle));
 
-        TreeView* TreeViewWidget = new TreeView(Container);
-        TreeViewWidget->set_fixed_size(Vector2i(100, 200));
+        TreeView* TreeViewWidget = Make<TreeView>(Container)
+            .fixed_size({100, 200});
 
         NanoTree* MyTree = new NanoTree();
         MyTree->set_root("1");
@@ -648,12 +668,11 @@ public:
 
         TreeViewWidget->set_items(MyTree);
 
-        new Label(Container, "ButtonHit:");
-        TreeButtonSelected = new Label(Container, "");
+        Make<Label>(Container, "ButtonHit:");
+        TreeButtonSelected = Make<Label>(Container, "");
 
-        Widget* AdvWid = new Widget(Container);
         AdvancedGridLayout* layout = new AdvancedGridLayout();
-        AdvWid->set_layout(layout);
+        Widget* AdvWid = Make<Widget>(Container).layout(layout);
 
         layout->append_row(5, 1);
         layout->append_row(100, 0);
@@ -663,38 +682,27 @@ public:
         layout->append_col(70, 1);
         layout->append_col(100, 1);
 
-        Button* w1 = new Button(AdvWid,"b0");
-        layout->set_anchor(w1, AdvancedGridLayout::Anchor(0, 0));
-
-        Button* b1 = new Button(AdvWid, "b1");
-        layout->set_anchor(b1, AdvancedGridLayout::Anchor(0, 1));
-
-        b1 = new Button(AdvWid, "c0");
-        layout->set_anchor(b1, AdvancedGridLayout::Anchor(1, 0));
-
-        b1 = new Button(AdvWid, "c0");
-        layout->set_anchor(b1, AdvancedGridLayout::Anchor(0, 2));
-
-        b1 = new Button(AdvWid, "c0");
-        layout->set_anchor(b1, AdvancedGridLayout::Anchor(1, 2));
-
-        b1 = new Button(AdvWid, "c0");
-        layout->set_anchor(b1, AdvancedGridLayout::Anchor(1, 1,2,2));
-
-
+        layout->set_anchor(Make<Button>(AdvWid, "b0"), AdvancedGridLayout::Anchor(0, 0));
+        layout->set_anchor(Make<Button>(AdvWid, "b1"), AdvancedGridLayout::Anchor(0, 1));
+        layout->set_anchor(Make<Button>(AdvWid, "c0"), AdvancedGridLayout::Anchor(1, 0));
+        layout->set_anchor(Make<Button>(AdvWid, "c0"), AdvancedGridLayout::Anchor(0, 2));
+        layout->set_anchor(Make<Button>(AdvWid, "c0"), AdvancedGridLayout::Anchor(1, 2));
+        layout->set_anchor(Make<Button>(AdvWid, "c0"), AdvancedGridLayout::Anchor(1, 1, 2, 2));
     }
     void CreateControlsDefault()
     {
-        Window* CtrConsole_TopWindow = new Window(this, "Console", true);
-        CtrConsole_TopWindow->set_position(Vector2i(700, 400));
-        CtrConsole_TopWindow->set_layout(new BoxLayout(Orientation::Vertical, Alignment::Fill));
-        CtrConsole_TopWindow->set_visible(true);
-        CtrConsole_TopWindow->set_size( Vector2i(500,250) );
+        Window* CtrConsole_TopWindow = Make<Window>(this, "Console", true)
+            .pos({700, 400})
+            .size({500, 250})
+            .visible(true)
+            .layout(new BoxLayout(Orientation::Vertical, Alignment::Fill));
 
-        ScrollPanel* ScrollWidget = new ScrollPanel(CtrConsole_TopWindow);
-        ScrollWidget->set_scroll_type(ScrollPanel::ScrollTypes::Both);
-        ScrollWidget->DebugName = "Top";
-        ScrollWidget->set_layout(new BoxLayout(Orientation::Vertical, Alignment::Fill, 15));// defaults: 2 columns
+        ScrollPanel* ScrollWidget = Make<ScrollPanel>(CtrConsole_TopWindow)
+            .layout(new BoxLayout(Orientation::Vertical, Alignment::Fill, 15)) // defaults: 2 columns
+            .tap([](ScrollPanel* s) {
+                s->set_scroll_type(ScrollPanel::ScrollTypes::Both);
+                s->DebugName = "Top";
+            });
 /*
         // vscroll should only have *ONE* child. this is what `wrapper` is for
         auto WrapperWidget1 = new Widget(ScrollWidget);
@@ -709,13 +717,15 @@ public:
         WrapperWidget2->set_layout(new BoxLayout(Orientation::Vertical, Alignment::Fill, 15));// defaults: 2 columns
 */
 
-        TextArea* CtrConsole_TextConsole = new TextArea(ScrollWidget);
-        CtrConsole_TextConsole->set_padding(10);
-        CtrConsole_TextConsole->set_selectable(true);
-        CtrConsole_TextConsole->set_background_color(Color(0, 255));
-        CtrConsole_TextConsole->set_foreground_color(Color(255, 100, 0, 255));
-        CtrConsole_TextConsole->set_foreground_color(Color(155, 0, 0, 255));
-        CtrConsole_TextConsole->append(" ----- LOG BEGINS ----\n ");
+        TextArea* CtrConsole_TextConsole = Make<TextArea>(ScrollWidget)
+            .tap([](TextArea* t) {
+                t->set_padding(10);
+                t->set_selectable(true);
+                t->set_background_color(Color(0, 255));
+                t->set_foreground_color(Color(255, 100, 0, 255));
+                t->set_foreground_color(Color(155, 0, 0, 255));
+                t->append(" ----- LOG BEGINS ----\n ");
+            });
 
 		std::string longtext = "Example Log... \n "
             "Example Log... Example Log... Example Log... Example Log... Example Log... \n"

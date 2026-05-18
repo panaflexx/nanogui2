@@ -22,7 +22,7 @@ NAMESPACE_BEGIN(nanogui)
  *
  * \brief [Normal/Toggle/Radio/Popup] Button widget.
  */
-    class NANOGUI_EXPORT Button : public Widget {
+    class NANOGUI_EXPORT Button : public WidgetCRTP<Button> {
     public:
         /// Flags to specify the button behavior (can be combined with binary OR)
         enum Flags {

@@ -21,7 +21,7 @@
 NAMESPACE_BEGIN(nanogui)
 
 Window::Window(Widget* parent, const std::string& title, bool resizable)
-    : Widget(parent), m_title(title), m_button_panel(nullptr), m_modal(false), m_drag(false),
+    : WidgetCRTP<Window>(parent), m_title(title), m_button_panel(nullptr), m_modal(false), m_drag(false),
       m_resize_dir(Vector2i(0, 0)), m_first_size(0), m_draw_shadow(false), m_resizable(resizable),
 	  m_can_move(true), m_snap_offset(8), m_can_snap(true)
 {

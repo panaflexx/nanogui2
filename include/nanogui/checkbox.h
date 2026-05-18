@@ -28,7 +28,7 @@ NAMESPACE_BEGIN(nanogui)
  *     which affects all subclasses of this Widget.  Subclasses must explicitly
  *     set a different value if needed (e.g., in their constructor).
  */
-class NANOGUI_EXPORT CheckBox : public Widget {
+class NANOGUI_EXPORT CheckBox : public WidgetCRTP<CheckBox> {
 public:
     /**
      * Adds a CheckBox to the specified ``parent``.

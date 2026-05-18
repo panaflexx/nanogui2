@@ -22,7 +22,7 @@
 NAMESPACE_BEGIN(nanogui)
 
 TabWidgetBase::TabWidgetBase(Widget* parent, const std::string& font)
-    : Widget(parent), m_font(font), m_background_color(Color(0.f, 0.f)) {
+    : WidgetCRTP<TabWidgetBase>(parent), m_font(font), m_background_color(Color(0.f, 0.f)) {
     DebugName = m_parent->DebugName + ",Tab";
     m_tab_offsets.push_back(0);
 }

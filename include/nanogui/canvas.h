@@ -36,7 +36,7 @@ NAMESPACE_BEGIN(nanogui)
  *
  * \endrst
  */
-class NANOGUI_EXPORT Canvas : public Widget {
+class NANOGUI_EXPORT Canvas : public WidgetCRTP<Canvas> {
 public:
     /**
      * Creates a new Canvas widget
