@@ -234,6 +234,13 @@ bool load_string_with_factory(Widget* root_parent,
                                ? type_val->string_value : "";
 
     if (type_str == "Canvas") {
+        // Top widget layout (applies to the root_parent which acts as the
+        // canvas container, e.g. the editor's canvas window or the host
+        // Screen at runtime).
+        std::string top_ltype;
+        if (get_string(root, "layout", top_ltype))
+            apply_layout(root_parent, top_ltype);
+
         DictValue* children = dict_object_get(root, "children");
         if (children && children->type == DICT_ARRAY) {
             for (size_t i = 0; i < children->array_value.length; ++i) {

@@ -1699,6 +1699,9 @@ void GUIEditor::clear_canvas() {
     while (canvas_win->child_count() > 0) {
         canvas_win->remove_child_at(0);
     }
+    // Reset the top widget (canvas) layout. The loader will re-apply
+    // whatever layout (if any) the saved JSON specifies for the Canvas.
+    canvas_win->set_layout(nullptr);
     update_properties();
 }
 

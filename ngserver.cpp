@@ -532,6 +532,10 @@ public:
 		if (m_rootWindow) {
 			m_rootWindow->set_size(size);
 			perform_layout();  // update layouts accordingly
+		} else if (this->layout()) {
+			// Top widget (the Screen itself) has a layout set from JSON;
+			// re-run it so children flow with the new screen size.
+			perform_layout();
 		}
 		Screen::resize_event(size);
 		return true;

@@ -668,7 +668,7 @@ private:
 		GridLayout *layout = new GridLayout(Orientation::Horizontal, 2, Alignment::Middle, 15, 5);
 		layout->set_col_alignment( Alignment::Fill);
 		layout->set_row_alignment( Alignment::Middle );
-		table->set_width(400);
+		table->set_max_width(400);
 
 		TableTheme theme;
 		theme.header_background = Color(100, 100, 100, 255);

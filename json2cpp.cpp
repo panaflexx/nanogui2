@@ -400,6 +400,11 @@ static std::string make_source(const std::string& classname,
     // child of `parent`.
     std::string rtype;
     if (root && root->type == DICT_OBJECT && get_string(root, "type", rtype) && rtype == "Canvas") {
+        // Top widget layout: apply directly to `parent`.
+        std::string top_ltype;
+        if (get_string(root, "layout", top_ltype))
+            gen_layout(g, "parent", top_ltype);
+
         DictValue* children = get_field(root, "children");
         if (children && children->type == DICT_ARRAY) {
             for (size_t i = 0; i < children->array_value.length; ++i)
@@ -433,6 +438,7 @@ static std::string make_mainapp(const std::string& classname,
       << "#include <nanogui/opengl.h>\n"
       << "#include <nanogui/screen.h>\n"
       << "#include <nanogui/widget.h>\n"
+      << "#include <nanogui/window.h>\n"
       << "#include <memory>\n"
       << "#include <iostream>\n\n"
       << "class MainApp : public nanogui::Screen {\n"
@@ -440,8 +446,22 @@ static std::string make_mainapp(const std::string& classname,
       << "    MainApp()\n"
       << "        : nanogui::Screen(nanogui::Vector2i(" << win_w << ", " << win_h
       << "), \"" << classname << "\", true) {\n"
-      << "        m_gui = std::make_unique<" << classname << ">(this);\n"
+      << "        // Borderless root window sized to the screen; hosts the\n"
+      << "        // generated GUI so layout is honored (Screen doesn't lay out).\n"
+      << "        m_root = new nanogui::Window(this, \"\");\n"
+      << "        m_root->set_position(nanogui::Vector2i(0, 0));\n"
+      << "        //m_root->set_size(size());\n"
+      << "        m_gui = std::make_unique<" << classname << ">(m_root);\n"
       << "        perform_layout();\n"
+      << "    }\n\n"
+      << "    virtual bool resize_event(const nanogui::Vector2i& sz) override {\n"
+      << "        //nanogui::Screen::resize_event(sz);\n"
+      << "        if (m_root) {\n"
+      << "            //m_root->set_position(nanogui::Vector2i(0, 0));\n"
+      << "            m_root->set_size(sz);\n"
+      << "            perform_layout();\n"
+      << "        }\n"
+      << "        return true;\n"
       << "    }\n\n"
       << "    virtual bool keyboard_event(int key, int scancode, int action, int modifiers) override {\n"
       << "        if (nanogui::Screen::keyboard_event(key, scancode, action, modifiers))\n"
@@ -453,6 +473,7 @@ static std::string make_mainapp(const std::string& classname,
       << "        return false;\n"
       << "    }\n\n"
       << "private:\n"
+      << "    nanogui::Window* m_root = nullptr;\n"
       << "    std::unique_ptr<" << classname << "> m_gui;\n"
       << "};\n\n"
       << "int main(int /*argc*/, char** /*argv*/) {\n"

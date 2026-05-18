@@ -138,6 +138,11 @@ bool save_layout(GUIEditor* editor, const std::string& path) {
     dict_object_set(root, "id", dict_create_string(editor->canvas_win->id().c_str()));
     dict_object_set(root, "size", make_vec2i(editor->canvas_win->size()));
 
+    // Top widget (canvas) layout, if any.
+    std::string top_ltype = layout_to_string(editor->canvas_win);
+    if (!top_ltype.empty())
+        dict_object_set(root, "layout", dict_create_string(top_ltype.c_str()));
+
     DictValue* children = dict_create_array();
     for (Widget* c : editor->canvas_win->children()) {
         dict_array_append(children, widget_to_json(editor, c));

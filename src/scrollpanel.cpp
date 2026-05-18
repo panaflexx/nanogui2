@@ -41,19 +41,19 @@ void ScrollPanel::perform_layout(NVGcontext* ctx) {
     // FIRST: Give child the available space as a constraint
     child->set_size(available);
     child->perform_layout(ctx);
-    
+
     // THEN: Get child's preferred size within that constraint
     Vector2i constrained_preferred = child->preferred_size(ctx);
-    
+
     // Update stored preferred size for scrolling calculations
     m_child_preferred_size = constrained_preferred;
 
     // Determine final child size:
-    // - If child needs more space than available: give it what it needs (enable scrolling)  
+    // - If child needs more space than available: give it what it needs (enable scrolling)
     // - If child needs less space than available: let it fill the available space
-    int child_height = constrained_preferred.y() > available.y() ? 
+    int child_height = constrained_preferred.y() > available.y() ?
                        constrained_preferred.y() : available.y();
-    int child_width = constrained_preferred.x() > available.x() ? 
+    int child_width = constrained_preferred.x() > available.x() ?
                       constrained_preferred.x() : available.x();
 
     // Position child for scroll amount
@@ -76,10 +76,12 @@ bool ScrollPanel::keyboard_event(int key, int scancode, int action, int modifier
 	//printf("keyboard_event: key=%d action=%d focused=%s\n", key, action,
 	//	focused()?"TRUE":"FALSE");
 
+    /*
     if (focused()) {
 		if(modifiers == GLFW_MOD_SHIFT)
 			printf("Got shift!\n");
 	}
+	*/
 
     auto child = m_children[0];
 	return child->keyboard_event(key, scancode, action, modifiers);
