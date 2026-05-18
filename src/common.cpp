@@ -339,20 +339,19 @@ load_image_directory(NVGcontext *ctx, const std::string &path) {
     return result;
 }
 
-std::string file_dialog(const std::vector<std::pair<std::string, std::string>> &filetypes, bool save, std::string initial_folder) {
-    auto result = file_dialog(filetypes, save, initial_folder);
-    //return result.empty() ? "" : result.front();
-    return result;
-}
-
-#if !defined(__APPLE__)
 std::vector<std::string> file_dialog(const std::vector<std::pair<std::string, std::string>> &filetypes, bool save, bool multiple, std::string initial_folder) {
     static const int FILE_DIALOG_MAX_BUFFER = 16384;
     if (save && multiple) {
         throw std::invalid_argument("save and multiple must not both be true.");
     }
 
-#if defined(EMSCRIPTEN)
+#if defined(__APPLE__)
+
+    auto result = mac_file_dialog(filetypes, save, false);
+    //return result.empty() ? "" : result.front();
+    return result;
+
+#elif defined(EMSCRIPTEN)
     throw std::runtime_error("Opening files is not supported when NanoGUI is compiled via Emscripten");
 #elif defined(_WIN32)
     OPENFILENAME ofn;
@@ -465,7 +464,6 @@ std::vector<std::string> file_dialog(const std::vector<std::pair<std::string, st
     return result;
 #endif
 }
-#endif
 
 void Object::inc_ref() const {
     m_ref_count++;

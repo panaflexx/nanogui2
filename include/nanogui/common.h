@@ -263,9 +263,11 @@ extern NANOGUI_EXPORT void async(const std::function<void()> &func);
  *     Set to ``true`` if you would like subsequent file dialogs to open
  *     at whatever folder they were in when they close this one.
  */
-extern NANOGUI_EXPORT std::string
-file_dialog(const std::vector<std::pair<std::string, std::string>> &filetypes,
-            bool save, std::string initial_folder);
+#if defined(__APPLE__)
+std::vector<std::string>
+mac_file_dialog(const std::vector<std::pair<std::string, std::string>> &filetypes,
+            bool save, bool multiple);
+#endif
 
 /**
  * \brief Open a native file open dialog, which allows multiple selection.
@@ -282,11 +284,10 @@ file_dialog(const std::vector<std::pair<std::string, std::string>> &filetypes,
  *     Set to ``true`` if you would like to be able to select multiple
  *     files at once. May not be simultaneously true with \p save.
  */
-#if !defined(__APPLE__)
-extern NANOGUI_EXPORT std::vector<std::string>
+extern NANOGUI_EXPORT 
+std::vector<std::string>
 file_dialog(const std::vector<std::pair<std::string, std::string>> &filetypes,
             bool save, bool multiple, std::string initial_folder);
-#endif
 
 #if defined(__APPLE__) || defined(DOXYGEN_DOCUMENTATION_BUILD)
 /**

@@ -211,7 +211,7 @@ public:
 
         Make<Label>(ButtonDemoWindow, "A tool palette", "sans-bold");
         GridLayout* layout = new GridLayout(Orientation::Horizontal, 4, Alignment::Maximum, 0, 0);
-        layout->set_col_alignment({ Alignment::Fill });
+        layout->set_col_alignment( Alignment::Fill );
         Widget* tools = Make<Widget>(ButtonDemoWindow).layout(layout);
 
         Make<ToolButton>(tools, FA_CLOUD);
@@ -370,14 +370,14 @@ public:
             .layout(new BoxLayout(Orientation::Horizontal, Alignment::Middle, 0, 6));
         Make<Button>(tools, "Open").tap([](Button* b) {
             b->set_callback([&] {
-                std::cout << "File dialog result: " << file_dialog(
-                    { {"png", "Portable Network Graphics"}, {"txt", "Text file"} }, false, "c:") << std::endl;
+                file_dialog(
+                    { {"png", "Portable Network Graphics"}, {"txt", "Text file"} }, false, false, "c:");
             });
         });
         Make<Button>(tools, "Save").tap([](Button* b) {
             b->set_callback([&] {
-                std::cout << "File dialog result: " << file_dialog(
-                    { {"png", "Portable Network Graphics"}, {"txt", "Text file"} }, true, "c:") << std::endl;
+                file_dialog(
+                    { {"png", "Portable Network Graphics"}, {"txt", "Text file"} }, true, false, "c:");
             });
         });
 

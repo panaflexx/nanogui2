@@ -738,11 +738,11 @@ int main(int argc, char** argv) {
             imagePaths.emplace_back(argv[i]);
         }
 
-        Window* CtrConsole_TopWindow = new Window(screen, "Image Panel", true);
-        CtrConsole_TopWindow->set_position(Vector2i(70, 40));
+        Window* CtrConsole_TopWindow = new Window(screen, "", true);
+        CtrConsole_TopWindow->set_position(Vector2i(0, 0));
         CtrConsole_TopWindow->set_layout(new BoxLayout(Orientation::Vertical, Alignment::Fill));
         CtrConsole_TopWindow->set_visible(true);
-        CtrConsole_TopWindow->set_size( Vector2i(500,600) );
+        CtrConsole_TopWindow->set_size( screen->size() );
 
         ScrollPanel* ScrollWidget = new ScrollPanel(CtrConsole_TopWindow);
         ScrollWidget->set_scroll_type(ScrollPanel::ScrollTypes::Vertical);
@@ -777,3 +777,6 @@ int main(int argc, char** argv) {
 
     return 0;
 }
+
+
+

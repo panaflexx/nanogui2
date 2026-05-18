@@ -446,7 +446,8 @@ Screen::Screen(const Vector2i& size, const std::string& caption, bool resizable,
     // darwin.mm provides these
     extern void enable_macos_pinch_zoom(void*);
     extern void set_macos_zoom_callback(const std::function<void(double,int,int)>&);
-    enable_macos_pinch_zoom(m_glfw_window);
+	void* nswin = glfwGetCocoaWindow(m_glfw_window);
+    enable_macos_pinch_zoom(nswin);
     set_macos_zoom_callback(
         [this](double mag, int x, int y) {
             this->zoom_callback_event(mag, Vector2i(x, y));
