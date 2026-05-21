@@ -691,6 +691,8 @@ Dropdown::Dropdown(Widget *parent, const vector<string> &items, const vector<int
 MenuItem *Dropdown::add_item(const string &caption, int icon, const vector<Shortcut> &s)
 {
     auto ret = new MenuItem{popup(), caption, icon, s};
+	ret->set_flags(m_mode == ComboBox ? Button::RadioButton : Button::NormalButton);
+	ret->set_visible(true);
     return ret;
 }
 

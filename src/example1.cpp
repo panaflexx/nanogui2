@@ -65,67 +65,61 @@ public:
     std::vector<MenuItem *> m_edit_items;   /// Menu items that are enabled iff we have an editable image
     MenuBar *m_menubar = NULL;
 
-	void addWindowButtons(Window *w)
-	{
-		Make<Button>(w->button_panel(), "X")
-		    .tap([w](Button* b) { b->set_callback([w] { w->dispose(); }); });
-	}
+	void addWindowButtons(Window *w) {
+        w->button_panel()->add<Button>("X")
+            .callback([w] { w->dispose(); });
+    }
 
-	void ask_to_quit()
-    {
+	void ask_to_quit() {
         Make<MessageDialog>(this, MessageDialog::Type::Information, "Warning!", "🛑 Quit?", "Yes", "No", true)
             .tap([this](MessageDialog* dlg) {
-                dlg->set_callback([this](int result) { this->set_visible(result != 0); });
+                dlg->set_callback([this](int result) { set_visible(result != 0); });
                 dlg->request_focus();
             });
     }
 
-    void CreateMovingMenuBar()
-    {
-        Window* MenuBar1 = Make<Window>(this, "Try to move this around")
+    void CreateMovingMenuBar() {
+        auto MenuBar1 = this->add<Window>("Try to move this around")
             .pos({15, 600})
             .layout(new BoxLayout(Orientation::Horizontal));
 
-        PopupButton* FileBtn = Make<PopupButton>(MenuBar1, "File")
+        auto FileBtn = MenuBar1->add<PopupButton>("File")
             .tap([](PopupButton* p) {
                 p->popup()->set_layout(new BoxLayout(Orientation::Vertical, Alignment::Fill));
                 p->set_side(Popup::Left);
             });
 
-        Make<Button>(FileBtn->popup(), "Folder Dialog")
-            .tap([this](Button* b) {
-                b->set_callback([&] {
-                    printf("**BEEP**\n");
-                    //auto dlg = new FolderDialog(this, "Select Folder");
-                    //dlg->set_callback([&](std::string result) {std::cout << "Folder Selected: " << result << std::endl; });
-                });
+        FileBtn->popup()->add<Button>("Folder Dialog")
+            .callback([this] {
+                printf("**BEEP**\n");
             });
-        Make<Button>(FileBtn->popup(), "Do File Stuff 2");
-        Make<Button>(FileBtn->popup(), "Do File Stuff 3");
-        Make<Label>(FileBtn->popup(), "-------------");
-        Make<Button>(FileBtn->popup(), "short Stuff 4");
-        Make<Button>(FileBtn->popup(), "short Stuff 5");
-        Make<Button>(FileBtn->popup(), "Do File Stuff 6");
+        FileBtn->popup()->add<Button>("Do File Stuff 2");
+        FileBtn->popup()->add<Button>("Do File Stuff 3");
+        FileBtn->popup()->add<Label>("-------------");
+        FileBtn->popup()->add<Button>("short Stuff 4");
+        FileBtn->popup()->add<Button>("short Stuff 5");
+        FileBtn->popup()->add<Button>("Do File Stuff 6");
 
-        PopupButton* EditBtn = Make<PopupButton>(MenuBar1, "Edit")
+        auto EditBtn = MenuBar1->add<PopupButton>("Edit")
             .tap([](PopupButton* p) {
                 p->popup()->set_layout(new BoxLayout(Orientation::Vertical));
                 p->set_side(Popup::Bottom);
             });
-        Make<Button>(EditBtn->popup(), "This is avery long button that will hit the borders when the popup is opened");
-        Make<Button>(EditBtn->popup(), "Do File Stuff 2");
+        EditBtn->popup()->add<Button>("This is avery long button that will hit the borders when the popup is opened");
+        EditBtn->popup()->add<Button>("Do File Stuff 2");
 
-        PopupButton* HelpBtn = Make<PopupButton>(MenuBar1, "Help")
+        auto HelpBtn = MenuBar1->add<PopupButton>("Help")
             .tap([](PopupButton* p) {
                 p->popup()->set_layout(new BoxLayout(Orientation::Vertical));
                 p->set_side(Popup::Right);
             });
-        Make<Button>(HelpBtn->popup(), "Help");
-        Make<Button>(HelpBtn->popup(), "About");
-        Make<Button>(HelpBtn->popup(), "About2");
-        Make<Button>(HelpBtn->popup(), "About3");
-        Make<Button>(HelpBtn->popup(), "About4");
+        HelpBtn->popup()->add<Button>("Help");
+        HelpBtn->popup()->add<Button>("About");
+        HelpBtn->popup()->add<Button>("About2");
+        HelpBtn->popup()->add<Button>("About3");
+        HelpBtn->popup()->add<Button>("About4");
     }
+
     void CreateMenuBar()
     {
 		MenuBar *m_menubar = Make<MenuBar>(this, "");
@@ -169,71 +163,62 @@ public:
 
     void CreateMainWindow()
     {
-        Window* ButtonDemoWindow = Make<Window>(this, "", true)
+        auto ButtonDemoWindow = this->add<Window>("", true)
             .pos({15, 40})
             .layout(new GroupLayout());
         addWindowButtons(ButtonDemoWindow);
 
-        /* No need to store a pointer, the data structure will be automatically
-           freed when the parent window is deleted */
-        Make<Label>(ButtonDemoWindow, "Push buttons", "sans-bold");
+        ButtonDemoWindow->add<Label>("Push buttons", "sans-bold");
 
-        Make<Button>(ButtonDemoWindow, "Plain button")
+        ButtonDemoWindow->add<Button>("Plain button")
             .tooltip("short tooltip")
-            .tap([](Button* b) { b->set_callback([] { std::cout << "pushed!" << std::endl; }); });
+            .callback([] { std::cout << "plain pushed!" << std::endl; });
 
-        /* Alternative construction notation using variadic template */
+        ButtonDemoWindow->add<Button>("Styled 🎨", FA_ROCKET)
+            .tooltip("This button has a fairly long tooltip...")
+            .icon(FA_ROCKET)
+			.background(Color(0, 0, 255, 25))
+			.callback([] { std::cout << "styled pushed!" << std::endl; });
 
-        Make<Button>(ButtonDemoWindow, "Styled", FA_ROCKET)
-            .tooltip("This button has a fairly long tooltip. It is so long, in "
-                     "fact, that the shown text will span several lines.")
-            .tap([](Button* b) {
-                b->set_background_color(Color(0, 0, 255, 25));
-                b->set_callback([] { std::cout << "pushed!" << std::endl; });
+        ButtonDemoWindow->add<Label>("EMOJI! 🐺💺💆🐡🐛", "sans");
+
+        ButtonDemoWindow->add<Label>("Toggle buttons", "sans-bold");
+        ButtonDemoWindow->add<Button>("Toggle me")
+            .flags(Button::ToggleButton)
+            .change_callback([](bool state) {
+                std::cout << "Toggle button state: " << state << std::endl;
             });
 
-        Make<Label>(ButtonDemoWindow, "EMOJI! 🐺💺💆🐡🐛", "sans");
+        ButtonDemoWindow->add<Label>("Radio buttons", "sans-bold");
+        ButtonDemoWindow->add<Button>("Radio button 1").flags(Button::RadioButton);
+        ButtonDemoWindow->add<Button>("Radio button 2").flags(Button::RadioButton);
 
-        Make<Label>(ButtonDemoWindow, "Toggle buttons", "sans-bold");
-        Make<Button>(ButtonDemoWindow, "Toggle me")
-            .tap([](Button* b) {
-                b->set_flags(Button::ToggleButton);
-                b->set_change_callback([](bool state) {
-                    std::cout << "Toggle button state: " << state << std::endl;
-                });
-            });
-
-        Make<Label>(ButtonDemoWindow, "Radio buttons", "sans-bold");
-        Make<Button>(ButtonDemoWindow, "Radio button 1")
-            .tap([](Button* b) { b->set_flags(Button::RadioButton); });
-        Make<Button>(ButtonDemoWindow, "Radio button 2")
-            .tap([](Button* b) { b->set_flags(Button::RadioButton); });
-
-        Make<Label>(ButtonDemoWindow, "A tool palette", "sans-bold");
+        ButtonDemoWindow->add<Label>("A tool palette", "sans-bold");
         GridLayout* layout = new GridLayout(Orientation::Horizontal, 4, Alignment::Maximum, 0, 0);
-        layout->set_col_alignment( Alignment::Fill );
-        Widget* tools = Make<Widget>(ButtonDemoWindow).layout(layout);
+        layout->set_col_alignment(Alignment::Fill);
+        auto tools = ButtonDemoWindow->add<Widget>().layout(layout);
 
-        Make<ToolButton>(tools, FA_CLOUD);
-        Make<ToolButton>(tools, FA_FAST_FORWARD);
-        Make<ToolButton>(tools, FA_COMPASS);
-        Make<ToolButton>(tools, FA_UTENSILS);
+        tools->add<ToolButton>(FA_CLOUD);
+        tools->add<ToolButton>(FA_FAST_FORWARD);
+        tools->add<ToolButton>(FA_COMPASS);
+        tools->add<ToolButton>(FA_UTENSILS);
 
-        Make<Label>(ButtonDemoWindow, "Popup buttons", "sans-bold");
-        PopupButton* popup_btn = Make<PopupButton>(ButtonDemoWindow, "Popup", FA_FLASK);
-        Popup* popup = Make(popup_btn->popup()).layout(new GroupLayout());
-        Make<Label>(popup, "Arbitrary widgets can be placed here");
-        Make<CheckBox>(popup, "A check box");
+        ButtonDemoWindow->add<Label>("Popup buttons", "sans-bold");
+        auto popup_btn = ButtonDemoWindow->add<PopupButton>("Popup", FA_FLASK);
+        auto popup = Make(popup_btn->popup()).layout(new GroupLayout());
+        popup->add<Label>("Arbitrary widgets can be placed here");
+        popup->add<CheckBox>("A check box");
         // popup right
-        popup_btn = Make<PopupButton>(popup, "Recursive popup", FA_CHART_PIE);
-        Popup* popup_right = Make(popup_btn->popup()).layout(new GroupLayout());
-        Make<CheckBox>(popup_right, "Another check box");
+        auto popup_btn_right = popup->add<PopupButton>("Recursive popup", FA_CHART_PIE);
+        Make(popup_btn_right->popup()).layout(new GroupLayout())
+            ->add<CheckBox>("Another check box");
         // popup left
-        popup_btn = Make<PopupButton>(popup, "Recursive popup", FA_DNA)
+        auto popup_btn_left = popup->add<PopupButton>("Recursive popup", FA_DNA)
             .tap([](PopupButton* p) { p->set_side(Popup::Side::Left); });
-        Popup* popup_left = Make(popup_btn->popup()).layout(new GroupLayout());
-        Make<CheckBox>(popup_left, "Another check box");
+        Make(popup_btn_left->popup()).layout(new GroupLayout())
+            ->add<CheckBox>("Another check box");
     }
+
     void CreateBasicWindow()
     {
         //int TempWidth = 100;

@@ -14,6 +14,7 @@
 
 #include <nanogui/object.h>
 #include <nanogui/theme.h>
+#include <nanogui/fluent.h>
 #include <algorithm>
 #include <vector>
 
@@ -181,12 +182,6 @@ public:
     /// Returns the index of a specific child or -1 if not found
     int child_index(Widget* widget) const;
 
-    /// Variadic shorthand notation to construct and add a child widget
-    template<typename WidgetClass, typename... Args>
-    WidgetClass* add(const Args&... args) {
-        return new WidgetClass(this, args...);
-    }
-
     /// Walk up the hierarchy and return the parent window
     Window* window();
     /// Walk up the hierarchy and return the parent window (const version)
@@ -346,6 +341,12 @@ public:
         return ps;
     }
 
+	template <typename T, typename... Args>
+    Fluent<T> add(Args&&... args) {
+        T* child = new T(this, std::forward<Args>(args)...);
+        return Fluent<T>(child);
+    }
+
 protected:
     /// Free all resources used by the widget and any children
     virtual ~Widget();
@@ -438,6 +439,11 @@ protected:
 	virtual void end_animation();
 	std::pair<bool, float> get_animation_progress();
 };
+
+template <typename T, typename... Args>
+Fluent<T> Make(Widget* parent, Args&&... args) {
+    return parent->add<T>(std::forward<Args>(args)...);
+}
 
 /**
  * CRTP mixin that provides fluent setters returning the derived type.

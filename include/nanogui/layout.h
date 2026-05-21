@@ -17,6 +17,7 @@
 
 #include <nanogui/object.h>
 #include <nanogui/vector.h>
+#include <nanogui/widget.h>
 #include <unordered_map>
 #include <vector>
 
@@ -640,6 +641,10 @@ public:
         auto it = m_flex_items.find(widget);
         return it != m_flex_items.end() ? it->second : FlexItem();
     }
+
+	// Respect widget's width/height flex modes
+    SizeMode width_mode(const Widget* w) const { return w ? w->width_mode() : SizeMode::Preferred; }
+    SizeMode height_mode(const Widget* w) const { return w ? w->height_mode() : SizeMode::Preferred; }
 
     /* Implementation of the layout interface */
     virtual Vector2i preferred_size(NVGcontext *ctx, const Widget *widget) const override;
