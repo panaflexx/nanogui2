@@ -113,6 +113,10 @@ struct WindowConfig {
         bool m_can_snap;
         Vector2i m_snap_tot_rel;
         Vector2i m_snap_init;
+public:
+#if defined(_DEBUG) || !defined(NDEBUG)
+        float m_last_drawtime_ms = 0.0f;
+#endif
 };
 
 NAMESPACE_END(nanogui)

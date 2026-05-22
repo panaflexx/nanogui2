@@ -17,6 +17,7 @@
 #include <nanogui/widget.h>
 #include <nanogui/texture.h>
 #include <list>
+#include <unordered_set>
 
 NAMESPACE_BEGIN(nanogui)
 
@@ -232,6 +233,11 @@ public:
     /// Is any widget in this screen currently running an animation?
     bool animation_in_progress() const;
 
+    /// Called by Widget::start_animation() — registers the widget in the active set.
+    void register_animation(Widget* w);
+    /// Called when an animation ends (completion, stop, or widget destruction).
+    void unregister_animation(Widget* w);
+
     using Widget::perform_layout;
 
     /// Compute the layout of all widgets
@@ -251,6 +257,9 @@ public:
 		if (it != m_focus_path.end()) {
 			m_focus_path.erase(it);
 		}
+
+		// Ensure a destroyed widget never lingers in the animation registry
+		m_active_animations.erase(widget);
 	}
 
 public:
@@ -316,6 +325,16 @@ protected:
     bool m_stencil_buffer;
     bool m_float_buffer;
     bool m_redraw;
+    std::unordered_set<Widget*> m_active_animations;
+#if defined(_DEBUG) || !defined(NDEBUG)
+    // Screen-level redraw timing, accumulated between Ctrl+Shift+D dumps.
+    float  m_last_redraw_ms    = 0.0f;
+    float  m_redraw_min_ms     = 1e9f;
+    float  m_redraw_max_ms     = 0.0f;
+    double m_redraw_accum_ms   = 0.0;
+    int    m_redraw_count      = 0;
+    double m_redraw_epoch      = 0.0; // glfwGetTime() at last dump/reset
+#endif
     std::function<void(Vector2i)> m_resize_callback;
 #if defined(NANOGUI_USE_METAL)
     void* m_metal_texture = nullptr;

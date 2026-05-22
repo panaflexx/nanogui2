@@ -17,6 +17,7 @@
 #include <nanogui/popup.h>
 #include <nanogui/scrollpanel.h>
 #include <nanogui/messagedialog.h>
+#include <chrono>
 
 NAMESPACE_BEGIN(nanogui)
 
@@ -202,7 +203,15 @@ void Window::draw(NVGcontext* ctx) {
     }
 
     nvgRestore(ctx);
+
+#if defined(_DEBUG) || !defined(NDEBUG)
+    auto t0 = std::chrono::high_resolution_clock::now();
+#endif
     Widget::draw(ctx);
+#if defined(_DEBUG) || !defined(NDEBUG)
+    auto t1 = std::chrono::high_resolution_clock::now();
+    m_last_drawtime_ms = std::chrono::duration<float, std::milli>(t1 - t0).count();
+#endif
 }
 
 void Window::dispose() {

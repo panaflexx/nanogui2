@@ -301,10 +301,7 @@ public:
     bool animating() const { return m_animation_start >= 0.0; }
     void start_animation(AnimationType type = AnimationType::None);
     /// Stop any running animation immediately
-    void stop_animation() {
-        end_animation();
-        m_animation_start = -1.0;
-    }
+    void stop_animation();
 
     /**
      * Returns true if a currently-running animation wants to override the

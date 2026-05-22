@@ -7,7 +7,7 @@
 #include <ctype.h>
 #include <dlfcn.h>
 #include <stdio.h>
-#include "tree-sitter/lib/include/tree_sitter/api.h"
+#include "ts/tree-sitter/lib/include/tree_sitter/api.h"
 
 /* ====================== Types ====================== */
 

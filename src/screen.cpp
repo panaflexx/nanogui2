@@ -12,6 +12,7 @@
 */
 
 #include <nanogui/screen.h>
+#include <chrono>
 #include <nanogui/theme.h>
 #include <nanogui/opengl.h>
 #include <nanogui/window.h>
@@ -677,10 +678,21 @@ void Screen::draw_all() {
     if (m_redraw) {
         m_redraw = false;
 
+#if defined(_DEBUG) || !defined(NDEBUG)
+        auto _t0 = std::chrono::high_resolution_clock::now();
+#endif
         draw_setup();
         draw_contents();
         draw_widgets();
         draw_teardown();
+#if defined(_DEBUG) || !defined(NDEBUG)
+        auto _t1 = std::chrono::high_resolution_clock::now();
+        m_last_redraw_ms = std::chrono::duration<float, std::milli>(_t1 - _t0).count();
+        m_redraw_accum_ms += m_last_redraw_ms;
+        m_redraw_count++;
+        m_redraw_min_ms = std::min(m_redraw_min_ms, m_last_redraw_ms);
+        m_redraw_max_ms = std::max(m_redraw_max_ms, m_last_redraw_ms);
+#endif
     }
 }
 
@@ -870,6 +882,32 @@ void Screen::collect_focusable_widgets(Widget* root, std::vector<Widget*>& focus
 
 bool Screen::keyboard_event(int key, int scancode, int action, int modifiers) {
     if (m_focus_path.size() > 0) {
+#if defined(_DEBUG) || !defined(NDEBUG)
+        if (key == GLFW_KEY_D && (modifiers & GLFW_MOD_CONTROL) && (modifiers & GLFW_MOD_SHIFT) && action == GLFW_PRESS) {
+            printf("=== Window draw times ===\n");
+            for (Widget* w : m_children) {
+                if (auto* win = dynamic_cast<Window*>(w)) {
+                    printf("  %s: %.3f ms\n", win->title().c_str(), win->m_last_drawtime_ms);
+                }
+            }
+            double now = glfwGetTime();
+            double wall_secs = (m_redraw_epoch > 0.0) ? (now - m_redraw_epoch) : 0.0;
+            printf("=== Screen redraw stats (%d frames in %.1f s) ===\n", m_redraw_count, wall_secs);
+            if (m_redraw_count > 0 && wall_secs > 0.0) {
+                float avg = (float)(m_redraw_accum_ms / m_redraw_count);
+                float fps = (float)(m_redraw_count / wall_secs); // wall-clock fps
+                printf("  last=%.2f ms  avg=%.2f ms  min=%.2f ms  max=%.2f ms  ~%.1f fps\n",
+                       m_last_redraw_ms, avg, m_redraw_min_ms, m_redraw_max_ms, fps);
+            }
+            // Reset accumulators; record wall time so next dump can compute fps.
+            m_redraw_accum_ms = 0.0;
+            m_redraw_count    = 0;
+            m_redraw_min_ms   = 1e9f;
+            m_redraw_max_ms   = 0.0f;
+            m_redraw_epoch    = now;
+            return true;
+        }
+#endif
         // First, try to handle the key event in the current focus path
         for (int Cnt = m_focus_path.size() - 2; Cnt >= 0; Cnt--) {
             if (m_focus_path[Cnt]->focused() && m_focus_path[Cnt]->keyboard_event(key, scancode, action, modifiers))
@@ -1403,18 +1441,16 @@ void Screen::move_window_to_front(Window* window) {
     } while (changed);
 }
 
-static bool widget_animation_active(const Widget* w) {
-    if (!w) return false;
-    if (w->animating()) return true;
-    for (int i = 0; i < w->child_count(); ++i) {
-        if (widget_animation_active(w->child_at(i)))
-            return true;
-    }
-    return false;
+void Screen::register_animation(Widget* w) {
+    m_active_animations.insert(w);
+}
+
+void Screen::unregister_animation(Widget* w) {
+    m_active_animations.erase(w);
 }
 
 bool Screen::animation_in_progress() const {
-    return widget_animation_active(this);
+    return !m_active_animations.empty();
 }
 
 bool Screen::tooltip_fade_in_progress() const {
