@@ -295,6 +295,8 @@ std::pair<bool, float> Widget::get_animation_progress() {
             progress = 1.0f;
             end_animation();
             m_animation_start = -1.0;
+            if (Screen* scr = screen())
+                scr->unregister_animation(this);
             /* NOTE: we intentionally keep m_animation_type set so that a
                subsequent start_animation() call (with the default
                AnimationType::None argument) re-runs the same animation
@@ -326,7 +328,22 @@ void Widget::start_animation(AnimationType type) {
             m_min_size.y() = 0;
         }
         printf("Start animation %0.1f for %s\n", m_animation_start, m_id.c_str());
+
+        // Register with the owning screen so animation_in_progress() is O(1).
+        if (Screen* scr = screen())
+            scr->register_animation(this);
     }
+}
+
+void Widget::stop_animation() {
+    end_animation();
+    m_animation_start = -1.0;
+    if (Screen* scr = screen())
+        scr->unregister_animation(this);
+}
+
+void Widget::stop_animations() {
+    stop_animation();
 }
 
 void Widget::apply_animation_transform(NVGcontext* ctx, float progress) {

@@ -302,6 +302,8 @@ public:
     void start_animation(AnimationType type = AnimationType::None);
     /// Stop any running animation immediately
     void stop_animation();
+    /// Alias for stop_animation (some older headers used the plural form)
+    void stop_animations();
 
     /**
      * Returns true if a currently-running animation wants to override the

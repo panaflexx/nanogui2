@@ -14,6 +14,7 @@
 #include <nanogui/screen.h>
 #include <nanogui/widget.h>
 #include <nanogui/theme.h>
+#include <nanogui/cachedwidget.h>
 
 NAMESPACE_BEGIN(nanogui)
 
@@ -340,7 +341,14 @@ public:
 				screen->perform_layout();
 				screen->redraw();
 			}
-			
+
+            // Invalidate any parent CachedWidget caches
+            for (Widget* w = parent(); w != nullptr; w = w->parent()) {
+                if (auto* cw = dynamic_cast<CachedWidget*>(w)) {
+                    cw->cache_dirty();
+                }
+            }
+
             return true;
         }
         return Widget::mouse_drag_event(p, rel, button, modifiers);
