@@ -30,6 +30,8 @@
 #include <nanogui/imagepanel.h>
 #include <nanogui/imageview.h>
 #include <nanogui/scrollpanel.h>
+#include <nanogui/split.h>
+#include <nanogui/cachedwidget.h>
 #include <nanogui/colorwheel.h>
 #include <nanogui/colorpicker.h>
 #include <nanogui/graph.h>
@@ -39,10 +41,12 @@
 #include <nanogui/shader.h>
 #include <nanogui/renderpass.h>
 #include <nanogui/textarea.h>
+#include <nanogui/texteditor.h>
 #include <nanogui/folderdialog.h>
 #include <nanogui/fluent.h>
 #include <iostream>
 #include <memory>
+#include <sstream>
 #include <vector>
 
 #define STB_IMAGE_STATIC
@@ -676,64 +680,339 @@ public:
     }
     void CreateControlsDefault()
     {
-        Window* CtrConsole_TopWindow = Make<Window>(this, "Console", true)
+        // ----- Editor window ------------------------------------------------
+        // Replaces the old read-only TextArea "console" with the new
+        // TextEditor widget in Code mode. The TextEditor scrolls its own
+        // content (no ScrollPanel wrapper needed) and supports caret,
+        // selection, keyboard editing and per-run syntax colors.
+        Window* Editor_TopWindow = Make<Window>(this, "Editor", true)
             .pos({700, 400})
-            .size({500, 250})
+            .size({560, 320})
             .visible(true)
-            .layout(new BoxLayout(Orientation::Vertical, Alignment::Fill));
+            .layout(new BoxLayout(Orientation::Vertical, Alignment::Fill, 0, 0));
 
-        ScrollPanel* ScrollWidget = Make<ScrollPanel>(CtrConsole_TopWindow)
-            .layout(new BoxLayout(Orientation::Vertical, Alignment::Fill, 15)) // defaults: 2 columns
-            .tap([](ScrollPanel* s) {
-                s->set_scroll_type(ScrollPanel::ScrollTypes::Both);
-                s->DebugName = "Top";
-            });
-/*
-        // vscroll should only have *ONE* child. this is what `wrapper` is for
-        auto WrapperWidget1 = new Widget(ScrollWidget);
-        WrapperWidget1->set_layout(new BoxLayout(Orientation::Vertical, Alignment::Fill, 15));// defaults: 2 columns
+        // Cache the editor's rendered output to a NanoVG FBO so we don't
+        // repaint glyphs on every frame.  CachedWidget auto-invalidates on
+        // events passing through it (keys, mouse, scroll, focus, layout);
+        // we additionally invalidate from the editor's change/caret
+        // callbacks for programmatic mutations.
+        auto* editorCache = new CachedWidget(Editor_TopWindow);
+        editorCache->set_layout(
+            new BoxLayout(Orientation::Vertical, Alignment::Fill, 0, 0));
 
-        ScrollPanel* ScrollConsole = new ScrollPanel(WrapperWidget1);
-        ScrollConsole->set_scroll_type(ScrollPanel::ScrollTypes::Vertical);
-        //ScrollConsole->set_fixed_height(250);
-        ScrollConsole->DebugName = "Bottom";
-
-        auto WrapperWidget2 = new Widget(WrapperWidget1);
-        WrapperWidget2->set_layout(new BoxLayout(Orientation::Vertical, Alignment::Fill, 15));// defaults: 2 columns
-*/
-
-        TextArea* CtrConsole_TextConsole = Make<TextArea>(ScrollWidget)
-            .tap([](TextArea* t) {
-                t->set_padding(10);
-                t->set_selectable(true);
-                t->set_background_color(Color(0, 255));
-                t->set_foreground_color(Color(255, 100, 0, 255));
-                t->set_foreground_color(Color(155, 0, 0, 255));
-                t->append(" ----- LOG BEGINS ----\n ");
+        TextEditor* editor = Make<TextEditor>(editorCache,
+                                              TextEditor::Mode::Code)
+            .tap([](TextEditor* e) {
+                e->set_padding(8);
+                e->set_show_line_numbers(true);
+                e->set_tab_width(4);
+                e->set_expand_tab(true);
+                e->set_background_color(Color(30, 30, 34, 255));
+                e->set_caret_color(Color(220, 220, 220, 255));
+                e->set_selection_color(Color(70, 110, 180, 130));
+                e->set_current_line_color(Color(255, 255, 255, 14));
+                e->set_gutter_color(Color(38, 38, 44, 255));
+                e->set_line_number_color(Color(120, 120, 130, 255));
             });
 
-		std::string longtext = "Example Log... \n "
-            "Example Log... Example Log... Example Log... Example Log... Example Log... \n"
-            "Example Log... Example Log... Example Log... Example Log... Example Log... \n"
-            "Example Log... Example Log... Example Log... Example Log... Example Log... \n"
-            "Example Log... Example Log... Example Log... Example Log... Example Log... \n"
-            "Example Log... Example Log... Example Log... Example Log... Example Log... ";
+        // Programmatic invalidation (set_plain_text below, run-rebuild
+        // for syntax highlighting, etc.) needs to bump the cache too.
+        editor->change_callback = [editorCache] { editorCache->cache_dirty(); };
+        editor->caret_callback  = [editorCache](TextEditor::Position) {
+            editorCache->cache_dirty();
+        };
 
-        CtrConsole_TextConsole->append(longtext);
-        CtrConsole_TextConsole->set_foreground_color(Color(200, 100, 0, 255));
-        CtrConsole_TextConsole->append(longtext);
-        CtrConsole_TextConsole->set_foreground_color(Color(0, 10, 200, 255));
-        CtrConsole_TextConsole->append(longtext);
-        CtrConsole_TextConsole->append(longtext);
-        CtrConsole_TextConsole->append(longtext);
-        CtrConsole_TextConsole->append(longtext);
-        CtrConsole_TextConsole->append(longtext);
-        CtrConsole_TextConsole->append(longtext);
-        CtrConsole_TextConsole->append(longtext);
-        CtrConsole_TextConsole->append(longtext);
-        CtrConsole_TextConsole->append(longtext);
-        CtrConsole_TextConsole->append(longtext);
-        CtrConsole_TextConsole->append(longtext);
+        // Sample C source to demo monospace rendering + line numbers.
+        const std::string sample =
+            "// example.c -- TextEditor demo source\n"
+            "#include <stdio.h>\n"
+            "\n"
+            "int factorial(int n) {\n"
+            "\tif (n <= 1)\n"
+            "\t\treturn 1;\n"
+            "\treturn n * factorial(n - 1);\n"
+            "}\n"
+            "\n"
+            "int main(int argc, char** argv) {\n"
+            "\tfor (int i = 0; i < 5; ++i) {\n"
+            "\t\tprintf(\"%d! = %d\\n\", i, factorial(i));\n"
+            "\t}\n"
+            "\treturn 0;\n"
+            "}\n";
+        editor->set_plain_text(sample);
+
+        // -------------------------------------------------------------------
+        // Demonstrate the per-run color model by recoloring a handful of
+        // tokens on the first line.  This is the same hook a real
+        // syntax highlighter (tree-sitter) will use later: rebuild a
+        // paragraph's `runs` vector with each token in its own Style.
+        // -------------------------------------------------------------------
+        if (auto doc = editor->document(); doc && !doc->paragraphs.empty()) {
+            Style comment;  comment.monospace = true;
+            comment.fontSize  = editor->code_style().fontSize;
+            comment.fgColor   = nvgRGBA(110, 160, 110, 255);  // green
+
+            Style preproc;  preproc.monospace = true;
+            preproc.fontSize  = editor->code_style().fontSize;
+            preproc.fgColor   = nvgRGBA(200, 130, 200, 255);  // magenta
+
+            Style keyword;  keyword.monospace = true;
+            keyword.fontSize  = editor->code_style().fontSize;
+            keyword.fgColor   = nvgRGBA(230, 200,  90, 255);  // amber
+
+            Style ident;    ident.monospace = true;
+            ident.fontSize  = editor->code_style().fontSize;
+            ident.fgColor   = nvgRGBA(110, 170, 220, 255);  // blue
+
+            Style normal;   normal.monospace = true;
+            normal.fontSize  = editor->code_style().fontSize;
+            normal.fgColor   = editor->code_style().fgColor;
+
+            // Line 0: the // comment
+            doc->paragraphs[0]->runs.clear();
+            doc->paragraphs[0]->addText(
+                "// example.c -- TextEditor demo source", comment);
+
+            // Line 1: #include <stdio.h>
+            if (doc->paragraphs.size() > 1) {
+                doc->paragraphs[1]->runs.clear();
+                doc->paragraphs[1]->addText("#include ", preproc);
+                doc->paragraphs[1]->addText("<stdio.h>", normal);
+            }
+
+            // Line 3: int factorial(int n) {
+            if (doc->paragraphs.size() > 3) {
+                doc->paragraphs[3]->runs.clear();
+                doc->paragraphs[3]->addText("int",        keyword);
+                doc->paragraphs[3]->addText(" ",          normal);
+                doc->paragraphs[3]->addText("factorial",  ident);
+                doc->paragraphs[3]->addText("(",          normal);
+                doc->paragraphs[3]->addText("int",        keyword);
+                doc->paragraphs[3]->addText(" n) {",      normal);
+            }
+        }
+        editorCache->cache_dirty();
+    }
+
+    // -----------------------------------------------------------------------
+    // Minimal Markdown -> Document parser.
+    //
+    // Same shape as the one in nanovg-colorfont-atlas.cpp; lifted here so
+    // example1 stays self-contained.  Supports:
+    //    # / ## / ### headers   **bold**   *italic*   `code`
+    //    ```fenced code blocks```
+    // Blank lines break paragraphs.
+    // -----------------------------------------------------------------------
+    static void parse_markdown(nanogui::Document& doc, const std::string& md) {
+        doc.paragraphs.clear();
+
+        // Dark text on light preview background.
+        Style normal;  normal.fontSize = 16.0f;
+                       normal.fgColor  = nvgRGBA( 30,  30,  35, 255);
+        Style bold     = normal; bold.bold      = true;
+        Style italic   = normal; italic.italic  = true;
+        Style code     = normal; code.monospace = true; code.fontSize = 14.0f;
+                                code.fgColor   = nvgRGBA( 20,  20,  25, 255);
+                                code.bgColor   = nvgRGBA(225, 225, 232, 255);
+        Style h1 = normal; h1.fontSize = 28.0f; h1.bold = true;
+        Style h2 = normal; h2.fontSize = 22.0f; h2.bold = true;
+        Style h3 = normal; h3.fontSize = 18.0f; h3.bold = true;
+
+        std::istringstream iss(md);
+        std::string line;
+        Paragraph* current = nullptr;
+        bool       inCode  = false;
+        std::string codeBuf;
+
+        auto append_inline = [&](Paragraph* p, const std::string& text) {
+            size_t i = 0;
+            while (i < text.size()) {
+                if (i + 1 < text.size() && text[i] == '*' && text[i+1] == '*') {
+                    size_t s = i + 2;
+                    size_t e = text.find("**", s);
+                    if (e != std::string::npos) {
+                        if (e > s) p->addText(text.substr(s, e - s), bold);
+                        i = e + 2; continue;
+                    }
+                } else if (text[i] == '*' && (i == 0 || text[i-1] != '*')) {
+                    size_t s = i + 1;
+                    size_t e = text.find('*', s);
+                    if (e != std::string::npos && e > s) {
+                        p->addText(text.substr(s, e - s), italic);
+                        i = e + 1; continue;
+                    }
+                } else if (text[i] == '`') {
+                    size_t s = i + 1;
+                    size_t e = text.find('`', s);
+                    if (e != std::string::npos) {
+                        if (e > s) p->addText(text.substr(s, e - s), code);
+                        i = e + 1;
+                        if (i < text.size() && std::isspace((unsigned char)text[i])) {
+                            p->addText(" ", normal);
+                            while (i < text.size()
+                                   && std::isspace((unsigned char)text[i])) ++i;
+                        }
+                        continue;
+                    }
+                }
+                size_t s = i;
+                while (i < text.size() && text[i] != '*' && text[i] != '`') ++i;
+                if (i > s) p->addText(text.substr(s, i - s), normal);
+                else ++i;
+            }
+        };
+
+        while (std::getline(iss, line)) {
+            while (!line.empty() && std::isspace((unsigned char)line.back()))
+                line.pop_back();
+
+            if (line.empty()) {
+                if (inCode) codeBuf += '\n';
+                else        current = nullptr;
+                continue;
+            }
+
+            if (line.size() >= 3 && line.substr(0, 3) == "```") {
+                if (inCode) {
+                    if (!codeBuf.empty()) {
+                        auto* p = doc.addParagraph();
+                        p->addText(codeBuf, code);
+                    }
+                    codeBuf.clear();
+                    inCode  = false;
+                } else {
+                    inCode  = true;
+                    codeBuf.clear();
+                }
+                current = nullptr;
+                continue;
+            }
+            if (inCode) { codeBuf += line + "\n"; continue; }
+
+            if (line[0] == '#') {
+                size_t lvl = 0;
+                while (lvl < line.size() && line[lvl] == '#') ++lvl;
+                if (lvl > 0 && lvl < line.size()
+                    && std::isspace((unsigned char)line[lvl])) {
+                    const Style& hs = (lvl == 1) ? h1 : (lvl == 2) ? h2 : h3;
+                    auto* p = doc.addParagraph();
+                    p->addText(line.substr(lvl + 1), hs);
+                    current = nullptr;
+                    continue;
+                }
+            }
+
+            if (!current) current = doc.addParagraph();
+            else          current->addText(" ", normal); // soft wrap join
+            append_inline(current, line);
+        }
+
+        if (inCode && !codeBuf.empty()) {
+            auto* p = doc.addParagraph();
+            p->addText(codeBuf, code);
+        }
+        if (doc.paragraphs.empty()) doc.addParagraph();
+    }
+
+    // -----------------------------------------------------------------------
+    // CreateMarkdownDoc -- split-window markdown editor.
+    //
+    // Left pane:  TextEditor in Code mode -> the raw markdown source.
+    //             (This is what the user edits.)
+    // Right pane: TextEditor in RichText mode -> rendered preview.
+    //             (Rebuilt live whenever the source changes.)
+    //
+    // NOTE: Caret/selection in RichText mode is intentionally not yet
+    // implemented in TextEditor, so the right pane is read-only display.
+    // -----------------------------------------------------------------------
+    void CreateMarkdownDoc()
+    {
+        Window* mdWindow = Make<Window>(this, "Markdown", true)
+            .pos({60, 460})
+            .size({820, 380})
+            .visible(true)
+            .layout(new BoxLayout(Orientation::Vertical, Alignment::Fill, 0, 0));
+
+        // Wrap the whole Split in a CachedWidget so the Window's contents
+        // are rendered once into an FBO and reused across frames.  Mouse
+        // drags on the splitter, keystrokes in either editor, and the
+        // explicit cache_dirty() calls below all trigger a rebuild.
+        auto* mdCache = new CachedWidget(mdWindow);
+        mdCache->set_layout(
+            new BoxLayout(Orientation::Vertical, Alignment::Fill, 0, 0));
+        mdCache->set_fixed_size({800, 360});
+
+        // Vertical drag bar separating the two panes (Split::Horizontal
+        // means "widgets side-by-side, vertical divider").
+        auto* split = new Split(mdCache, Split::Orientation::Horizontal);
+        split->set_fixed_size({800, 360});
+        split->set_min_size({120, 120});
+        split->set_drag_position(0.5f);
+
+        // -- left: source editor (Code mode) --------------------------------
+        auto* source = new TextEditor(split, TextEditor::Mode::Code);
+        source->set_padding(8);
+        source->set_show_line_numbers(true);
+        source->set_tab_width(4);
+        source->set_expand_tab(true);
+        source->set_background_color(Color(28, 28, 32, 255));
+        // Light-gray foreground so the source is readable on the dark bg.
+        {
+            Style cs = source->code_style();
+            cs.fgColor = nvgRGBA(215, 215, 220, 255);
+            source->set_code_style(cs);
+        }
+
+        // -- right: rendered preview (RichText mode) ------------------------
+        auto* preview = new TextEditor(split, TextEditor::Mode::RichText);
+        preview->set_padding(12);
+        preview->set_show_line_numbers(false);
+        preview->set_read_only(true);
+        preview->set_background_color(Color(245, 245, 245, 255));
+        // Foreground for the preview is set per-run by the markdown parser.
+
+        const std::string defaultMd =
+            "# Markdown Demo\n"
+            "\n"
+            "Edit the **source** on the *left* and watch the rendered\n"
+            "preview on the right update live.\n"
+            "🐺💺💆🐡🐛\n"
+            "\n"
+            "## Inline styles\n"
+            "\n"
+            "This paragraph mixes **bold**, *italic* and `inline code`\n"
+            "all in one line.\n"
+            "\n"
+            "### Fenced code block\n"
+            "\n"
+            "```\n"
+            "int main() {\n"
+            "    printf(\"hello, markdown\\n\");\n"
+            "    return 0;\n"
+            "}\n"
+            "```\n"
+            "\n"
+            "## Notes\n"
+            "\n"
+            "The Document model is the same one used by\n"
+            "`nanovg-colorfont-atlas.cpp`, so anything renderable\n"
+            "there also renders here.\n";
+
+        source->set_plain_text(defaultMd);
+
+        // -- rebuild the preview document whenever the source changes ------
+        auto rebuild = [source, preview, mdCache]() {
+            auto pdoc = preview->document();
+            if (!pdoc) return;
+            parse_markdown(*pdoc, source->plain_text());
+            mdCache->cache_dirty();
+        };
+        rebuild();
+        source->change_callback = rebuild;
+        // Caret movement (no content change) still needs a repaint.
+        source->caret_callback = [mdCache](TextEditor::Position) {
+            mdCache->cache_dirty();
+        };
     }
 
 	// Necessary for closing open menus
@@ -780,6 +1059,7 @@ public:
         CreateSmallWindow();
         //CreateTreeViewWindow();
         CreateControlsDefault();
+        CreateMarkdownDoc();
 
         perform_layout();
 

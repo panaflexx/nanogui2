@@ -31,6 +31,8 @@
 #include <string_view>
 #include <unordered_map>
 #include <vector>
+#include <fstream>
+#include <sstream>
 
 using namespace nanogui;
 
@@ -135,13 +137,12 @@ private:
 
     // (face name, fontSize quantised) cache keys
     static uint64_t makeKey(const char* face, float size) {
-        // FNV-1a over face name + quantised size
         uint64_t h = 1469598103934665603ULL;
         for (const char* p = face; *p; ++p) {
             h ^= (uint8_t)*p;
             h *= 1099511628211ULL;
         }
-        uint32_t q = (uint32_t)(size * 1024.0f); // 1/1024 px resolution
+        uint32_t q = (uint32_t)(size * 1024.0f);
         h ^= q;
         h *= 1099511628211ULL;
         return h;
@@ -182,18 +183,15 @@ private:
         float w1 = nvgTextBounds(ctx, 0, 0, "x",   nullptr, b);
         float w2 = nvgTextBounds(ctx, 0, 0, "x x", nullptr, b);
         float sp = w2 - 2.0f * w1;
-        if (sp <= 0.0f) sp = s.fontSize * 0.25f; // sanity fallback
+        if (sp <= 0.0f) sp = s.fontSize * 0.25f;
         m_spaceCache.emplace(k, sp);
         return sp;
     }
 
-    // Measure a word: fills advance, leftBearing, visualRight.
     void measureWord(NVGcontext* ctx, const Style& s, std::string_view text,
                      float& advance, float& leftBearing, float& visualRight) {
         applyFont(ctx, s);
         float b[4];
-        // nvgTextBounds wants null-terminated strings, so we must materialise
-        // a std::string for the rare case where text isn't already one.
         const char* begin = text.data();
         const char* end   = begin + text.size();
         advance     = nvgTextBounds(ctx, 0, 0, begin, end, b);
@@ -201,9 +199,6 @@ private:
         visualRight = b[2];
     }
 
-    // ---- splitting helpers ------------------------------------------------
-
-    // Split a string on '\n'; preserves empty pieces (so blank lines work).
     template <typename Fn>
     static void forEachLine(std::string_view s, Fn fn) {
         size_t start = 0;
@@ -216,7 +211,6 @@ private:
         fn(s.substr(start));
     }
 
-    // Iterate whitespace-separated words in `line`.
     template <typename Fn>
     static void forEachWord(std::string_view line, Fn fn) {
         size_t i = 0, n = line.size();
@@ -228,13 +222,10 @@ private:
         }
     }
 
-    // ---- main per-paragraph routine --------------------------------------
-
     float drawParagraph(NVGcontext* ctx, const Paragraph& para,
                         float originX, float startY) {
         if (para.runs.empty()) return startY;
 
-        // -- Phase 1: build word list and break into lines ------------------
         std::vector<LayoutLine> lines;
         LayoutLine current;
 
@@ -257,7 +248,6 @@ private:
             const float indent = lineIndent();
             const float avail  = contentWidth - indent;
 
-            // Need a wrap?
             const float needed = current.words.empty()
                                  ? advance
                                  : current.advanceWidth + sp + advance;
@@ -289,9 +279,6 @@ private:
                 if (piece.empty()) return;
 
                 if (run.style.monospace) {
-                    // Lay out each character independently so that long
-                    // tokens still wrap inside a code block, and so '\t'/
-                    // spaces are preserved (no whitespace coalescing).
                     for (size_t i = 0; i < piece.size(); ++i) {
                         std::string_view ch = piece.substr(i, 1);
                         float adv, lb, vr;
@@ -311,12 +298,6 @@ private:
 
         if (lines.empty()) return startY;
 
-        // -- Phase 1.5: For mono-with-bg blocks, compute the widest line so
-        //               background rectangles are uniform-width per block. --
-        // A "mono block" is a maximal run of consecutive lines starting with
-        // a monospace+bg word. We compute the visual width of each such line
-        // (incorporating leftBearing/visualRight) so the background fully
-        // covers every glyph including italic overshoot.
         std::vector<float> blockWidth(lines.size(), 0.0f);
         {
             size_t i = 0;
@@ -327,20 +308,14 @@ private:
                     ++i;
                     continue;
                 }
-                // Find the extent of this mono-bg block.
                 size_t j = i;
                 float maxW = 0.0f;
                 while (j < lines.size() &&
                        !lines[j].words.empty() &&
                        lines[j].words.front().run->style.monospace &&
                        lines[j].words.front().run->style.bgColor.a > 0) {
-                    // Visual width using bounds: from leftmost glyph left edge
-                    // to rightmost glyph right edge (in line-local coords).
                     const auto& wfront = lines[j].words.front();
                     const auto& wback  = lines[j].words.back();
-                    // Cursor advances are summed in advanceWidth; the visual
-                    // right edge is (advanceWidth - last advance) + visualRight
-                    // of the last glyph.
                     const float leftEdge  = wfront.leftBearing;
                     const float rightEdge = (lines[j].advanceWidth - wback.advance)
                                             + wback.visualRight;
@@ -352,7 +327,6 @@ private:
             }
         }
 
-        // -- Phase 2: draw lines ------------------------------------------
         float y = startY;
         const float rightEdge = originX + contentWidth;
 
@@ -366,7 +340,6 @@ private:
             const float lineHeight = line.ascent + line.descent;
             const float baseline   = y + line.ascent;
 
-            // Pick the line's drawing origin based on alignment.
             float lineX;
             switch (para.alignment) {
                 case TextAlignment::Center:
@@ -382,8 +355,6 @@ private:
                     break;
             }
 
-            // Normalize mono+bg blocks so every line (including the second)
-            // starts at the exact same visual X regardless of the first glyph's bearing.
             float drawX = lineX;
             const bool isMonoBg = !line.words.empty() &&
                                   line.words.front().run->style.monospace &&
@@ -392,18 +363,15 @@ private:
                 drawX -= line.words.front().leftBearing;
             }
 
-            // Number of inter-word gaps available for justification.
             const int numGaps    = (int)line.words.size() - 1;
             const bool justify   = (para.alignment == TextAlignment::Justify) &&
                                    !isLastLine && numGaps > 0;
             float extraPerGap    = 0.0f;
             if (justify) {
-                // Available width MINUS what the line already advances to.
                 extraPerGap = (contentWidth - indent - line.advanceWidth) / (float)numGaps;
                 if (extraPerGap < 0.0f) extraPerGap = 0.0f;
             }
 
-            // --- Background (line-spanning) for mono-bg blocks ----------
             if (!line.words.empty()) {
                 const Style& fs = line.words.front().run->style;
                 if (fs.bgColor.a > 0) {
@@ -412,7 +380,6 @@ private:
                         bgL = drawX;
                         bgR = bgL + blockWidth[li];
                     } else {
-                        // Per-line visual extents (bounds-based)
                         const Word& wf = line.words.front();
                         const Word& wb = line.words.back();
                         bgL = lineX + wf.leftBearing;
@@ -428,22 +395,16 @@ private:
                 }
             }
 
-            // --- Draw each word ----------------------------------------
             float x = drawX;
             for (size_t wi = 0; wi < line.words.size(); ++wi) {
                 Word& word = line.words[wi];
                 const Style& st = word.run->style;
                 applyFont(ctx, st);
 
-                // Right-flush the last word of a justified line using the
-                // *visual* right edge, not the advance, so the rightmost
-                // glyph touches the right margin exactly.
                 if (justify && wi + 1 == line.words.size()) {
                     x = rightEdge - word.visualRight;
                 }
 
-                // Per-word background (only for non-mono runs that want it;
-                // mono lines already got a unified background above).
                 if (st.bgColor.a > 0 && !st.monospace) {
                     nvgBeginPath(ctx);
                     nvgFillColor(ctx, st.bgColor);
@@ -482,7 +443,6 @@ private:
                     nvgStroke(ctx);
                 }
 
-                // Advance to next word: skip if we just custom-positioned it.
                 if (!(justify && wi + 1 == line.words.size())) {
                     x += word.advance;
                     if (wi + 1 < line.words.size() && !st.monospace) {
@@ -492,7 +452,6 @@ private:
                 }
             }
 
-            // Debug: right-margin caret per line
             if (debugDraw && para.alignment == TextAlignment::Justify) {
                 nvgBeginPath(ctx);
                 nvgStrokeColor(ctx, nvgRGBA(255, 0, 0, 200));
@@ -505,7 +464,6 @@ private:
             y += lineHeight + lineSpacing;
         }
 
-        // Debug: paragraph bounding rectangle
         if (debugDraw) {
             nvgBeginPath(ctx);
             nvgStrokeColor(ctx, nvgRGBA(200, 0, 200, 180));
@@ -523,15 +481,150 @@ private:
 };
 
 // ---------------------------------------------------------------------------
+// Simple Markdown-like parser
+// ---------------------------------------------------------------------------
+static void parseMarkdown(Document& doc, const std::string& markdown) {
+    std::istringstream iss(markdown);
+    std::string line;
+    Paragraph* currentPara = nullptr;
+    bool inCodeBlock = false;
+    std::string codeBuffer;
+
+    Style normal;
+    Style bold = normal; bold.bold = true;
+    Style italic = normal; italic.italic = true;
+    Style code = normal; code.monospace = true; code.fontSize = 15.0f;
+    Style header = normal; header.fontSize = 24.0f; header.bold = true;
+
+    while (std::getline(iss, line)) {
+        // Trim trailing whitespace
+        while (!line.empty() && std::isspace(line.back())) line.pop_back();
+
+        if (line.empty()) {
+            if (inCodeBlock) {
+                codeBuffer += "\n";
+            } else {
+                currentPara = nullptr;
+            }
+            continue;
+        }
+
+        // Code block
+        if (line.size() >= 3 && line.substr(0, 3) == "```") {
+            if (inCodeBlock) {
+                if (!codeBuffer.empty()) {
+                    auto* p = doc.addParagraph();
+                    p->addText(codeBuffer, code);
+                }
+                codeBuffer.clear();
+                inCodeBlock = false;
+            } else {
+                inCodeBlock = true;
+                codeBuffer.clear();
+            }
+            continue;
+        }
+
+        if (inCodeBlock) {
+            codeBuffer += line + "\n";
+            continue;
+        }
+
+        // Headers
+        if (!line.empty() && line[0] == '#') {
+            size_t level = 0;
+            while (level < line.size() && line[level] == '#') ++level;
+            if (level > 0 && level < line.size() && std::isspace(line[level])) {
+                std::string text = line.substr(level + 1);
+                auto* p = doc.addParagraph();
+                p->addText(text, header);
+                currentPara = nullptr;
+                continue;
+            }
+        }
+
+        // Start new paragraph
+        if (!currentPara) {
+            currentPara = doc.addParagraph();
+        }
+
+        // --- Robust Inline Parser ---
+        const std::string& text = line;
+        size_t i = 0;
+
+        while (i < text.size()) {
+            // **bold**
+            if (i + 1 < text.size() && text[i] == '*' && text[i + 1] == '*') {
+                size_t start = i + 2;
+                size_t end = text.find("**", start);
+                if (end != std::string::npos) {
+                    if (start < end) {
+                        currentPara->addText(text.substr(start, end - start), bold);
+                    }
+                    i = end + 2;
+                    continue;
+                }
+            }
+            // *italic*
+            else if (text[i] == '*' && (i == 0 || text[i - 1] != '*')) {
+                size_t start = i + 1;
+                size_t end = text.find('*', start);
+                if (end != std::string::npos && end > start) {
+                    currentPara->addText(text.substr(start, end - start), italic);
+                    i = end + 1;
+                    continue;
+                }
+            }
+            // `monospace`
+            else if (text[i] == '`') {
+                size_t start = i + 1;
+                size_t end = text.find('`', start);
+                if (end != std::string::npos) {
+                    if (start < end) {
+                        currentPara->addText(text.substr(start, end - start), code);
+                    }
+                    i = end + 1;
+
+                    // Force add space after closing backtick
+                    if (i < text.size() && std::isspace(text[i])) {
+                        currentPara->addText(" ", code);
+                        while (i < text.size() && std::isspace(text[i])) ++i;
+                    }
+                    continue;
+                }
+            }
+
+            // Normal text
+            size_t start = i;
+            while (i < text.size() && text[i] != '*' && text[i] != '`') {
+                ++i;
+            }
+            if (i > start) {
+                currentPara->addText(text.substr(start, i - start), normal);
+            } else {
+                ++i;
+            }
+        }
+    }
+
+    // Final code block if still open
+    if (inCodeBlock && !codeBuffer.empty()) {
+        auto* p = doc.addParagraph();
+        p->addText(codeBuffer, code);
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Demo screen
 // ---------------------------------------------------------------------------
 
 class AtlasScreen : public Screen {
 public:
     std::unique_ptr<Document> doc;
+    std::string markdownSource;
 
-    AtlasScreen() : Screen(Vector2i(800, 600), "NanoGUI Document Layout Demo") {
-        // -- Fonts ----------------------------------------------------------
+    AtlasScreen() : Screen(Vector2i(1000, 800), "NanoGUI Document Layout Demo") {
+        // Load fonts
         auto loadFont = [&](const char* alias, const char* path) {
             int id = nvgCreateFont(m_nvg_context, alias, path);
             if (id == -1)
@@ -540,122 +633,62 @@ public:
         };
 
         loadFont("sans",  "resources/Roboto-Regular.ttf");
-        loadFont("sans",  "resources/Roboto-Regular.ttf");
         loadFont("mono",  "resources/NotoMono-Regular.ttf");
         loadFont("emoji", "resources/NotoColorEmoji.ttf");
         nvgSetEmojiFont(m_nvg_context, "emoji");
 
-        // -- Build sample document ------------------------------------------
+        // Default markdown content
+        markdownSource = R"MD(
+# Main Title
+
+This is a **bold** paragraph with *italic* text and `monospace` code.
+
+## Second Level Header
+
+This paragraph has **bold**, *italic*, and `inline code` all mixed together.
+
+### Third Level Header
+
+- Unordered list item 1
+- Unordered list item 2 with **bold**
+- Item with `code` and *emphasis*
+
+1. Ordered list item
+2. Another item with **bold text**
+
+Here's a code block:
+
+```cpp
+#include <iostream>
+
+int main() {
+    std::cout << "Hello from Markdown!\n";
+    return 0;
+}
+)MD";
+
+        // Try to load external file if provided
+		/*
+        if (__argc > 1) {
+            std::ifstream f(__argv[1]);
+            if (f) {
+                std::stringstream ss;
+                ss << f.rdbuf();
+                markdownSource = ss.str();
+            }
+        }
+		*/
+
         doc = std::make_unique<Document>();
-        doc->contentWidth = 720.0f;
-        doc->debugDraw    = false;
+        doc->contentWidth = 800.0f;
+        doc->debugDraw = false;
 
-        // Title
-        Style titleStyle;
-        titleStyle.fontSize = 28.0f;
-        titleStyle.bold     = true;
-        titleStyle.fgColor  = nvgRGBA(30, 60, 120, 255);
-        auto* title = doc->addParagraph();
-        title->alignment = TextAlignment::Center;
-        title->addText("Rich Text Document Demo", titleStyle);
-
-        // Body intro
-        Style body;
-        body.fontSize = 16.0f;
-        auto* p1 = doc->addParagraph();
-        p1->leftIndent      = 20;
-        p1->firstLineIndent = 30;
-        p1->addText(
-            "This is a demonstration of the Document/Paragraph/Text layout "
-            "system. It supports wrapping, per-run styling (size, color, bold, "
-            "italic, underline), background highlights, and several alignment "
-            "modes.",
-            body);
-
-        // Highlight + emoji
-        Style highlight = body;
-        highlight.bgColor   = nvgRGBA(255, 240, 150, 200);
-        highlight.underline = true;
-        auto* p2 = doc->addParagraph();
-        p2->alignment = TextAlignment::Center;
-        p2->leftIndent      = 20;
-        p2->firstLineIndent = 0;
-        p2->addText("🎉 Centered paragraph with emoji and underline 🐺", highlight);
-
-        // Right-aligned, larger
-        Style rightStyle = body;
-        rightStyle.fontSize = 24.0f;
-        rightStyle.fgColor  = nvgRGBA(120, 0, 0, 255);
-        auto* p3 = doc->addParagraph();
-        p3->alignment = TextAlignment::Right;
-        p3->addText("Right-aligned text with larger font.", rightStyle);
-
-        // Mixed runs
-        Style boldStyle      = body; boldStyle.bold           = true;
-        Style italicStyle    = body; italicStyle.italic       = true;
-        Style underlineStyle = body; underlineStyle.underline = true;
-        auto* p4 = doc->addParagraph();
-        p4->addText("You can mix runs inside a single paragraph: ", body);
-        p4->addText("bold", boldStyle);
-        p4->addText(", ", body);
-        p4->addText("italic", italicStyle);
-        p4->addText(", and ", body);
-        p4->addText("underlined", underlineStyle);
-        p4->addText(" text.", body);
-
-        // Justified paragraph
-        auto* p5 = doc->addParagraph();
-        p5->alignment       = TextAlignment::Justify;
-        p5->leftIndent      = 20;
-        p5->firstLineIndent = 30;
-        p5->addText(
-            "Well, Prince, so Genoa and Lucca are now just family estates of "
-            "the Buonapartes. But I warn you, if you do not tell me that this "
-            "means war, if you still try to defend the infamies and horrors "
-            "perpetrated by that Antichrist\u2014I really believe he is "
-            "Antichrist\u2014I will have nothing more to do with you and you "
-            "are no longer my friend, no longer my 'faithful slave,' as you "
-            "call yourself! But how do you do? I see I have frightened "
-            "you\u2014sit down and tell me all the news.",
-            body);
-
-        // Code block with simple syntax-highlight runs
-        Style codeStyle;
-        codeStyle.fontSize  = 15.0f;
-        codeStyle.monospace = true;
-        codeStyle.fgColor   = nvgRGBA(200, 200, 200, 255);
-        codeStyle.bgColor   = nvgRGBA(30, 30, 30, 255);
-
-        Style keyword = codeStyle; keyword.fgColor = nvgRGBA( 86, 156, 214, 255);
-        Style stringC = codeStyle; stringC.fgColor = nvgRGBA(206, 145, 120, 255);
-        Style comment = codeStyle; comment.fgColor = nvgRGBA(106, 153,  85, 255);
-        (void)comment;
-
-        auto* codePara = doc->addParagraph();
-        codePara->addText("#include <stdio.h>\n",  codeStyle);
-        codePara->addText("int main() {\n",        codeStyle);
-        codePara->addText("    printf",            keyword);
-        codePara->addText("(",                     codeStyle);
-        codePara->addText("\"Hello, World!\\n\"",  stringC);
-        codePara->addText(");\n",                  codeStyle);
-        codePara->addText("    ",                  codeStyle);
-        codePara->addText("return",                keyword);
-        codePara->addText(" 0;\n}",                codeStyle);
-
-        // Terminal-style line
-        Style term;
-        term.monospace = true;
-        term.fontSize  = 15.0f;
-        term.fgColor   = nvgRGBA(  0, 255, 100, 255);
-        term.bgColor   = nvgRGBA( 20,  20,  20, 255);
-        auto* termP = doc->addParagraph();
-        termP->addText("> gcc hello.c && ./a.out\nHello, World!", term);
+        parseMarkdown(*doc, markdownSource);
 
         perform_layout();
     }
 
     void draw_contents() override {
-        // Light gray page background
         nvgBeginPath(m_nvg_context);
         nvgRect(m_nvg_context, 0, 0, (float)width(), (float)height());
         nvgFillColor(m_nvg_context, nvgRGB(245, 245, 245));
@@ -664,8 +697,8 @@ public:
         Screen::draw_contents();
 
         if (doc) {
-            const float margin = 40.0f;
-            doc->contentWidth  = (float)width() - 2.0f * margin;
+            const float margin = 50.0f;
+            doc->contentWidth = (float)width() - 2.0f * margin;
             doc->draw(m_nvg_context, margin, 60.0f);
         }
     }
@@ -675,7 +708,7 @@ public:
 // Entry point
 // ---------------------------------------------------------------------------
 
-int main(int /*argc*/, char** /*argv*/) {
+int main(int argc, char** argv) {
     try {
         nanogui::init();
         {
@@ -691,3 +724,4 @@ int main(int /*argc*/, char** /*argv*/) {
     }
     return 0;
 }
+

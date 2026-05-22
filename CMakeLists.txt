@@ -380,6 +380,8 @@ add_library(nanogui ${NANOGUI_LIBRARY_TYPE}
   include/nanogui/messagedialog.h src/messagedialog.cpp
   include/nanogui/textbox.h src/textbox.cpp
   include/nanogui/textarea.h src/textarea.cpp
+  include/nanogui/document.h src/document.cpp
+  include/nanogui/texteditor.h src/texteditor.cpp
   include/nanogui/imagepanel.h src/imagepanel.cpp
   include/nanogui/scrollpanel.h src/scrollpanel.cpp
     include/nanogui/cachedwidget.h src/cachedwidget.cpp
