@@ -242,8 +242,8 @@ public:
     }
 
     /// Determine the widget located at the given position value (recursive)
-    Widget* find_widget(const Vector2i& p);
-    const Widget* find_widget(const Vector2i& p) const;
+    virtual Widget* find_widget(const Vector2i& p);
+    virtual const Widget* find_widget(const Vector2i& p) const;
 
     /// Handle a mouse button event (default implementation: propagate to children)
     virtual bool mouse_button_event(const Vector2i& p, int button, bool down, int modifiers);
@@ -277,6 +277,39 @@ public:
 
     /// Invoke the associated layout generator to properly place child widgets, if any
     virtual void perform_layout(NVGcontext* ctx);
+
+    /**
+     * \name Parent-grow (grow with parent)
+     *
+     * When enabled, the widget resizes itself to fill its parent's
+     * content area on every \ref perform_layout pass, regardless of
+     * what size the parent's layout assigned. This is useful for
+     * "container" widgets (Split, ScrollPanel, ZoomScrollPanel,
+     * CachedWidget, etc.) that should grow and shrink along with their
+     * parent window.
+     *
+     * The widget's current position (assigned by the parent's layout)
+     * is preserved; symmetric margins are maintained by computing
+     * size = parent->size() - 2 * position. Widgets that override
+     * perform_layout should call \ref apply_fill_parent at the top of
+     * their override (the base \ref Widget::perform_layout does this
+     * automatically).
+     */
+    void set_grow_parent(bool fill) { m_fill_parent = fill; }
+    bool grow_parent() const { return m_fill_parent; }
+
+    /**
+     * Returns the local-coordinate origin of this widget's *content*
+     * area. Most widgets return (0,0) (their content begins at the
+     * widget's top-left). A \ref Window with a title bar overrides
+     * this to return (0, header_height) so children laid out below
+     * the title are recognized as starting at the content origin.
+     *
+     * Used by \ref apply_fill_parent to correctly fill the parent's
+     * usable area when the parent reserves space (e.g. for a title
+     * bar) at the top.
+     */
+    virtual Vector2i content_offset() const { return Vector2i(0, 0); }
 
     /// Draw the widget (and all child widgets)
     virtual void draw(NVGcontext* ctx);
@@ -351,6 +384,15 @@ protected:
     virtual ~Widget();
 
     /**
+     * Helper for \ref set_fill_parent: if the flag is set, resize this
+     * widget so its bottom-right corner mirrors its top-left position
+     * within the parent. Should be called at the top of any
+     * perform_layout override that does not chain to
+     * \ref Widget::perform_layout.
+     */
+    void apply_fill_parent();
+
+    /**
      * Convenience definition for subclasses to get the full icon scale for this
      * class of Widget.  It simple returns the value
      * ``m_theme->m_icon_scale * this->m_icon_extra_scale``.
@@ -367,6 +409,7 @@ protected:
     ref<Layout> m_layout;
     //Vector2i m_pos, m_size, m_fixed_size;
 	Vector2i m_pos, m_size, m_min_size, m_max_size;
+    bool m_fill_parent = false;
     std::vector<Widget*> m_children;
 
 	SizeMode m_width_mode = SizeMode::Preferred;

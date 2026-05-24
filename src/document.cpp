@@ -194,9 +194,24 @@ void Document::draw(NVGcontext* ctx, float originX, float originY) {
 
     float y = originY;
     for (auto& para : paragraphs) {
-        y = drawParagraph(ctx, *para, originX, y);
-        y += paragraphSpacing;
+        if (para->isRule) {
+            // Draw a horizontal separator line; uses half paragraph-spacing
+            // as padding above and below so it sits comfortably in the flow.
+            float pad = paragraphSpacing * 0.5f;
+            float ry  = y + pad;
+            nvgBeginPath(ctx);
+            nvgMoveTo(ctx, originX, ry);
+            nvgLineTo(ctx, originX + contentWidth * 0.5f, ry);
+            nvgStrokeColor(ctx, para->ruleColor);
+            nvgStrokeWidth(ctx, para->ruleThickness);
+            nvgStroke(ctx);
+            y = ry + pad;
+        } else {
+            y = drawParagraph(ctx, *para, originX, y);
+            y += paragraphSpacing;
+        }
     }
+    last_drawn_height = y - originY;
 }
 
 // ---------------------------------------------------------------------------

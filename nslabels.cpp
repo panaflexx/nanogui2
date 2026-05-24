@@ -29,11 +29,13 @@ public:
 
         ScrollPanel *scrollPanel = new ScrollPanel(window);
         scrollPanel->set_layout(new BoxLayout(Orientation::Vertical, Alignment::Maximum, 0, 0));
+		scrollPanel->set_grow_parent(true);
 
         // Main content container with vertical FlexLayout
         Widget *contentContainer = new Widget(scrollPanel);
         FlexLayout *mainLayout = new FlexLayout(FlexDirection::Column, JustifyContent::FlexStart, AlignItems::Stretch, 10, 10);
         contentContainer->set_layout(mainLayout);
+		contentContainer->set_grow_parent(true);
 
         // Large header
         Label *header = new Label(contentContainer, "🐺💺💆🐡🐛", "emoji", 16);

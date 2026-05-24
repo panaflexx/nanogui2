@@ -11,8 +11,11 @@
 */
 
 #include <nanogui/scrollpanel.h>
+#include <nanogui/screen.h>
 #include <nanogui/theme.h>
 #include <nanogui/opengl.h>
+#include <GLFW/glfw3.h>
+#include <cmath>
 
 NAMESPACE_BEGIN(nanogui)
 
@@ -34,6 +37,9 @@ void ScrollPanel::perform_layout(NVGcontext* ctx) {
         return;
     if (m_children.size() > 1)
         throw std::runtime_error("ScrollPanel should have one child.");
+
+    // Honor Widget::set_fill_parent (grow with parent's content area).
+    apply_fill_parent();
 
     Widget* child = m_children[0];
     Vector2i available = m_size;
@@ -94,6 +100,8 @@ Vector2i ScrollPanel::preferred_size(NVGcontext* ctx) const {
 }
 
 bool ScrollPanel::mouse_drag_event(const Vector2i& p, const Vector2i& rel, int button, int modifiers) {
+    if (m_scrolling_y) m_vel_y = 0.0f;
+    if (m_scrolling_x) m_vel_x = 0.0f;
 
     if ((m_scrolling_y || m_scrolling_x) && !m_children.empty() && (m_child_preferred_size.y() > m_size.y() || m_child_preferred_size.x() > m_size.x())) {
         if (m_scrolling_y && m_child_preferred_size.y() > m_size.y() && VScrollable())
@@ -123,6 +131,7 @@ bool ScrollPanel::mouse_button_event(const Vector2i& p, int button, bool down, i
     if (down && button == GLFW_MOUSE_BUTTON_1 && !m_children.empty() && VScrollable() && OverVertical) {
 
         m_scrolling_y = true;
+        m_vel_y = 0.0f; m_vel_x = 0.0f;
 
         int scrollh = (int)(height() *
             std::min(1.f, height() / (float)m_child_preferred_size.y()));
@@ -146,6 +155,7 @@ bool ScrollPanel::mouse_button_event(const Vector2i& p, int button, bool down, i
     if (down && button == GLFW_MOUSE_BUTTON_1 && !m_children.empty() && HScrollable() && OverHorizontal) {
 
         m_scrolling_x = true;
+        m_vel_y = 0.0f; m_vel_x = 0.0f;
         int scrollw = (int)(width() *
             std::min(1.f, width() / (float)m_child_preferred_size.x()));
         int start = (int)(m_pos.x() + 4 + 1 + (m_size.x() - 8 - scrollw) * m_scroll.x());
@@ -176,49 +186,19 @@ bool ScrollPanel::mouse_button_event(const Vector2i& p, int button, bool down, i
 
 bool ScrollPanel::scroll_event(const Vector2i& p, const Vector2f& rel) {
     bool used = false;
-
     if (!m_children.empty() && m_child_preferred_size.y() > m_size.y() && VScrollable() && rel.y() != 0.f) {
-        auto child = m_children[0];
-        float scroll_amount = rel.y() * m_size.y() * .25f;
-
-        m_scroll.y() = std::max(0.f, std::min(1.f, m_scroll.y() - scroll_amount / m_child_preferred_size.y()));
-
-        Vector2i old_pos = child->position();
-        child->set_position(Vector2i(old_pos.x(), -m_scroll.y() * (m_child_preferred_size.y() - m_size.y())));
-        Vector2i new_pos = child->position();
-        m_update_layout = true;
-        child->mouse_motion_event(p - m_pos, old_pos - new_pos, 0, 0);
+        m_vel_y = std::clamp(m_vel_y - rel.y() * (float)m_size.y() * 0.6f, -3500.f, 3500.f);
         used = true;
     }
     if (!m_children.empty() && m_child_preferred_size.x() > m_size.x() && HScrollable() && rel.y() != 0.f) {
-        auto child = m_children[0];
-        float scroll_amount = rel.y() * m_size.x() * .25f;
-
-        m_scroll.x() = std::max(0.f, std::min(1.f, m_scroll.x() - scroll_amount / m_child_preferred_size.x()));
-
-        Vector2i old_pos = child->position();
-        child->set_position(Vector2i(-m_scroll.x() * (m_child_preferred_size.x() - m_size.x()), old_pos.y()));
-        Vector2i new_pos = child->position();
-        m_update_layout = true;
-        child->mouse_motion_event(p - m_pos, old_pos - new_pos, 0, 0);
+        m_vel_x = std::clamp(m_vel_x - rel.y() * (float)m_size.x() * 0.6f, -3500.f, 3500.f);
         used = true;
     }
     if (!m_children.empty() && m_child_preferred_size.x() > m_size.x() && HScrollable() && rel.x() != 0.f) {
-        // True 2D scroll deltas (trackpads, horizontal wheels, etc.)
-        auto child = m_children[0];
-        float scroll_amount = rel.x() * m_size.x() * .25f;
-
-        m_scroll.x() = std::max(0.f, std::min(1.f, m_scroll.x() - scroll_amount / m_child_preferred_size.x()));
-
-        Vector2i old_pos = child->position();
-        child->set_position(Vector2i(-m_scroll.x() * (m_child_preferred_size.x() - m_size.x()), old_pos.y()));
-        Vector2i new_pos = child->position();
-        m_update_layout = true;
-        child->mouse_motion_event(p - m_pos, old_pos - new_pos, 0, 0);
+        m_vel_x = std::clamp(m_vel_x - rel.x() * (float)m_size.x() * 0.6f, -3500.f, 3500.f);
         used = true;
     }
-    if (used)
-        return true;
+    if (used) { screen()->redraw(); return true; }
     return Widget::scroll_event(p, rel);
 }
 
@@ -227,74 +207,88 @@ void ScrollPanel::draw(NVGcontext* ctx) {
         return;
     Widget* child = m_children[0];
 
+    // ---- Inertia integration ----
+    {
+        double now = glfwGetTime();
+        float dt = (m_last_t > 0.0) ? std::min((float)(now - m_last_t), 0.05f) : 0.0f;
+        m_last_t = now;
+        bool moving = false;
+
+        if (std::abs(m_vel_y) > 0.5f && VScrollable() && m_child_preferred_size.y() > m_size.y()) {
+            float range = (float)(m_child_preferred_size.y() - m_size.y());
+            float cur   = m_scroll.y() * range + m_vel_y * dt;
+            cur = std::clamp(cur, 0.f, range);
+            m_scroll.y() = cur / range;
+            if (cur <= 0.f || cur >= range) m_vel_y = 0.f;
+            else {
+                m_vel_y *= std::exp(-8.0f * dt);
+                if (std::abs(m_vel_y) < 0.5f) m_vel_y = 0.f;
+            }
+            moving = true;
+        }
+        if (std::abs(m_vel_x) > 0.5f && HScrollable() && m_child_preferred_size.x() > m_size.x()) {
+            float range = (float)(m_child_preferred_size.x() - m_size.x());
+            float cur   = m_scroll.x() * range + m_vel_x * dt;
+            cur = std::clamp(cur, 0.f, range);
+            m_scroll.x() = cur / range;
+            if (cur <= 0.f || cur >= range) m_vel_x = 0.f;
+            else {
+                m_vel_x *= std::exp(-8.0f * dt);
+                if (std::abs(m_vel_x) < 0.5f) m_vel_x = 0.f;
+            }
+            moving = true;
+        }
+        if (moving) { m_update_layout = true; screen()->redraw(); }
+    }
+
     if (m_update_layout) {
         m_update_layout = false;
         child->perform_layout(ctx);
     }
-    int yoffset = 0;
-    int xoffset = 0;
 
+    int yoffset = 0, xoffset = 0;
     if (m_child_preferred_size.y() > m_size.y() && VScrollable())
-        yoffset = -m_scroll.y() * (m_child_preferred_size.y() - m_size.y());
+        yoffset = -(int)(m_scroll.y() * (m_child_preferred_size.y() - m_size.y()));
     if (m_child_preferred_size.x() > m_size.x() && HScrollable())
-        xoffset = -m_scroll.x() * (m_child_preferred_size.x() - m_size.x());
+        xoffset = -(int)(m_scroll.x() * (m_child_preferred_size.x() - m_size.x()));
 
     child->set_position(Vector2i(xoffset, yoffset));
-    //m_child_preferred_size = child->preferred_size(ctx);
-    float scrollw = width() * std::min(1.f, width() / (float)m_child_preferred_size.x());
-    float scrollh = height() * std::min(1.f, height() / (float)m_child_preferred_size.y());
 
+    // Draw child, clipped to full panel area (scrollbar overlays)
     nvgSave(ctx);
     nvgTranslate(ctx, m_pos.x(), m_pos.y());
-    nvgIntersectScissor(ctx, 0, 0, m_size.x() - 10, m_size.y() - 10);
+    nvgIntersectScissor(ctx, 0, 0, (float)m_size.x(), (float)m_size.y());
     if (child->visible())
         child->draw(ctx);
     nvgRestore(ctx);
 
-    if (m_child_preferred_size.y() > m_size.y() && VScrollable())
-    {
+    // ---- Pill-style overlay scrollbar (no track drawn) ----
+    constexpr float SB_W      = 6.0f;
+    constexpr float SB_MARGIN = 3.0f;
+    constexpr float SB_MIN    = 28.0f;
 
-        NVGpaint paint = nvgBoxGradient(
-            ctx, m_pos.x() + m_size.x() - 12 + 1, m_pos.y() + 4 + 1, 8,
-            m_size.y() - 8, 3, 4, Color(0, 32), Color(0, 92));
+    if (m_child_preferred_size.y() > m_size.y() && VScrollable()) {
+        float vis   = (float)m_size.y() / (float)m_child_preferred_size.y();
+        float th    = std::max(SB_MIN, (float)m_size.y() * vis);
+        float track = (float)m_size.y() - th;
+        float ty    = m_pos.y() + m_scroll.y() * track;
+        float tx    = m_pos.x() + (float)m_size.x() - SB_W - SB_MARGIN;
         nvgBeginPath(ctx);
-        nvgRoundedRect(ctx, m_pos.x() + m_size.x() - 12, m_pos.y() + 4, 8,
-            m_size.y() - 8, 3);
-        nvgFillPaint(ctx, paint);
-        nvgFill(ctx);
-
-        paint = nvgBoxGradient(
-            ctx, m_pos.x() + m_size.x() - 12 - 1,
-            m_pos.y() + 4 + (m_size.y() - 8 - scrollh) * m_scroll.y() - 1, 8, scrollh,
-            3, 4, Color(220, 100), Color(128, 100));
-
-        nvgBeginPath(ctx);
-        nvgRoundedRect(ctx, m_pos.x() + m_size.x() - 12 + 1,
-            m_pos.y() + 4 + 1 + (m_size.y() - 8 - scrollh) * m_scroll.y(), 8 - 2,
-            scrollh - 2, 2);
-        nvgFillPaint(ctx, paint);
+        nvgRoundedRect(ctx, tx, ty + 3.f, SB_W, th - 6.f, SB_W * 0.5f);
+        nvgFillColor(ctx, m_scrolling_y ? nvgRGBA(100,110,130,230) : nvgRGBA(150,155,165,180));
         nvgFill(ctx);
     }
-    if (m_child_preferred_size.x() > m_size.x() && HScrollable())
-    {
-        NVGpaint paint = nvgBoxGradient(
-            ctx, m_pos.x() + m_size.x() + 4 + 1, m_pos.y() - 12 + 1, m_size.x() - 8, 8, 3, 4, Color(0, 32), Color(0, 92));
+    if (m_child_preferred_size.x() > m_size.x() && HScrollable()) {
+        float vis   = (float)m_size.x() / (float)m_child_preferred_size.x();
+        float tw    = std::max(SB_MIN, (float)m_size.x() * vis);
+        float track = (float)m_size.x() - tw;
+        float tx    = m_pos.x() + m_scroll.x() * track;
+        float ty    = m_pos.y() + (float)m_size.y() - SB_W - SB_MARGIN;
         nvgBeginPath(ctx);
-        nvgRoundedRect(ctx, m_pos.x() + 4, m_pos.y() + m_size.y() - 12, m_size.x() - 8, 8, 3);
-        nvgFillPaint(ctx, paint);
-        nvgFill(ctx);
-
-        paint = nvgBoxGradient(
-            ctx, m_pos.x() + 4 + (m_size.x() - 8 - scrollw) * m_scroll.x() - 1, m_pos.y() + m_size.y() - 12 - 1, scrollw, 8,
-            3, 4, Color(220, 100), Color(128, 100));
-
-        nvgBeginPath(ctx);
-        nvgRoundedRect(ctx,
-            m_pos.x() + 4 + 1 + (m_size.x() - 8 - scrollw) * m_scroll.x(), m_pos.y() + m_size.y() - 12 + 1, scrollw - 2, 8 - 2, 2);
-        nvgFillPaint(ctx, paint);
+        nvgRoundedRect(ctx, tx + 3.f, ty, tw - 6.f, SB_W, SB_W * 0.5f);
+        nvgFillColor(ctx, m_scrolling_x ? nvgRGBA(100,110,130,230) : nvgRGBA(150,155,165,180));
         nvgFill(ctx);
     }
-
 }
 
 NAMESPACE_END(nanogui)

@@ -90,7 +90,27 @@ Vector2i Widget::preferred_size(NVGcontext* ctx) const {
         return m_size;
 }
 
+void Widget::apply_fill_parent() {
+    if (!m_fill_parent || !m_parent)
+        return;
+    // The parent's usable content area starts at `co` (e.g. (0, header)
+    // for a Window with a title bar) and ends at parent->size(). The
+    // child's position within that content area is `m_pos - co`. We
+    // preserve symmetric margins inside the content area, which gives
+    //   filled = (parent_size - co) - 2 * (m_pos - co)
+    //          = parent_size + co - 2 * m_pos
+    const Vector2i &ps = m_parent->size();
+    Vector2i co = m_parent->content_offset();
+    Vector2i filled(
+        std::max(0, ps.x() + co.x() - 2 * m_pos.x()),
+        std::max(0, ps.y() + co.y() - 2 * m_pos.y())
+    );
+    if (filled.x() > 0 && filled.y() > 0)
+        m_size = filled;
+}
+
 void Widget::perform_layout(NVGcontext* ctx) {
+    apply_fill_parent();
     if (m_layout) {
         m_layout->perform_layout(ctx, this);
     }

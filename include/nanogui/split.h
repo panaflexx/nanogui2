@@ -114,18 +114,19 @@ public:
     
     /// Perform custom layout (override for custom layout)
     virtual void perform_layout(NVGcontext *ctx) override {
-        Vector2i areaSize = size();
-
-		//printf("perform_layout 1\n");
-
 		if (m_children.empty())
 			return;
 		if (m_children.size() != 2)
 			throw std::runtime_error("Split must have two children.");
 
-		m_firstWidget = m_children[0];
-		m_secondWidget = m_children[1];
-        
+        m_firstWidget = m_children[0];
+        m_secondWidget = m_children[1];
+
+        // Honor Widget::set_fill_parent (grow with parent's content area).
+        apply_fill_parent();
+
+        Vector2i areaSize = size();
+
         // If area is invalid, use parent size
         if (areaSize.x() <= 0 || areaSize.y() <= 0) {
             if (parent()) {
@@ -230,51 +231,30 @@ public:
         if (!ctx || !m_firstWidget || !m_secondWidget)
             return;
         
-        int dragBarSize = 6;
+        int dragBarSize = 6;  // hotspot / hit-test size — never changes
+        int drawWidth = m_theme->m_split_divider_width;
         float visualPosition;
-        
+
         if (m_orientation == Orientation::Horizontal) {
             visualPosition = m_dragPosition * (m_size.x() - dragBarSize);
-            
-            // Draw vertical divider bar
+            float drawOffset = (dragBarSize - drawWidth) * 0.5f;
+
             nvgBeginPath(ctx);
-            nvgRect(ctx, 
-                m_pos.x() + visualPosition, m_pos.y(), 
-                dragBarSize, m_size.y());
-            nvgFillColor(ctx, m_theme->m_border_light);
+            nvgRect(ctx,
+                m_pos.x() + visualPosition + drawOffset, m_pos.y(),
+                drawWidth, m_size.y());
+            nvgFillColor(ctx, m_theme->m_split_divider);
             nvgFill(ctx);
-            
-            // Draw grabber lines
-            int centerY = m_pos.y() + m_size.y() / 2;
-            for (int i = -2; i <= 2; i += 2) {
-                nvgBeginPath(ctx);
-                nvgMoveTo(ctx, m_pos.x() + visualPosition + 2, centerY + i);
-                nvgLineTo(ctx, m_pos.x() + visualPosition + dragBarSize - 2, centerY + i);
-                nvgStrokeColor(ctx, Color(255, 255, 255, 100));
-                nvgStrokeWidth(ctx, 1.0f);
-                nvgStroke(ctx);
-            }
         } else {
             visualPosition = m_dragPosition * (m_size.y() - dragBarSize);
-            
-            // Draw horizontal divider bar
+            float drawOffset = (dragBarSize - drawWidth) * 0.5f;
+
             nvgBeginPath(ctx);
-            nvgRect(ctx, 
-                m_pos.x(), m_pos.y() + visualPosition, 
-                m_size.x(), dragBarSize);
-            nvgFillColor(ctx, m_theme->m_border_light);
+            nvgRect(ctx,
+                m_pos.x(), m_pos.y() + visualPosition + drawOffset,
+                m_size.x(), drawWidth);
+            nvgFillColor(ctx, m_theme->m_split_divider);
             nvgFill(ctx);
-            
-            // Draw grabber lines
-            int centerX = m_pos.x() + m_size.x() / 2;
-            for (int i = -2; i <= 2; i += 2) {
-                nvgBeginPath(ctx);
-                nvgMoveTo(ctx, centerX + i, m_pos.y() + visualPosition + 2);
-                nvgLineTo(ctx, centerX + i, m_pos.y() + visualPosition + dragBarSize - 2);
-                nvgStrokeColor(ctx, Color(255, 255, 255, 100));
-                nvgStrokeWidth(ctx, 1.0f);
-                nvgStroke(ctx);
-            }
         }
     }
     
@@ -291,22 +271,22 @@ public:
         // Handle mouse press (to start dragging)
         if (button == GLFW_MOUSE_BUTTON_1 && down) {
             int dragBarSize = 6;
-			float visualPosition;
-            
-			if (m_orientation == Orientation::Horizontal) {
-				visualPosition = m_dragPosition * (m_size.x() - dragBarSize);
-				if (p.x() >= visualPosition && p.x() <= visualPosition + dragBarSize) {
-					//printf("DRAG HORIZONTAL\n");
+            float visualPosition;
+            // p comes in parent-relative coordinates; convert to Split-local
+            Vector2i lp = p - m_pos;
+
+            if (m_orientation == Orientation::Horizontal) {
+                visualPosition = m_dragPosition * (m_size.x() - dragBarSize);
+                if (lp.x() >= visualPosition && lp.x() <= visualPosition + dragBarSize) {
                     m_dragging = true;
-                    m_dragOffset = p.x() - visualPosition;
+                    m_dragOffset = lp.x() - visualPosition;
                     return true;
                 }
             } else {
-				visualPosition = m_dragPosition * (m_size.y() - dragBarSize);
-				if (p.y() >= visualPosition && p.y() <= visualPosition + dragBarSize) {
-					//printf("DRAG VERTICAL\n");
+                visualPosition = m_dragPosition * (m_size.y() - dragBarSize);
+                if (lp.y() >= visualPosition && lp.y() <= visualPosition + dragBarSize) {
                     m_dragging = true;
-                    m_dragOffset = p.y() - visualPosition;
+                    m_dragOffset = lp.y() - visualPosition;
                     return true;
                 }
             }
@@ -320,13 +300,15 @@ public:
         if (m_dragging) {
             float totalSize;
             float newPosition;
-            
+            // p comes in parent-relative coordinates; convert to Split-local
+            Vector2i lp = p - m_pos;
+
             if (m_orientation == Orientation::Horizontal) {
                 totalSize = m_size.x() - 6; // Subtract drag bar width
-                newPosition = (float)(p.x() - m_dragOffset) / totalSize;
+                newPosition = (float)(lp.x() - m_dragOffset) / totalSize;
             } else {
                 totalSize = m_size.y() - 6; // Subtract drag bar height
-                newPosition = (float)(p.y() - m_dragOffset) / totalSize;
+                newPosition = (float)(lp.y() - m_dragOffset) / totalSize;
             }
             
             // Clamp position between 0 and 1
@@ -362,15 +344,17 @@ public:
 		// Check if mouse is over the drag bar
 		int dragBarSize = 6;
 		bool overDragBar = false;
+		// p comes in parent-relative coordinates; convert to Split-local
+		Vector2i lp = p - m_pos;
 		
 		if (m_orientation == Orientation::Horizontal) {
 			float visualPosition = m_dragPosition * (m_size.x() - dragBarSize);
-			if (p.x() >= visualPosition && p.x() <= visualPosition + dragBarSize) {
+			if (lp.x() >= visualPosition && lp.x() <= visualPosition + dragBarSize) {
 				overDragBar = true;
 			}
 		} else {
 			float visualPosition = m_dragPosition * (m_size.y() - dragBarSize);
-			if (p.y() >= visualPosition && p.y() <= visualPosition + dragBarSize) {
+			if (lp.y() >= visualPosition && lp.y() <= visualPosition + dragBarSize) {
 				overDragBar = true;
 			}
 		}

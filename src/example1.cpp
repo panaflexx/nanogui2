@@ -699,6 +699,8 @@ public:
         auto* editorCache = new CachedWidget(Editor_TopWindow);
         editorCache->set_layout(
             new BoxLayout(Orientation::Vertical, Alignment::Fill, 0, 0));
+        editorCache->set_grow_parent(true);
+        editorCache->set_size( Editor_TopWindow->size());
 
         TextEditor* editor = Make<TextEditor>(editorCache,
                                               TextEditor::Mode::Code)
@@ -721,6 +723,8 @@ public:
         editor->caret_callback  = [editorCache](TextEditor::Position) {
             editorCache->cache_dirty();
         };
+        editor->set_min_height(editorCache->size().y());
+        editor->set_grow_parent(true);
 
         // Sample C source to demo monospace rendering + line numbers.
         const std::string sample =
@@ -927,11 +931,15 @@ public:
     // -----------------------------------------------------------------------
     void CreateMarkdownDoc()
     {
+        // FlexLayout on the Window: one main-axis item (the cache), with
+        // AlignItems::Stretch filling the cross axis and flex_grow=1 on
+        // the cache filling the main axis.  Result: the cache always
+        // tracks the Window's content area as it's resized.
         Window* mdWindow = Make<Window>(this, "Markdown", true)
             .pos({60, 460})
             .size({820, 380})
             .visible(true)
-            .layout(new BoxLayout(Orientation::Vertical, Alignment::Fill, 0, 0));
+            .layout(new GroupLayout());
 
         // Wrap the whole Split in a CachedWidget so the Window's contents
         // are rendered once into an FBO and reused across frames.  Mouse
@@ -939,15 +947,20 @@ public:
         // explicit cache_dirty() calls below all trigger a rebuild.
         auto* mdCache = new CachedWidget(mdWindow);
         mdCache->set_layout(
-            new BoxLayout(Orientation::Vertical, Alignment::Fill, 0, 0));
-        mdCache->set_fixed_size({800, 360});
+            new BoxLayout(Orientation::Horizontal, Alignment::Fill, 0, 0));
+        mdCache->set_grow_parent(true);
+        mdCache->set_min_size(mdWindow->size());
 
         // Vertical drag bar separating the two panes (Split::Horizontal
         // means "widgets side-by-side, vertical divider").
         auto* split = new Split(mdCache, Split::Orientation::Horizontal);
-        split->set_fixed_size({800, 360});
-        split->set_min_size({120, 120});
+        //split->set_fixed_size({800, 360});
+        split->set_min_size(mdCache->size());
+        //split->set_height(600);
         split->set_drag_position(0.5f);
+        // Grow the Split (and therefore the editor panes) along with the
+        // parent Window when it is resized.
+        split->set_grow_parent(true);
 
         // -- left: source editor (Code mode) --------------------------------
         auto* source = new TextEditor(split, TextEditor::Mode::Code);
@@ -1007,6 +1020,7 @@ public:
             parse_markdown(*pdoc, source->plain_text());
             mdCache->cache_dirty();
         };
+
         rebuild();
         source->change_callback = rebuild;
         // Caret movement (no content change) still needs a repaint.

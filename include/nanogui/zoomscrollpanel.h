@@ -170,6 +170,10 @@ protected:
     bool      m_panning;           ///< Middle-mouse pan in progress.
     bool      m_update_layout;
     ScrollTypes m_scroll_type;
+
+    double    m_vel_x  = 0.0;   // inertia scroll velocity (px/s)
+    double    m_vel_y  = 0.0;
+    double    m_last_t = 0.0;   // glfwGetTime() at last draw
 };
 
 NAMESPACE_END(nanogui)

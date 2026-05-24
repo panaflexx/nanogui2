@@ -62,6 +62,10 @@ public:
     float             leftIndent      = 0.0f;
     float             firstLineIndent = 0.0f;
     TextAlignment     alignment       = TextAlignment::Left;
+    // Horizontal-rule paragraph: skips text layout and draws a line instead.
+    bool              isRule          = false;
+    NVGcolor          ruleColor       = NVGcolor{ { { 0.65f, 0.65f, 0.70f, 1.f } } };
+    float             ruleThickness   = 1.0f;
 
     Paragraph() = default;
 
@@ -90,6 +94,7 @@ public:
     float paragraphSpacing = 12.0f;  // gap between paragraphs
     float lineSpacing      = 4.0f;   // extra gap between lines in a paragraph
     bool  debugDraw        = false;  // overlay word/line debug visualisations
+    mutable float last_drawn_height = 0.0f; ///< Set by draw(); total content height in pixels.
 
     Paragraph* addParagraph();
     Paragraph* addParagraph(std::string text, const Style& style = Style{});

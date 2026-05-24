@@ -190,17 +190,6 @@ void Window::draw(NVGcontext* ctx) {
         nvgText(ctx, m_pos.x() + m_size.x() / 2, m_pos.y() + hh / 2 - 1,
             m_title.c_str(), nullptr);
     }
-    if (m_resizable)
-    {
-        nvgSave(ctx);
-        nvgBeginPath(ctx);
-        nvgMoveTo(ctx, m_pos.x() + m_size.x() - 10, m_pos.y() + m_size.y());
-        nvgLineTo(ctx, m_pos.x() + m_size.x(), m_pos.y() + m_size.y() - 10);
-        nvgLineTo(ctx, m_pos.x() + m_size.x(), m_pos.y() + m_size.y());
-        nvgFillColor(ctx, m_theme->m_window_header_gradient_top);
-        nvgFill(ctx);
-        nvgRestore(ctx);
-    }
 
     nvgRestore(ctx);
 
@@ -212,6 +201,21 @@ void Window::draw(NVGcontext* ctx) {
     auto t1 = std::chrono::high_resolution_clock::now();
     m_last_drawtime_ms = std::chrono::duration<float, std::milli>(t1 - t0).count();
 #endif
+
+    /* Draw the resize grip last so it sits on top of any child widgets
+       that happen to overlap the bottom-right corner. */
+    if (m_resizable)
+    {
+        nvgSave(ctx);
+        nvgResetScissor(ctx);
+        nvgBeginPath(ctx);
+        nvgMoveTo(ctx, m_pos.x() + m_size.x() - 10, m_pos.y() + m_size.y());
+        nvgLineTo(ctx, m_pos.x() + m_size.x(), m_pos.y() + m_size.y() - 10);
+        nvgLineTo(ctx, m_pos.x() + m_size.x(), m_pos.y() + m_size.y());
+        nvgFillColor(ctx, m_theme->m_window_header_gradient_top);
+        nvgFill(ctx);
+        nvgRestore(ctx);
+    }
 }
 
 void Window::dispose() {
@@ -420,6 +424,11 @@ bool Window::mouse_motion_event(const Vector2i& p, const Vector2i& rel, int butt
     {
         m_cursor = Cursor::Arrow;
 
+        // Only forward to children if we're not over a resize zone.
+        if (m_resizable &&
+            (check_horizontal_resize(p) || check_vertical_resize(p)))
+            return true;
+
         return (Widget::mouse_motion_event(p, rel, button, modifiers));
     }
     return true;
@@ -427,6 +436,19 @@ bool Window::mouse_motion_event(const Vector2i& p, const Vector2i& rel, int butt
 }
 
 bool Window::mouse_button_event(const Vector2i& p, int button, bool down, int modifiers) {
+
+    // Give resize precedence over child widgets.
+    if (m_resizable && down && button == GLFW_MOUSE_BUTTON_1) {
+        if (check_horizontal_resize(p) || check_vertical_resize(p)) {
+            m_resize_dir.x() = check_horizontal_resize(p) ? 1 : 0;
+            m_resize_dir.y() = check_vertical_resize(p) ? 1 : 0;
+            m_resize = true;
+            m_snap_init = size();
+            m_snap_tot_rel = Vector2f(0, 0);
+            request_focus();
+            return true;
+        }
+    }
 
     if (Widget::mouse_button_event(p, button, down, modifiers))
         return true;
@@ -462,6 +484,29 @@ bool Window::scroll_event(const Vector2i& p, const Vector2f& rel) {
 
 void Window::refresh_relative_placement() {
     /* Overridden in \ref Popup */
+}
+
+Widget* Window::find_widget(const Vector2i& p) {
+    /* `p` is expressed in the parent's coordinate frame; convert to the
+       absolute (screen) frame that check_horizontal_resize /
+       check_vertical_resize expect. */
+    Vector2i abs_p = m_parent ? m_parent->absolute_position() + p : p;
+    if (m_resizable && visible() && contains(p) &&
+        (check_horizontal_resize(abs_p) || check_vertical_resize(abs_p)))
+        return this;
+    return Widget::find_widget(p);
+}
+
+const Widget* Window::find_widget(const Vector2i& p) const {
+    Vector2i abs_p = m_parent ? m_parent->absolute_position() + p : p;
+    /* check_horizontal_resize / check_vertical_resize are non-const helpers,
+       so route through the non-const overload for the resize-zone test. */
+    Window* self = const_cast<Window*>(this);
+    if (m_resizable && visible() && contains(p) &&
+        (self->check_horizontal_resize(abs_p) ||
+         self->check_vertical_resize(abs_p)))
+        return this;
+    return Widget::find_widget(p);
 }
 bool Window::check_horizontal_resize(const Vector2i& mousePos) {
     int offset = m_theme->m_resize_area_offset;

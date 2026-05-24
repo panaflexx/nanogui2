@@ -181,21 +181,33 @@ void ZoomScrollPanel::perform_layout(NVGcontext* ctx) {
     if (m_children.size() > 1)
         throw std::runtime_error("ZoomScrollPanel should have one child.");
 
+    // Honor Widget::set_fill_parent (grow with parent's content area).
+    apply_fill_parent();
+
     Widget* child = m_children[0];
 
-    // Give the child as much space as it wants. Unlike ScrollPanel, we
-    // do NOT constrain the child to the viewport: the panel can also
-    // *zoom in*, so the child might want to be larger than the viewport
-    // at scale 1.0 OR smaller than it at high zoom. The viewport
-    // constraint applies only to drawing/scissoring.
     child->set_position(Vector2i(0, 0));
 
-    // First pass: ask the child its natural preferred size.
+    // Viewport size expressed in the child's (pre-zoom) logical units.
+    int view_w = (int)std::ceil(m_size.x() / std::max(m_zoom, 1e-9));
+    int view_h = (int)std::ceil(m_size.y() / std::max(m_zoom, 1e-9));
+
+    // First pass: constrain the child to the viewport so layouts that
+    // can shrink (e.g. FlexLayout with flex_shrink, AlignItems::Stretch)
+    // get a chance to do so. Without this step, the child would always
+    // report its natural (unconstrained) preferred size and we would
+    // never shrink below that.
+    child->set_size(Vector2i(view_w, view_h));
+    child->perform_layout(ctx);
+
+    // Now ask the child what it actually wants inside that constraint.
     Vector2i pref = child->preferred_size(ctx);
-    // Make sure the child has at least the viewport-equivalent (in logical units) available.
-    int min_w = (int)std::ceil(m_size.x() / std::max(m_zoom, 1e-9));
-    int min_h = (int)std::ceil(m_size.y() / std::max(m_zoom, 1e-9));
-    Vector2i child_size(std::max(pref.x(), min_w), std::max(pref.y(), min_h));
+
+    // Final child size: at least the viewport (so it visually fills the
+    // panel when the content is smaller), but larger if the child wants
+    // more (in which case scrolling kicks in). The viewport constraint
+    // here is in pre-zoom logical units, matching `pref`.
+    Vector2i child_size(std::max(pref.x(), view_w), std::max(pref.y(), view_h));
 
     child->set_size(child_size);
     child->perform_layout(ctx);
@@ -234,6 +246,7 @@ bool ZoomScrollPanel::mouse_button_event(const Vector2i& p, int button, bool dow
         VScrollable() && on_vbar && e.y() > m_size.y())
     {
         m_scrolling_y = true;
+        m_vel_y = 0.0; m_vel_x = 0.0;
 
         double scrollh = m_size.y() * std::min(1.0, m_size.y() / e.y());
         double cur_norm = scroll().y();
@@ -260,6 +273,7 @@ bool ZoomScrollPanel::mouse_button_event(const Vector2i& p, int button, bool dow
         HScrollable() && on_hbar && e.x() > m_size.x())
     {
         m_scrolling_x = true;
+        m_vel_y = 0.0; m_vel_x = 0.0;
 
         double scrollw = m_size.x() * std::min(1.0, m_size.x() / e.x());
         double cur_norm = scroll().x();
@@ -319,6 +333,7 @@ bool ZoomScrollPanel::mouse_motion_event(const Vector2i& p, const Vector2i& rel,
 
 bool ZoomScrollPanel::mouse_drag_event(const Vector2i& p, const Vector2i& rel,
                                        int button, int modifiers) {
+    if (m_scrolling_y || m_scrolling_x) { m_vel_x = 0.0; m_vel_y = 0.0; }
     Vector2d e = effective_child_size();
 
     // Scrollbar drag (axis-specific because m_scrolling_* gets set in mouse_button_event).
@@ -381,22 +396,20 @@ bool ZoomScrollPanel::scroll_event(const Vector2i& p, const Vector2f& rel) {
     bool used = false;
 
     if (!shift && VScrollable() && e.y() > m_size.y() && rel.y() != 0.f) {
-        m_pan_offset.y() += rel.y() * m_size.y() * 0.25;
+        m_vel_y = std::clamp(m_vel_y + (double)rel.y() * m_size.y() * 0.6, -3500.0, 3500.0);
         used = true;
     }
     if (shift && HScrollable() && e.x() > m_size.x() && rel.y() != 0.f) {
-        m_pan_offset.x() += rel.y() * m_size.x() * 0.25;
+        m_vel_x = std::clamp(m_vel_x + (double)rel.y() * m_size.x() * 0.6, -3500.0, 3500.0);
         used = true;
     }
     if (!shift && HScrollable() && e.x() > m_size.x() && rel.x() != 0.f) {
         // True 2D scroll deltas (trackpads, horizontal wheels, etc.)
-        m_pan_offset.x() += rel.x() * m_size.x() * 0.25;
+        m_vel_x = std::clamp(m_vel_x + (double)rel.x() * m_size.x() * 0.6, -3500.0, 3500.0);
         used = true;
     }
 
     if (used) {
-        clamp_state();
-        m_update_layout = true;
         return true;
     }
 
@@ -421,6 +434,32 @@ void ZoomScrollPanel::draw(NVGcontext* ctx) {
         return;
     Widget* child = m_children[0];
 
+    // ---- Inertia integration ----
+    {
+        double now = glfwGetTime();
+        double dt  = (m_last_t > 0.0) ? std::min(now - m_last_t, 0.05) : 0.0;
+        m_last_t = now;
+        bool moving = false;
+
+        Vector2d e = effective_child_size();
+
+        if (std::abs(m_vel_y) > 0.5 && VScrollable() && e.y() > m_size.y()) {
+            m_pan_offset.y() += m_vel_y * dt;
+            clamp_state();
+            m_vel_y *= std::exp(-8.0 * dt);
+            if (std::abs(m_vel_y) < 0.5) m_vel_y = 0.0;
+            moving = true;
+        }
+        if (std::abs(m_vel_x) > 0.5 && HScrollable() && e.x() > m_size.x()) {
+            m_pan_offset.x() += m_vel_x * dt;
+            clamp_state();
+            m_vel_x *= std::exp(-8.0 * dt);
+            if (std::abs(m_vel_x) < 0.5) m_vel_x = 0.0;
+            moving = true;
+        }
+        if (moving) { m_update_layout = true; screen()->redraw(); }
+    }
+
     if (m_update_layout) {
         m_update_layout = false;
         child->perform_layout(ctx);
@@ -429,88 +468,48 @@ void ZoomScrollPanel::draw(NVGcontext* ctx) {
     }
 
     Vector2d e = effective_child_size();
-
     bool show_vbar = VScrollable() && e.y() > m_size.y();
     bool show_hbar = HScrollable() && e.x() > m_size.x();
 
-    // We always keep child position at (0,0); pan/zoom is in the matrix.
     child->set_position(Vector2i(0, 0));
 
-    // --- Child rendering with transform + scissor ---
+    // Child rendering — scissor covers full panel (scrollbar overlays)
     nvgSave(ctx);
     nvgTranslate(ctx, (float)m_pos.x(), (float)m_pos.y());
-    // Scissor in panel-local pixel space (before zoom transform):
-    nvgIntersectScissor(ctx,
-                        0, 0,
-                        (float)(m_size.x() - (show_vbar ? kScrollbarSlot - 2 : 0)),
-                        (float)(m_size.y() - (show_hbar ? kScrollbarSlot - 2 : 0)));
+    nvgIntersectScissor(ctx, 0, 0, (float)m_size.x(), (float)m_size.y());
     nvgTranslate(ctx, (float)m_pan_offset.x(), (float)m_pan_offset.y());
     nvgScale(ctx, (float)m_zoom, (float)m_zoom);
     if (child->visible())
         child->draw(ctx);
     nvgRestore(ctx);
 
-    // --- Scrollbars (drawn in screen/panel-local pixel space) ---
+    // ---- Pill-style overlay scrollbars (no track) ----
+    constexpr float SB_W      = 6.0f;
+    constexpr float SB_MARGIN = 3.0f;
+    constexpr float SB_MIN    = 28.0f;
+
     if (show_vbar) {
-        double scrollh = m_size.y() * std::min(1.0, m_size.y() / e.y());
-        float sy = (float)scroll().y();
-
-        NVGpaint paint = nvgBoxGradient(
-            ctx, m_pos.x() + m_size.x() - kScrollbarSlot + 1,
-                 m_pos.y() + kScrollbarMargin + 1,
-                 kScrollbarThick, m_size.y() - 8, 3, 4,
-                 Color(0, 32), Color(0, 92));
+        float vis   = (float)m_size.y() / (float)e.y();
+        float th    = std::max(SB_MIN, (float)m_size.y() * vis);
+        float track = (float)m_size.y() - th;
+        float sy    = (float)scroll().y();
+        float ty    = m_pos.y() + sy * track;
+        float tx    = m_pos.x() + (float)m_size.x() - SB_W - SB_MARGIN;
         nvgBeginPath(ctx);
-        nvgRoundedRect(ctx, m_pos.x() + m_size.x() - kScrollbarSlot,
-                       m_pos.y() + kScrollbarMargin,
-                       kScrollbarThick, m_size.y() - 8, 3);
-        nvgFillPaint(ctx, paint);
-        nvgFill(ctx);
-
-        paint = nvgBoxGradient(
-            ctx, m_pos.x() + m_size.x() - kScrollbarSlot - 1,
-                 m_pos.y() + kScrollbarMargin +
-                     (float)((m_size.y() - 8 - scrollh) * sy) - 1,
-                 kScrollbarThick, (float)scrollh,
-                 3, 4, Color(220, 100), Color(128, 100));
-        nvgBeginPath(ctx);
-        nvgRoundedRect(ctx, m_pos.x() + m_size.x() - kScrollbarSlot + 1,
-                       m_pos.y() + kScrollbarMargin + 1 +
-                           (float)((m_size.y() - 8 - scrollh) * sy),
-                       kScrollbarThick - 2, (float)(scrollh - 2), 2);
-        nvgFillPaint(ctx, paint);
+        nvgRoundedRect(ctx, tx, ty + 3.f, SB_W, th - 6.f, SB_W * 0.5f);
+        nvgFillColor(ctx, m_scrolling_y ? nvgRGBA(100,110,130,230) : nvgRGBA(150,155,165,180));
         nvgFill(ctx);
     }
-
     if (show_hbar) {
-        double scrollw = m_size.x() * std::min(1.0, m_size.x() / e.x());
-        float sx = (float)scroll().x();
-
-        NVGpaint paint = nvgBoxGradient(
-            ctx, m_pos.x() + kScrollbarMargin + 1,
-                 m_pos.y() + m_size.y() - kScrollbarSlot + 1,
-                 m_size.x() - 8, kScrollbarThick, 3, 4,
-                 Color(0, 32), Color(0, 92));
+        float vis   = (float)m_size.x() / (float)e.x();
+        float tw    = std::max(SB_MIN, (float)m_size.x() * vis);
+        float track = (float)m_size.x() - tw;
+        float sx    = (float)scroll().x();
+        float tx    = m_pos.x() + sx * track;
+        float ty    = m_pos.y() + (float)m_size.y() - SB_W - SB_MARGIN;
         nvgBeginPath(ctx);
-        nvgRoundedRect(ctx, m_pos.x() + kScrollbarMargin,
-                       m_pos.y() + m_size.y() - kScrollbarSlot,
-                       m_size.x() - 8, kScrollbarThick, 3);
-        nvgFillPaint(ctx, paint);
-        nvgFill(ctx);
-
-        paint = nvgBoxGradient(
-            ctx, m_pos.x() + kScrollbarMargin +
-                     (float)((m_size.x() - 8 - scrollw) * sx) - 1,
-                 m_pos.y() + m_size.y() - kScrollbarSlot - 1,
-                 (float)scrollw, kScrollbarThick, 3, 4,
-                 Color(220, 100), Color(128, 100));
-        nvgBeginPath(ctx);
-        nvgRoundedRect(ctx,
-                       m_pos.x() + kScrollbarMargin + 1 +
-                           (float)((m_size.x() - 8 - scrollw) * sx),
-                       m_pos.y() + m_size.y() - kScrollbarSlot + 1,
-                       (float)(scrollw - 2), kScrollbarThick - 2, 2);
-        nvgFillPaint(ctx, paint);
+        nvgRoundedRect(ctx, tx + 3.f, ty, tw - 6.f, SB_W, SB_W * 0.5f);
+        nvgFillColor(ctx, m_scrolling_x ? nvgRGBA(100,110,130,230) : nvgRGBA(150,155,165,180));
         nvgFill(ctx);
     }
 }

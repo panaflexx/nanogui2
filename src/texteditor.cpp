@@ -10,6 +10,8 @@
 #include <algorithm>
 #include <cstdio>
 #include <cstring>
+#include <GLFW/glfw3.h>
+#include <cmath>
 
 NAMESPACE_BEGIN(nanogui)
 
@@ -556,6 +558,12 @@ void TextEditor::scroll_to_caret() {
 
     if (m_scroll_x < 0.f) m_scroll_x = 0.f;
     if (m_scroll_y < 0.f) m_scroll_y = 0.f;
+
+    // Kill any coasting so the inertia block in draw() doesn't overwrite
+    // the position we just computed, and flag that we set scroll explicitly.
+    m_vel_x = 0.0f;
+    m_vel_y = 0.0f;
+    m_scroll_caret_pending = true;
 }
 
 // ---------------------------------------------------------------------------
@@ -593,11 +601,14 @@ bool TextEditor::mouse_drag_event(const Vector2i& p, const Vector2i& /*rel*/,
 
 bool TextEditor::scroll_event(const Vector2i& /*p*/, const Vector2f& rel) {
     if (!m_metrics_valid) return false;
-    const float lh = m_cached_line_h > 0.f ? m_cached_line_h : 16.f;
-    m_scroll_y -= rel.y() * lh * 3.f;
-    m_scroll_x -= rel.x() * (m_cached_char_adv > 0.f ? m_cached_char_adv : 8.f) * 3.f;
-    if (m_scroll_y < 0.f) m_scroll_y = 0.f;
-    if (m_scroll_x < 0.f) m_scroll_x = 0.f;
+    const float lh  = m_cached_line_h  > 0.f ? m_cached_line_h  : 16.f;
+    const float adv = m_cached_char_adv > 0.f ? m_cached_char_adv : 8.f;
+    // Impulse = 24x line/char so inertia totals ~3 lines per notch at tau=125ms
+    if (rel.y() != 0.f)
+        m_vel_y = std::clamp(m_vel_y - rel.y() * lh * 24.f, -3500.f, 3500.f);
+    if (rel.x() != 0.f)
+        m_vel_x = std::clamp(m_vel_x - rel.x() * adv * 24.f, -3500.f, 3500.f);
+    screen()->redraw();
     return true;
 }
 
@@ -722,7 +733,59 @@ bool TextEditor::keyboard_character_event(unsigned int codepoint) {
 // ---------------------------------------------------------------------------
 
 void TextEditor::draw(NVGcontext* ctx) {
-    // Background
+    // ---- Helpers ----
+    auto content_height = [&]() -> float {
+        if (m_mode == Mode::Code && m_metrics_valid)
+            return m_cached_line_h * (float)paragraph_count();
+        return m_content_h;   // updated by draw_rich each frame
+    };
+    auto max_scroll_y = [&]() -> float {
+        const float visH = (float)std::max(0, m_size.y() - 2 * m_padding);
+        return std::max(0.f, content_height() - visH);
+    };
+
+    // ---- Inertia integration ----
+    {
+        double now = glfwGetTime();
+        float  dt  = (m_last_t > 0.0)
+                     ? std::min((float)(now - m_last_t), 0.05f) : 0.0f;
+        m_last_t = now;
+        bool moving = false;
+
+        const float maxY = max_scroll_y();
+
+        if (std::abs(m_vel_y) > 0.5f) {
+            m_scroll_y += m_vel_y * dt;
+            m_scroll_y  = std::clamp(m_scroll_y, 0.f, maxY);
+            if (m_scroll_y <= 0.f || m_scroll_y >= maxY) m_vel_y = 0.f;
+            else {
+                m_vel_y *= std::exp(-8.0f * dt);
+                if (std::abs(m_vel_y) < 0.5f) m_vel_y = 0.f;
+            }
+            moving = true;
+        } else if (!m_scroll_caret_pending) {
+            // Only clamp on "free" frames; skip when scroll_to_caret() just
+            // set an explicit position (maxY may still be stale this frame).
+            m_scroll_y = std::clamp(m_scroll_y, 0.f, maxY);
+        }
+        m_scroll_caret_pending = false; // consume the flag
+
+        if (std::abs(m_vel_x) > 0.5f) {
+            m_scroll_x += m_vel_x * dt;
+            if (m_scroll_x < 0.f) { m_scroll_x = 0.f; m_vel_x = 0.f; }
+            else {
+                m_vel_x *= std::exp(-8.0f * dt);
+                if (std::abs(m_vel_x) < 0.5f) m_vel_x = 0.f;
+            }
+            moving = true;
+        } else {
+            if (m_scroll_x < 0.f) m_scroll_x = 0.f;
+        }
+
+        if (moving) screen()->redraw();
+    }
+
+    // ---- Background ----
     nvgBeginPath(ctx);
     nvgRect(ctx, (float)m_pos.x(), (float)m_pos.y(),
                  (float)m_size.x(), (float)m_size.y());
@@ -731,14 +794,35 @@ void TextEditor::draw(NVGcontext* ctx) {
 
     nvgSave(ctx);
     nvgIntersectScissor(ctx, (float)m_pos.x(), (float)m_pos.y(),
-                            (float)m_size.x(), (float)m_size.y());
-
+                             (float)m_size.x(), (float)m_size.y());
     if (m_mode == Mode::Code) draw_code(ctx);
     else                       draw_rich(ctx);
-
     nvgRestore(ctx);
 
-    // Let children (if any) draw on top.
+    // ---- Pill-style overlay scrollbar ----
+    {
+        const float visH     = (float)std::max(0, m_size.y() - 2 * m_padding);
+        const float contentH = content_height();
+        if (contentH > visH + 1.f) {
+            constexpr float SB_W   = 6.f;
+            constexpr float SB_M   = 3.f;
+            constexpr float SB_MIN = 28.f;
+            const float maxY  = contentH - visH;
+            const float vis_r = visH / contentH;
+            const float th    = std::max(SB_MIN, (float)m_size.y() * vis_r);
+            const float track = (float)m_size.y() - th;
+            const float frac  = (maxY > 0.f)
+                                ? std::clamp(m_scroll_y / maxY, 0.f, 1.f)
+                                : 0.f;
+            const float ty = (float)m_pos.y() + frac * track;
+            const float tx = (float)m_pos.x() + (float)m_size.x() - SB_W - SB_M;
+            nvgBeginPath(ctx);
+            nvgRoundedRect(ctx, tx, ty + 3.f, SB_W, th - 6.f, SB_W * 0.5f);
+            nvgFillColor(ctx, nvgRGBA(150, 155, 165, 180));
+            nvgFill(ctx);
+        }
+    }
+
     Widget::draw(ctx);
 }
 
@@ -891,6 +975,7 @@ void TextEditor::draw_rich(NVGcontext* ctx) {
     m_doc->draw(ctx,
                 (float)m_pos.x() + (float)m_padding,
                 (float)m_pos.y() + (float)m_padding);
+    m_content_h = m_doc->last_drawn_height;
     nvgTranslate(ctx, 0.f, m_scroll_y);
 
     // No interactive caret in rich mode for now -- editing is supported

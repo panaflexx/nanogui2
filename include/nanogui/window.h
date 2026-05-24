@@ -92,6 +92,17 @@ struct WindowConfig {
         virtual Vector2i preferred_size(NVGcontext* ctx) const override;
         /// Invoke the associated layout generator to properly place child widgets, if any
         virtual void perform_layout(NVGcontext* ctx) override;
+        /// Content origin is below the title bar (when one is present)
+        virtual Vector2i content_offset() const override {
+            if (!m_title.empty() && m_theme)
+                return Vector2i(0, m_theme->m_window_header_height);
+            return Vector2i(0, 0);
+        }
+        /// Determine the widget located at the given position value (recursive).
+        /// Overridden so that the window-resize hot zones always claim the
+        /// point, even when child widgets visually overlap them.
+        virtual Widget* find_widget(const Vector2i& p) override;
+        virtual const Widget* find_widget(const Vector2i& p) const override;
     protected:
         /// Internal helper function to maintain nested window position values; overridden in \ref Popup
         virtual void refresh_relative_placement();

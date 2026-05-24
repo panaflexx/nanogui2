@@ -233,6 +233,13 @@ protected:
     float    m_scroll_x;
     float    m_scroll_y;
 
+    // Inertia scroll
+    float  m_vel_x     = 0.0f;  // horizontal velocity (px/s)
+    float  m_vel_y     = 0.0f;  // vertical   velocity (px/s)
+    double m_last_t    = 0.0;   // glfwGetTime() at last draw frame
+    float  m_content_h            = 0.0f;  // cached document height (rich mode)
+    bool   m_scroll_caret_pending = false; // scroll_to_caret() ran since last draw
+
     // cached metrics (updated lazily inside draw / hit-test)
     mutable float m_cached_line_h;
     mutable float m_cached_char_adv;

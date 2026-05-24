@@ -64,6 +64,8 @@ Theme::Theme(NVGcontext *ctx) {
     m_window_header_gradient_bot         = Color(78, 255);//m_button_gradient_bot_unfocused;
     m_window_header_sep_top              = m_border_light;
     m_window_header_sep_bot              = m_border_dark;
+    m_split_divider                      = Color(200, 255);
+    m_split_divider_width                = 4;
 
     m_window_popup                       = Color(20, 180);
     m_window_popup_transparent           = Color(50, 0);

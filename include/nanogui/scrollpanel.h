@@ -71,6 +71,9 @@ NAMESPACE_BEGIN(nanogui)
         bool m_scrolling_x, m_scrolling_y;
         bool m_update_layout;
         ScrollTypes m_scroll_type;
+        float  m_vel_x  = 0.0f;   // inertia scroll velocity (px/s)
+        float  m_vel_y  = 0.0f;
+        double m_last_t = 0.0;    // glfwGetTime() timestamp of last draw
 };
 
 NAMESPACE_END(nanogui)

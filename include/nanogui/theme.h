@@ -200,6 +200,12 @@ public:
     /// The Window header bottom separation color (default: \ref nanogui::Theme::m_border_dark).
     Color m_window_header_sep_bot;
 
+    /// The Split widget divider bar color (default: intensity=``200``, alpha=``255``).
+    Color m_split_divider;
+    /// The Split widget visual draw width in pixels (default: ``4``).
+    /// The interactive hotspot remains unchanged regardless of this value.
+    int m_split_divider_width;
+
     /**
      * The popup window color
      * (default: intensity=``50``, alpha=``255``; see \ref nanogui::Color::Color(int,int))).

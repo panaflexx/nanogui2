@@ -53,6 +53,7 @@ public:
 		//split->set_max_size( this->size());
 		split->set_max_size({2048,2048});
 		split->set_min_size( 100 );
+		split->set_grow_parent( true );
 
         // LEFT PANEL: Customer List
 		ScrollPanel *leftPanel = new ScrollPanel(split);
