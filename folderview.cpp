@@ -1,5 +1,5 @@
 /**
- * folderview.cpp — Apple Mail-style folder sidebar demo
+ * folderview.cpp — Juicy Mail-style folder sidebar demo
  *
  * Demonstrates a custom FolderView widget with:
  *   - Section headers (Favorites, Smart Mailboxes, iCloud)
@@ -294,7 +294,7 @@ private:
 };
 
 // ---------------------------------------------------------------------------
-// FolderView — the complete Apple Mail-style sidebar widget
+// FolderView — the complete Juicy Mail-style sidebar widget
 // ---------------------------------------------------------------------------
 class FolderView : public Widget {
 public:
@@ -362,7 +362,7 @@ private:
         kids->set_height(h);
     }
 
-    // Build the full Apple Mail-style sidebar content
+    // Build the full Juicy Mail-style sidebar content
     void build_sidebar() {
         // Add a little top padding
         auto *top_spacer = new Widget(m_container);
@@ -1073,7 +1073,7 @@ public:
     EmailListView *m_email_list     = nullptr;
     TextEditor    *m_editor         = nullptr;
 
-    MailApp() : Screen(Vector2i(1100, 700), "Apple Mail — Folder View Demo") {
+    MailApp() : Screen(Vector2i(1100, 700), "Juicy Mail — Folder View Demo") {
         inc_ref();
 
         // Theme — light background like macOS
