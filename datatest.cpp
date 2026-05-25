@@ -1,34 +1,46 @@
 /*
-    datagrid.cpp -- Test application for the new DataGrid widget
+    datatest.cpp -- Test driver for the DataGrid widget.
 
-    Shows:
-      - FolderView on the left (sidebar)
-      - Large virtual DataGrid (64k rows) on the right
-      - Multiple data types including Currency with Excel-style formatting
+    Usage:
+        datatest                              # built-in synthetic 64k-row demo
+        datatest --csv file.csv [--no-header] # edit a CSV file in place
+        datatest --db file.db --table NAME    # edit a SQLite table in place
+
+    Edits made in the grid are committed to the underlying source:
+      * SQLite: each cell edit issues an UPDATE through the prepared statement
+                in SQLiteDataAdapter (requires a primary key, which is auto-
+                detected from PRAGMA table_info).
+      * CSV:    edits land in memory immediately. A "Save" button writes them
+                back to disk; an "Auto-save" toggle persists after every change.
 */
 
 #include <nanogui/nanogui.h>
 #include <nanogui/datagrid.h>
-#include <random>
+#include <nanogui/dataadapter.h>
+#include <nanogui/csvadapter.h>
+#include <nanogui/sqliteadapter.h>
+
 #include <chrono>
+#include <cstdint>
+#include <cstdio>
+#include <cstring>
 #include <iostream>
+#include <memory>
+#include <string>
 #include <unordered_map>
+#include <vector>
 
 using namespace nanogui;
 
-
 // ---------------------------------------------------------------------------
-// Fake Data Model - 65536 rows with varied types per row
+// Built-in synthetic model (used when no --csv / --db is provided)
 // ---------------------------------------------------------------------------
 class FakeLargeDataModel : public DataGridModel {
 public:
-    FakeLargeDataModel() {
-        m_row_count = 65536;
-        m_rng.seed(42); // reproducible
-    }
+    FakeLargeDataModel() : m_row_count(65536) {}
 
-    size_t row_count() const override { return m_row_count; }
-    size_t column_count() const override { return 255; }
+    size_t row_count() const override    { return m_row_count; }
+    size_t column_count() const override  { return 255; }
 
     std::string column_name(int column) const override {
         static const char* names[] = {
@@ -48,42 +60,26 @@ public:
         return types[column % 12];
     }
 
-    std::any get_value(int row, int column) const override {
-        // Honor any user-edited override first
-        auto key = make_key(row, column);
-        auto it = m_overrides.find(key);
-        if (it != m_overrides.end())
-            return it->second;
+    nanogui::any get_value(int row, int column) const override {
+        auto it = m_overrides.find(make_key(row, column));
+        if (it != m_overrides.end()) return it->second;
 
         int c = column % 12;
         switch (c) {
-            case 0: return (int64_t)row;
-            case 1: return std::string("Item_") + std::to_string(row % 10000);
-            case 2: {
-                double val = (row % 7 == 0) ? -(row * 1.37) : (row * 12.34);
-                return val;
-            }
-            case 3: return (int64_t)((row % 200) + 1);
-            case 4: return 9.99 + (row % 50) * 0.5;
-            case 5: {
-                // Generate a plausible timestamp
-                auto tp = std::chrono::system_clock::now() - std::chrono::hours(row % 10000);
-                return tp;
-            }
-            case 6: return (row % 3) != 0;
-            case 7: {
-                static const char* cats[] = {"Hardware", "Software", "Services", "Support", "Training"};
-                return std::string(cats[row % 5]);
-            }
-            case 8: return 50.0 + (row % 50) * 0.8;
-            case 9: return (row % 5 == 0) ? "Urgent - follow up" : "Standard order";
-            case 10: return (int64_t)(row % 4); // 0-3 status codes
-            case 11: {
-                double qty = (row % 200) + 1;
-                double price = 9.99 + (row % 50) * 0.5;
-                return qty * price;
-            }
-            default: return std::any{};
+            case 0:  return (int64_t)row;
+            case 1:  return std::string("Item_") + std::to_string(row % 10000);
+            case 2:  return (row % 7 == 0) ? -(row * 1.37) : (row * 12.34);
+            case 3:  return (int64_t)((row % 200) + 1);
+            case 4:  return 9.99 + (row % 50) * 0.5;
+            case 5:  return std::chrono::system_clock::now() - std::chrono::hours(row % 10000);
+            case 6:  return (row % 3) != 0;
+            case 7:  { static const char* cats[] = {"Hardware","Software","Services","Support","Training"};
+                       return std::string(cats[row % 5]); }
+            case 8:  return 50.0 + (row % 50) * 0.8;
+            case 9:  return (row % 5 == 0) ? "Urgent - follow up" : "Standard order";
+            case 10: return (int64_t)(row % 4);
+            case 11: return ((row % 200) + 1) * (9.99 + (row % 50) * 0.5);
+            default: return nanogui::any{};
         }
     }
 
@@ -92,7 +88,6 @@ public:
         style.fontSize = 14.0f;
         int c = column % 12;
         if (c == 2 || c == 4 || c == 11) {
-            // Currency columns - red for negative, right-aligned, grouped
             style.number_format.symbol = "$";
             style.number_format.decimal_places = 2;
             style.number_format.negative_red = true;
@@ -100,32 +95,17 @@ public:
             style.h_align = Alignment::Maximum;
         }
         if (c == 0 || c == 3 || c == 10) {
-            // Integer columns - right-aligned, grouped
             style.number_format.use_grouping = true;
             style.h_align = Alignment::Maximum;
         }
-        if (c == 8) {
-            // Score (Double)
-            style.number_format.decimal_places = 1;
-            style.h_align = Alignment::Maximum;
-        }
-        if (c == 6) {
-            // Boolean centered
-            style.h_align = Alignment::Middle;
-        }
-        if (c == 5) {
-            // Date centered
-            style.h_align = Alignment::Middle;
-        }
+        if (c == 8) { style.number_format.decimal_places = 1; style.h_align = Alignment::Maximum; }
+        if (c == 6 || c == 5) style.h_align = Alignment::Middle;
         if (c == 10) {
-            // Status code - colorize
-            int64_t code = (int64_t)(row % 4);
-            switch (code) {
-                case 0: style.fgColor = nvgRGB(40, 110, 220);   break; // blue
-                case 1: style.fgColor = nvgRGB(20, 140, 60);    break; // green
-                case 2: style.fgColor = nvgRGB(210, 130, 30);   break; // amber
-                case 3: style.fgColor = nvgRGB(200, 30, 30);    break; // red
-                default: break;
+            switch ((int64_t)(row % 4)) {
+                case 0: style.fgColor = nvgRGB(40, 110, 220);  break;
+                case 1: style.fgColor = nvgRGB(20, 140,  60);  break;
+                case 2: style.fgColor = nvgRGB(210,130,  30);  break;
+                case 3: style.fgColor = nvgRGB(200, 30,  30);  break;
             }
             style.bold = true;
         }
@@ -134,15 +114,11 @@ public:
 
     bool is_cell_editable(int row, int column) const override {
         int c = column % 12;
-        // Allow editing of name (string) and score (double)
         return c == 1 || c == 8;
     }
 
-    // Persist the edited value so future get_value() calls (e.g. re-draws
-    // and re-opening the editor) see it.
-    bool set_value(int row, int column, const std::any& value) override {
-        if (!is_cell_editable(row, column))
-            return false;
+    bool set_value(int row, int column, const nanogui::any& value) override {
+        if (!is_cell_editable(row, column)) return false;
         m_overrides[make_key(row, column)] = value;
         return true;
     }
@@ -151,143 +127,266 @@ private:
     static uint64_t make_key(int row, int column) {
         return ((uint64_t)(uint32_t)row << 32) | (uint32_t)column;
     }
+    size_t                                    m_row_count;
+    std::unordered_map<uint64_t, nanogui::any> m_overrides;
+};
 
-    size_t m_row_count;
-    mutable std::mt19937 m_rng;
-    std::unordered_map<uint64_t, std::any> m_overrides;
+// ---------------------------------------------------------------------------
+// Generic editor factories driven off the column's DataType
+// ---------------------------------------------------------------------------
+namespace {
+
+DataGridColumn::EditorFactory make_editor_factory(DataType type) {
+    switch (type) {
+        case DataType::Integer:
+            return [](DataGrid* grid, int /*row*/, int /*col*/,
+                      const nanogui::any& value) -> Widget* {
+                int64_t v = 0;
+                if (value.has_value()) {
+                    if (value.type() == typeid(int64_t))      v = nanogui::any_cast<int64_t>(value);
+                    else if (value.type() == typeid(int))     v = nanogui::any_cast<int>(value);
+                    else if (value.type() == typeid(double))  v = (int64_t)nanogui::any_cast<double>(value);
+                    else if (value.type() == typeid(std::string)) {
+                        try { v = std::stoll(nanogui::any_cast<std::string>(value)); } catch (...) {}
+                    }
+                }
+                auto* ib = new IntBox<int64_t>(grid, v);
+                ib->set_editable(true);
+                ib->set_alignment(TextBox::Alignment::Right);
+                ib->set_callback([grid](int64_t) { grid->end_edit(true); });
+                return ib;
+            };
+
+        case DataType::Double:
+        case DataType::Currency:
+            return [](DataGrid* grid, int /*row*/, int /*col*/,
+                      const nanogui::any& value) -> Widget* {
+                double v = 0.0;
+                if (value.has_value()) {
+                    if (value.type() == typeid(double))       v = nanogui::any_cast<double>(value);
+                    else if (value.type() == typeid(int64_t)) v = (double)nanogui::any_cast<int64_t>(value);
+                    else if (value.type() == typeid(int))     v = (double)nanogui::any_cast<int>(value);
+                    else if (value.type() == typeid(std::string)) {
+                        try { v = std::stod(nanogui::any_cast<std::string>(value)); } catch (...) {}
+                    }
+                }
+                auto* fb = new FloatBox<double>(grid, v);
+                fb->set_editable(true);
+                fb->set_alignment(TextBox::Alignment::Right);
+                fb->set_callback([grid](double) { grid->end_edit(true); });
+                return fb;
+            };
+
+        case DataType::Boolean:
+            return [](DataGrid* grid, int /*row*/, int /*col*/,
+                      const nanogui::any& value) -> Widget* {
+                bool v = false;
+                if (value.has_value()) {
+                    if (value.type() == typeid(bool))         v = nanogui::any_cast<bool>(value);
+                    else if (value.type() == typeid(int64_t)) v = nanogui::any_cast<int64_t>(value) != 0;
+                    else if (value.type() == typeid(std::string)) {
+                        const auto& s = nanogui::any_cast<std::string>(value);
+                        v = (s == "true" || s == "1" || s == "yes");
+                    }
+                }
+                auto* cb = new CheckBox(grid, "");
+                cb->set_checked(v);
+                cb->set_callback([grid](bool) { grid->end_edit(true); });
+                return cb;
+            };
+
+        case DataType::String:
+        case DataType::DateTime:
+        case DataType::Date:
+        case DataType::Time:
+        default:
+            return [](DataGrid* grid, int /*row*/, int /*col*/,
+                      const nanogui::any& value) -> Widget* {
+                std::string s = DataAdapter::any_to_string(value);
+                auto* tb = new TextBox(grid, s);
+                tb->set_editable(true);
+                tb->set_alignment(TextBox::Alignment::Left);
+                tb->set_callback([grid](const std::string&) {
+                    grid->end_edit(true);
+                    return true;
+                });
+                return tb;
+            };
+    }
 }
-;
+
+// Build a column list from the model's metadata. Picks sensible widths and
+// alignment from the column type and wires up a default editor per column.
+std::vector<DataGridColumn> build_columns_from_model(DataGridModel* model) {
+    std::vector<DataGridColumn> cols;
+    if (!model) return cols;
+    const int ncols = (int)model->column_count();
+    cols.reserve(ncols);
+
+    for (int i = 0; i < ncols; ++i) {
+        DataGridColumn c;
+        c.title = model->column_name(i);
+        c.type  = model->column_type(i);
+        switch (c.type) {
+            case DataType::Integer:   c.width = 100; break;
+            case DataType::Double:
+            case DataType::Currency:  c.width = 120; break;
+            case DataType::Boolean:   c.width = 70;  break;
+            case DataType::DateTime:
+            case DataType::Date:
+            case DataType::Time:      c.width = 150; break;
+            default:                  c.width = 160; break;
+        }
+        c.min_width        = 40;
+        c.max_width        = 600;
+        c.sortable         = true;
+        c.editor_factory   = make_editor_factory(c.type);
+        cols.push_back(std::move(c));
+    }
+    return cols;
+}
+
+} // namespace
+
+// ---------------------------------------------------------------------------
+// CLI parsing
+// ---------------------------------------------------------------------------
+struct CliOptions {
+    enum class Mode { Synthetic, CSV, SQLite };
+    Mode        mode      = Mode::Synthetic;
+    std::string csv_path;
+    bool        csv_header = true;
+    std::string db_path;
+    std::string table_name;
+};
+
+static void print_usage(const char* prog) {
+    std::fprintf(stderr,
+        "Usage:\n"
+        "  %s                              # synthetic 64k-row demo\n"
+        "  %s --csv FILE [--no-header]     # load and edit a CSV file\n"
+        "  %s --db FILE --table NAME       # load and edit a SQLite table\n",
+        prog, prog, prog);
+}
+
+static bool parse_cli(int argc, char** argv, CliOptions& out) {
+    for (int i = 1; i < argc; ++i) {
+        const std::string a = argv[i];
+        auto need_val = [&](const char* opt) -> const char* {
+            if (i + 1 >= argc) {
+                std::fprintf(stderr, "Missing value for %s\n", opt);
+                return nullptr;
+            }
+            return argv[++i];
+        };
+
+        if (a == "--csv") {
+            const char* v = need_val("--csv"); if (!v) return false;
+            out.mode = CliOptions::Mode::CSV;
+            out.csv_path = v;
+        } else if (a == "--no-header") {
+            out.csv_header = false;
+        } else if (a == "--db") {
+            const char* v = need_val("--db"); if (!v) return false;
+            out.mode = CliOptions::Mode::SQLite;
+            out.db_path = v;
+        } else if (a == "--table") {
+            const char* v = need_val("--table"); if (!v) return false;
+            out.table_name = v;
+        } else if (a == "-h" || a == "--help") {
+            print_usage(argv[0]);
+            return false;
+        } else {
+            std::fprintf(stderr, "Unknown argument: %s\n", a.c_str());
+            print_usage(argv[0]);
+            return false;
+        }
+    }
+
+    if (out.mode == CliOptions::Mode::SQLite && out.table_name.empty()) {
+        std::fprintf(stderr, "--db requires --table NAME\n");
+        return false;
+    }
+    return true;
+}
+
+// ---------------------------------------------------------------------------
+// Application
+// ---------------------------------------------------------------------------
 class DataGridApp {
 public:
-    Screen* screen = nullptr;
-    Window* window = nullptr;
-    DataGrid* datagrid = nullptr;
+    Screen*    screen   = nullptr;
+    Window*    window   = nullptr;
+    DataGrid*  datagrid = nullptr;
+    Label*     status   = nullptr;
 
-    DataGridApp() {
-        screen = new Screen(Vector2i(1400, 900), "DataGrid Test - 64k Rows");
+    // Keep a strong ref to the model and (when applicable) a typed pointer
+    // to the CSV adapter so the Save button can call save() on it.
+    std::shared_ptr<DataGridModel> model;
+    CSVDataAdapter*                csv_adapter = nullptr;
+    bool                           auto_save   = false;
 
-        window = new Window(screen, "Enterprise DataGrid Demo");
+    CliOptions opts;
+
+    explicit DataGridApp(const CliOptions& options) : opts(options) {
+        const std::string title = title_for_mode();
+        screen = new Screen(Vector2i(1400, 900), title);
+
+        window = new Window(screen, title);
         window->set_position(Vector2i(20, 20));
         window->set_size(Vector2i(1360, 860));
-        window->set_layout(new BoxLayout(Orientation::Horizontal, Alignment::Fill, 8, 8));
+        window->set_layout(new BoxLayout(Orientation::Vertical, Alignment::Fill, 8, 8));
 
-        // Left sidebar - FolderView style navigation
-        auto* sidebar = new Widget(window);
-        sidebar->set_min_width(220);
-        sidebar->set_layout(new BoxLayout(Orientation::Vertical, Alignment::Fill, 4, 4));
+        // Toolbar
+        auto* toolbar = new Widget(window);
+        toolbar->set_layout(new BoxLayout(Orientation::Horizontal, Alignment::Middle, 0, 8));
 
-        auto* sidebar_label = new Label(sidebar, "Data Sources", "sans-bold");
-        sidebar_label->set_font_size(15);
+        auto* src_label = new Label(toolbar, source_description(), "sans-bold");
+        src_label->set_font_size(14);
 
-        // Simple folder-like items
-        const char* folders[] = {
-            "Sales Data", "Customer DB", "Inventory", "Financials",
-            "HR Records", "Audit Logs", "Archived"
-        };
+        // Spacer
+        auto* spacer = new Widget(toolbar);
+        spacer->set_fixed_size(Vector2i(20, 1));
+        (void)spacer;
 
-        for (const char* name : folders) {
-            auto* item = new Button(sidebar, name);
-            item->set_font_size(14);
-            item->set_min_height(28);
-            item->set_callback([this, name]() {
-                if (datagrid && datagrid->model()) {
-                    // In a real app we would swap models here
-                    screen->redraw();
-                }
-            });
+        if (opts.mode == CliOptions::Mode::CSV) {
+            auto* save_btn = new Button(toolbar, "Save");
+            save_btn->set_font_size(13);
+            save_btn->set_callback([this]() { save_csv(); });
+
+            auto* autosave_cb = new CheckBox(toolbar, "Auto-save");
+            autosave_cb->set_font_size(13);
+            autosave_cb->set_callback([this](bool v) { auto_save = v; });
         }
 
-        // Main content area with the DataGrid
-        auto* main_area = new Widget(window);
-        main_area->set_layout(new BoxLayout(Orientation::Vertical, Alignment::Fill, 4, 4));
-
-        auto* header = new Label(main_area, "Virtual DataGrid — 65536 rows × 255 columns (horiz scroll test)", "sans-bold");
-        header->set_font_size(16);
-
-        // Create the DataGrid
-        datagrid = new DataGrid(main_area);
+        // Grid
+        datagrid = new DataGrid(window);
         datagrid->set_font_size(14);
-        datagrid->set_min_height(400);
+        datagrid->set_min_height(600);
 
-        // Create a model that generates 64k rows of varied types
-        auto model = std::make_shared<FakeLargeDataModel>();
+        // Model
+        model = build_model();
         datagrid->set_model(model);
+        datagrid->set_columns(build_columns_from_model(model.get()));
+        datagrid->set_sorting_enabled(true);
+        datagrid->set_filtering_enabled(true);
+        datagrid->set_editing_enabled(true);
 
-        // Configure columns with rich formatting
-        std::vector<DataGridColumn> cols(255);
-
-        // Configure columns with rich formatting (cycle every 12 types, repeat widths)
-        static const char* titles[] = {
-            "ID", "Name", "Amount", "Qty", "Unit Price", "Date",
-            "Active", "Category", "Score", "Notes", "Status", "Total"
-        };
-        static const DataType col_types[] = {
-            DataType::Integer, DataType::String, DataType::Currency,
-            DataType::Integer, DataType::Currency, DataType::DateTime,
-            DataType::Boolean, DataType::String, DataType::Double,
-            DataType::String, DataType::Integer, DataType::Currency
-        };
-        static const int widths[] = {70,160,110,70,100,130,70,120,80,200,80,110};
-
-        for (int i = 0; i < 255; ++i) {
-            int t = i % 12;
-            cols[i].title = std::string(titles[t]) + "_" + std::to_string(i / 12);
-            cols[i].width = widths[t];
-            cols[i].min_width = 40;
-            cols[i].max_width = 400;
-            cols[i].type = col_types[t];
-            // Mark several columns as sortable to demonstrate the indicator
-            cols[i].sortable = (t == 0 || t == 1 || t == 2 || t == 5 || t == 8 || t == 11);
-        }
-
-        datagrid->set_columns(cols);
-
-        // Debug: print initial column widths (first 20)
-        printf("Initial column widths (first 20): ");
-        for (int i = 0; i < 20 && i < (int)cols.size(); ++i) {
-            printf("%d ", cols[i].width);
-        }
-        printf("...\n");
-
-        // Editor for Name column (string) - writes the new string back
-        // into the model so the change persists when the editor closes.
-        cols[1].editor_factory = [](DataGrid* grid, int row, int col, const std::any& value) -> Widget* {
-            auto* tb = new TextBox(grid, value.has_value() ? std::any_cast<std::string>(value) : "");
-            tb->set_editable(true);
-            tb->set_alignment(TextBox::Alignment::Left);
-            tb->set_callback([grid, row, col](const std::string& text) {
-                if (auto* m = grid->model())
-                    m->set_value(row, col, std::any(text));
-                grid->end_edit(true);
-                return true;
+        // Persist every edit. For SQLite, set_value() already issues an UPDATE
+        // inside the adapter, so we only need to handle CSV auto-save here.
+        datagrid->set_cell_edited_callback(
+            [this](int row, int col, const nanogui::any& new_value) {
+                (void)row; (void)col; (void)new_value;
+                if (auto_save && opts.mode == CliOptions::Mode::CSV)
+                    save_csv();
+                update_status();
             });
-            return tb;
-        };
-
-        // Editor for Score column (double) - same pattern: store the
-        // typed value via set_value() then close the editor.
-        cols[8].editor_factory = [](DataGrid* grid, int row, int col, const std::any& value) -> Widget* {
-            double v = value.has_value() ? std::any_cast<double>(value) : 0.0;
-            auto* fb = new FloatBox<double>(grid, v);
-            fb->set_editable(true);
-            fb->set_alignment(TextBox::Alignment::Right);
-            fb->set_callback([grid, row, col](double newv) {
-                if (auto* m = grid->model())
-                    m->set_value(row, col, std::any(newv));
-                grid->end_edit(true);
-            });
-            return fb;
-        };
-
-        datagrid->set_columns(cols); // re-apply with editors
 
         // Status bar
-        auto* status = new Label(main_area,
-            "Rows: 65,536  |  Click a cell to focus  |  Click headers to select column + cycle sort  |  "
-            "Double-click cell or press Enter to edit  |  Double-click column edge to autosize  |  Esc cancels edit");
+        status = new Label(window, "");
         status->set_font_size(12);
+        update_status();
 
-        // Keyboard help
         screen->set_resize_callback([this](Vector2i) {
             window->set_size(screen->size() - Vector2i(40, 40));
         });
@@ -297,16 +396,79 @@ public:
         window->perform_layout(screen->nvg_context());
         screen->set_visible(true);
         screen->draw_all();
-        mainloop();
+        mainloop(-1);
+    }
+
+private:
+    std::string title_for_mode() const {
+        switch (opts.mode) {
+            case CliOptions::Mode::CSV:    return "DataGrid - CSV: " + opts.csv_path;
+            case CliOptions::Mode::SQLite: return "DataGrid - SQLite: " + opts.db_path + " [" + opts.table_name + "]";
+            default:                       return "DataGrid - Synthetic Demo";
+        }
+    }
+
+    std::string source_description() const {
+        switch (opts.mode) {
+            case CliOptions::Mode::CSV:    return "CSV file: " + opts.csv_path;
+            case CliOptions::Mode::SQLite: return "SQLite: " + opts.db_path + "  table=" + opts.table_name;
+            default:                       return "Synthetic in-memory model (65,536 rows)";
+        }
+    }
+
+    std::shared_ptr<DataGridModel> build_model() {
+        switch (opts.mode) {
+            case CliOptions::Mode::CSV: {
+                auto adapter = std::make_shared<CSVDataAdapter>(opts.csv_path, opts.csv_header);
+                csv_adapter = adapter.get();
+                return adapter;
+            }
+            case CliOptions::Mode::SQLite: {
+                auto adapter = std::make_shared<SQLiteDataAdapter>(opts.db_path, opts.table_name);
+                return adapter;
+            }
+            case CliOptions::Mode::Synthetic:
+            default:
+                return std::make_shared<FakeLargeDataModel>();
+        }
+    }
+
+    void save_csv() {
+        if (!csv_adapter) return;
+        const bool ok = csv_adapter->save();
+        if (status) {
+            status->set_caption(ok ? ("Saved " + opts.csv_path)
+                                    : ("Failed to save " + opts.csv_path));
+        }
+        if (screen) screen->redraw();
+    }
+
+    void update_status() {
+        if (!status || !model) return;
+        char buf[256];
+        std::snprintf(buf, sizeof(buf),
+            "Rows: %zu  |  Columns: %zu  |  Double-click cell or press Enter to edit  |  "
+            "Click headers to sort  |  Esc cancels edit%s",
+            model->row_count(), model->column_count(),
+            (opts.mode == CliOptions::Mode::CSV && auto_save) ? "  |  Auto-save ON" : "");
+        status->set_caption(buf);
     }
 };
 
-
+// ---------------------------------------------------------------------------
+// Entry point
+// ---------------------------------------------------------------------------
 int main(int argc, char** argv) {
+    CliOptions opts;
+    if (!parse_cli(argc, argv, opts))
+        return 1;
+
     try {
         nanogui::init();
-        DataGridApp app;
-        app.run();
+        {
+            DataGridApp app(opts);
+            app.run();
+        }
         nanogui::shutdown();
     } catch (const std::exception& e) {
         std::cerr << "Error: " << e.what() << std::endl;

@@ -13,12 +13,20 @@
 #include <nanogui/screen.h>
 #include <nanogui/theme.h>
 #include <nanogui/opengl.h>
+#include <nanogui/textbox.h>
+#include <nanogui/checkbox.h>
+#include <nanogui/combobox.h>
+#include <nanogui/slider.h>
 #include <GLFW/glfw3.h>
-#include <cmath>
-#include <cstdio>
-#include <chrono>
-#include <ctime>
 #include <algorithm>
+#include <cctype>
+#include <chrono>
+#include <cmath>
+#include <cstdint>
+#include <cstdio>
+#include <cstdlib>
+#include <ctime>
+#include <string>
 
 NAMESPACE_BEGIN(nanogui)
 
@@ -108,6 +116,85 @@ void DataGrid::begin_edit(int row, int column) {
     screen()->redraw();
 }
 
+// ---------------------------------------------------------------------------
+// Editor value extraction
+// ---------------------------------------------------------------------------
+
+namespace {
+
+// Trim ASCII whitespace from both ends.
+std::string trim(const std::string& s) {
+    size_t a = 0, b = s.size();
+    while (a < b && std::isspace(static_cast<unsigned char>(s[a]))) ++a;
+    while (b > a && std::isspace(static_cast<unsigned char>(s[b - 1]))) --b;
+    return s.substr(a, b - a);
+}
+
+// Parse a textual editor value into a typed `any` based on the column type.
+// Falls back to returning the string verbatim if parsing fails.
+nanogui::any parse_text_value(const std::string& raw, DataType type) {
+    const std::string s = trim(raw);
+    if (s.empty()) return std::string();
+
+    switch (type) {
+        case DataType::Integer: {
+            try {
+                size_t pos = 0;
+                long long v = std::stoll(s, &pos);
+                if (pos == s.size()) return (int64_t)v;
+            } catch (...) {}
+            return s;
+        }
+        case DataType::Double: {
+            try {
+                size_t pos = 0;
+                double v = std::stod(s, &pos);
+                if (pos == s.size()) return v;
+            } catch (...) {}
+            return s;
+        }
+        case DataType::Boolean: {
+            std::string l(s.size(), '\0');
+            for (size_t i = 0; i < s.size(); ++i)
+                l[i] = static_cast<char>(std::tolower(static_cast<unsigned char>(s[i])));
+            if (l == "true"  || l == "1" || l == "yes" || l == "y") return true;
+            if (l == "false" || l == "0" || l == "no"  || l == "n") return false;
+            return s;
+        }
+        case DataType::String:
+        case DataType::DateTime:
+        case DataType::Blob:
+        default:
+            return s;
+    }
+}
+
+// Default extractor: pull a value out of an unknown editor widget.
+// Returns an empty `any` if no recognised widget type is found.
+nanogui::any default_extract_editor_value(Widget* editor, DataType column_type) {
+    if (!editor) return {};
+
+    if (auto* cb = dynamic_cast<CheckBox*>(editor))
+        return cb->checked();
+
+    if (auto* combo = dynamic_cast<ComboBox*>(editor))
+        return (int64_t)combo->selected_index();
+
+    if (auto* sl = dynamic_cast<Slider*>(editor)) {
+        if (column_type == DataType::Integer)
+            return (int64_t)std::llround(sl->value());
+        return (double)sl->value();
+    }
+
+    // TextBox covers TextBox itself and its IntBox<>/FloatBox<> specialisations.
+    if (auto* tb = dynamic_cast<TextBox*>(editor))
+        return parse_text_value(tb->value(), column_type);
+
+    return {};
+}
+
+} // namespace
+
 void DataGrid::end_edit(bool commit) {
     if (!m_editor)
         return;
@@ -123,9 +210,32 @@ void DataGrid::end_edit(bool commit) {
     m_edit_row = -1;
     m_edit_col = -1;
 
-    if (commit && m_model && er >= 0 && ec >= 0) {
-        if (m_cell_edited_cb)
-            m_cell_edited_cb(er, ec, std::any{});
+    // -- Commit phase --------------------------------------------------------
+    // Read the value back from the editor, write it into the model, and notify
+    // the user callback. This is done BEFORE focus shuffling / child removal so
+    // the editor widget is still alive and inspectable.
+    if (commit && editor && m_model && er >= 0 && ec >= 0 &&
+        ec < (int)m_columns.size())
+    {
+        const DataGridColumn& col = m_columns[ec];
+
+        nanogui::any new_value = col.editor_reader
+            ? col.editor_reader(this, er, ec, editor)
+            : default_extract_editor_value(editor, col.type);
+
+        if (new_value.has_value()) {
+            // Only attempt set_value() if the model says the cell is editable.
+            bool wrote = false;
+            if (m_model->is_cell_editable(er, ec))
+                wrote = m_model->set_value(er, ec, new_value);
+
+            // Fire the user callback regardless of whether the model accepted
+            // the write -- consumers may want to react to a rejected edit.
+            if (m_cell_edited_cb)
+                m_cell_edited_cb(er, ec, new_value);
+
+            (void)wrote;
+        }
     }
 
     // Move focus off the editor BEFORE we destroy it so the screen
@@ -196,7 +306,7 @@ static std::string format_time_point(const std::chrono::system_clock::time_point
     return buf;
 }
 
-std::string DataGrid::format_cell_text(const std::any& value, DataType type,
+std::string DataGrid::format_cell_text(const nanogui::any& value, DataType type,
                                        const CellStyle& style) const
 {
     if (!value.has_value())
@@ -207,19 +317,19 @@ std::string DataGrid::format_cell_text(const std::any& value, DataType type,
     // Currency / Double / numeric formatting
     if (type == DataType::Currency || type == DataType::Double) {
         double v = 0.0;
-        if (ti == typeid(double))         v = std::any_cast<double>(value);
-        else if (ti == typeid(float))     v = (double)std::any_cast<float>(value);
-        else if (ti == typeid(int64_t))   v = (double)std::any_cast<int64_t>(value);
-        else if (ti == typeid(int))       v = (double)std::any_cast<int>(value);
+        if (ti == typeid(double))         v = nanogui::any_cast<double>(value);
+        else if (ti == typeid(float))     v = (double)nanogui::any_cast<float>(value);
+        else if (ti == typeid(int64_t))   v = (double)nanogui::any_cast<int64_t>(value);
+        else if (ti == typeid(int))       v = (double)nanogui::any_cast<int>(value);
         else return "[?]";
         return format_number_with_groups(v, style.number_format);
     }
 
     if (type == DataType::Integer) {
         int64_t v = 0;
-        if (ti == typeid(int64_t))      v = std::any_cast<int64_t>(value);
-        else if (ti == typeid(int))     v = (int64_t)std::any_cast<int>(value);
-        else if (ti == typeid(double))  v = (int64_t)std::any_cast<double>(value);
+        if (ti == typeid(int64_t))      v = nanogui::any_cast<int64_t>(value);
+        else if (ti == typeid(int))     v = (int64_t)nanogui::any_cast<int>(value);
+        else if (ti == typeid(double))  v = (int64_t)nanogui::any_cast<double>(value);
         else return "[?]";
         if (style.number_format.use_grouping) {
             NumberFormat nf = style.number_format;
@@ -230,39 +340,39 @@ std::string DataGrid::format_cell_text(const std::any& value, DataType type,
     }
 
     if (type == DataType::Boolean) {
-        if (ti == typeid(bool)) return std::any_cast<bool>(value) ? "true" : "false";
+        if (ti == typeid(bool)) return nanogui::any_cast<bool>(value) ? "true" : "false";
         return "[?]";
     }
 
     if (type == DataType::DateTime) {
         if (ti == typeid(std::chrono::system_clock::time_point))
-            return format_time_point(std::any_cast<std::chrono::system_clock::time_point>(value),
+            return format_time_point(nanogui::any_cast<std::chrono::system_clock::time_point>(value),
                                      "%Y-%m-%d %H:%M");
-        if (ti == typeid(std::string)) return std::any_cast<std::string>(value);
+        if (ti == typeid(std::string)) return nanogui::any_cast<std::string>(value);
         return "[date]";
     }
     if (type == DataType::Date) {
         if (ti == typeid(std::chrono::system_clock::time_point))
-            return format_time_point(std::any_cast<std::chrono::system_clock::time_point>(value),
+            return format_time_point(nanogui::any_cast<std::chrono::system_clock::time_point>(value),
                                      "%Y-%m-%d");
-        if (ti == typeid(std::string)) return std::any_cast<std::string>(value);
+        if (ti == typeid(std::string)) return nanogui::any_cast<std::string>(value);
         return "[date]";
     }
     if (type == DataType::Time) {
         if (ti == typeid(std::chrono::system_clock::time_point))
-            return format_time_point(std::any_cast<std::chrono::system_clock::time_point>(value),
+            return format_time_point(nanogui::any_cast<std::chrono::system_clock::time_point>(value),
                                      "%H:%M:%S");
-        if (ti == typeid(std::string)) return std::any_cast<std::string>(value);
+        if (ti == typeid(std::string)) return nanogui::any_cast<std::string>(value);
         return "[time]";
     }
 
     // Strings & fallbacks
-    if (ti == typeid(std::string))            return std::any_cast<std::string>(value);
-    if (ti == typeid(const char*))            return std::any_cast<const char*>(value);
-    if (ti == typeid(int64_t))                return std::to_string(std::any_cast<int64_t>(value));
-    if (ti == typeid(int))                    return std::to_string(std::any_cast<int>(value));
-    if (ti == typeid(double))                 { char b[32]; std::snprintf(b, sizeof(b), "%g", std::any_cast<double>(value)); return b; }
-    if (ti == typeid(bool))                   return std::any_cast<bool>(value) ? "true" : "false";
+    if (ti == typeid(std::string))            return nanogui::any_cast<std::string>(value);
+    if (ti == typeid(const char*))            return nanogui::any_cast<const char*>(value);
+    if (ti == typeid(int64_t))                return std::to_string(nanogui::any_cast<int64_t>(value));
+    if (ti == typeid(int))                    return std::to_string(nanogui::any_cast<int>(value));
+    if (ti == typeid(double))                 { char b[32]; std::snprintf(b, sizeof(b), "%g", nanogui::any_cast<double>(value)); return b; }
+    if (ti == typeid(bool))                   return nanogui::any_cast<bool>(value) ? "true" : "false";
 
     return "[value]";
 }
@@ -288,7 +398,7 @@ int DataGrid::autosize_column(NVGcontext* ctx, int col) {
     int last_row = std::min(m_first_visible_row + std::max(m_visible_rows, 1),
                             (int)m_model->row_count());
     for (int row = m_first_visible_row; row < last_row; ++row) {
-        std::any v = m_model->get_value(row, col);
+        nanogui::any v = m_model->get_value(row, col);
         CellStyle style = m_model->get_cell_style(row, col);
         nvgFontSize(ctx, style.fontSize);
         nvgFontFace(ctx, style.bold ? "sans-bold" : "sans");
@@ -303,6 +413,18 @@ int DataGrid::autosize_column(NVGcontext* ctx, int col) {
     new_w = std::min(dc.max_width, new_w);
     new_w = std::max(dc.min_width, new_w);
     return new_w;
+}
+
+void DataGrid::set_cell_clicked_callback(std::function<void(int, int)> cb) {
+    m_cell_clicked_cb = std::move(cb);
+}
+
+void DataGrid::set_cell_edited_callback(std::function<void(int, int, const nanogui::any&)> cb) {
+    m_cell_edited_cb = std::move(cb);
+}
+
+void DataGrid::set_sort_changed_callback(std::function<void(int, bool)> cb) {
+    m_sort_changed_cb = std::move(cb);
 }
 
 void DataGrid::set_focused_cell(int row, int col) {
@@ -756,7 +878,7 @@ void DataGrid::draw_body(NVGcontext* ctx) {
                 if (x + col.width < 0) { x += col.width; continue; }
                 if (x > (float)width()) break;
 
-                std::any value = m_model->get_value(row, col_idx);
+                nanogui::any value = m_model->get_value(row, col_idx);
                 CellStyle style = m_model->get_cell_style(row, col_idx);
 
                 bool col_selected = std::find(m_selected_cols.begin(), m_selected_cols.end(), col_idx)
@@ -811,10 +933,10 @@ void DataGrid::draw_body(NVGcontext* ctx) {
                     bool is_negative = false;
                     if (value.has_value()) {
                         const std::type_info& ti = value.type();
-                        if (ti == typeid(double))      is_negative = std::any_cast<double>(value) < 0.0;
-                        else if (ti == typeid(int64_t)) is_negative = std::any_cast<int64_t>(value) < 0;
-                        else if (ti == typeid(int))     is_negative = std::any_cast<int>(value) < 0;
-                        else if (ti == typeid(float))   is_negative = std::any_cast<float>(value) < 0.f;
+                        if (ti == typeid(double))      is_negative = nanogui::any_cast<double>(value) < 0.0;
+                        else if (ti == typeid(int64_t)) is_negative = nanogui::any_cast<int64_t>(value) < 0;
+                        else if (ti == typeid(int))     is_negative = nanogui::any_cast<int>(value) < 0;
+                        else if (ti == typeid(float))   is_negative = nanogui::any_cast<float>(value) < 0.f;
                     }
 
                     // fgColor.a == 0 is the "inherit theme text color" sentinel

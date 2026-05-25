@@ -266,6 +266,9 @@ elseif (CMAKE_SYSTEM MATCHES "Linux" OR CMAKE_SYSTEM_NAME MATCHES "BSD")
   if (CMAKE_SYSTEM MATCHES "Linux")
     list(APPEND NANOGUI_LIBS dl m)
   endif()
+
+  # SQLite adapter support
+  list(APPEND NANOGUI_LIBS sqlite3)
 endif()
 
 # Use freetype library
@@ -397,6 +400,9 @@ add_library(nanogui ${NANOGUI_LIBRARY_TYPE}
   include/nanogui/imageview.h src/imageview.cpp
   include/nanogui/treeview.h src/treeview.cpp
   include/nanogui/datagrid.h src/datagrid.cpp
+  include/nanogui/dataadapter.h src/dataadapter.cpp
+  include/nanogui/sqliteadapter.h src/sqliteadapter.cpp
+  include/nanogui/csvadapter.h src/csvadapter.cpp
   include/nanogui/traits.h src/traits.cpp
   include/nanogui/renderpass.h
   include/nanogui/formhelper.h

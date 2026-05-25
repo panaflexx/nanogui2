@@ -16,8 +16,8 @@
 #include <nanogui/widget.h>
 #include <nanogui/layout.h>
 #include <nanogui/theme.h>
+#include <nanogui/any.h>
 #include <nanovg.h>
-#include <any>
 #include <functional>
 #include <memory>
 #include <string>
@@ -92,15 +92,15 @@ public:
     virtual DataType    column_type(int column) const = 0;
 
     // --- Data access (virtualized - only called for visible + prefetched rows) ---
-    virtual std::any    get_value(int row, int column) const = 0;
-    virtual CellStyle   get_cell_style(int row, int column) const { return CellStyle{}; }
+    virtual nanogui::any get_value(int row, int column) const = 0;
+    virtual CellStyle    get_cell_style(int row, int column) const { return CellStyle{}; }
 
     // Optional prefetch hint for SQL/file models
     virtual void        prefetch(int start_row, int count) const {}
 
     // --- Editing support ---
     virtual bool        is_cell_editable(int row, int column) const { return false; }
-    virtual bool        set_value(int row, int column, const std::any& value) { return false; }
+    virtual bool        set_value(int row, int column, const nanogui::any& value) { return false; }
 
     // --- Sorting / Filtering (model can implement or return false) ---
     virtual bool        supports_sorting() const { return false; }
@@ -128,7 +128,7 @@ struct NANOGUI_EXPORT DataGridColumn {
     using CellDrawFunc = std::function<void(NVGcontext* ctx,
                                             const Vector2i& pos,
                                             const Vector2i& size,
-                                            const std::any& value,
+                                            const nanogui::any& value,
                                             const CellStyle& style,
                                             bool selected,
                                             bool focused)>;
@@ -139,8 +139,19 @@ struct NANOGUI_EXPORT DataGridColumn {
     using EditorFactory = std::function<Widget*(class DataGrid* grid,
                                                 int row,
                                                 int column,
-                                                const std::any& current_value)>;
+                                                const nanogui::any& current_value)>;
     EditorFactory editor_factory;
+
+    // Optional: read the edited value back from the editor widget on commit.
+    // If unset, the grid uses a default extractor that understands TextBox,
+    // IntBox / FloatBox (via TextBox::value()), CheckBox, ComboBox, and Slider,
+    // and re-parses the text according to `type` for numeric / boolean columns.
+    // Return an empty `any` to signal "do not commit".
+    using EditorReader = std::function<nanogui::any(class DataGrid* grid,
+                                                    int row,
+                                                    int column,
+                                                    Widget* editor)>;
+    EditorReader editor_reader;
 };
 
 // ---------------------------------------------------------------------------
@@ -192,7 +203,7 @@ public:
 
     // --- Callbacks ---
     void set_cell_clicked_callback(std::function<void(int row, int col)> cb);
-    void set_cell_edited_callback(std::function<void(int row, int col, const std::any& new_value)> cb);
+    void set_cell_edited_callback(std::function<void(int row, int col, const nanogui::any& new_value)> cb);
     void set_sort_changed_callback(std::function<void(int column, bool ascending)> cb);
 
     // --- Standard Widget overrides ---
@@ -221,7 +232,7 @@ protected:
     void position_editor();
 
     // Helpers for the new feature set
-    std::string format_cell_text(const std::any& value, DataType type, const CellStyle& style) const;
+    std::string format_cell_text(const nanogui::any& value, DataType type, const CellStyle& style) const;
     int         autosize_column(NVGcontext* ctx, int col);
 
 private:
@@ -295,7 +306,7 @@ private:
 
     // Callbacks
     std::function<void(int, int)>                           m_cell_clicked_cb;
-    std::function<void(int, int, const std::any&)>          m_cell_edited_cb;
+    std::function<void(int, int, const nanogui::any&)>      m_cell_edited_cb;
     std::function<void(int, bool)>                          m_sort_changed_cb;
 
     // Column reordering / resizing support
