@@ -50,7 +50,7 @@ int main(int /* argc */, char ** /* argv */) {
             screen = new Screen(Vector2i(500, 700), "NanoGUI test");
         }
 
-        bool enabled = true;
+        //bool enabled = true;
         FormHelper *gui = new FormHelper(screen);
         ref<Window> window = gui->add_window(Vector2i(10, 10), "Form helper example");
         gui->add_group("Basic types");

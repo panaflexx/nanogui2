@@ -17,9 +17,9 @@
 NAMESPACE_BEGIN(nanogui)
 
 Button::Button(Widget* parent, const std::string& caption, int icon)
-    : WidgetCRTP<Button>(parent), m_caption(caption), m_icon(icon), m_make_transparent(false),
-    m_icon_position(IconPosition::LeftCentered), m_pushed(false),
-    m_flags(NormalButton), m_background_color(Color(0, 0)),
+    : WidgetCRTP<Button>(parent), m_caption(caption), m_icon(icon), m_icon_position(IconPosition::LeftCentered),
+    m_pushed(false), m_flags(NormalButton),
+    m_background_color(Color(0, 0)), m_make_transparent(false),
     m_text_color(Color(0, 0)) {
     DebugName = m_parent->DebugName + ",Butt";
 }
@@ -58,7 +58,7 @@ bool Button::mouse_enter_event(const Vector2i& p, bool enter) {
 bool Button::mouse_button_event(const Vector2i& p, int button, bool down, int modifiers) {
     Widget::mouse_button_event(p, button, down, modifiers);
     // Temporarily increase the reference count of the button in case the
-    //  button causes the parent window to be destructed 
+    //  button causes the parent window to be destructed
     ref<Button> self = this;
 
     if (m_enabled == 1 &&
@@ -126,7 +126,7 @@ bool Button::keyboard_event(int key, int scancode, int action, int modifiers) {
 */
 bool Button::handle_event(bool active, bool contains_point) {
     bool pushed_backup = m_pushed;
-    
+
     if (active) {
         if (m_flags & RadioButton) {
             if (m_button_group.empty()) {
@@ -171,10 +171,10 @@ bool Button::handle_event(bool active, bool contains_point) {
         if (m_flags & NormalButton)
             set_pushed(false);
     }
-    
+
     if (pushed_backup != m_pushed && m_change_callback)
         m_change_callback(m_pushed);
-        
+
     return true;
 }
 

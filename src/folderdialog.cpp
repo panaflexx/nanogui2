@@ -17,10 +17,8 @@
 #include <nanogui/scrollpanel.h>
 #include <filesystem>
 
-#if WIN32
-#include <windows.h> 
-#else
-#include <fileapi.h>
+#if defined(_WIN32)
+#include <windows.h>
 #endif
 
 NAMESPACE_BEGIN(nanogui)
@@ -30,16 +28,16 @@ FolderDialog::FolderDialog(Widget* parent, const std::string& title,
 
     set_modal(true);
 
-    const std::string ext("\\");
-
     if (std::filesystem::exists(starting_folder))
         m_current_folder = starting_folder;
     else m_current_folder = std::filesystem::current_path().string();
 
-    if (m_current_folder != ext &&
-        m_current_folder.size() > ext.size() &&
-        m_current_folder.substr(m_current_folder.size() - ext.size()) == "\\")
-        m_current_folder = m_current_folder.substr(0, m_current_folder.size() - ext.size());
+    // normalize trailing separator
+    if (!m_current_folder.empty()) {
+        char sep = std::filesystem::path::preferred_separator;
+        if (m_current_folder.back() == sep)
+            m_current_folder.pop_back();
+    }
 
     //Widget *top_panel = new Widget(this);
     //top_panel->set_layout(new BoxLayout(Orientation::Vertical,
@@ -66,6 +64,20 @@ FolderDialog::FolderDialog(Widget* parent, const std::string& title,
     Button* cancel_button = new Button(panel_buttons, "Cancel");
     cancel_button->set_callback([&] { if (m_callback) m_callback(""); dispose(); });
 
+#if !defined(_WIN32)
+    Button* home_button = new Button(panel_buttons, "Home");
+    home_button->set_callback([this] {
+        const char* home = getenv("HOME");
+        std::string homePath = home ? home : "/";
+        if (std::filesystem::exists(homePath)) {
+            m_current_folder = homePath;
+            current_location->set_caption(m_current_folder);
+            // rebuild tree rooted at home
+            start_items();
+        }
+    });
+#endif
+
     start_items();
 
     center();
@@ -89,18 +101,18 @@ void FolderDialog::start_items()
         });
 
     //Put Top Root
+#if defined(_WIN32)
     CurNanoTree->set_root("This_PC");
     CurNanoTree->Objects["This_PC"]->Name = "This_PC";
     CurNanoTree->Objects["This_PC"]->Expanded = true;
     explore_treeview->set_items(CurNanoTree);
-    // put driver roots
-#if WIN32
+    // enumerate drives on Windows
     DWORD Drives = GetLogicalDrives();
     for (int Cnt = 0; Cnt < 32; Cnt++)
     {
         if ((Drives >> Cnt) & 1)
         {
-            std::string Drive = ((utf8)(Cnt + 'A')) + ":\\";
+            std::string Drive = std::string(1, (char)('A' + Cnt)) + ":\\";
             CurNanoTree->add_node("This_PC", Drive);
             CurNanoTree->Objects[Drive]->Name = Drive;
             CurNanoTree->Objects[Drive]->CallBack = [=] {current_location->set_caption(Drive); explore_treeview->perform_layout(screen()->nvg_context()); };
@@ -108,48 +120,49 @@ void FolderDialog::start_items()
         }
     }
 #else
-    TODO try these:
-https://www.linuxquestions.org/questions/programming-9/how-to-get-a-list-of-physical-drives-in-c-538365/
-https://stackoverflow.com/questions/7243988/how-to-list-the-harddisks-attached-to-a-linux-machine-using-c
-
+    // On Unix, start directly from root "/"
+    CurNanoTree->set_root("/");
+    CurNanoTree->Objects["/"]->Name = "/";
+    CurNanoTree->Objects["/"]->Expanded = true;
+    explore_treeview->set_items(CurNanoTree);
+    FillChildren("/");
 #endif
 
     explore_treeview->set_items(explore_treeview->items());
 
-    // step into the path
-
-    char* str, * tofree;
-    char* running;
-    char* token;
-    str = (char*)malloc(Curr_Root.string().length() + 1);
-    tofree = str;
-
-    strcpy(str, Curr_Root.string().c_str());
-
-    std::string TmpFolder = "";
-    while (true)
-    {
-        token = Mystrsep(&str);
-        if (token == NULL)break;
-        TmpFolder += std::string(token) + "\\";
-
-        explore_treeview->arrow_callback(TmpFolder);
+    // step into the path (portable)
+    std::filesystem::path p = Curr_Root;
+    std::string accumulated;
+    for (const auto& part : p) {
+        if (accumulated.empty())
+            accumulated = part.string();
+        else
+            accumulated = (std::filesystem::path(accumulated) / part).string();
+        // ensure trailing separator for node names used by the tree
+        if (!accumulated.empty() && accumulated.back() != std::filesystem::path::preferred_separator)
+            accumulated += std::filesystem::path::preferred_separator;
+        explore_treeview->arrow_callback(accumulated);
     }
-    free(str);
 
     explore_treeview->perform_layout(screen()->nvg_context());
 }
 
 void FolderDialog::FillChildren(std::string Node)
 {
-    if (Node == "This_PC" || explore_treeview->items()->Objects[Node]->Children.size() > 0)return;// This_PC is just a node for the root. it does not represent a location
+#if defined(_WIN32)
+    if (Node == "This_PC") return;
+#endif
+    if (explore_treeview->items()->Objects[Node]->Children.size() > 0) return;
+    char sep = std::filesystem::path::preferred_separator;
     for (auto& CurrObject : std::filesystem::directory_iterator(Node))
     {
         try
         {
             if (std::filesystem::is_directory(CurrObject))
             {
-                std::string CompleteName = CurrObject.path().string() + "\\";
+                std::string CompleteName = CurrObject.path().string();
+                if (!CompleteName.empty() && CompleteName.back() != sep)
+                    CompleteName += sep;
                 if (explore_treeview->items()->Objects.find(CompleteName) == explore_treeview->items()->Objects.end())// node does not already exist
                 {
                     explore_treeview->items()->add_node(Node, CompleteName);
@@ -162,24 +175,4 @@ void FolderDialog::FillChildren(std::string Node)
     }
 }
 
-// taken from here: https://stackoverflow.com/questions/8512958/is-there-a-windows-variant-of-strsep-function
-char* FolderDialog::Mystrsep(char** stringp)
-{
-    char* start = *stringp;
-    char* p;
-
-    p = (start != NULL) ? strpbrk(start, "\\") : NULL;
-
-    if (p == NULL)
-    {
-        *stringp = NULL;
-    }
-    else
-    {
-        *p = '\0';
-        *stringp = p + 1;
-    }
-
-    return start;
-}
 NAMESPACE_END(nanogui)

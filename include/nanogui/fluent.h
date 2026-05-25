@@ -9,6 +9,8 @@
 
 #pragma once
 
+#include <nanogui/common.h>
+#include <nanogui/vector.h>
 // Forward declaration only (breaks circular include)
 NAMESPACE_BEGIN(nanogui)
 class Widget;

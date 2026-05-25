@@ -110,7 +110,7 @@ int main(int /* argc */, char ** /* argv */) {
 #endif
 
     // Create nanogui gui
-    bool enabled = true;
+    //bool enabled = true;
     FormHelper *gui = new FormHelper(screen);
     ref<Window> nanogui_window = gui->add_window(Vector2i(10, 10), "Form helper example");
     gui->add_group("Basic types");

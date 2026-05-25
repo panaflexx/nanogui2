@@ -1,3 +1,6 @@
+/* Copyright 2025 Roger Davenport */
+/* MIT Licensed */
+
 #ifndef DICT_H
 #define DICT_H
 

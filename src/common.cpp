@@ -28,8 +28,9 @@
 
 #if !defined(_WIN32)
 #  include <locale.h>
-#  include <signal.h>
 #  include <dirent.h>
+#elif !defined(__linux__)
+#  include <signal.h>
 #endif
 
 #if defined(EMSCRIPTEN)
@@ -483,4 +484,3 @@ void Object::dec_ref(bool dealloc) const noexcept {
 Object::~Object() { }
 
 NAMESPACE_END(nanogui)
-

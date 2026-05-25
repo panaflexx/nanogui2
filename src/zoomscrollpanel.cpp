@@ -15,6 +15,7 @@
 #include <nanogui/opengl.h>
 #include <algorithm>
 #include <cmath>
+#include <stdexcept>
 
 NAMESPACE_BEGIN(nanogui)
 

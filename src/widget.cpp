@@ -9,12 +9,15 @@
     BSD-style license that can be found in the LICENSE.txt file.
 */
 
+#include "nanogui/vector.h"
+#include <exception>
 #include <nanogui/widget.h>
 #include <nanogui/layout.h>
 #include <nanogui/theme.h>
 #include <nanogui/window.h>
 #include <nanogui/opengl.h>
 #include <nanogui/screen.h>
+#include <stdexcept>
 
 #define _USE_MATH_DEFINES
 #include <cmath>
@@ -52,10 +55,17 @@ Widget::~Widget() {
         this->DebugName.c_str()
     );
 #endif
-    Screen* CanICastSreen = dynamic_cast<Screen*>(this);
-    bool screen_widget = CanICastSreen != NULL;
-    if (screen_widget) {
-        this->screen()->notify_widget_destroyed(this);
+    // If this widget is NOT itself the Screen but is attached to one,
+    // notify the screen so it can scrub stale pointers (focus path,
+    // drag widget, animation registry, etc.). Without this, a dynamically
+    // destroyed widget (e.g. a temporary cell editor) leaves a dangling
+    // pointer in Screen::m_focus_path and the next focus update will
+    // dereference freed memory.
+    bool is_screen = dynamic_cast<Screen*>(this) != nullptr;
+    if (!is_screen) {
+        Screen* sc = this->screen();
+        if (sc)
+            sc->notify_widget_destroyed(this);
     }
 
     if (std::uncaught_exceptions() > 0) {

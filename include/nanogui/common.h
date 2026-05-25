@@ -16,11 +16,13 @@
 
 #include <stdint.h>
 #include <functional>
-#include <algorithm>
 #include <vector>
 #include <string>
-#include <stdexcept>
 #include <limits.h>
+#if !defined (__linux__)
+#  include <algorithm>
+#  include <stdexcept>
+#endif
 
 /* Set to 1 to draw boxes around widgets */
 //#define NANOGUI_SHOW_WIDGET_BOUNDS 1
@@ -284,7 +286,7 @@ mac_file_dialog(const std::vector<std::pair<std::string, std::string>> &filetype
  *     Set to ``true`` if you would like to be able to select multiple
  *     files at once. May not be simultaneously true with \p save.
  */
-extern NANOGUI_EXPORT 
+extern NANOGUI_EXPORT
 std::vector<std::string>
 file_dialog(const std::vector<std::pair<std::string, std::string>> &filetypes,
             bool save, bool multiple, std::string initial_folder);
@@ -328,4 +330,3 @@ NAMESPACE_BEGIN(enoki)
 /// Base class of all Enoki arrays
 template <typename Value_, typename Derived_> struct ArrayBase;
 NAMESPACE_END(enoki)
-

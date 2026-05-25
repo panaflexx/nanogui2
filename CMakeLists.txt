@@ -378,6 +378,7 @@ add_library(nanogui ${NANOGUI_LIBRARY_TYPE}
   include/nanogui/progressbar.h src/progressbar.cpp
   include/nanogui/slider.h src/slider.cpp
   include/nanogui/messagedialog.h src/messagedialog.cpp
+  include/nanogui/folderdialog.h src/folderdialog.cpp
   include/nanogui/textbox.h src/textbox.cpp
   include/nanogui/textarea.h src/textarea.cpp
   include/nanogui/document.h src/document.cpp
@@ -395,6 +396,7 @@ add_library(nanogui ${NANOGUI_LIBRARY_TYPE}
   include/nanogui/shader.h src/shader.cpp
   include/nanogui/imageview.h src/imageview.cpp
   include/nanogui/treeview.h src/treeview.cpp
+  include/nanogui/datagrid.h src/datagrid.cpp
   include/nanogui/traits.h src/traits.cpp
   include/nanogui/renderpass.h
   include/nanogui/formhelper.h
@@ -505,6 +507,7 @@ if (NANOGUI_BUILD_EXAMPLES)
   add_executable(guieditor     guieditor.cpp guieditor_json.cpp guieditor_json_editor.cpp)
   add_executable(json2cpp      json2cpp.cpp)
   add_executable(folderview    folderview.cpp)
+  add_executable(datatest      datatest.cpp)
 
   target_link_libraries(example1      nanogui)
   target_link_libraries(example2      nanogui)
@@ -518,6 +521,7 @@ if (NANOGUI_BUILD_EXAMPLES)
   target_link_libraries(flowsheet	  nanogui)
   target_link_libraries(flextest	  nanogui)
   target_link_libraries(folderview    nanogui)
+  target_link_libraries(datatest      nanogui)
   target_link_libraries(nanovg-colorfont-atlas nanogui ${NANOGUI_LIBS})
   target_link_libraries(imagestash_test nanogui ${NANOGUI_LIBS})
   target_link_libraries(guieditor nanogui ${NANOGUI_LIBS})

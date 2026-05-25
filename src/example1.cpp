@@ -94,7 +94,7 @@ public:
             });
 
         FileBtn->popup()->add<Button>("Folder Dialog")
-            .callback([this] {
+            .callback([] {
                 printf("**BEEP**\n");
             });
         FileBtn->popup()->add<Button>("Do File Stuff 2");
@@ -145,20 +145,20 @@ public:
         };
 
         add_item(
-        {"New...", "New image"}, FA_FILE, [this] { printf("New...\n"); }, {{SYSTEM_COMMAND_MOD, 'N'}}, false);
+        {"New...", "New image"}, FA_FILE, [] { printf("New...\n"); }, {{SYSTEM_COMMAND_MOD, 'N'}}, false);
         add_item(
         {"Exit...", "Exit..."}, FA_FILE, [this] { ask_to_quit(); }, {{SYSTEM_COMMAND_MOD, 'Q'}}, false);
 
         menu = m_menubar->add_menu("Edit");
 
-        add_item({"Undo", "Step back in history"}, FA_REPLY, [this] { printf("undo()\n"); },
+        add_item({"Undo", "Step back in history"}, FA_REPLY, [] { printf("undo()\n"); },
                  {{SYSTEM_COMMAND_MOD, 'Z'}});
-        add_item({"Redo", "Step forward in history"}, FA_SHARE, [this] { printf("redo()"); },
+        add_item({"Redo", "Step forward in history"}, FA_SHARE, [] { printf("redo()"); },
                  {{SYSTEM_COMMAND_MOD | GLFW_MOD_SHIFT, 'Z'}});
         Make<Separator>(menu->popup());
-        add_item({"Cut"}, FA_CUT, [this] { printf("cut()"); }, {{SYSTEM_COMMAND_MOD, 'X'}});
-        add_item({"Copy"}, FA_COPY, [this] { printf("copy()"); }, {{SYSTEM_COMMAND_MOD, 'C'}});
-        add_item({"Paste"}, FA_PASTE, [this] { printf("paste()"); }, {{SYSTEM_COMMAND_MOD, 'V'}});
+        add_item({"Cut"}, FA_CUT, [] { printf("cut()"); }, {{SYSTEM_COMMAND_MOD, 'X'}});
+        add_item({"Copy"}, FA_COPY, [] { printf("copy()"); }, {{SYSTEM_COMMAND_MOD, 'C'}});
+        add_item({"Paste"}, FA_PASTE, [] { printf("paste()"); }, {{SYSTEM_COMMAND_MOD, 'V'}});
 
 		// Move menubar to front
         move_window_to_front(m_menubar);

@@ -18,6 +18,7 @@
 #include <nanogui/object.h>
 #include <nanogui/vector.h>
 #include <nanogui/widget.h>
+#include <stdexcept>
 #include <unordered_map>
 #include <vector>
 
@@ -531,7 +532,7 @@ protected:
 /// Flex direction for FlexLayout (equivalent to CSS flex-direction)
 enum class FlexDirection {
     Row = 0,        ///< Items arranged horizontally, left to right
-    RowReverse,     ///< Items arranged horizontally, right to left  
+    RowReverse,     ///< Items arranged horizontally, right to left
     Column,         ///< Items arranged vertically, top to bottom
     ColumnReverse   ///< Items arranged vertically, bottom to top
 };
@@ -539,7 +540,7 @@ enum class FlexDirection {
 /// Justify content for main axis alignment (equivalent to CSS justify-content)
 enum class JustifyContent {
     FlexStart = 0,  ///< Items packed at start of main axis
-    FlexEnd,        ///< Items packed at end of main axis  
+    FlexEnd,        ///< Items packed at end of main axis
     Center,         ///< Items centered along main axis
     SpaceBetween,   ///< Items evenly distributed, first/last at edges
     SpaceAround,    ///< Items evenly distributed with equal space around
@@ -580,12 +581,12 @@ public:
      */
     struct FlexItem {
         float flex_grow = 0.0f;     ///< How much the item should grow (CSS flex-grow)
-        float flex_shrink = 1.0f;   ///< How much the item should shrink (CSS flex-shrink)  
+        float flex_shrink = 1.0f;   ///< How much the item should shrink (CSS flex-shrink)
         int flex_basis = -1;        ///< Initial main size before free space distribution (CSS flex-basis)
         AlignItems align_self = AlignItems::FlexStart;  ///< Override container align_items for this item
-        
+
         FlexItem() = default;
-        FlexItem(float grow, float shrink = 1.0f, int basis = -1) 
+        FlexItem(float grow, float shrink = 1.0f, int basis = -1)
             : flex_grow(grow), flex_shrink(shrink), flex_basis(basis) {}
     };
 
@@ -594,7 +595,7 @@ public:
      *
      * \param direction The flex direction (main axis orientation)
      * \param justify_content Main axis alignment
-     * \param align_items Cross axis alignment  
+     * \param align_items Cross axis alignment
      * \param margin Margin around the container
      * \param gap Gap between flex items
      */
@@ -605,7 +606,7 @@ public:
 
     /// Get the flex direction
     FlexDirection direction() const { return m_direction; }
-    /// Set the flex direction  
+    /// Set the flex direction
     void set_direction(FlexDirection direction) { m_direction = direction; }
 
     /// Get the justify content setting
@@ -630,7 +631,7 @@ public:
 
     /// Get the gap between items
     int gap() const { return m_gap; }
-    /// Set the gap between items  
+    /// Set the gap between items
     void set_gap(int gap) { m_gap = gap; }
 
     /// Set flex properties for a specific widget
@@ -653,14 +654,14 @@ public:
 protected:
     /// Determine if direction is row-based
     bool is_row_direction() const { return m_direction == FlexDirection::Row || m_direction == FlexDirection::RowReverse; }
-    
-    /// Determine if direction is reversed  
+
+    /// Determine if direction is reversed
     bool is_reverse_direction() const { return m_direction == FlexDirection::RowReverse || m_direction == FlexDirection::ColumnReverse; }
 
     /// Get main axis index (0 for row, 1 for column)
     int main_axis() const { return is_row_direction() ? 0 : 1; }
-    
-    /// Get cross axis index  
+
+    /// Get cross axis index
     int cross_axis() const { return is_row_direction() ? 1 : 0; }
 
 protected:

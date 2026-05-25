@@ -21,8 +21,10 @@
 #include <nanogui/menu.h>
 
 #include <iostream>
+#if !defined(__linux__)
 #include <memory>
 #include <sstream>
+#endif
 
 #define STB_IMAGE_STATIC
 #define STB_IMAGE_IMPLEMENTATION
@@ -639,7 +641,7 @@ public:
                 nvgFontFace(ctx, "sans");
                 nvgFillColor(ctx, Color(255, 255, 255, 255));
                 nvgTextAlign(ctx, NVG_ALIGN_CENTER);
-                nvgText(ctx, m_pos.x() + m_size.x() / 2, m_pos.y() + m_size.y() / 2 + 15, "DISABLED", nullptr);
+                nvgText(ctx, m_pos.x() + m_size.x() / 2.0f, m_pos.y() + m_size.y() / (2.0 + 15.0), "DISABLED", nullptr);
             }
             nvgRestore(ctx);
         }
@@ -714,7 +716,7 @@ public:
                 nvgFontFace(ctx, "sans");
                 nvgFillColor(ctx, Color(255, 255, 255, 255));
                 nvgTextAlign(ctx, NVG_ALIGN_CENTER);
-                nvgText(ctx, m_pos.x() + m_size.x() / 2, m_pos.y() + 20, "TEST MODE: OFF", nullptr);
+                nvgText(ctx, m_pos.x() + m_size.x() / 2.0f, m_pos.y() + 20, "TEST MODE: OFF", nullptr);
             }
             nvgRestore(ctx);
         }
@@ -775,13 +777,13 @@ public:
             // Bottom-right
             nvgRect(ctx, w_pos.x() + w_size.x() - hs / 2, w_pos.y() + w_size.y() - hs / 2, hs, hs);
             // Top-middle
-            nvgRect(ctx, w_pos.x() + w_size.x() / 2 - hs / 2, w_pos.y() - hs / 2, hs, hs);
+            nvgRect(ctx, w_pos.x() + w_size.x() / 2.0 - hs / 2.0, w_pos.y() - hs / 2, hs, hs);
             // Bottom-middle
-            nvgRect(ctx, w_pos.x() + w_size.x() / 2 - hs / 2, w_pos.y() + w_size.y() - hs / 2, hs, hs);
+            nvgRect(ctx, w_pos.x() + w_size.x() / 2.0 - hs / 2.0, w_pos.y() + w_size.y() - hs / 2, hs, hs);
             // Left-middle
-            nvgRect(ctx, w_pos.x() - hs / 2, w_pos.y() + w_size.y() / 2 - hs / 2, hs, hs);
+            nvgRect(ctx, w_pos.x() - hs / 2, w_pos.y() + w_size.y() / 2.0 - hs / 2.0, hs, hs);
             // Right-middle
-            nvgRect(ctx, w_pos.x() + w_size.x() - hs / 2, w_pos.y() + w_size.y() / 2 - hs / 2, hs, hs);
+            nvgRect(ctx, w_pos.x() + w_size.x() - hs / 2.0, w_pos.y() + w_size.y() / 2.0 - hs / 2, hs, hs);
 
             nvgFillColor(ctx, handleFill);
             nvgFill(ctx);
@@ -1072,7 +1074,7 @@ bool GUIEditor::update_properties() {
                 TextBox *caption_box = new TextBox(row);
                 caption_box->set_value(mi->caption());
                 caption_box->set_min_width(150);
-                caption_box->set_callback([this, mi](const std::string &v) {
+                caption_box->set_callback([mi](const std::string &v) {
                     mi->set_caption(v);
 					/*
                     if (!v.empty()) {

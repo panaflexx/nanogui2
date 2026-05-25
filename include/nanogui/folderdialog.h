@@ -22,7 +22,6 @@ NAMESPACE_BEGIN(nanogui)
  * \brief Simple select folder modal dialog.
  */
 class NANOGUI_EXPORT FolderDialog : public Window {
-    char* Mystrsep(char** stringp);
     void start_items();
     void FillChildren(std::string Node);
 public:

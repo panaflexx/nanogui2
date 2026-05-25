@@ -2,6 +2,7 @@
 #include <nanogui/screen.h>
 #include <nanogui/opengl.h>
 #include <nanogui/texture.h>
+#include <stdexcept>
 #include "opengl_check.h"
 
 NAMESPACE_BEGIN(nanogui)
