@@ -279,7 +279,7 @@ public:
         float y = (float)m_pos.y();
         float h = (float)m_size.y();
 
-        nvgFontSize(ctx, fs * 0.7f);
+        nvgFontSize(ctx, fs);
         nvgFontFace(ctx, "sans-bold");
         nvgFillColor(ctx, m_theme->m_disabled_text_color);
         nvgTextAlign(ctx, NVG_ALIGN_LEFT | NVG_ALIGN_MIDDLE);
@@ -1084,7 +1084,7 @@ public:
         theme->m_icon_color            = Color(80, 130, 210, 255);
         theme->m_disabled_text_color   = Color(120, 120, 130, 255);
         theme->m_split_divider_width    = 2;
-        theme->m_standard_font_size     = 24.0f;
+        theme->m_standard_font_size     = 16.0f;
 
 
         // Root borderless window

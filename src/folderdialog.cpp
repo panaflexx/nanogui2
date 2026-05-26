@@ -15,11 +15,11 @@
 #include <nanogui/label.h>
 #include <nanogui/screen.h>
 #include <nanogui/scrollpanel.h>
-#include <filesystem>
 
 #if defined(_WIN32)
+#include <filesystem>
 #include <windows.h>
-#endif
+
 
 NAMESPACE_BEGIN(nanogui)
 
@@ -174,5 +174,6 @@ void FolderDialog::FillChildren(std::string Node)
         catch (const std::exception& e) {};
     }
 }
-
 NAMESPACE_END(nanogui)
+
+#endif //WIN32

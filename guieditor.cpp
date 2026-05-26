@@ -32,6 +32,7 @@
 #if !defined(__linux__)
 #include <memory>
 #include <sstream>
+#include <array>
 #endif
 
 // Pull json2cpp generator as a module (no main)
@@ -550,9 +551,12 @@ GUIEditor::GUIEditor() : Screen(Vector2i(1024, 768), "GUI Editor") {
         tool_buttons.push_back(tb);
     }
 
-    // Load / Save row
+	// Load / Save row
     Widget *fileRow = new Widget(editor_win);
-    fileRow->set_layout(new BoxLayout(Orientation::Horizontal, Alignment::Middle, 0, 5));
+    fileRow->set_layout(
+    	new GridLayout(Orientation::Horizontal, 2,
+                                        Alignment::Minimum, 15, 5)
+		);
 
     Button *load_btn = new Button(fileRow, "Load", FA_FOLDER_OPEN);
     load_btn->set_tooltip("Load layout from JSON file");
@@ -2087,11 +2091,12 @@ void GUIEditor::open_code_editor_window() {
     // Optional button row
     Widget* btn_row = new Widget(code_win);
     btn_row->set_layout(new BoxLayout(Orientation::Horizontal, Alignment::Middle, 0, 6));
+	btn_row->set_min_height(28);
     Button* copy_btn = new Button(btn_row, "Copy to clipboard", FA_CLIPBOARD);
 
     // Apply Flex items
     flex->set_flex_item(editor,   FlexLayout::FlexItem(1.0f));
-    flex->set_flex_item(btn_row,  FlexLayout::FlexItem(0.0f));
+    flex->set_flex_item(btn_row,  FlexLayout::FlexItem(1.0f));
     copy_btn->set_callback([copy_btn] {
         copy_btn->set_caption("Copied!");
         if (auto* sc = copy_btn->screen()) sc->redraw();
