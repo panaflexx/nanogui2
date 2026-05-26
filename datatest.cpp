@@ -363,7 +363,7 @@ public:
         // Grid
         datagrid = new DataGrid(window);
         datagrid->set_font_size(14);
-        datagrid->set_min_height(600);
+        datagrid->set_min_height(300);
 
         // Model
         model = build_model();
