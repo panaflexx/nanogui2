@@ -51,6 +51,10 @@ bool save_layout(GUIEditor* editor, const std::string& path);
 /// Uses GUIEditor::create_widget_by_type as the factory.
 bool load_layout(GUIEditor* editor, const std::string& path);
 
+/// Build the exact Dict tree that save_layout would serialize.
+/// The caller is responsible for calling dict_destroy() on the result.
+DictValue* build_canvas_dict(GUIEditor* editor);
+
 } // namespace guieditor_json
 
 #endif // GUIEDITOR_JSON_H

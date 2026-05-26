@@ -336,7 +336,6 @@ public:
         window->set_position(Vector2i(20, 20));
         window->set_size(Vector2i(1360, 860));
         window->set_layout(new BoxLayout(Orientation::Vertical, Alignment::Fill, 8, 8));
-		window->set_resizable( true );
 
         // Toolbar
         auto* toolbar = new Widget(window);

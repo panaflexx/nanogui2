@@ -100,6 +100,9 @@ public:
     Widget* create_widget_by_type(const std::string& type, Widget* parent);
     void    clear_canvas();
 
+    /// Generate C++ via the embedded json2cpp and open a TextEditor window.
+    void open_code_editor_window();
+
     bool mouse_button_event(const Vector2i &p, int button, bool down, int modifiers) override;
     bool mouse_motion_event(const Vector2i &p, const Vector2i &rel, int button, int modifiers) override;
     bool mouse_drag_event(const Vector2i &p, const Vector2i &rel, int button, int modifiers) override;
@@ -108,6 +111,9 @@ public:
     void draw(NVGcontext *ctx) override;
 
 private:
+    /// Returns true if any child Window currently has modal() == true.
+    bool has_modal_dialog() const;
+
     // -----------------------------------------------------------------------
     // Snap-to-grid
     // -----------------------------------------------------------------------

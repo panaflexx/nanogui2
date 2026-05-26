@@ -206,4 +206,25 @@ bool load_layout(GUIEditor* editor, const std::string& path) {
     return load_layout_into(editor->canvas_win, path, factory);
 }
 
+DictValue* build_canvas_dict(GUIEditor* editor) {
+    if (!editor || !editor->canvas_win) return nullptr;
+
+    DictValue* root = dict_create_object();
+    dict_object_set(root, "type", dict_create_string("Canvas"));
+    dict_object_set(root, "id", dict_create_string(editor->canvas_win->id().c_str()));
+    dict_object_set(root, "size", make_vec2i(editor->canvas_win->size()));
+
+    std::string top_ltype = layout_to_string(editor->canvas_win);
+    if (!top_ltype.empty())
+        dict_object_set(root, "layout", dict_create_string(top_ltype.c_str()));
+
+    DictValue* children = dict_create_array();
+    for (Widget* c : editor->canvas_win->children()) {
+        dict_array_append(children, widget_to_json(editor, c));
+    }
+    dict_object_set(root, "children", children);
+
+    return root;
+}
+
 } // namespace guieditor_json

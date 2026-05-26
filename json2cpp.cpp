@@ -552,6 +552,33 @@ static void print_usage(const char* prog) {
         "  -h, --help           Show this message\n";
 }
 
+// ---------------------------------------------------------------------------
+// Public API – reusable when json2cpp.cpp is included as a module
+// (guieditor does: #define JSON2CPP_AS_MODULE \n//                  #include "json2cpp.cpp")
+// ---------------------------------------------------------------------------
+struct Json2CppResult {
+    std::string header;   // guiclass.h contents
+    std::string source;   // guiclass.cpp contents
+    std::string mainapp;  // mainapp.cpp contents (empty unless fullmain)
+};
+
+Json2CppResult json2cpp_generate(DictValue* root,
+                                 const std::string& classname = "GuiClass",
+                                 int canvas_w = 0, int canvas_h = 0,
+                                 float scale = 1.0f,
+                                 bool fullmain = false)
+{
+    Json2CppResult r;
+    if (!root) return r;
+
+    r.header  = make_header(classname);
+    r.source  = make_source(classname, root, canvas_w, canvas_h, scale);
+    if (fullmain)
+        r.mainapp = make_mainapp(classname, canvas_w, canvas_h, scale);
+    return r;
+}
+
+#ifndef JSON2CPP_AS_MODULE
 int main(int argc, char** argv) {
     std::string input;
     std::string classname = "GuiClass";
@@ -651,3 +678,5 @@ int main(int argc, char** argv) {
         std::cout << "[json2cpp] Wrote " << mpath << "\n";
     return 0;
 }
+
+#endif // JSON2CPP_AS_MODULE

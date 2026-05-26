@@ -21,13 +21,23 @@
 #include <nanogui/progressbar.h>
 #include <nanogui/split.h>
 #include <nanogui/menu.h>
+#include <nanogui/texteditor.h>
 
 #include <iostream>
 #include <algorithm>
+#include <fstream>
+#include <cstdio>
+#include <thread>
+#include <chrono>
 #if !defined(__linux__)
 #include <memory>
 #include <sstream>
 #endif
+
+// Pull json2cpp generator as a module (no main)
+#define JSON2CPP_AS_MODULE
+#include "json2cpp.cpp"
+#undef JSON2CPP_AS_MODULE
 
 #define STB_IMAGE_STATIC
 #define STB_IMAGE_IMPLEMENTATION
@@ -571,6 +581,13 @@ GUIEditor::GUIEditor() : Screen(Vector2i(1024, 768), "GUI Editor") {
             new MessageDialog(this, MessageDialog::Type::Warning,
                               "Save failed", "Could not save JSON layout to " + path);
         }
+    });
+
+    // Edit Code button — generates C++ via json2cpp module and opens editor window
+    Button *edit_code_btn = new Button(fileRow, "Edit Code", FA_CODE);
+    edit_code_btn->set_tooltip("Generate C++ code from current layout and open in editor");
+    edit_code_btn->set_callback([this] {
+        open_code_editor_window();
     });
 
     // Test button — toggles test mode, stays in sync with the checkbox below
@@ -1441,6 +1458,9 @@ static Widget* find_deepest_container(Widget* root, const Vector2i& p,
 }
 
 bool GUIEditor::mouse_button_event(const Vector2i &p, int button, bool down, int modifiers) {
+    if (has_modal_dialog()) {
+        return Screen::mouse_button_event(p, button, down, modifiers);
+    }
     m_redraw = true;
     Widget *clicked_widget = find_widget(p);
 
@@ -1740,6 +1760,9 @@ bool GUIEditor::mouse_button_event(const Vector2i &p, int button, bool down, int
 }
 
 bool GUIEditor::mouse_motion_event(const Vector2i &p, const Vector2i &rel, int button, int modifiers) {
+    if (has_modal_dialog()) {
+        return Screen::mouse_motion_event(p, rel, button, modifiers);
+    }
     if (Screen::mouse_motion_event(p, rel, button, modifiers)) return true;
 
     // --- Rubber band update ---
@@ -1850,6 +1873,9 @@ bool GUIEditor::mouse_motion_event(const Vector2i &p, const Vector2i &rel, int b
 }
 
 bool GUIEditor::mouse_drag_event(const Vector2i &p, const Vector2i &rel, int button, int modifiers) {
+    if (has_modal_dialog()) {
+        return Screen::mouse_drag_event(p, rel, button, modifiers);
+    }
     if (!test_mode && dragging && selected_widget && (button & (1 << GLFW_MOUSE_BUTTON_1))) {
         if (selected_widget == canvas_win) return false;
         Widget *cur = selected_widget->parent();
@@ -1871,6 +1897,9 @@ bool GUIEditor::mouse_drag_event(const Vector2i &p, const Vector2i &rel, int but
 }
 
 bool GUIEditor::keyboard_event(int key, int scancode, int action, int modifiers) {
+    if (has_modal_dialog()) {
+        return Screen::keyboard_event(key, scancode, action, modifiers);
+    }
     if (Screen::keyboard_event(key, scancode, action, modifiers)) return true;
 
     if (key == GLFW_KEY_ESCAPE && action == GLFW_PRESS) {
@@ -1994,6 +2023,97 @@ bool GUIEditor::resize_event(const Vector2i &size) {
     }
     Screen::resize_event(size);
     return true;
+}
+
+// ============================================================================
+// Code generation / editor window
+// ============================================================================
+
+void GUIEditor::open_code_editor_window() {
+    if (!canvas_win) return;
+
+    // Use the shared implementation so we get the full recursive widget JSON
+    DictValue* root = guieditor_json::build_canvas_dict(this);
+    if (!root) {
+        new MessageDialog(this, MessageDialog::Type::Warning,
+                          "Code generation failed", "Could not build JSON tree.");
+        return;
+    }
+
+    int canvas_w = 0, canvas_h = 0;
+    DictValue* szv = dict_object_get(root, "size");
+    if (szv && szv->type == DICT_ARRAY && szv->array_value.length >= 2) {
+        canvas_w = (int)szv->array_value.items[0]->int64_value;
+        canvas_h = (int)szv->array_value.items[1]->int64_value;
+    }
+
+    // fullmain=false => no mainapp.cpp, only the GuiClass
+    Json2CppResult code = json2cpp_generate(root, "GuiClass", canvas_w, canvas_h, 1.0f, /*fullmain*/ false);
+    dict_destroy(root);
+
+    if (code.source.empty()) {
+        new MessageDialog(this, MessageDialog::Type::Warning,
+                          "Code generation failed", "json2cpp_generate returned empty source.");
+        return;
+    }
+
+    // Create a new floating window with a code-mode TextEditor
+    Window* code_win = new Window(this, "Generated C++ (editable)");
+    code_win->set_modal(true);   // block interaction with the main canvas while open
+    code_win->set_layout(new BoxLayout(Orientation::Vertical, Alignment::Fill, 8, 8));
+    code_win->set_position(Vector2i(120, 80));
+    code_win->set_size(Vector2i(900, 700));
+
+    // Explicit close button (top-right)
+    Button *close_btn = new Button(code_win->button_panel(), "", FA_TIMES);
+    close_btn->set_tooltip("Close");
+    close_btn->set_callback([code_win] {
+        // Defer dispose so the current mouse-button release finishes first.
+        async([code_win] { code_win->dispose(); });
+    });
+
+    auto* editor = new TextEditor(code_win, TextEditor::Mode::Code);
+    editor->set_background_color(Color(30, 30, 35, 255));
+    Style code_style;
+    code_style.fgColor = nvgRGBA(220, 220, 220, 255);
+    code_style.fontSize = 13.0f;
+    editor->set_code_style(code_style);
+    editor->set_height_flex(SizeMode::Expanding);
+
+    editor->set_plain_text(code.source);   // only the class, no main
+
+    // Optional button row
+    Widget* btn_row = new Widget(code_win);
+    btn_row->set_layout(new BoxLayout(Orientation::Horizontal, Alignment::Middle, 0, 6));
+    Button* copy_btn = new Button(btn_row, "Copy to clipboard", FA_CLIPBOARD);
+    copy_btn->set_callback([copy_btn] {
+        copy_btn->set_caption("Copied!");
+        if (auto* sc = copy_btn->screen()) sc->redraw();
+
+        // Sleep off the UI thread, then post the revert back to the main thread
+        std::thread([copy_btn] {
+            std::this_thread::sleep_for(std::chrono::milliseconds(2000));
+            async([copy_btn] {
+                if (copy_btn->screen()) {
+                    copy_btn->set_caption("Copy to clipboard");
+                    copy_btn->screen()->redraw();
+                }
+            });
+        }).detach();
+    });
+
+    perform_layout();
+    code_win->center();
+    redraw();
+}
+
+bool GUIEditor::has_modal_dialog() const {
+    for (Widget* w : children()) {
+        if (Window* win = dynamic_cast<Window*>(w)) {
+            if (win->modal()) return true;
+        }
+    }
+    return false;
 }
 
 // ============================================================================
