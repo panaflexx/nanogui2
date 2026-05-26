@@ -30,8 +30,9 @@
 #include <cstdio>
 #include <thread>
 #include <chrono>
-#if !defined(__linux__)
+#include <atomic>
 #include <memory>
+#if !defined(__linux__)
 #include <sstream>
 #include <array>
 #endif
@@ -2109,20 +2110,26 @@ void GUIEditor::open_code_editor_window() {
     // Apply Flex items
     flex->set_flex_item(editor,   FlexLayout::FlexItem(1.0f));
     flex->set_flex_item(btn_row,  FlexLayout::FlexItem(0.0f));
-    copy_btn->set_callback([copy_btn] {
+    auto copy_alive = std::make_shared<std::atomic<bool>>(true);
+
+    copy_btn->set_callback([copy_btn, copy_alive] {
         copy_btn->set_caption("Copied!");
         if (auto* sc = copy_btn->screen()) sc->redraw();
 
-        // Sleep off the UI thread, then post the revert back to the main thread
-        std::thread([copy_btn] {
+        std::thread([copy_btn, copy_alive] {
             std::this_thread::sleep_for(std::chrono::milliseconds(2000));
-            async([copy_btn] {
-                if (copy_btn->screen()) {
+            async([copy_btn, copy_alive] {
+                if (*copy_alive && copy_btn->screen()) {
                     copy_btn->set_caption("Copy to clipboard");
                     copy_btn->screen()->redraw();
                 }
             });
         }).detach();
+    });
+
+    close_btn->set_callback([code_win, copy_alive] {
+        *copy_alive = false;                       // kill pending revert
+        async([code_win] { code_win->dispose(); });
     });
 
     perform_layout();
