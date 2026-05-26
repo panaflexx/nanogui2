@@ -827,14 +827,14 @@ void TextEditor::draw(NVGcontext* ctx) {
 }
 
 Vector2i TextEditor::preferred_size(NVGcontext* ctx) const {
-    if (m_mode == Mode::Code) {
-        const float lh  = line_height(ctx);
-        const float adv = char_advance(ctx);
-        int w = (int)std::ceil(adv * 80) + gutter_width(ctx) + 2 * m_padding;
-        int h = (int)std::ceil(lh * (float)paragraph_count()) + 2 * m_padding;
-        return Vector2i(w, h);
-    }
-    return Vector2i((int)m_doc->contentWidth + 2 * m_padding, 200);
+    const float lh  = line_height(ctx);
+    const float adv = char_advance(ctx);
+    int w = (int)std::ceil(adv * 80) + gutter_width(ctx) + 2 * m_padding;
+
+    // Return a modest intrinsic height (~5 lines). FlexItem grow will expand it.
+    constexpr int kMinLines = 5;
+    int h = (int)std::ceil(lh * kMinLines) + 2 * m_padding;
+    return {w, h};
 }
 
 // ---------------------------------------------------------------------------

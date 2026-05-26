@@ -1069,7 +1069,7 @@ Vector2i FlexLayout::preferred_size(NVGcontext *ctx, const Widget *widget) const
     const Window *window = dynamic_cast<const Window*>(widget);
     if (window && !window->title().empty()) {
         if (!is_row_direction())
-            size[1] += widget->theme()->m_window_header_height - m_margin / 2;
+            size[1] += widget->theme()->m_window_header_height;
         else
             y_offset = widget->theme()->m_window_header_height;
     }
@@ -1147,7 +1147,7 @@ void FlexLayout::perform_layout(NVGcontext *ctx, Widget *widget) const {
     if (window && !window->title().empty()) {
 		y_offset = widget->theme()->m_window_header_height;
         if (!is_row_direction()) {
-            container_size.y() -= widget->theme()->m_window_header_height - m_margin / 2;
+            container_size.y() -= widget->theme()->m_window_header_height;
         } else {
             container_size.y() -= y_offset;
         }

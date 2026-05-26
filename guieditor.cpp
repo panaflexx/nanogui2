@@ -9,6 +9,7 @@
 
 #include "guieditor.h"
 #include "guieditor_json.h"
+#include <nanogui/theme.h>
 #include <nanogui/toolbutton.h>
 #include <nanogui/icons.h>
 #include <nanogui/messagedialog.h>
@@ -2036,6 +2037,16 @@ bool GUIEditor::resize_event(const Vector2i &size) {
 void GUIEditor::open_code_editor_window() {
     if (!canvas_win) return;
 
+    // Theme — light background like macOS
+    Theme *code_theme = new Theme(screen()->nvg_context());
+    code_theme->m_window_fill_unfocused = Color(180, 122, 75, 255);
+    code_theme->m_window_fill_focused   = Color(180, 122, 75, 255);
+    code_theme->m_text_color            = Color(255, 255, 255, 255);
+    code_theme->m_icon_color            = Color(80, 130, 210, 255);
+    code_theme->m_disabled_text_color   = Color(120, 120, 130, 255);
+    code_theme->m_split_divider_width    = 2;
+    code_theme->m_standard_font_size     = 16.0f;
+
     // Use the shared implementation so we get the full recursive widget JSON
     DictValue* root = guieditor_json::build_canvas_dict(this);
     if (!root) {
@@ -2069,6 +2080,7 @@ void GUIEditor::open_code_editor_window() {
     code_win->set_position(Vector2i(120, 80));
     code_win->set_min_size(Vector2i(600, 400));
     code_win->set_resizable(true);
+    code_win->set_theme(code_theme);
 
     // Explicit close button (top-right)
     Button *close_btn = new Button(code_win->button_panel(), "", FA_TIMES);
@@ -2096,7 +2108,7 @@ void GUIEditor::open_code_editor_window() {
 
     // Apply Flex items
     flex->set_flex_item(editor,   FlexLayout::FlexItem(1.0f));
-    flex->set_flex_item(btn_row,  FlexLayout::FlexItem(1.0f));
+    flex->set_flex_item(btn_row,  FlexLayout::FlexItem(0.0f));
     copy_btn->set_callback([copy_btn] {
         copy_btn->set_caption("Copied!");
         if (auto* sc = copy_btn->screen()) sc->redraw();
