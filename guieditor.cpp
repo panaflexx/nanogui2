@@ -2060,9 +2060,11 @@ void GUIEditor::open_code_editor_window() {
     // Create a new floating window with a code-mode TextEditor
     Window* code_win = new Window(this, "Generated C++ (editable)");
     code_win->set_modal(true);   // block interaction with the main canvas while open
-    code_win->set_layout(new BoxLayout(Orientation::Vertical, Alignment::Fill, 8, 8));
+    auto* flex = new FlexLayout(FlexDirection::Column, JustifyContent::FlexStart, AlignItems::Stretch);
+    code_win->set_layout(flex);
     code_win->set_position(Vector2i(120, 80));
-    code_win->set_size(Vector2i(900, 700));
+    code_win->set_min_size(Vector2i(600, 400));
+    code_win->set_resizable(true);
 
     // Explicit close button (top-right)
     Button *close_btn = new Button(code_win->button_panel(), "", FA_TIMES);
@@ -2078,14 +2080,18 @@ void GUIEditor::open_code_editor_window() {
     code_style.fgColor = nvgRGBA(220, 220, 220, 255);
     code_style.fontSize = 13.0f;
     editor->set_code_style(code_style);
+    editor->set_min_size({300,200});
     editor->set_height_flex(SizeMode::Expanding);
-
     editor->set_plain_text(code.source);   // only the class, no main
 
     // Optional button row
     Widget* btn_row = new Widget(code_win);
     btn_row->set_layout(new BoxLayout(Orientation::Horizontal, Alignment::Middle, 0, 6));
     Button* copy_btn = new Button(btn_row, "Copy to clipboard", FA_CLIPBOARD);
+
+    // Apply Flex items
+    flex->set_flex_item(editor,   FlexLayout::FlexItem(1.0f));
+    flex->set_flex_item(btn_row,  FlexLayout::FlexItem(0.0f));
     copy_btn->set_callback([copy_btn] {
         copy_btn->set_caption("Copied!");
         if (auto* sc = copy_btn->screen()) sc->redraw();
