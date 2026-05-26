@@ -16,6 +16,9 @@
 #include <nanogui/checkbox.h>
 #include <nanogui/slider.h>
 #include <nanogui/colorpicker.h>
+#include <nanogui/graph.h>
+#include <nanogui/progressbar.h>
+#include <nanogui/split.h>
 #include <nanogui/layout.h>
 
 #include <fstream>
@@ -104,10 +107,26 @@ DictValue* widget_to_json(GUIEditor* editor, Widget* w) {
     } else if (type == "Color Picker") {
         if (ColorPicker* cp = dynamic_cast<ColorPicker*>(w))
             dict_object_set(obj, "color", make_color(cp->color()));
+    } else if (type == "Graph") {
+        if (Graph* g = dynamic_cast<Graph*>(w))
+            dict_object_set(obj, "caption", dict_create_string(g->caption().c_str()));
+    } else if (type == "Progress Bar") {
+        if (ProgressBar* pb = dynamic_cast<ProgressBar*>(w))
+            dict_object_set(obj, "value", dict_create_number((double)pb->value()));
+    } else if (type == "Split") {
+        if (Split* sp = dynamic_cast<Split*>(w)) {
+            dict_object_set(obj, "orientation",
+                dict_create_string(sp->orientation() == Split::Orientation::Horizontal
+                                   ? "horizontal" : "vertical"));
+            dict_object_set(obj, "drag_position",
+                dict_create_number((double)sp->drag_position()));
+        }
     }
 
-    // Recurse into children for container types only
-    bool descend = (type == "Window" || type == "Pane" || type == "Widget" || type == "View");
+    // Recurse into children for container types only.
+    // Split is included: its two panes are saved as children and restored on load.
+    bool descend = (type == "Window" || type == "Pane" || type == "Widget"
+                 || type == "View"   || type == "Split");
     if (descend) {
         DictValue* children = dict_create_array();
         for (Widget* c : w->children()) {

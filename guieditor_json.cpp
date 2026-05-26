@@ -26,6 +26,9 @@
 #include <nanogui/checkbox.h>
 #include <nanogui/slider.h>
 #include <nanogui/colorpicker.h>
+#include <nanogui/graph.h>
+#include <nanogui/progressbar.h>
+#include <nanogui/split.h>
 #include <nanogui/layout.h>
 
 #include <fstream>
@@ -202,6 +205,28 @@ void build_from_json(const guieditor_json::WidgetFactory& factory,
         if (ColorPicker* cp = dynamic_cast<ColorPicker*>(w)) {
             if (get_color(obj, "color", cval))
                 cp->set_color(cval);
+        }
+    } else if (type == "Graph") {
+        if (Graph* g = dynamic_cast<Graph*>(w)) {
+            if (get_string(obj, "caption", sval))
+                g->set_caption(sval);
+        }
+    } else if (type == "Progress Bar" || type == "ProgressBar") {
+        if (ProgressBar* pb = dynamic_cast<ProgressBar*>(w)) {
+            DictValue* vv = get_field(obj, "value");
+            if (get_number(vv, nval))
+                pb->set_value((float)nval);
+        }
+    } else if (type == "Split") {
+        if (Split* sp = dynamic_cast<Split*>(w)) {
+            std::string orient;
+            if (get_string(obj, "orientation", orient))
+                sp->set_orientation(orient == "vertical"
+                    ? Split::Orientation::Vertical
+                    : Split::Orientation::Horizontal);
+            DictValue* dpv = get_field(obj, "drag_position");
+            if (get_number(dpv, nval))
+                sp->set_drag_position((float)nval);
         }
     }
 

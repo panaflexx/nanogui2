@@ -148,6 +148,11 @@ static const TypeInfo* lookup_type(const std::string& t) {
         { "Slider",       nullptr,       "nanogui::Slider",      nullptr },
         { "Color Picker", "ColorPicker", "nanogui::ColorPicker", nullptr },
         { "Dropdown",     nullptr,       "nanogui::Dropdown",    nullptr },
+        { "Split",        nullptr,       "nanogui::Split",       nullptr },
+        { "Graph",        nullptr,       "nanogui::Graph",       "\"\""  },
+        { "Image Panel",  "ImagePanel",  "nanogui::ImagePanel",  nullptr },
+        { "Progress Bar", "ProgressBar", "nanogui::ProgressBar", nullptr },
+        { "Text Area",    "TextArea",    "nanogui::TextArea",    nullptr },
         { nullptr, nullptr, nullptr, nullptr }
     };
     for (const TypeInfo* it = table; it->json_type; ++it) {
@@ -282,6 +287,37 @@ static void gen_widget(Gen& g, DictValue* obj, const std::string& parent_var) {
         if (get_color4(obj, "color", rgba))
             g.body << g.indent() << var << "->set_color(nanogui::Color("
                    << rgba[0] << ", " << rgba[1] << ", " << rgba[2] << ", " << rgba[3] << "));\n";
+    } else if (type == "Graph") {
+        if (get_string(obj, "caption", sval))
+            g.body << g.indent() << var << "->set_caption(\"" << escape_cstr(sval) << "\");\n";
+    } else if (type == "Progress Bar" || type == "ProgressBar") {
+        DictValue* vv = get_field(obj, "value");
+        if (get_number_val(vv, nval)) {
+            std::ostringstream lit;
+            lit.precision(9);
+            lit << (float)nval;
+            std::string sv = lit.str();
+            if (sv.find('.') == std::string::npos && sv.find('e') == std::string::npos
+                && sv.find('E') == std::string::npos)
+                sv += ".0";
+            g.body << g.indent() << var << "->set_value(" << sv << "f);\n";
+        }
+    } else if (type == "Split") {
+        if (get_string(obj, "orientation", sval))
+            g.body << g.indent() << var << "->set_orientation("
+                   << (sval == "vertical"
+                       ? "nanogui::Split::Orientation::Vertical"
+                       : "nanogui::Split::Orientation::Horizontal")
+                   << ");\n";
+        DictValue* dpv = get_field(obj, "drag_position");
+        if (get_number_val(dpv, nval)) {
+            std::ostringstream lit;
+            lit.precision(9);
+            lit << (float)nval;
+            std::string sv = lit.str();
+            if (sv.find('.') == std::string::npos) sv += ".0";
+            g.body << g.indent() << var << "->set_drag_position(" << sv << "f);\n";
+        }
     }
 
     // When scaling, also rescale the effective font_size (which may come
@@ -378,6 +414,11 @@ static std::string make_source(const std::string& classname,
       << "#include <nanogui/colorpicker.h>\n"
       << "#include <nanogui/combobox.h>\n"
       << "#include <nanogui/menu.h>\n"
+      << "#include <nanogui/graph.h>\n"
+      << "#include <nanogui/imagepanel.h>\n"
+      << "#include <nanogui/progressbar.h>\n"
+      << "#include <nanogui/textarea.h>\n"
+      << "#include <nanogui/split.h>\n"
       << "#include <nanogui/layout.h>\n"
       << "#include <nanogui/common.h>\n\n"
       << classname << "::" << classname << "(nanogui::Widget* parent) {\n"

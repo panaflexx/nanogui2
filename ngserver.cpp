@@ -9,6 +9,11 @@
 #include <nanogui/checkbox.h>
 #include <nanogui/slider.h>
 #include <nanogui/colorpicker.h>
+#include <nanogui/graph.h>
+#include <nanogui/imagepanel.h>
+#include <nanogui/progressbar.h>
+#include <nanogui/textarea.h>
+#include <nanogui/split.h>
 #include <iostream>
 #include <string>
 #include <fstream>
@@ -300,6 +305,29 @@ private:
                 widget = new Slider(parent);
             } else if (type == "Color Picker" || type == "ColorPicker") {
                 widget = new ColorPicker(parent);
+            } else if (type == "Split") {
+                // Children (the two panes) are added by the JSON loader.
+                // Orientation and drag_position are applied by guieditor_json.
+                widget = new Split(parent, Split::Orientation::Horizontal);
+            } else if (type == "Graph") {
+                std::string caption;
+                DictValue* v = dict_object_get(json, "caption");
+                if (v && v->type == DICT_STRING) caption = v->string_value;
+                widget = new Graph(parent, caption);
+            } else if (type == "Image Panel" || type == "ImagePanel") {
+                widget = new ImagePanel(parent);
+            } else if (type == "Progress Bar" || type == "ProgressBar") {
+                auto* pb = new ProgressBar(parent);
+                DictValue* v = dict_object_get(json, "value");
+                if (v) {
+                    double val = 0.0;
+                    if (v->type == DICT_NUMBER)      val = v->number_value;
+                    else if (v->type == DICT_INT64)  val = (double)v->int64_value;
+                    pb->set_value((float)val);
+                }
+                widget = pb;
+            } else if (type == "Text Area" || type == "TextArea") {
+                widget = new TextArea(parent);
             } else {
                 std::cerr << "Warning: Unknown widget type '" << type
                           << "', creating generic EventWidget\n";
@@ -445,6 +473,27 @@ private:
             
             widget = new EventLabel(parent, text, id);
             
+        } else if (widgetType == "Split") {
+            widget = new Split(parent, Split::Orientation::Horizontal);
+        } else if (widgetType == "Graph") {
+            std::string caption;
+            DictValue* v = dict_object_get(jsonObj, "caption");
+            if (v && v->type == DICT_STRING) caption = v->string_value;
+            widget = new Graph(parent, caption);
+        } else if (widgetType == "Image Panel" || widgetType == "ImagePanel") {
+            widget = new ImagePanel(parent);
+        } else if (widgetType == "Progress Bar" || widgetType == "ProgressBar") {
+            auto* pb = new ProgressBar(parent);
+            DictValue* v = dict_object_get(jsonObj, "value");
+            if (v) {
+                double val = 0.0;
+                if (v->type == DICT_NUMBER)     val = v->number_value;
+                else if (v->type == DICT_INT64) val = (double)v->int64_value;
+                pb->set_value((float)val);
+            }
+            widget = pb;
+        } else if (widgetType == "Text Area" || widgetType == "TextArea") {
+            widget = new TextArea(parent);
         } else {
             // Unknown widget type, create generic widget
             std::cout << "Warning: Unknown widget type '" << widgetType << "', creating generic Widget" << std::endl;

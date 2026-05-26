@@ -9,6 +9,7 @@
     BSD-style license that can be found in the LICENSE.txt file.
 */
 
+#include <nanogui/opengl.h>
 #include <nanogui/nanogui.h>
 #include <nanogui/common.h>
 #include <nanogui/screen.h>
