@@ -267,8 +267,10 @@ elseif (CMAKE_SYSTEM MATCHES "Linux" OR CMAKE_SYSTEM_NAME MATCHES "BSD")
   if (CMAKE_SYSTEM MATCHES "Linux")
     list(APPEND NANOGUI_LIBS dl m)
   endif()
+endif()
 
-  # SQLite adapter support
+# SQLite support on all desktop platforms
+if (NOT ${CMAKE_CXX_COMPILER_ID} MATCHES "Emscripten")
   list(APPEND NANOGUI_LIBS sqlite3)
 endif()
 
@@ -348,6 +350,13 @@ endif()
 if (APPLE AND CMAKE_CXX_COMPILER_ID MATCHES "Clang")
   # Use automatic reference counting for Objective-C portions
   add_compile_options(-fobjc-arc)
+endif()
+
+# Disable noisy warnings from header-only libraries
+if (CMAKE_CXX_COMPILER_ID MATCHES "Clang|AppleClang")
+    add_compile_options(-Wno-unused-function -Wno-missing-braces -Wno-unused-parameter)
+elseif (CMAKE_CXX_COMPILER_ID STREQUAL "GNU")
+    add_compile_options(-Wno-unused-function -Wno-unused-parameter)
 endif()
 
 if (NANOGUI_BUILD_GLFW)
