@@ -90,6 +90,12 @@ public:
     /// Clear all current contents
     void clear();
 
+    /// Return the concatenated text currently stored in the widget
+    std::string text() const;
+
+    /// Replace the entire contents with the given text
+    void set_text(const std::string& text);
+
     /* Widget implementation */
     virtual void draw(NVGcontext *ctx) override;
     virtual Vector2i preferred_size(NVGcontext *ctx) const override;

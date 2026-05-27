@@ -143,10 +143,60 @@ public:
     /// Render one paragraph using the wrapping layout; returns the
     /// y-coordinate where the next paragraph should start.
     float              drawParagraph(NVGcontext* ctx, const Paragraph& para,
-                                     float originX, float startY);
+                                     float originX, float startY,
+                                     size_t para_idx = SIZE_MAX);
 
     /// Discard any cached font measurements (call after font reloads).
     void               clearMeasurementCaches();
+
+    // -----------------------------------------------------------------------
+    // Rich-text layout cache: populated during draw(); used by TextEditor for
+    // caret / selection rendering and mouse / keyboard hit-testing.
+    // -----------------------------------------------------------------------
+
+    /// Per-word geometry captured during draw().
+    struct WordLayout {
+        size_t byte_start;   ///< byte offset in paragraph plain_text (inclusive)
+        size_t byte_end;     ///< exclusive
+        float  x;            ///< drawn x position
+        float  advance;      ///< advance width (text advance, not visual bounds)
+    };
+
+    /// Geometry of one visual line (possibly a soft-wrapped portion of a paragraph).
+    struct RichLine {
+        size_t               para_idx;    ///< paragraph index
+        size_t               byte_start;  ///< byte range in para plain_text
+        size_t               byte_end;
+        float                y_top;       ///< top of row (pre-scroll, in draw-space)
+        float                y_bottom;    ///< bottom of row (includes lineSpacing)
+        float                baseline;    ///< NVG baseline y
+        float                x_start;     ///< x where first word begins
+        std::vector<WordLayout> words;
+    };
+
+    /// Caret geometry returned by richCaretInfo().
+    struct CaretInfo {
+        float x        = 0.f;
+        float y_top    = 0.f;
+        float y_bottom = 0.f;
+        bool  valid    = false;
+    };
+
+    /// All visual lines from the most recent draw() call.
+    mutable std::vector<RichLine> m_rich_layout;
+    mutable float                 m_layout_origin_x = 0.f;
+    mutable float                 m_layout_origin_y = 0.f;
+
+    /// Return (para_idx, byte_col) for a point in draw-space coordinates.
+    /// Uses m_rich_layout populated by the last draw() call.
+    std::pair<size_t,size_t> richHitTest(NVGcontext* ctx, float x, float y) const;
+
+    /// Return caret geometry (draw-space) for (para_idx, byte_col).
+    CaretInfo richCaretInfo(NVGcontext* ctx, size_t para_idx, size_t byte_col) const;
+
+    /// Return index into m_rich_layout for the visual line containing the position,
+    /// or m_rich_layout.size() if not found.
+    size_t richLineIndex(size_t para_idx, size_t byte_col) const;
 
 private:
     static uint64_t makeKey(const char* face, float size);
@@ -160,6 +210,8 @@ private:
         float       advance;
         float       leftBearing;
         float       visualRight;
+        size_t      byte_start = 0;   ///< byte offset in paragraph plain_text
+        size_t      byte_end   = 0;   ///< exclusive
     };
     struct LayoutLine {
         std::vector<Word> words;

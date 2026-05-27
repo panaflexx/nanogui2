@@ -59,6 +59,7 @@ option(NANOGUI_BUILD_GLAD                "Build GLAD OpenGL loader library? (nee
 option(NANOGUI_BUILD_GLFW                "Build GLFW?" ${NANOGUI_BUILD_GLFW_DEFAULT})
 option(NANOGUI_INSTALL                   "Install NanoGUI on `make install`?" ON)
 option(NANOGUI_USE_FREETYPE				 "Build with Freetype2" ON)
+option(NANOGUI_USE_QUICKJS               "Build with QuickJS-NG scripting engine" OFF)
 
 if (NOT NANOGUI_BACKEND)
   if (CMAKE_SYSTEM_PROCESSOR MATCHES "armv7" OR
@@ -495,6 +496,64 @@ elseif(MSVC)
   set_source_files_properties(ext/nanovg/src/nanovg.c PROPERTIES COMPILE_FLAGS "/wd4005 /wd4456 /wd4457")
 endif()
 
+# Optional QuickJS-NG scripting engine
+if (NANOGUI_USE_QUICKJS)
+  if (NOT EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/ext/quickjs-ng/CMakeLists.txt")
+    message(FATAL_ERROR "QuickJS-NG submodule is missing. "
+      "Run: git submodule update --init ext/quickjs-ng")
+  endif()
+
+  # Build quickjs-ng as a static library with -fPIC so it can be absorbed
+  # into libnanogui.so when building a shared nanogui.
+  set(BUILD_SHARED_LIBS_SAVED ${BUILD_SHARED_LIBS})
+  set(BUILD_SHARED_LIBS OFF)
+  set(QJS_ENABLE_INSTALL OFF CACHE BOOL "" FORCE)
+  set(QJS_BUILD_EXAMPLES OFF CACHE BOOL "" FORCE)
+  set(QJS_BUILD_WERROR   OFF CACHE BOOL "" FORCE)
+  set(CMAKE_POSITION_INDEPENDENT_CODE ON)
+  add_subdirectory(ext/quickjs-ng EXCLUDE_FROM_ALL)
+  set(BUILD_SHARED_LIBS ${BUILD_SHARED_LIBS_SAVED})
+
+  # JS widget binding sources (C++ → QuickJS bridge)
+  set(NANOGUI_JS_SOURCES
+    src/js/js_widget.cpp
+    src/js/js_screen.cpp
+    src/js/js_window.cpp
+    src/js/js_label.cpp
+    src/js/js_button.cpp
+    src/js/js_layout.cpp
+    src/js/js_module.cpp
+    src/nanojs/nanojs.cpp
+  )
+
+  target_sources(nanogui PRIVATE ${NANOGUI_JS_SOURCES})
+  target_link_libraries(nanogui PUBLIC qjs)
+
+  # Consumers of nanogui get quickjs.h and our JS headers on their include path
+  target_include_directories(nanogui
+    PUBLIC
+      ${CMAKE_CURRENT_SOURCE_DIR}/ext/quickjs-ng
+      ${CMAKE_CURRENT_SOURCE_DIR}/src/nanojs
+    PRIVATE
+      ${CMAKE_CURRENT_SOURCE_DIR}/src/js
+  )
+
+  target_compile_definitions(nanogui PUBLIC NANOGUI_USE_QUICKJS)
+
+  # nanojs — standalone JS script runner (uses NanoJS runtime)
+  add_executable(nanojs src/nanojs/nanojs_cli.cpp)
+  target_link_libraries(nanojs PRIVATE nanogui)
+
+  # Headless smoke-test for the NanoJS runtime (no GL window needed)
+  add_executable(test_nanojs testapp/test_nanojs.cpp)
+  target_link_libraries(test_nanojs PRIVATE nanogui)
+
+  message(STATUS "QuickJS-NG: enabled (ext/quickjs-ng)")
+  message(STATUS "  JS binding sources: ${NANOGUI_JS_SOURCES}")
+else()
+  message(STATUS "QuickJS-NG: disabled (pass -DNANOGUI_USE_QUICKJS=ON to enable)")
+endif()
+
 # Build example application if desired
 if (NANOGUI_BUILD_EXAMPLES)
   add_executable(example1      src/example1.cpp)
@@ -502,18 +561,18 @@ if (NANOGUI_BUILD_EXAMPLES)
   add_executable(example3      src/example3.cpp)
   add_executable(example4      src/example4.cpp)
   add_executable(example_icons src/example_icons.cpp)
-  add_executable(ngserver      ngserver.cpp guieditor_json.cpp)
-  add_executable(nslabels      nslabels.cpp)
-  add_executable(nanovg-colorfont-atlas nanovg-colorfont-atlas.cpp)
-  add_executable(imagestash_test imagestash_test.cpp)
-  add_executable(flexdemo 	   flexdemo.cpp)
-  add_executable(flexsample    flexsample.cpp)
-  add_executable(flowsheet     flowsheet.cpp)
-  add_executable(flextest 	   flextest.cpp)
-  add_executable(guieditor     guieditor.cpp guieditor_json.cpp guieditor_json_editor.cpp)
-  add_executable(json2cpp      json2cpp.cpp)
-  add_executable(folderview    folderview.cpp)
-  add_executable(datatest      datatest.cpp)
+  add_executable(ngserver      examples/ngserver.cpp examples/guieditor_json.cpp)
+  add_executable(nslabels      examples/nslabels.cpp)
+  add_executable(nanovg-colorfont-atlas examples/nanovg-colorfont-atlas.cpp)
+  add_executable(imagestash_test examples/imagestash_test.cpp)
+  add_executable(flexdemo 	   examples/flexdemo.cpp)
+  add_executable(flexsample    examples/flexsample.cpp)
+  add_executable(flowsheet     examples/flowsheet.cpp)
+  add_executable(flextest 	   examples/flextest.cpp)
+  add_executable(guieditor     examples/guieditor.cpp examples/guieditor_json.cpp examples/guieditor_json_editor.cpp)
+  add_executable(json2cpp      examples/json2cpp.cpp)
+  add_executable(folderview    examples/folderview.cpp)
+  add_executable(datatest      examples/datatest.cpp)
 
   target_link_libraries(example1      nanogui)
   target_link_libraries(example2      nanogui)

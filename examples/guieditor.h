@@ -76,6 +76,7 @@ public:
     Widget        *original_parent  = nullptr;
     Widget        *potential_parent = nullptr;
     Vector2i       drag_start, drag_offset;
+    Window        *m_active_textarea_editor = nullptr;  // singleton guard for textarea editor
     Vector2i       drag_initial_pos;  ///< mouse position at the moment dragging began
 
     // Group / rubber-band selection
@@ -102,6 +103,9 @@ public:
 
     /// Generate C++ via the embedded json2cpp and open a TextEditor window.
     void open_code_editor_window();
+
+    /// Open a rich-text editor window for editing a TextArea widget's content.
+    void open_textarea_editor_window(TextArea* target);
 
     bool mouse_button_event(const Vector2i &p, int button, bool down, int modifiers) override;
     bool mouse_motion_event(const Vector2i &p, const Vector2i &rel, int button, int modifiers) override;

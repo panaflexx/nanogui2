@@ -190,6 +190,17 @@ size_t TextEditor::byte_for_visual_col(const std::string& line, size_t vcol) con
 
 TextEditor::Position
 TextEditor::position_from_point(NVGcontext* ctx, const Vector2i& p) const {
+    if (m_mode == Mode::RichText) {
+        // Convert widget-relative → logical draw-space (undo nvgTranslate scroll)
+        float hit_x = (float)m_pos.x() + (float)p.x();
+        float hit_y = (float)m_pos.y() + (float)p.y() + m_scroll_y;
+        auto [pi, bc] = m_doc->richHitTest(ctx, hit_x, hit_y);
+        if (pi >= paragraph_count()) pi = paragraph_count() - 1;
+        size_t lim = m_doc->paragraphs[pi]->byte_length();
+        if (bc > lim) bc = lim;
+        return Position{pi, bc};
+    }
+
     // p is widget-relative.
     const float lh   = line_height(ctx);
     const float adv  = char_advance(ctx);
@@ -212,6 +223,17 @@ TextEditor::position_from_point(NVGcontext* ctx, const Vector2i& p) const {
 }
 
 Vector2f TextEditor::point_for_position(NVGcontext* ctx, Position pos) const {
+    if (m_mode == Mode::RichText) {
+        auto info = m_doc->richCaretInfo(ctx, pos.paragraph, pos.column);
+        if (info.valid) {
+            // logical → widget-relative: undo m_pos offset and scroll
+            float wx = info.x     - (float)m_pos.x();
+            float wy = info.y_top - (float)m_pos.y() - m_scroll_y;
+            return Vector2f(wx, wy);
+        }
+        return Vector2f((float)m_padding, (float)m_padding);
+    }
+
     const float lh  = line_height(ctx);
     const float adv = char_advance(ctx);
     const int   gW  = gutter_width(ctx);
@@ -267,7 +289,13 @@ void TextEditor::set_caret(Position p, bool extend_selection) {
     if (p.column > lim) p.column = lim;
 
     m_caret = p;
-    if (!extend_selection) m_anchor = m_caret;
+    if (!extend_selection) {
+        printf("set_caret ANCHOR RESET to {%zu,%zu} (was anchor={%zu,%zu} caret={%zu,%zu})\n",
+               p.paragraph, p.column,
+               m_anchor.paragraph, m_anchor.column,
+               m_caret.paragraph,  m_caret.column);
+        m_anchor = m_caret;
+    }
     if (caret_callback) caret_callback(m_caret);
 }
 
@@ -532,31 +560,43 @@ void TextEditor::scroll_to_caret() {
     NVGcontext* ctx = s->nvg_context();
     if (!ctx) return;
 
-    const float lh  = line_height(ctx);
-    const float adv = char_advance(ctx);
-    const int   gW  = gutter_width(ctx);
-    const int   visW = std::max(0, m_size.x() - 2 * m_padding - gW);
-    const int   visH = std::max(0, m_size.y() - 2 * m_padding);
+    float caretXContent, caretYContent, caretH;
+    const int gW   = (m_mode == Mode::Code) ? gutter_width(ctx) : 0;
+    const int visW = std::max(0, m_size.x() - 2 * m_padding - gW);
+    const int visH = std::max(0, m_size.y() - 2 * m_padding);
 
-    // Caret position in pre-scroll text-area coordinates.
-    const std::string text =
-        m_doc->paragraphs[m_caret.paragraph]->plain_text();
-    const float caretXContent = adv * (float)visual_col_for_byte(text, m_caret.column);
-    const float caretYContent = lh  * (float)m_caret.paragraph;
+    if (m_mode == Mode::RichText) {
+        auto info = m_doc->richCaretInfo(ctx, m_caret.paragraph, m_caret.column);
+        if (!info.valid) return;  // layout not yet populated (first frame)
+        // logical → content-space (relative to widget top-left + padding, no scroll)
+        caretXContent = info.x     - (float)m_pos.x() - (float)m_padding;
+        caretYContent = info.y_top - (float)m_pos.y() - (float)m_padding;
+        caretH        = info.y_bottom - info.y_top;
+    } else {
+        const float lh  = line_height(ctx);
+        const float adv = char_advance(ctx);
+        const std::string text =
+            m_doc->paragraphs[m_caret.paragraph]->plain_text();
+        caretXContent = adv * (float)visual_col_for_byte(text, m_caret.column);
+        caretYContent = lh  * (float)m_caret.paragraph;
+        caretH        = lh;
+    }
 
-    // Vertical
+    // Vertical scroll
     if (caretYContent < m_scroll_y)
         m_scroll_y = caretYContent;
-    else if (caretYContent + lh > m_scroll_y + (float)visH)
-        m_scroll_y = caretYContent + lh - (float)visH;
+    else if (caretYContent + caretH > m_scroll_y + (float)visH)
+        m_scroll_y = caretYContent + caretH - (float)visH;
 
-    // Horizontal
-    if (caretXContent < m_scroll_x)
-        m_scroll_x = std::max(0.f, caretXContent - adv);
-    else if (caretXContent + adv > m_scroll_x + (float)visW)
-        m_scroll_x = caretXContent + adv - (float)visW;
-
-    if (m_scroll_x < 0.f) m_scroll_x = 0.f;
+    // Horizontal scroll (code mode only — rich mode wraps)
+    if (m_mode != Mode::RichText) {
+        const float adv = char_advance(ctx);
+        if (caretXContent < m_scroll_x)
+            m_scroll_x = std::max(0.f, caretXContent - adv);
+        else if (caretXContent + adv > m_scroll_x + (float)visW)
+            m_scroll_x = caretXContent + adv - (float)visW;
+        if (m_scroll_x < 0.f) m_scroll_x = 0.f;
+    }
     if (m_scroll_y < 0.f) m_scroll_y = 0.f;
 
     // Kill any coasting so the inertia block in draw() doesn't overwrite
@@ -596,11 +636,12 @@ bool TextEditor::mouse_drag_event(const Vector2i& p, const Vector2i& /*rel*/,
     Vector2i wp = p - m_pos;
     Position np = position_from_point(ctx, wp);
     set_caret(np, /*extend*/ true);
+    s->redraw();
+    printf("mouse_drag_event: p=%d,%d np=%zu,%zu\n", p.x(), p.y(), np.paragraph, np.column);
     return true;
 }
 
 bool TextEditor::scroll_event(const Vector2i& /*p*/, const Vector2f& rel) {
-    if (!m_metrics_valid) return false;
     const float lh  = m_cached_line_h  > 0.f ? m_cached_line_h  : 16.f;
     const float adv = m_cached_char_adv > 0.f ? m_cached_char_adv : 8.f;
     // Impulse = 24x line/char so inertia totals ~3 lines per notch at tau=125ms
@@ -655,6 +696,27 @@ bool TextEditor::keyboard_event(int key, int scancode, int action, int mods) {
     };
 
     auto move_v = [&](int delta) {
+        if (m_mode == Mode::RichText && !m_doc->m_rich_layout.empty()) {
+            // Move by visual line (a paragraph may wrap into multiple lines)
+            Screen* vs = screen();
+            NVGcontext* vctx = vs ? vs->nvg_context() : nullptr;
+            if (vctx) {
+                size_t li = m_doc->richLineIndex(m_caret.paragraph, m_caret.column);
+                const auto& rl = m_doc->m_rich_layout;
+                long tli = std::clamp((long)li + delta, 0L, (long)rl.size() - 1);
+                // Preserve the current x across vertical moves
+                auto cur_info = m_doc->richCaretInfo(vctx, m_caret.paragraph, m_caret.column);
+                float target_x = cur_info.valid ? cur_info.x
+                                                : (float)m_pos.x() + (float)m_padding;
+                const Document::RichLine& tline = rl[(size_t)tli];
+                float hit_y = (tline.y_top + tline.y_bottom) * 0.5f;
+                auto [pi, bc] = m_doc->richHitTest(vctx, target_x, hit_y);
+                set_caret(Position{pi, bc}, shift);
+                scroll_to_caret();
+                return;
+            }
+        }
+        // Code mode (or rich mode before first draw)
         Position np = m_caret;
         long pn = (long)np.paragraph + delta;
         if (pn < 0) pn = 0;
@@ -969,21 +1031,95 @@ void TextEditor::draw_code(NVGcontext* ctx) {
 
 void TextEditor::draw_rich(NVGcontext* ctx) {
     if (!m_doc) return;
-    // Use the widget rect as the layout box; reserve padding all around.
     m_doc->contentWidth = (float)m_size.x() - 2.f * (float)m_padding;
     nvgTranslate(ctx, 0.f, -m_scroll_y);
     m_doc->draw(ctx,
                 (float)m_pos.x() + (float)m_padding,
                 (float)m_pos.y() + (float)m_padding);
     m_content_h = m_doc->last_drawn_height;
-    nvgTranslate(ctx, 0.f, m_scroll_y);
 
-    // No interactive caret in rich mode for now -- editing is supported
-    // via the same insert_text/delete_at_caret API, but caret rendering
-    // requires laying out wrapped lines, which is left for a follow-up.
-    if (focused() && has_selection() == false) {
-        // (placeholder: future work)
+    // ---- Selection highlight (semi-transparent, drawn over text) ----
+    printf("draw_rich: has_sel=%d anchor={%zu,%zu} caret={%zu,%zu} layout_lines=%zu\n",
+           (int)has_selection(),
+           m_anchor.paragraph, m_anchor.column,
+           m_caret.paragraph,  m_caret.column,
+           m_doc->m_rich_layout.size());
+    if (has_selection()) {
+        auto [sel_a, sel_b] = selection();
+        printf("  sel=[{%zu,%zu}->{%zu,%zu}]\n",
+               sel_a.paragraph, sel_a.column,
+               sel_b.paragraph, sel_b.column);
+        nvgFillColor(ctx, m_selection_color);
+        int rect_count = 0;
+        for (const auto& rl : m_doc->m_rich_layout) {
+            // Skip lines outside the selection paragraph range
+            if (rl.para_idx < sel_a.paragraph || rl.para_idx > sel_b.paragraph)
+                continue;
+
+            // Byte range of the selection on this visual line
+            size_t line_sel_start, line_sel_end;
+            if (rl.para_idx == sel_a.paragraph && rl.para_idx == sel_b.paragraph) {
+                line_sel_start = std::max(sel_a.column, rl.byte_start);
+                line_sel_end   = std::min(sel_b.column, rl.byte_end);
+            } else if (rl.para_idx == sel_a.paragraph) {
+                line_sel_start = std::max(sel_a.column, rl.byte_start);
+                line_sel_end   = rl.byte_end;
+            } else if (rl.para_idx == sel_b.paragraph) {
+                line_sel_start = rl.byte_start;
+                line_sel_end   = std::min(sel_b.column, rl.byte_end);
+            } else {
+                // Fully inside selection
+                line_sel_start = rl.byte_start;
+                line_sel_end   = rl.byte_end;
+            }
+
+            if (line_sel_start > line_sel_end) continue;
+
+            float x0, x1;
+            if (rl.words.empty()) {
+                x0 = rl.x_start;
+                x1 = rl.x_start + 4.f;
+            } else {
+                auto x_for = [&](size_t bc) -> float {
+                    auto ci = m_doc->richCaretInfo(ctx, rl.para_idx, bc);
+                    return ci.valid ? ci.x : rl.x_start;
+                };
+                x0 = x_for(line_sel_start);
+                x1 = x_for(line_sel_end);
+                // For fully-selected lines (not the last paragraph in sel),
+                // extend slightly past last word to hint continuation
+                bool full_line = (rl.para_idx < sel_b.paragraph &&
+                                  line_sel_end == rl.byte_end &&
+                                  !rl.words.empty());
+                if (full_line)
+                    x1 = rl.words.back().x + rl.words.back().advance + 6.f;
+            }
+
+            float w = std::max(2.f, x1 - x0);
+            printf("  rect[%d] para=%zu bytes=[%zu,%zu] x=[%.1f,%.1f] y=[%.1f,%.1f]\n",
+                   rect_count++, rl.para_idx,
+                   line_sel_start, line_sel_end,
+                   x0, x1, rl.y_top, rl.y_bottom);
+            nvgBeginPath(ctx);
+            nvgRect(ctx, x0, rl.y_top, w, rl.y_bottom - rl.y_top);
+            nvgFill(ctx);
+        }
+        printf("  total rects drawn: %d\n", rect_count);
     }
+
+    // ---- I-beam caret ----
+    if (focused()) {
+        auto ci = m_doc->richCaretInfo(ctx, m_caret.paragraph, m_caret.column);
+        if (ci.valid) {
+            nvgBeginPath(ctx);
+            nvgRect(ctx, std::round(ci.x) - 0.75f, ci.y_top,
+                    1.5f, ci.y_bottom - ci.y_top);
+            nvgFillColor(ctx, m_caret_color);
+            nvgFill(ctx);
+        }
+    }
+
+    nvgTranslate(ctx, 0.f, m_scroll_y);
 }
 
 NAMESPACE_END(nanogui)

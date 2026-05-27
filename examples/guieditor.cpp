@@ -9,6 +9,7 @@
 
 #include "guieditor.h"
 #include "guieditor_json.h"
+#include "nanovg.h"
 #include <nanogui/theme.h>
 #include <nanogui/toolbutton.h>
 #include <nanogui/icons.h>
@@ -896,6 +897,14 @@ void GUIEditor::add_type_properties() {
             return true;
         });
         fb->set_min_height(20);
+
+    } else if (auto* ta = dynamic_cast<TextArea*>(selected_widget)) {
+        new Label(properties_pane, "Text:", "sans-bold");
+        Button *edit_btn = new Button(properties_pane, "Edit Text", FA_EDIT);
+        edit_btn->set_callback([this, ta] {
+            open_textarea_editor_window(ta);
+        });
+        edit_btn->set_min_height(24);
 
     } else if (auto* sp = dynamic_cast<Split*>(selected_widget)) {
         new Label(properties_pane, "Orientation:", "sans-bold");
@@ -2134,6 +2143,80 @@ void GUIEditor::open_code_editor_window() {
 
     perform_layout();
     code_win->center();
+    redraw();
+}
+
+void GUIEditor::open_textarea_editor_window(TextArea* target) {
+    if (!target) return;
+
+    // Singleton: only allow one textarea editor at a time
+    if (m_active_textarea_editor) {
+        m_active_textarea_editor->request_focus();
+        return;
+    }
+    Theme *edit_theme = new Theme(screen()->nvg_context());
+        edit_theme->m_window_fill_unfocused = Color(180, 122, 75, 255);
+        edit_theme->m_window_fill_focused   = Color(180, 122, 75, 255);
+        edit_theme->m_text_color            = Color(255, 255, 255, 255);
+        edit_theme->m_icon_color            = Color(80, 130, 210, 255);
+        edit_theme->m_disabled_text_color   = Color(120, 120, 130, 255);
+        edit_theme->m_split_divider_width    = 2;
+        edit_theme->m_standard_font_size     = 16.0f;
+
+    auto* edit_win = new Window(this, "Edit Text Area");
+    m_active_textarea_editor = edit_win;   // register singleton
+    auto* flex = new FlexLayout(FlexDirection::Column, JustifyContent::FlexStart, AlignItems::Stretch);
+    edit_win->set_layout(flex);
+    edit_win->set_modal(true);
+    edit_win->set_fixed_size({600, 400});
+    edit_win->set_theme(edit_theme);
+
+    auto* editor = new TextEditor(edit_win, TextEditor::Mode::RichText);
+    editor->set_background_color(Color(65, 65, 60, 255));
+    Style rich_style;
+    rich_style.fgColor = nvgRGBA(230, 230, 235, 255);
+    rich_style.fontSize = 14.0f;
+    editor->set_default_style(rich_style);
+    editor->set_height_flex(SizeMode::Expanding);
+    editor->set_caret_color(Color(255,255,255,255));
+
+    // Populate with current content
+    editor->set_plain_text(target->text());
+
+    // Button row
+    auto* btn_row = new Widget(edit_win);
+    btn_row->set_layout(new BoxLayout(Orientation::Horizontal, Alignment::Middle, 0, 10));
+    btn_row->set_min_height(32);
+
+    auto* apply_btn = new Button(btn_row, "Apply", FA_CHECK);
+    auto* cancel_btn = new Button(btn_row, "Cancel", FA_TIMES);
+
+    apply_btn->set_callback([this, edit_win, editor, target] {
+        target->set_text(editor->plain_text());   // plain_text() returns the raw text
+        if (selected_widget) {
+            selected_widget->perform_layout(m_nvg_context);
+        }
+        perform_layout();
+        redraw();
+        async([this, edit_win] {
+            m_active_textarea_editor = nullptr;
+            edit_win->dispose();
+        });
+    });
+
+    cancel_btn->set_callback([this, edit_win] {
+        async([this, edit_win] {
+            m_active_textarea_editor = nullptr;
+            edit_win->dispose();
+        });
+    });
+
+    // Apply Flex items
+    flex->set_flex_item(editor,   FlexLayout::FlexItem(1.0f));
+    flex->set_flex_item(btn_row,  FlexLayout::FlexItem(0.0f));
+
+    edit_win->center();
+    perform_layout();
     redraw();
 }
 

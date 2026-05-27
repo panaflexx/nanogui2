@@ -1027,6 +1027,14 @@ public:
         source->caret_callback = [mdCache](TextEditor::Position) {
             mdCache->cache_dirty();
         };
+        // Selection drag in the preview bypasses CachedWidget::mouse_drag_event
+        // (Screen dispatches directly to the drag widget), so the cached FBO
+        // never gets invalidated during the drag.  A caret_callback here fires
+        // on every set_caret() call — including mid-drag — and keeps the cache
+        // in sync so the selection highlight updates in real time.
+        preview->caret_callback = [mdCache](TextEditor::Position) {
+            mdCache->cache_dirty();
+        };
     }
 
 	// Necessary for closing open menus

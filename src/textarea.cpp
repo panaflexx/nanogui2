@@ -63,6 +63,20 @@ void TextArea::clear() {
     m_selection_start = m_selection_end = -1;
 }
 
+std::string TextArea::text() const {
+    std::string result;
+    for (const auto& block : m_blocks) {
+        result += block.text;
+    }
+    return result;
+}
+
+void TextArea::set_text(const std::string& text) {
+    clear();
+    if (!text.empty())
+        append(text);
+}
+
 bool TextArea::keyboard_event(int key, int /* scancode */, int action, int modifiers) {
     if (m_selectable && focused()) {
         if (key == GLFW_KEY_C && modifiers == SYSTEM_COMMAND_MOD && action == GLFW_PRESS &&

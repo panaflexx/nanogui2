@@ -10,3 +10,6 @@
 [submodule "ext/pybind11"]
 	path = ext/pybind11
 	url = https://github.com/pybind/pybind11
+[submodule "ext/quickjs-ng"]
+	path = ext/quickjs-ng
+	url = https://github.com/quickjs-ng/quickjs.git
