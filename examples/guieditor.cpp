@@ -1481,6 +1481,22 @@ bool GUIEditor::mouse_button_event(const Vector2i &p, int button, bool down, int
     m_redraw = true;
     Widget *clicked_widget = find_widget(p);
 
+    // Special case: clicking anywhere on a TestWindow (including its titlebar)
+    // should select the window instead of letting Screen::mouse_button_event
+    // consume the event for native window dragging.
+    if (!test_mode && button == GLFW_MOUSE_BUTTON_1 && down && clicked_widget) {
+        if (auto* win = dynamic_cast<Window*>(clicked_widget)) {
+            // Special case: clicked on title bar (need relative coordinates)
+            if (win==canvas_win && p.y() > win->position().y() && p.y() < win->position().y() + 24) {
+                selected_widget = win;
+
+                original_parent  = win->parent();
+                update_properties();
+                // fall through to allow window movement
+            }
+        }
+    }
+
     if (Screen::mouse_button_event(p, button, down, modifiers))
         return true;
 
