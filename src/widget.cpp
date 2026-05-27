@@ -9,6 +9,7 @@
     BSD-style license that can be found in the LICENSE.txt file.
 */
 
+#include "nanogui/common.h"
 #include "nanogui/vector.h"
 #include <exception>
 #include <nanogui/widget.h>
@@ -76,8 +77,10 @@ Widget::~Widget() {
         return;
     }
     for (auto child : m_children) {
-        if (child)
+        if (child) {
+            child->m_parent = nullptr; // avoid dangling parent in pending cleanup
             child->dec_ref();
+        }
     }
 }
 
@@ -94,6 +97,7 @@ int Widget::font_size() const {
 }
 
 Vector2i Widget::preferred_size(NVGcontext* ctx) const {
+    if (!ctx) return m_size;
     if (m_layout)
         return m_layout->preferred_size(ctx, this);
     else
@@ -120,6 +124,7 @@ void Widget::apply_fill_parent() {
 }
 
 void Widget::perform_layout(NVGcontext* ctx) {
+    if (!ctx) return;  // guard against early calls before NVG init
     apply_fill_parent();
     if (m_layout) {
         m_layout->perform_layout(ctx, this);
@@ -246,9 +251,22 @@ bool Widget::keyboard_character_event(unsigned int) {
 void Widget::add_child(int index, Widget* widget) {
     assert(index <= child_count());
     m_children.insert(m_children.begin() + index, widget);
-    widget->inc_ref();
     widget->set_parent(this);
     widget->set_theme(m_theme);
+
+    // Always account for the new owner (the list entry).
+    widget->inc_ref();
+
+    // If this widget was queued for destruction (from a previous parent), cancel the pending destruction.
+    {
+        std::lock_guard<std::mutex> lock(g_widgets_to_cleanup_mutex);
+        auto it = std::find(g_widgets_to_cleanup.begin(), g_widgets_to_cleanup.end(), widget);
+        if (it != g_widgets_to_cleanup.end()) {
+            g_widgets_to_cleanup.erase(it);
+            // release the extra ref that remove_child added to keep it alive
+            widget->dec_ref();
+        }
+    }
 }
 
 void Widget::add_child(Widget* widget) {
@@ -256,20 +274,63 @@ void Widget::add_child(Widget* widget) {
 }
 
 void Widget::remove_child(const Widget* widget) {
-    size_t child_count = m_children.size();
+    // Immediate removal from the tree (so child_count/iteration see the change)
     m_children.erase(std::remove(m_children.begin(), m_children.end(), widget),
-        m_children.end());
-    if (m_children.size() == child_count)
-        throw std::runtime_error("Widget::remove_child(): widget not found!");
-    widget->dec_ref();
+                     m_children.end());
+    const_cast<Widget*>(widget)->set_parent(nullptr);
+
+    // Queue the final dec_ref so destructor runs outside the event path
+    std::lock_guard<std::mutex> lock(g_widgets_to_cleanup_mutex);
+    if (std::find(g_widgets_to_cleanup.begin(), g_widgets_to_cleanup.end(), widget) != g_widgets_to_cleanup.end())
+        return;
+    widget->inc_ref();
+    g_widgets_to_cleanup.push_back(const_cast<Widget*>(widget));
 }
 
 void Widget::remove_child_at(int index) {
     if (index < 0 || index >= (int)m_children.size())
         throw std::runtime_error("Widget::remove_child_at(): out of bounds!");
     Widget* widget = m_children[index];
+    // Immediate removal from the tree
     m_children.erase(m_children.begin() + index);
-    widget->dec_ref();
+    widget->set_parent(nullptr);
+
+    // Queue the final dec_ref
+    std::lock_guard<std::mutex> lock(g_widgets_to_cleanup_mutex);
+    if (std::find(g_widgets_to_cleanup.begin(), g_widgets_to_cleanup.end(), widget) != g_widgets_to_cleanup.end())
+        return;
+    widget->inc_ref();
+    g_widgets_to_cleanup.push_back(widget);
+}
+
+void Widget::reparent(Widget* new_parent) {
+    if (m_parent == new_parent)
+        return;
+
+    // Remove from current parent (if any) - direct, no cleanup queue
+    if (m_parent) {
+        auto& siblings = m_parent->m_children;
+        siblings.erase(std::remove(siblings.begin(), siblings.end(), this),
+                       siblings.end());
+    }
+
+    // Add to new parent (if any)
+    if (new_parent) {
+        new_parent->m_children.push_back(this);
+        set_theme(new_parent->theme());
+    }
+
+    m_parent = new_parent;
+
+    // If this widget was queued for destruction, cancel it
+    {
+        std::lock_guard<std::mutex> lock(g_widgets_to_cleanup_mutex);
+        auto it = std::find(g_widgets_to_cleanup.begin(), g_widgets_to_cleanup.end(), this);
+        if (it != g_widgets_to_cleanup.end()) {
+            g_widgets_to_cleanup.erase(it);
+            dec_ref(); // release the extra ref from remove_child
+        }
+    }
 }
 
 int Widget::child_index(Widget* widget) const {
@@ -293,14 +354,15 @@ Window* Widget::window() {
 
 Screen* Widget::screen() {
     Widget* widget = this;
-    while (true) {
-        if (!widget)
-            return nullptr;
+    int depth = 0;
+    while (widget && depth < 1024) {
         Screen* screen = dynamic_cast<Screen*>(widget);
         if (screen)
             return screen;
         widget = widget->parent();
+        ++depth;
     }
+    return nullptr;
 }
 
 const Screen* Widget::screen() const { return const_cast<Widget*>(this)->screen(); }

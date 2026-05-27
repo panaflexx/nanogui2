@@ -14,6 +14,7 @@
 
 #pragma once
 
+#include <mutex>
 #include <stdint.h>
 #include <functional>
 #include <vector>
@@ -253,6 +254,10 @@ extern NANOGUI_EXPORT bool active();
  * for queuing up UI-related state changes from other threads.
  */
 extern NANOGUI_EXPORT void async(const std::function<void()> &func);
+
+extern NANOGUI_EXPORT std::vector<Widget *> g_widgets_to_cleanup;
+extern NANOGUI_EXPORT std::mutex g_widgets_to_cleanup_mutex;
+
 
 /**
  * \brief Open a native file open/save dialog.

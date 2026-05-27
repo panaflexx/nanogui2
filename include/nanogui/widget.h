@@ -40,6 +40,7 @@ enum class SizeMode {
  * widgets using a layout generator (see \ref Layout).
  */
 class NANOGUI_EXPORT Widget : public Object {
+    friend class Screen;
 public:
     std::string DebugName;
     /// Construct a new widget with the given parent widget
@@ -172,6 +173,13 @@ public:
 
     /// Remove a child widget by value
     void remove_child(const Widget* widget);
+
+    /// Move this widget to a new parent instantly (avoids the deferred-destruction queue).
+    /// Much faster than remove_child + add_child when reparenting during drag.
+    void reparent(Widget* new_parent);
+
+    /// Perform safe widget cleanup (removing widgets from their parents)
+    void do_widget_cleanup(Screen* screen);
 
     /// Retrieves the child at the specific position
     const Widget* child_at(int index) const { return m_children[index]; }

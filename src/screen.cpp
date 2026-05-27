@@ -11,6 +11,7 @@
     BSD-style license that can be found in the LICENSE.txt file.
 */
 
+#include <mutex>
 #include <nanogui/screen.h>
 #include <chrono>
 #include <nanogui/theme.h>
@@ -572,6 +573,7 @@ void Screen::initialize(GLFWwindow* window, bool shutdown_glfw) {
 }
 
 Screen::~Screen() {
+    do_widget_cleanup();
     __nanogui_screens.erase(m_glfw_window);
     for (size_t i = 0; i < (size_t)Cursor::CursorCount; ++i) {
         if (m_cursors[i])
@@ -785,7 +787,7 @@ void Screen::draw_widgets() {
             }
         }
     }
-		
+
 
 
     double elapsed = glfwGetTime() - m_last_interaction;
@@ -1055,7 +1057,7 @@ void Screen::cursor_pos_callback_event(double x, double y) {
     }
 }
 
-// Works great - but doesn't handle popups 
+// Works great - but doesn't handle popups
 void Screen::mouse_button_callback_event(int button, int action, int modifiers) {
     m_modifiers = modifiers;
     m_last_interaction = glfwGetTime();
@@ -1327,7 +1329,7 @@ void Screen::update_focus(Widget* widget) {
         if (w != nullptr && w->focused())
             w->focus_event(false);
     }
-    
+
     // Now clear the path and build the new one
     m_focus_path.clear();
     Widget* window = nullptr;
@@ -1337,11 +1339,11 @@ void Screen::update_focus(Widget* widget) {
             window = widget;
         widget = widget->parent();
     }
-    
+
     // Set focus to the new widgets
     for (auto it = m_focus_path.rbegin(); it != m_focus_path.rend(); ++it)
         (*it)->focus_event(true);
-        
+
     if (window)
         move_window_to_front((Window*)window);
 }
@@ -1439,6 +1441,19 @@ void Screen::move_window_to_front(Window* window) {
             }
         }
     } while (changed);
+}
+
+void Screen::do_widget_cleanup() {
+    std::lock_guard<std::mutex> lock(g_widgets_to_cleanup_mutex);
+    for (Widget* w : g_widgets_to_cleanup) {
+        if (Widget* p = w->parent()) {
+            auto& ch = p->m_children;
+            ch.erase(std::remove(ch.begin(), ch.end(), w), ch.end());
+            w->set_parent(nullptr);
+        }
+        w->dec_ref();
+    }
+    g_widgets_to_cleanup.clear();
 }
 
 void Screen::register_animation(Widget* w) {

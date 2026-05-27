@@ -9,7 +9,9 @@
     BSD-style license that can be found in the LICENSE.txt file.
 */
 
+#include "nanogui/widget.h"
 #include <nanogui/screen.h>
+#include <vector>
 
 #if defined(_WIN32)
 #  ifndef NOMINMAX
@@ -82,6 +84,8 @@ static float emscripten_refresh = 0;
 
 std::mutex m_async_mutex;
 std::vector<std::function<void()>> m_async_functions;
+std::vector<Widget *> g_widgets_to_cleanup;
+std::mutex g_widgets_to_cleanup_mutex;
 
 void mainloop(float refresh, bool show_fps) {
     if (mainloop_active)
@@ -105,6 +109,8 @@ void mainloop(float refresh, bool show_fps) {
                 f();
             m_async_functions.clear();
         }
+        for(auto kv : __nanogui_screens)
+            kv.second->do_widget_cleanup();
 
         for (auto kv : __nanogui_screens) {
             Screen *screen = kv.second;

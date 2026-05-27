@@ -242,7 +242,8 @@ public:
 
     /// Compute the layout of all widgets
     void perform_layout() {
-        this->perform_layout(m_nvg_context);
+        if (m_nvg_context)
+            this->perform_layout(m_nvg_context);
     }
 
 	void notify_widget_destroyed(Widget* widget) {
@@ -251,7 +252,7 @@ public:
 			m_drag_widget = nullptr;
 			m_drag_active = false;
 		}
-		
+
 		// Also clear from focus path
 		auto it = std::find(m_focus_path.begin(), m_focus_path.end(), widget);
 		if (it != m_focus_path.end()) {
@@ -304,6 +305,8 @@ public:
     bool m_close_popups = false;
     double m_last_interaction;
 
+    void do_widget_cleanup();
+
 protected:
     GLFWwindow* m_glfw_window = nullptr;
     NVGcontext* m_nvg_context = nullptr;
@@ -326,6 +329,7 @@ protected:
     bool m_float_buffer;
     bool m_redraw;
     std::unordered_set<Widget*> m_active_animations;
+
 #if defined(_DEBUG) || !defined(NDEBUG)
     // Screen-level redraw timing, accumulated between Ctrl+Shift+D dumps.
     float  m_last_redraw_ms    = 0.0f;
@@ -336,6 +340,7 @@ protected:
     double m_redraw_epoch      = 0.0; // glfwGetTime() at last dump/reset
 #endif
     std::function<void(Vector2i)> m_resize_callback;
+
 #if defined(NANOGUI_USE_METAL)
     void* m_metal_texture = nullptr;
     void* m_metal_drawable = nullptr;

@@ -1648,22 +1648,16 @@ bool GUIEditor::mouse_button_event(const Vector2i &p, int button, bool down, int
                 && new_parent->window() != editor_win
                 && new_parent != selected_widget
                 && !dynamic_cast<TestSplit*>(selected_widget->parent())) {
-                // Reparent
-                Widget* cur = selected_widget->parent();
-                if (cur) {
-                    selected_widget->inc_ref();
-                    cur->remove_child(selected_widget);
-                    new_parent->add_child(selected_widget);
-                    Vector2i ps = new_parent->size(), ws = selected_widget->size();
-                    new_pos.x() = std::max(0, std::min(new_pos.x(), ps.x() - ws.x()));
-                    new_pos.y() = std::max(0, std::min(new_pos.y(), ps.y() - ws.y()));
-                    selected_widget->set_position(new_pos);
-                    if (original_parent) original_parent->perform_layout(m_nvg_context);
-                    new_parent->perform_layout(m_nvg_context);
-                    perform_layout();
-                    update_properties();
-                    selected_widget->dec_ref();
-                }
+                // Reparent using fast path (no deferred-destruction overhead)
+                selected_widget->reparent(new_parent);
+                Vector2i ps = new_parent->size(), ws = selected_widget->size();
+                new_pos.x() = std::max(0, std::min(new_pos.x(), ps.x() - ws.x()));
+                new_pos.y() = std::max(0, std::min(new_pos.y(), ps.y() - ws.y()));
+                selected_widget->set_position(new_pos);
+                if (original_parent) original_parent->perform_layout(m_nvg_context);
+                new_parent->perform_layout(m_nvg_context);
+                perform_layout();
+                update_properties();
             } else {
                 // Same parent: just update position
                 Widget* cur = selected_widget->parent();
@@ -1678,6 +1672,15 @@ bool GUIEditor::mouse_button_event(const Vector2i &p, int button, bool down, int
                     perform_layout();
                     update_properties();
                 }
+            }
+        }
+        // Finalize drag: do the heavy work once on release
+        if (selected_widget) {
+            Widget* par = selected_widget->parent();
+            if (par) {
+                par->perform_layout(m_nvg_context);
+                perform_layout();
+                update_properties();
             }
         }
         dragging        = false;
@@ -1844,9 +1847,8 @@ bool GUIEditor::mouse_motion_event(const Vector2i &p, const Vector2i &rel, int b
             potential_parent = nullptr; redraw();
         }
 
-        cur->perform_layout(m_nvg_context);
-        perform_layout();
-        update_properties();
+        // Lightweight during drag: no layout or property rebuild every frame
+        redraw();
         return true;
 
     } else if (resizing && !test_mode && selected_widget) {

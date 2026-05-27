@@ -29,7 +29,7 @@ public:
 	CheckBox *m_has_trade_in;
 
     CarSalesFormApp() : Screen(Vector2i(1080, 800), "Car Sales Management System") {
-        inc_ref();
+        //inc_ref();
 
         // Custom theme for professional look
 		/*
@@ -764,7 +764,7 @@ int main() {
 
         {
             ref<CarSalesFormApp> app = new CarSalesFormApp();
-            app->dec_ref();
+            //app->dec_ref();
             app->set_visible(true);
             app->draw_all();
             nanogui::mainloop();
