@@ -950,7 +950,8 @@ void GUIEditor::add_layout_properties() {
     layout_combo->set_callback([this](int index) {
         if (!selected_widget) return;
         applyLayoutType(selected_widget, index);
-        update_properties();
+
+		async([this] { update_focus(nullptr); update_properties(); });
     });
     layout_combo->set_min_height(20);
     addLayoutSpecificControls(selected_widget);
@@ -1301,7 +1302,8 @@ void GUIEditor::addFlexLayoutControls(FlexLayout* layout) {
         layout->set_align_items((AlignItems)i);
         selected_widget->perform_layout(m_nvg_context);
         if (auto* p = selected_widget->parent()) p->perform_layout(m_nvg_context);
-        perform_layout(); redraw();
+        //perform_layout(); redraw();
+		async([this] { update_focus(nullptr); update_properties(); });
     });
     ac->set_min_height(20);
 }

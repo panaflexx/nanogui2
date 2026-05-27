@@ -126,6 +126,9 @@ bool Button::keyboard_event(int key, int scancode, int action, int modifiers) {
 */
 bool Button::handle_event(bool active, bool contains_point) {
     bool pushed_backup = m_pushed;
+	// Protect against self-deletion during callbacks (common cause of crashes
+    // when callbacks modify the widget tree).
+    ref<Button> self = this;
 
     if (active) {
         if (m_flags & RadioButton) {
@@ -197,6 +200,7 @@ bool Button::keyboard_event(int key, int scancode, int action, int modifiers) {
     if (!m_enabled)
         return false;
 
+	ref<Button> self = this;  // protect during potential callback
     if (action == GLFW_PRESS || action == GLFW_REPEAT) {
         if (key == GLFW_KEY_ENTER || key == GLFW_KEY_SPACE) {
             return handle_event(true, true);
