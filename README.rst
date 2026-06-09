@@ -22,7 +22,9 @@ callbacks, a variety of useful widget types and Retina-capable rendering on
 Apple devices thanks to NanoVG_ by Mikko Mononen. Python bindings of all
 functionality are provided using pybind11_.
 
-**NEW**: Example GUI editor.
+**NEW**: GUI editor, JSON save/load, code generator.
+
+**NEW**: DataGrid with CSV and SQLite support
 
 **NEW**: GridLayout and AdvancedGridLayout draw tables.
 
