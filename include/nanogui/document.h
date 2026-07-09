@@ -149,17 +149,27 @@ public:
     /// Discard any cached font measurements (call after font reloads).
     void               clearMeasurementCaches();
 
+    /// Mark rich layout dirty (content / width / font change). Next draw reflows.
+    void               markLayoutDirty() { m_layout_dirty = true; }
+
+    /// True if layout must be rebuilt before drawing or hit-testing.
+    bool               layoutDirty() const { return m_layout_dirty; }
+
     // -----------------------------------------------------------------------
     // Rich-text layout cache: populated during draw(); used by TextEditor for
     // caret / selection rendering and mouse / keyboard hit-testing.
     // -----------------------------------------------------------------------
 
-    /// Per-word geometry captured during draw().
+    /// Per-word geometry captured during layout (used for hit-test + replay).
     struct WordLayout {
         size_t byte_start;   ///< byte offset in paragraph plain_text (inclusive)
         size_t byte_end;     ///< exclusive
         float  x;            ///< drawn x position
         float  advance;      ///< advance width (text advance, not visual bounds)
+        float  leftBearing = 0.f;
+        float  visualRight = 0.f;
+        Style  style;        ///< style snapshot for cheap re-draw without re-layout
+        std::string text;    ///< word / glyph cluster text
     };
 
     /// Geometry of one visual line (possibly a soft-wrapped portion of a paragraph).
@@ -200,6 +210,13 @@ public:
 
 private:
     static uint64_t makeKey(const char* face, float size);
+
+    // Layout validity (avoid reflowing whole document every mouse-drag frame).
+    mutable bool  m_layout_dirty = true;
+    mutable float m_laid_content_width = -1.f;
+    mutable float m_laid_origin_x = 0.f;
+    mutable float m_laid_origin_y = 0.f;
+    mutable float m_laid_height = 0.f;
 
     std::unordered_map<uint64_t, float>    m_spaceCache;
     std::unordered_map<uint64_t, VMetrics> m_metricsCache;

@@ -27,7 +27,7 @@
 #include <nanogui/combobox.h>
 #include <nanogui/scrollpanel.h>
 #include <nanogui/zoomscrollpanel.h>
-#include <nanogui/cachedwidget.h>
+
 #include <map>
 #include <iostream>
 
@@ -709,9 +709,9 @@ void Screen::nvg_flush() {
 }
 
 void Screen::draw_widgets() {
-    // Update any CachedWidget FBOs BEFORE we begin the screen frame so
-    // they don't disturb ancestor NanoVG transform/scissor state.
-    CachedWidget::process_pending_updates(m_nvg_context);
+    // Rebuild dirty display-list caches BEFORE the screen frame begins so
+    // recording does not disturb ancestor NanoVG transform/scissor state.
+    Widget::process_pending_cache_updates(m_nvg_context);
 
     nvgBeginFrame(m_nvg_context, m_size[0], m_size[1], m_pixel_ratio);
 

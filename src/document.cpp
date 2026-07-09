@@ -49,6 +49,7 @@ size_t Paragraph::byte_length() const {
 
 Paragraph* Document::addParagraph() {
     paragraphs.emplace_back(std::make_unique<Paragraph>());
+    m_layout_dirty = true;
     return paragraphs.back().get();
 }
 
@@ -63,12 +64,14 @@ Paragraph* Document::insertParagraph(size_t index) {
         return addParagraph();
     auto it = paragraphs.insert(paragraphs.begin() + (ptrdiff_t)index,
                                 std::make_unique<Paragraph>());
+    m_layout_dirty = true;
     return it->get();
 }
 
 bool Document::removeParagraph(size_t index) {
     if (index >= paragraphs.size()) return false;
     paragraphs.erase(paragraphs.begin() + (ptrdiff_t)index);
+    m_layout_dirty = true;
     return true;
 }
 
@@ -185,37 +188,112 @@ void forEachWord(std::string_view line, Fn fn) {
 // ---------------------------------------------------------------------------
 
 void Document::draw(NVGcontext* ctx, float originX, float originY) {
-    // Reset measurement caches each draw call so font/size changes are
-    // picked up. They're cheap (a handful of entries per frame).
-    m_spaceCache.clear();
-    m_metricsCache.clear();
-    m_rich_layout.clear();
-    m_layout_origin_x = originX;
-    m_layout_origin_y = originY;
-
     nvgTextAlign(ctx, NVG_ALIGN_LEFT | NVG_ALIGN_BASELINE);
 
-    float y = originY;
-    for (size_t pi = 0; pi < paragraphs.size(); ++pi) {
-        auto& para = paragraphs[pi];
-        if (para->isRule) {
-            // Draw a horizontal separator line; uses half paragraph-spacing
-            // as padding above and below so it sits comfortably in the flow.
-            float pad = paragraphSpacing * 0.5f;
-            float ry  = y + pad;
+    const bool need_layout =
+        m_layout_dirty ||
+        m_laid_content_width != contentWidth ||
+        m_laid_origin_x != originX ||
+        m_laid_origin_y != originY ||
+        m_rich_layout.empty();
+
+    if (need_layout) {
+        // Full reflow + paint (measures with nvgTextBounds).
+        m_rich_layout.clear();
+        m_layout_origin_x = originX;
+        m_layout_origin_y = originY;
+
+        float y = originY;
+        for (size_t pi = 0; pi < paragraphs.size(); ++pi) {
+            auto& para = paragraphs[pi];
+            if (para->isRule) {
+                float pad = paragraphSpacing * 0.5f;
+                float ry  = y + pad;
+                // Capture a zero-word line so hit-test can skip rules cleanly.
+                RichLine rule_line;
+                rule_line.para_idx   = pi;
+                rule_line.byte_start = 0;
+                rule_line.byte_end   = 0;
+                rule_line.y_top      = y;
+                rule_line.y_bottom   = ry + pad;
+                rule_line.baseline   = ry;
+                rule_line.x_start    = originX;
+                // Stash rule draw params in a sentinel WordLayout
+                WordLayout rw;
+                rw.byte_start = 0;
+                rw.byte_end   = 0;
+                rw.x          = originX;
+                rw.advance    = contentWidth * 0.5f;
+                rw.style.fgColor = para->ruleColor;
+                rw.style.fontSize = para->ruleThickness; // thickness piggy-back
+                rw.text       = "\x01RULE"; // sentinel
+                rule_line.words.push_back(std::move(rw));
+                m_rich_layout.push_back(std::move(rule_line));
+
+                nvgBeginPath(ctx);
+                nvgMoveTo(ctx, originX, ry);
+                nvgLineTo(ctx, originX + contentWidth * 0.5f, ry);
+                nvgStrokeColor(ctx, para->ruleColor);
+                nvgStrokeWidth(ctx, para->ruleThickness);
+                nvgStroke(ctx);
+                y = ry + pad;
+            } else {
+                y = drawParagraph(ctx, *para, originX, y, pi);
+                y += paragraphSpacing;
+            }
+        }
+        last_drawn_height = y - originY;
+        m_laid_height = last_drawn_height;
+        m_laid_content_width = contentWidth;
+        m_laid_origin_x = originX;
+        m_laid_origin_y = originY;
+        m_layout_dirty = false;
+        return;
+    }
+
+    // ---- Fast path: content/width/origin unchanged (selection drag, hover).
+    // Replay from the layout cache — no nvgTextBounds reflow.
+    for (const RichLine& rl : m_rich_layout) {
+        if (rl.words.size() == 1 && rl.words[0].text == "\x01RULE") {
+            const WordLayout& rw = rl.words[0];
+            float ry = rl.baseline;
             nvgBeginPath(ctx);
-            nvgMoveTo(ctx, originX, ry);
-            nvgLineTo(ctx, originX + contentWidth * 0.5f, ry);
-            nvgStrokeColor(ctx, para->ruleColor);
-            nvgStrokeWidth(ctx, para->ruleThickness);
+            nvgMoveTo(ctx, rw.x, ry);
+            nvgLineTo(ctx, rw.x + rw.advance, ry);
+            nvgStrokeColor(ctx, rw.style.fgColor);
+            nvgStrokeWidth(ctx, rw.style.fontSize > 0.f ? rw.style.fontSize : 1.f);
             nvgStroke(ctx);
-            y = ry + pad;
-        } else {
-            y = drawParagraph(ctx, *para, originX, y, pi);
-            y += paragraphSpacing;
+            continue;
+        }
+        for (const WordLayout& wl : rl.words) {
+            const Style& st = wl.style;
+            applyFont(ctx, st);
+            if (st.bgColor.a > 0 && !st.monospace) {
+                nvgBeginPath(ctx);
+                nvgFillColor(ctx, st.bgColor);
+                nvgRect(ctx,
+                        wl.x + wl.leftBearing - 1,
+                        rl.baseline - metricsFor(ctx, st).ascender - 1,
+                        (wl.visualRight - wl.leftBearing) + 2,
+                        metricsFor(ctx, st).lineh + 2);
+                nvgFill(ctx);
+            }
+            nvgFillColor(ctx, st.fgColor);
+            nvgText(ctx, wl.x, rl.baseline, wl.text.c_str(), nullptr);
+            if (st.underline) {
+                const float ux0 = wl.x + wl.leftBearing;
+                const float ux1 = wl.x + wl.visualRight;
+                const float uy  = rl.baseline + std::max(1.0f, st.fontSize * 0.08f);
+                nvgBeginPath(ctx);
+                nvgStrokeColor(ctx, st.fgColor);
+                nvgStrokeWidth(ctx, std::max(1.0f, st.fontSize * 0.05f));
+                nvgMoveTo(ctx, ux0, uy);
+                nvgLineTo(ctx, ux1, uy);
+                nvgStroke(ctx);
+            }
         }
     }
-    last_drawn_height = y - originY;
+    last_drawn_height = m_laid_height;
 }
 
 // ---------------------------------------------------------------------------
@@ -440,14 +518,18 @@ float Document::drawParagraph(NVGcontext* ctx, const Paragraph& para,
             if (justify && wi + 1 == line.words.size())
                 wx = rightEdge - word.visualRight;
 
-            // Capture word position in layout cache
+            // Capture word position + draw data for cheap re-paint
             if (capture_layout) {
                 WordLayout wl;
-                wl.byte_start = word.byte_start;
-                wl.byte_end   = word.byte_end;
-                wl.x          = wx;
-                wl.advance    = word.advance;
-                rich_line.words.push_back(wl);
+                wl.byte_start   = word.byte_start;
+                wl.byte_end     = word.byte_end;
+                wl.x            = wx;
+                wl.advance      = word.advance;
+                wl.leftBearing  = word.leftBearing;
+                wl.visualRight  = word.visualRight;
+                wl.style        = st;
+                wl.text         = word.text;
+                rich_line.words.push_back(std::move(wl));
             }
 
             if (st.bgColor.a > 0 && !st.monospace) {

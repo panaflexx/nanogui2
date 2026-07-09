@@ -33,6 +33,13 @@ NAMESPACE_BEGIN(nanogui)
         /// Create a new popup parented to a screen (first argument) and a parent window (if applicable)
         Popup(Widget* parent, Window* parent_window = nullptr, PopupButton* parent_button = nullptr);
 
+        /// Popups are highly interactive; keep display-list caching off even if a layout is set.
+        Widget& set_layout(Layout* layout) override {
+            Widget::set_layout(layout);
+            set_cached(false);
+            return *this;
+        }
+
         /// Return the anchor position in the parent window; the placement of the popup is relative to it
         void set_anchor_pos(const Vector2i& anchor_pos) { m_anchor_pos = anchor_pos; }
         /// Set the anchor position in the parent window; the placement of the popup is relative to it

@@ -58,6 +58,10 @@ TextEditor::TextEditor(Widget* parent, Mode mode)
     if (m_doc->paragraphs.empty()) {
         m_doc->addParagraph();
     }
+
+    // Scroll / selection / caret change every frame — draw live and exclude
+    // this widget from parent display-list bakes (see Widget::set_live).
+    set_live(true);
 }
 
 // ---------------------------------------------------------------------------
@@ -96,6 +100,7 @@ void TextEditor::set_plain_text(const std::string& text, const Style* style) {
         m_doc->addParagraph();
     m_caret = m_anchor = Position{0, 0};
     m_scroll_x = m_scroll_y = 0.f;
+    if (m_doc) m_doc->markLayoutDirty();
 }
 
 std::string TextEditor::plain_text() const {
@@ -482,6 +487,7 @@ void TextEditor::delete_range(Position a, Position b) {
 
 void TextEditor::fire_changed() {
     m_metrics_valid = false; // line count may have changed (gutter width)
+    if (m_doc) m_doc->markLayoutDirty();
     if (change_callback) change_callback();
     if (caret_callback) caret_callback(m_caret);
 }
@@ -651,6 +657,8 @@ bool TextEditor::scroll_event(const Vector2i& /*p*/, const Vector2f& rel) {
         m_vel_y = std::clamp(m_vel_y - rel.y() * lh * 24.f, -3500.f, 3500.f);
     if (rel.x() != 0.f)
         m_vel_x = std::clamp(m_vel_x - rel.x() * adv * 24.f, -3500.f, 3500.f);
+    // Scroll must not be baked into a retained parent list.
+    propagate_cache_dirty();
     screen()->redraw();
     return true;
 }
@@ -846,7 +854,10 @@ void TextEditor::draw(NVGcontext* ctx) {
             if (m_scroll_x < 0.f) m_scroll_x = 0.f;
         }
 
-        if (moving) screen()->redraw();
+        if (moving) {
+            propagate_cache_dirty();
+            screen()->redraw();
+        }
     }
 
     // ---- Background ----

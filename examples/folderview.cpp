@@ -17,6 +17,8 @@
 #include <nanogui/layout.h>
 #include <nanogui/icons.h>
 #include <nanogui/texteditor.h>
+#include <nanogui/textbox.h>
+#include <nanogui/menu.h>
 #include <GLFW/glfw3.h>
 #include <iostream>
 #include <functional>
@@ -1095,7 +1097,48 @@ public:
         window->set_layout(
             new BoxLayout(Orientation::Vertical, Alignment::Fill, 0, 0));
 
-        // Horizontal split: sidebar | content
+        // ---- Toolbar ----
+        Widget *toolbar = new Widget(window);
+        toolbar->set_min_height(60);
+        toolbar->set_height(60);
+        toolbar->set_layout(
+            new BoxLayout(Orientation::Horizontal, Alignment::Middle, 0, 0));
+
+        auto make_button_tool = [&](int icon) {
+            Button *btn = new Button(toolbar, "", icon);
+            btn->set_font_size(52);
+            btn->set_transparent(true);
+            return btn;
+        };
+
+        make_button_tool(FA_ENVELOPE);
+        make_button_tool(FA_EDIT);
+        make_button_tool(FA_ARCHIVE);
+        make_button_tool(FA_TRASH);
+        make_button_tool(FA_MAIL_BULK);
+        make_button_tool(FA_REPLY);
+        make_button_tool(FA_REPLY_ALL);
+        make_button_tool(FA_ARROW_RIGHT);
+
+        // Flag Dropdown
+        Dropdown *flag_dd = new Dropdown(toolbar, Dropdown::Mode::Menu, "Flag");
+        flag_dd->set_theme(m_theme);
+        flag_dd->set_icon(FA_FLAG);
+        flag_dd->add_item("High Priority");
+        flag_dd->add_item("Low Priority");
+        flag_dd->add_item("Follow Up");
+
+        // Spacer
+        Widget *spacer = new Widget(toolbar);
+        spacer->set_min_width(10);
+        spacer->set_width(10);
+
+        // Search Box
+        TextBox *search_box = new TextBox(toolbar);
+        search_box->set_min_width(150);
+        // Removed set_padding(5) as it's not a member of TextBox
+
+        // ---- Horizontal split: sidebar | content ----
         Split *split = new Split(window, Split::Orientation::Horizontal);
         split->set_max_size({2048, 2048});
         split->set_min_size(100);
@@ -1131,27 +1174,6 @@ public:
                                      AlignItems::Stretch, 0, 0);
         right->set_layout(rflex);
         right->set_min_width(100);
-
-        // Toolbar (fixed height, flex_grow=0 by default)
-        Widget *toolbar = new Widget(right);
-        toolbar->set_layout(
-            new BoxLayout(Orientation::Horizontal, Alignment::Middle, 8, 6));
-        toolbar->set_min_height(40);
-        toolbar->set_height(40);
-
-        auto make_tool = [&](const std::string &cap, int icon) {
-            Button *btn = new Button(toolbar, cap, icon);
-            btn->set_font_size(13);
-            btn->set_transparent(true);
-            return btn;
-        };
-
-        make_tool("", FA_REPLY);
-        make_tool("", FA_REPLY_ALL);
-        make_tool("", FA_ARROW_RIGHT);
-        make_tool("", FA_TRASH);
-        make_tool("", FA_ARCHIVE);
-        make_tool("", FA_FLAG);
 
         // Hairline separator
         Widget *sep = new Widget(right);

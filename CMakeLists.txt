@@ -367,8 +367,8 @@ endif()
 # Compile main NanoGUI library
 add_library(nanogui ${NANOGUI_LIBRARY_TYPE}
   # Merge NanoVG into the NanoGUI library
-  ext/nanovg/src/nanovg.c
-  ext/nanovg/src/stb_image.h
+  ext/nanovgd/src/nanovg.c
+  ext/nanovgd/src/stb_image.h
 
   # Merge GLAD into the NanoGUI library (only if needed)
   ${NANOGUI_EXTRA}
@@ -398,7 +398,6 @@ add_library(nanogui ${NANOGUI_LIBRARY_TYPE}
   include/nanogui/texteditor.h src/texteditor.cpp
   include/nanogui/imagepanel.h src/imagepanel.cpp
   include/nanogui/scrollpanel.h src/scrollpanel.cpp
-    include/nanogui/cachedwidget.h src/cachedwidget.cpp
     include/nanogui/zoomscrollpanel.h src/zoomscrollpanel.cpp
   include/nanogui/colorwheel.h src/colorwheel.cpp
   include/nanogui/colorpicker.h src/colorpicker.cpp
@@ -436,7 +435,7 @@ target_include_directories(nanogui
     ${CMAKE_CURRENT_SOURCE_DIR}/include
 
   PRIVATE
-    ext/nanovg/src
+    ext/nanovgd/src
     ${CMAKE_CURRENT_BINARY_DIR}
 )
 
@@ -463,7 +462,7 @@ if (NANOGUI_BUILD_SHARED)
 endif()
 
 target_include_directories(nanogui PUBLIC
-  "${CMAKE_CURRENT_SOURCE_DIR}/ext/nanovg/src")
+  "${CMAKE_CURRENT_SOURCE_DIR}/ext/nanovgd/src")
 
 if (NANOGUI_BUILD_GLAD)
   target_compile_definitions(nanogui PUBLIC -DNANOGUI_GLAD)
@@ -500,9 +499,9 @@ endif()
 
 # Quench warnings while compiling NanoVG
 if (CMAKE_COMPILER_IS_GNUCC)
-  set_source_files_properties(ext/nanovg/src/nanovg.c PROPERTIES COMPILE_FLAGS -Wno-unused-result)
+  set_source_files_properties(ext/nanovgd/src/nanovg.c PROPERTIES COMPILE_FLAGS -Wno-unused-result)
 elseif(MSVC)
-  set_source_files_properties(ext/nanovg/src/nanovg.c PROPERTIES COMPILE_FLAGS "/wd4005 /wd4456 /wd4457")
+  set_source_files_properties(ext/nanovgd/src/nanovg.c PROPERTIES COMPILE_FLAGS "/wd4005 /wd4456 /wd4457")
 endif()
 
 # Optional QuickJS-NG scripting engine

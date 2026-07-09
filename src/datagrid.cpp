@@ -39,6 +39,9 @@ DataGrid::DataGrid(Widget* parent)
 {
     DebugName = (m_parent ? m_parent->DebugName : "") + ",DataGrid";
     set_font_size(16);
+
+    // Momentum scrolling runs in draw(); must be painted every frame.
+    set_live(true);
 }
 
 void DataGrid::set_model(std::shared_ptr<DataGridModel> model) {
@@ -579,6 +582,7 @@ void DataGrid::draw(NVGcontext* ctx) {
 
         if (moving) {
             update_visible_range();
+            propagate_cache_dirty();
             screen()->redraw();
         }
     }
@@ -1563,6 +1567,8 @@ bool DataGrid::scroll_event(const Vector2i& p, const Vector2f& rel) {
     }
 
     if (used) {
+        // Ensure any residual cached ancestor rebuilds; coasting needs draw().
+        propagate_cache_dirty();
         screen()->redraw();
         return true;
     }

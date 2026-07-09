@@ -23,6 +23,9 @@
 #define _USE_MATH_DEFINES
 #include <cmath>
 #include <GLFW/glfw3.h>
+#include <unordered_set>
+#include <vector>
+
 
 /* Uncomment the following definition to draw red bounding
    boxes around widgets (useful for debugging drawing code) */
@@ -30,6 +33,10 @@
 //    #define NANOGUI_SHOW_WIDGET_BOUNDS 1
 
 NAMESPACE_BEGIN(nanogui)
+
+namespace {
+    std::unordered_set<Widget*> s_cache_pending;
+}
 
 Widget::Widget(Widget* parent)
     : m_parent(nullptr), m_theme(nullptr), m_layout(nullptr),
@@ -63,6 +70,10 @@ Widget::~Widget() {
     // pointer in Screen::m_focus_path and the next focus update will
     // dereference freed memory.
     bool is_screen = dynamic_cast<Screen*>(this) != nullptr;
+    // Drop from the pending cache registry and free any retained list.
+    s_cache_pending.erase(this);
+    delete_draw_cache();
+
     if (!is_screen) {
         Screen* sc = this->screen();
         if (sc)
@@ -139,6 +150,7 @@ void Widget::perform_layout(NVGcontext* ctx) {
             c->perform_layout(ctx);
         }
     }
+    propagate_cache_dirty();
 }
 
 Widget* Widget::find_widget(const Vector2i& p) {
@@ -160,6 +172,8 @@ const Widget* Widget::find_widget(const Vector2i& p) const {
 }
 
 bool Widget::mouse_button_event(const Vector2i& p, int button, bool down, int modifiers) {
+    propagate_cache_dirty();
+
     Screen* CanICastSreen = dynamic_cast<Screen*>(this);
     bool screen_widget = CanICastSreen != NULL;
     for (auto it = m_children.rbegin(); it != m_children.rend(); ++it) {
@@ -198,6 +212,8 @@ bool Widget::mouse_motion_event(const Vector2i& p, const Vector2i& rel, int butt
 }
 
 bool Widget::scroll_event(const Vector2i& p, const Vector2f& rel) {
+    propagate_cache_dirty();
+
     for (auto it = m_children.rbegin(); it != m_children.rend(); ++it) {
         Widget* child = *it;
         if (!child->visible())
@@ -221,6 +237,7 @@ bool Widget::zoom_event(double magnification, const Vector2i& pos) {
 }
 
 bool Widget::mouse_drag_event(const Vector2i& p, const Vector2i& rel, int button, int  modifiers) {
+    propagate_cache_dirty();
     Screen* CanICastSreen = dynamic_cast<Screen*>(this);
     if (CanICastSreen != NULL)return false;
 
@@ -231,20 +248,25 @@ bool Widget::mouse_drag_event(const Vector2i& p, const Vector2i& rel, int button
 }
 
 bool Widget::mouse_enter_event(const Vector2i&, bool enter) {
+    propagate_cache_dirty();
     m_mouse_focus = enter;
     return false;
 }
 
 bool Widget::focus_event(bool focused) {
+    propagate_cache_dirty();
+
     m_focused = focused;
     return false;
 }
 
 bool Widget::keyboard_event(int, int, int, int) {
+    propagate_cache_dirty();
     return false;
 }
 
 bool Widget::keyboard_character_event(unsigned int) {
+    propagate_cache_dirty();
     return false;
 }
 
@@ -512,6 +534,205 @@ void Widget::end_animation() {
     // Subclasses can override for more logic
 }
 
+
+/* ------------------------------------------------------------------ */
+/*  Display-list cache                                                */
+/* ------------------------------------------------------------------ */
+
+static void cache_register(Widget* w) {
+    if (w) s_cache_pending.insert(w);
+}
+
+Widget& Widget::set_layout(Layout* layout) {
+    m_layout = layout;
+    // Containers with a layout are the natural display-list cache roots.
+    if (layout)
+        set_cached(true);
+    return *this;
+}
+
+Widget& Widget::set_live(bool live) {
+    m_live = live;
+    if (live) {
+        // Live widgets should not retain their own list either.
+        set_cached(false);
+        // Ancestor lists must rebuild without this child baked in.
+        propagate_cache_dirty();
+    }
+    return *this;
+}
+
+Widget& Widget::set_cached(bool cached) {
+    if (m_cached == cached)
+        return *this;
+    m_cached = cached;
+    if (!cached) {
+        s_cache_pending.erase(this);
+        delete_draw_cache();
+        m_cache_dirty = true;
+    } else {
+        m_cache_dirty = true;
+        cache_register(this);
+        if (Screen* scr = screen())
+            scr->redraw();
+    }
+    return *this;
+}
+
+void Widget::cache_dirty() {
+    if (!m_cached)
+        return;
+    m_cache_dirty = true;
+    m_cache_redraw_delay_ms = 0;
+    cache_register(this);
+    if (Screen* scr = screen())
+        scr->redraw();
+}
+
+void Widget::propagate_cache_dirty() {
+    for (Widget* w = this; w != nullptr; w = w->parent()) {
+        if (w->m_cached)
+            w->cache_dirty();
+    }
+}
+
+void Widget::cache_redraw(int ms_time) {
+    if (!m_cached)
+        return;
+    m_cache_redraw_delay_ms = ms_time;
+    m_cache_dirty = true;
+    m_cache_last_request = glfwGetTime();
+    cache_register(this);
+    if (Screen* scr = screen())
+        scr->redraw();
+}
+
+int Widget::cache_packet_count() const {
+    return nvgDrawListSize(m_draw_list);
+}
+
+void Widget::delete_draw_cache() {
+    if (m_draw_list) {
+        NVGcontext* ctx = nullptr;
+        if (Screen* scr = screen())
+            ctx = scr->nvg_context();
+        nvgDeleteDrawList(ctx, m_draw_list);
+        m_draw_list = nullptr;
+    }
+    m_cache_size = Vector2i(0, 0);
+    m_cache_pixel_ratio = 0.0f;
+}
+
+void Widget::draw_cached_content(NVGcontext* ctx) {
+    // Record non-live children only. Live children (TextEditor, DataGrid, …)
+    // repaint every frame after SubmitDrawList so scroll/selection stay correct
+    // without freezing or constantly invalidating the parent list.
+    if (m_layout)
+        m_layout->draw_table(ctx, this);
+
+    for (auto child : m_children) {
+        if (!child->visible() || child->live())
+            continue;
+#if !defined(NANOGUI_SHOW_WIDGET_BOUNDS)
+        nvgSave(ctx);
+        nvgIntersectScissor(ctx, child->position().x(), child->position().y(),
+                            child->size().x(), child->size().y());
+#endif
+        child->draw(ctx);
+#if !defined(NANOGUI_SHOW_WIDGET_BOUNDS)
+        nvgRestore(ctx);
+#endif
+    }
+}
+
+
+void Widget::draw_live_overlays(NVGcontext* ctx) {
+    // Current transform is this widget's parent space (caller translated to parent).
+    // Live widgets paint with their m_pos relative to that space (same as Widget::draw).
+    for (auto child : m_children) {
+        if (!child->visible())
+            continue;
+#if !defined(NANOGUI_SHOW_WIDGET_BOUNDS)
+        nvgSave(ctx);
+        nvgIntersectScissor(ctx, child->position().x(), child->position().y(),
+                            child->size().x(), child->size().y());
+#endif
+        if (child->live()) {
+            child->draw(ctx);
+        } else {
+            // Descend so a live grandchild under a non-live intermediate still paints.
+            nvgTranslate(ctx, (float)child->position().x(), (float)child->position().y());
+            child->draw_live_overlays(ctx);
+            nvgTranslate(ctx, -(float)child->position().x(), -(float)child->position().y());
+        }
+#if !defined(NANOGUI_SHOW_WIDGET_BOUNDS)
+        nvgRestore(ctx);
+#endif
+    }
+}
+
+
+void Widget::update_draw_cache(NVGcontext* ctx) {
+    if (!m_cached || !ctx)
+        return;
+    if (m_size.x() <= 0 || m_size.y() <= 0)
+        return;
+
+    float pxRatio = 1.0f;
+    if (Screen* scr = screen())
+        pxRatio = scr->pixel_ratio();
+
+    if (!m_draw_list) {
+        m_draw_list = nvgCreateDrawList(ctx);
+        if (!m_draw_list)
+            return;
+    }
+
+    // Tessellate children once in local coordinates into a retained Path 2 list.
+    nvgBeginFrame(ctx, (float)m_size.x(), (float)m_size.y(), pxRatio);
+    nvgBeginDisplayList(ctx, m_draw_list);
+    draw_cached_content(ctx);
+    nvgEndDisplayList(ctx);
+    nvgCancelFrame(ctx);
+
+    m_cache_size = m_size;
+    m_cache_pixel_ratio = pxRatio;
+}
+
+void Widget::process_pending_cache_updates(NVGcontext* ctx) {
+    if (s_cache_pending.empty())
+        return;
+
+    double now = glfwGetTime();
+    std::vector<Widget*> ready;
+    ready.reserve(s_cache_pending.size());
+
+    for (auto it = s_cache_pending.begin(); it != s_cache_pending.end(); ) {
+        Widget* w = *it;
+        if (!w->m_cached) {
+            it = s_cache_pending.erase(it);
+            continue;
+        }
+        if (w->m_cache_redraw_delay_ms > 0 &&
+            (now - w->m_cache_last_request) * 1000.0 < (double)w->m_cache_redraw_delay_ms) {
+            if (Screen* scr = w->screen())
+                scr->redraw();
+            ++it;
+            continue;
+        }
+        ready.push_back(w);
+        it = s_cache_pending.erase(it);
+    }
+
+    for (Widget* w : ready) {
+        if (w->m_size.x() <= 0 || w->m_size.y() <= 0)
+            continue;
+        w->update_draw_cache(ctx);
+        w->m_cache_dirty = false;
+        w->m_cache_redraw_delay_ms = 0;
+    }
+}
+
 void Widget::draw(NVGcontext* ctx) {
 #if defined(NANOGUI_SHOW_WIDGET_BOUNDS)
     nvgStrokeWidth(ctx, 1.0f);
@@ -560,6 +781,31 @@ void Widget::draw(NVGcontext* ctx) {
 
     if (anim_active) {
         apply_animation_transform(ctx, progress);
+    }
+
+    // Retained display-list path: submit a previously recorded local-space list.
+    if (m_cached) {
+        float pxRatio = 1.0f;
+        if (Screen* scr = screen())
+            pxRatio = scr->pixel_ratio();
+        if (m_cache_size != m_size || m_cache_pixel_ratio != pxRatio ||
+            nvgDrawListNeedsRebuild(ctx, m_draw_list)) {
+            m_cache_dirty = true;
+            cache_register(this);
+            if (Screen* scr = screen())
+                scr->redraw();
+        }
+        if (!m_cache_dirty && m_draw_list && nvgDrawListSize(m_draw_list) > 0) {
+            nvgSubmitDrawList(ctx, m_draw_list);
+            // Live overlays only in a real frame — never while a parent is
+            // recording (those paints would hit GL and then be cancel'd).
+            if (!nvgIsRecordingDisplayList(ctx))
+                draw_live_overlays(ctx);
+            nvgTranslate(ctx, -m_pos.x(), -m_pos.y());
+            nvgRestore(ctx);
+            return;
+        }
+        // Dirty / empty: fall through to immediate children draw for this frame.
     }
 
 	// Draw table layout if enabled

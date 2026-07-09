@@ -99,7 +99,7 @@ public:
 		rightPanel->set_zoom(1.0); // default zoom
 
 		// Wrap the content in a CachedWidget for performance
-		CachedWidget *cachedContent = new CachedWidget(rightPanel);
+		Widget *cachedContent = new Widget(rightPanel);
 		FlexLayout *mainLayout = new FlexLayout(FlexDirection::Column, JustifyContent::FlexStart,
 									AlignItems::Stretch, 20, 15);
 		cachedContent->set_layout(mainLayout);

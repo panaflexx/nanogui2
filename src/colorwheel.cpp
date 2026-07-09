@@ -21,6 +21,8 @@ ColorWheel::ColorWheel(Widget* parent, const Color& rgb)
     : WidgetCRTP<ColorWheel>(parent), m_drag_region(None) {
     DebugName = m_parent->DebugName + ",ColW";
     set_color(rgb);
+    // Gradient fills + interactive hue: paint live, not from a parent bake.
+    set_live(true);
 }
 
 Vector2i ColorWheel::preferred_size(NVGcontext*) const {
@@ -183,6 +185,7 @@ ColorWheel::Region ColorWheel::adjust_position(const Vector2i& p, Region conside
 
         if (m_callback)
             m_callback(color());
+        propagate_cache_dirty();
 
         return OuterCircle;
     }
@@ -214,6 +217,7 @@ ColorWheel::Region ColorWheel::adjust_position(const Vector2i& p, Region conside
         m_black = l1;
         if (m_callback)
             m_callback(color());
+        propagate_cache_dirty();
         return InnerTriangle;
     }
 

@@ -24,12 +24,14 @@ ScrollPanel::ScrollPanel(Widget* parent)
     : WidgetCRTP<ScrollPanel>(parent), m_child_preferred_size(Vector2i(0, 0)),
     m_scroll(0.f, 0.f), m_update_layout(false), m_scroll_type(ScrollTypes::Vertical) {
     DebugName = m_parent->DebugName + ",ScrlPnl";
+    set_live(true);
 }
 
 ScrollPanel::ScrollPanel(Widget* parent, ScrollTypes scroll_type)
     : WidgetCRTP<ScrollPanel>(parent), m_child_preferred_size(Vector2i(0, 0)),
     m_scroll(0.f, 0.f), m_update_layout(false), m_scroll_type(scroll_type) {
     DebugName = m_parent->DebugName + ",ScrlPnl";
+    set_live(true);
 }
 
 
@@ -92,6 +94,12 @@ bool ScrollPanel::keyboard_event(int key, int scancode, int action, int modifier
 
     auto child = m_children[0];
 	return child->keyboard_event(key, scancode, action, modifiers);
+    // Content of a ScrollPanel is a natural retained view (scroll = transform only).
+    if (!m_children.empty() && m_children[0]) {
+        if (m_children[0]->layout())
+            m_children[0]->set_cached(true);
+    }
+
 }
 
 Vector2i ScrollPanel::preferred_size(NVGcontext* ctx) const {
@@ -199,7 +207,11 @@ bool ScrollPanel::scroll_event(const Vector2i& p, const Vector2f& rel) {
         m_vel_x = std::clamp(m_vel_x - rel.x() * (float)m_size.x() * 0.6f, -3500.f, 3500.f);
         used = true;
     }
-    if (used) { screen()->redraw(); return true; }
+    if (used) {
+        propagate_cache_dirty();
+        screen()->redraw();
+        return true;
+    }
     return Widget::scroll_event(p, rel);
 }
 
@@ -239,13 +251,16 @@ void ScrollPanel::draw(NVGcontext* ctx) {
             }
             moving = true;
         }
-        if (moving) { m_update_layout = true; screen()->redraw(); }
+        if (moving) {
+            m_update_layout = true;
+            propagate_cache_dirty();
+            screen()->redraw();
+        }
     }
 
-    if (m_update_layout) {
-        m_update_layout = false;
-        child->perform_layout(ctx);
-    }
+    // Scroll only moves the child; do not re-run layout (would thrash display lists).
+    // Full layout runs from ScrollPanel::perform_layout when the panel size changes.
+    m_update_layout = false;
 
     int yoffset = 0, xoffset = 0;
     if (m_child_preferred_size.y() > m_size.y() && VScrollable())

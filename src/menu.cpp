@@ -380,6 +380,7 @@ PopupMenu::PopupMenu(Screen *screen, Window *parent_window, MenuItem *parent_ite
     Popup(screen, parent_window), m_parent_item(parent_item), m_exclusive(exclusive)
 {
     set_layout(new BoxLayout(Orientation::Vertical, Alignment::Fill, 3));
+    set_cached(false);
     set_visible(false);
 
     auto flat_theme                             = new Theme(screen->nvg_context());
@@ -676,6 +677,7 @@ Dropdown::Dropdown(Widget *parent, const vector<string> &items, const vector<int
         auto icon    = icons.size() == items.size() ? icons[index] : 0;
         auto item    = new MenuItem{m_popup, caption, icon};
         item->set_flags(m_mode == ComboBox ? Button::RadioButton : Button::NormalButton);
+        item->set_theme(m_theme);
         item->set_callback(
             [this, index]
             {
@@ -693,6 +695,7 @@ MenuItem *Dropdown::add_item(const string &caption, int icon, const vector<Short
     auto ret = new MenuItem{popup(), caption, icon, s};
 	ret->set_flags(m_mode == ComboBox ? Button::RadioButton : Button::NormalButton);
 	ret->set_visible(true);
+	ret->set_theme(m_theme);
     return ret;
 }
 
@@ -1060,6 +1063,8 @@ MenuBar::MenuBar(Widget *parent, const string &title) : Window(parent, title)
     set_theme(menu_theme);
     set_position(nanogui::Vector2i(0, 0));
     set_layout(new BoxLayout(Orientation::Horizontal, Alignment::Middle, 2, 0));
+    // Menus are hover/keyboard interactive; never retain a frozen display list.
+    set_cached(false);
 }
 
 Dropdown *MenuBar::add_menu(const string &name)
@@ -1179,6 +1184,7 @@ PopupWrapper::PopupWrapper(Widget *parent) : Widget(parent)
 {
     m_popup = new PopupMenu{screen(), window(), nullptr, false};
     set_layout(new BoxLayout(Orientation::Vertical, Alignment::Fill, 0, 0));
+    set_cached(false);
 }
 
 bool PopupWrapper::mouse_button_event(const Vector2i &p, int button, bool down, int modifiers)

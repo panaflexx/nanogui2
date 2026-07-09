@@ -19,6 +19,9 @@
 #include <vector>
 
 
+// Forward-declare NanoVG draw list (defined in nanovg.h)
+struct NVGdrawList;
+
 NAMESPACE_BEGIN(nanogui)
 
 enum class Cursor; // do not put a docstring, this is already documented
@@ -57,8 +60,30 @@ public:
     Layout* layout() { return m_layout; }
     /// Return the used \ref Layout generator
     const Layout* layout() const { return m_layout.get(); }
-    /// Set the used \ref Layout generator
-    Widget& set_layout(Layout* layout) { m_layout = layout; return *this; }
+    /// Set the used \ref Layout generator.
+    /// Enabling a layout also opts this widget into display-list caching by default.
+    virtual Widget& set_layout(Layout* layout);
+
+    // ---- Display-list cache (Path 1/2) ------------------------------------
+    /// Whether this widget retains children as an NVG draw list.
+    bool cached() const { return m_cached; }
+    /// Enable/disable retained draw-list caching for this widget.
+    Widget& set_cached(bool cached);
+
+    /// Live widgets always repaint in the main frame and are omitted from
+    /// parent display-list bakes (scroll/selection without thrashing the UI).
+    bool live() const { return m_live; }
+    Widget& set_live(bool live);
+    /// Mark the retained draw list dirty (rebuilt before the next frame).
+    void cache_dirty();
+    /// Dirty this widget and every cached ancestor (for hover/key updates).
+    void propagate_cache_dirty();
+    /// Dirty with optional debounce delay in milliseconds.
+    void cache_redraw(int ms_time = 0);
+    /// Number of packets in the retained list (0 if empty/disabled).
+    int cache_packet_count() const;
+    /// Pre-frame rebuild of all pending dirty cached widgets.
+    static void process_pending_cache_updates(NVGcontext* ctx);
 
     /// Return the \ref Theme used to draw this widget
     Theme* theme() { return m_theme; }
@@ -400,6 +425,15 @@ protected:
      */
     void apply_fill_parent();
 
+    /// Rebuild the retained draw list from current children (local coordinates).
+    virtual void update_draw_cache(NVGcontext* ctx);
+    /// Release the retained draw list.
+    void delete_draw_cache();
+    /// Draw only the cacheable content (default: children). Used while recording.
+    virtual void draw_cached_content(NVGcontext* ctx);
+    /// After submitting a clean display list, repaint live descendants omitted from the bake.
+    void draw_live_overlays(NVGcontext* ctx);
+
     /**
      * Convenience definition for subclasses to get the full icon scale for this
      * class of Widget.  It simple returns the value
@@ -476,6 +510,16 @@ protected:
      */
     float m_icon_extra_scale;
     Cursor m_cursor;
+
+    // Display-list cache
+    bool m_cached = false;
+    bool m_live = false;   // omit from parent list; always draw live
+    bool m_cache_dirty = true;
+    ::NVGdrawList* m_draw_list = nullptr;
+    int m_cache_redraw_delay_ms = 0;
+    double m_cache_last_request = 0.0;
+    float m_cache_pixel_ratio = 0.0f;
+    Vector2i m_cache_size{0, 0};
 
 	// Animation support
 	AnimationType m_animation_type = AnimationType::None;

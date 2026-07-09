@@ -21,6 +21,7 @@ ColorPicker::ColorPicker(Widget *parent, const Color& color) : PopupButton(paren
     set_background_color(color);
     Popup *popup = this->popup();
     popup->set_layout(new GroupLayout());
+    popup->set_cached(false); // ColorWheel needs live repaints while dragging
 
     // initialize callback to do nothing; this is for users to hook into
     // receiving a new color value

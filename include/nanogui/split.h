@@ -15,7 +15,6 @@
 #include <nanogui/screen.h>
 #include <nanogui/widget.h>
 #include <nanogui/theme.h>
-#include <nanogui/cachedwidget.h>
 
 NAMESPACE_BEGIN(nanogui)
 
@@ -45,6 +44,8 @@ public:
           m_dragPosition(0.5f), m_dragging(false),
           m_minSplitSize(100, 100), m_maxSplitSize(INT_MAX, INT_MAX),
           m_firstWidget(nullptr), m_secondWidget(nullptr) {
+        // Split is a layout-like container: retain children between drag events.
+        set_cached(true);
     }
 
     /// Get the current orientation
@@ -322,11 +323,13 @@ public:
 				screen->redraw();
 			}
 
-            // Invalidate any parent CachedWidget caches
+            // Invalidate retained display lists for this split, panes, and ancestors.
+            cache_dirty();
+            if (m_firstWidget) m_firstWidget->cache_dirty();
+            if (m_secondWidget) m_secondWidget->cache_dirty();
             for (Widget* w = parent(); w != nullptr; w = w->parent()) {
-                if (auto* cw = dynamic_cast<CachedWidget*>(w)) {
-                    cw->cache_dirty();
-                }
+                if (w->cached())
+                    w->cache_dirty();
             }
 
             return true;

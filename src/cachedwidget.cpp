@@ -1,10 +1,13 @@
 /*
     src/cachedwidget.cpp -- Implementation of CachedWidget
 
-    Renders an offscreen NVG/FBO cache of the widget's children for
+    Caches an NVG draw list (display list) of the widget's children for
     performance. Cache updates are deferred to BEFORE the next screen
     frame begins so they don't disrupt ancestor NanoVG state
     (transforms, scissors, etc.).
+
+    Geometry is recorded in widget-local coordinates and submitted under
+    nvgTranslate(m_pos) so parent clipping/transforms still work.
 
     NanoGUI was developed by Wenzel Jakob <wenzel.jakob@epfl.ch>.
 
@@ -17,18 +20,8 @@
 #include <nanogui/opengl.h>
 #include <GLFW/glfw3.h>
 
-// Bring in NanoVG FBO helpers. The implementation lives in nanovg.c
-// (compiled with C linkage), so wrap in extern "C".
-#if defined(NANOGUI_USE_OPENGL)
-#  define NANOVG_GL3
-#elif defined(NANOGUI_USE_GLES)
-#  define NANOVG_GLES2
-#endif
-extern "C" {
-#include <nanovg_gl_utils.h>
-}
-
 #include <unordered_set>
+#include <vector>
 
 NAMESPACE_BEGIN(nanogui)
 
@@ -77,6 +70,10 @@ void CachedWidget::cache_redraw(int ms_time) {
 
     if (Screen* scr = screen())
         scr->redraw();
+}
+
+int CachedWidget::cache_packet_count() const {
+    return nvgDrawListSize(m_drawList);
 }
 
 void CachedWidget::perform_layout(NVGcontext* ctx) {
@@ -131,54 +128,57 @@ bool CachedWidget::keyboard_character_event(unsigned int codepoint) {
 /* ------------------------------------------------------------------ */
 
 void CachedWidget::delete_cache() {
-    if (m_fbo) {
-        nvgluDeleteFramebuffer(static_cast<NVGLUframebuffer*>(m_fbo));
-        m_fbo = nullptr;
+    if (m_drawList) {
+        // Context may already be gone during teardown; nvgDeleteDrawList
+        // tolerates a null context.
+        NVGcontext* ctx = nullptr;
+        if (Screen* scr = screen())
+            ctx = scr->nvg_context();
+        nvgDeleteDrawList(ctx, m_drawList);
+        m_drawList = nullptr;
     }
-    // nvgluDeleteFramebuffer also frees the associated image
-    m_cacheImage = -1;
+    m_cachedSize = Vector2i(0, 0);
+    m_cachedPixelRatio = 0.0f;
 }
 
 void CachedWidget::draw(NVGcontext* ctx) {
     if (m_size.x() <= 0 || m_size.y() <= 0)
         return;
 
-    // Detect size mismatch -> request a rebuild for the next frame.
-    if (m_cachedSize != m_size) {
+    float pxRatio = 1.0f;
+    if (Screen* scr = screen())
+        pxRatio = scr->pixel_ratio();
+
+    // Detect size / DPI mismatch -> request a rebuild for the next frame.
+    if (m_cachedSize != m_size || m_cachedPixelRatio != pxRatio ||
+        nvgDrawListNeedsRebuild(ctx, m_drawList)) {
         m_cacheDirty = true;
         s_pending.insert(this);
         if (Screen* scr = screen())
             scr->redraw();
     }
 
-    // If the cache is ready, use the fast path.
-    if (!m_cacheDirty && m_cacheImage != -1) {
-        NVGpaint paint = nvgImagePattern(ctx,
-            0, 0,
-            (float)m_size.x(), (float)m_size.y(),
-            0.0f, m_cacheImage, 1.0f);
-
+    // Fast path: submit the retained local-space draw list under our position.
+    if (!m_cacheDirty && m_drawList && nvgDrawListSize(m_drawList) > 0) {
         nvgSave(ctx);
-        nvgTranslate(ctx, m_pos.x(), m_pos.y());
-        nvgBeginPath(ctx);
-        nvgRect(ctx, 0, 0, m_size.x(), m_size.y());
-        nvgFillPaint(ctx, paint);
-        nvgFill(ctx);
+        nvgTranslate(ctx, (float)m_pos.x(), (float)m_pos.y());
+        nvgSubmitDrawList(ctx, m_drawList);
         nvgRestore(ctx);
         return;
     }
 
-    // Fallback path: cache is dirty (or not yet built). Draw children
-    // directly through the current NVG state so the visuals remain correct
-    // for this frame. The cache will be rebuilt before the next frame.
+    // Fallback: cache is dirty (or not yet built). Draw children directly
+    // through the current NVG state so this frame stays correct.
     nvgSave(ctx);
-    nvgTranslate(ctx, m_pos.x(), m_pos.y());
+    nvgTranslate(ctx, (float)m_pos.x(), (float)m_pos.y());
     draw_cached(ctx);
     nvgRestore(ctx);
 }
 
 void CachedWidget::draw_cached(NVGcontext* ctx) {
     // Children are at this widget's local (0,0) coordinate space.
+    // Their draw() implementations use m_pos relative to this parent, so we
+    // must NOT pre-translate by CachedWidget::m_pos here.
     for (auto child : m_children) {
         if (child->visible())
             child->draw(ctx);
@@ -188,56 +188,30 @@ void CachedWidget::draw_cached(NVGcontext* ctx) {
 void CachedWidget::update_cache(NVGcontext* ctx) {
     if (m_size.x() <= 0 || m_size.y() <= 0)
         return;
+    if (!ctx)
+        return;
 
-    int w = m_size.x();
-    int h = m_size.y();
+    float pxRatio = 1.0f;
+    if (Screen* scr = screen())
+        pxRatio = scr->pixel_ratio();
 
-    // (Re)create the FBO if needed.
-    if (m_fbo == nullptr || m_cachedSize != m_size) {
-        if (m_fbo) {
-            nvgluDeleteFramebuffer(static_cast<NVGLUframebuffer*>(m_fbo));
-            m_fbo = nullptr;
-            m_cacheImage = -1;
-        }
-
-        NVGLUframebuffer* fb = nvgluCreateFramebuffer(
-            ctx, w, h,
-            NVG_IMAGE_REPEATX | NVG_IMAGE_REPEATY | NVG_IMAGE_FLIPY
-        );
-
-
-        if (!fb)
+    if (!m_drawList) {
+        m_drawList = nvgCreateDrawList(ctx);
+        if (!m_drawList)
             return;
-
-        m_fbo = fb;
-        m_cacheImage = fb->image;
-        m_cachedSize = m_size;
     }
 
-    NVGLUframebuffer* fb = static_cast<NVGLUframebuffer*>(m_fbo);
-
-    // Save the current default framebuffer and viewport so we can restore.
-    GLint defaultFBO = 0;
-    glGetIntegerv(GL_FRAMEBUFFER_BINDING, &defaultFBO);
-    GLint vp[4];
-    glGetIntegerv(GL_VIEWPORT, vp);
-
-    // Bind FBO and render the children into it. We are OUTSIDE any
-    // active screen NVG frame at this point (we are called BEFORE the
-    // screen's nvgBeginFrame), so we can freely begin/end a frame here
-    // without disturbing ancestor state.
-    nvgluBindFramebuffer(fb);
-    glViewport(0, 0, w, h);
-    glClearColor(0.0f, 0.0f, 0.0f, 0.0f);
-    glClear(GL_COLOR_BUFFER_BIT | GL_STENCIL_BUFFER_BIT);
-
-    nvgBeginFrame(ctx, (float)w, (float)h, 1.0f);
+    // Record children in local widget space. nvgBeginFrame establishes
+    // devicePixelRatio/fringe for tessellation; Cancel discards any
+    // accidental per-frame IR from the recording side.
+    nvgBeginFrame(ctx, (float)m_size.x(), (float)m_size.y(), pxRatio);
+    nvgBeginDisplayList(ctx, m_drawList);
     draw_cached(ctx);
-    nvgEndFrame(ctx);
+    nvgEndDisplayList(ctx);
+    nvgCancelFrame(ctx);
 
-    // Restore default FBO + viewport.
-    glBindFramebuffer(GL_FRAMEBUFFER, defaultFBO);
-    glViewport(vp[0], vp[1], vp[2], vp[3]);
+    m_cachedSize = m_size;
+    m_cachedPixelRatio = pxRatio;
 }
 
 /* ------------------------------------------------------------------ */

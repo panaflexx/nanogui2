@@ -31,7 +31,6 @@
 #include <nanogui/imageview.h>
 #include <nanogui/scrollpanel.h>
 #include <nanogui/split.h>
-#include <nanogui/cachedwidget.h>
 #include <nanogui/colorwheel.h>
 #include <nanogui/colorpicker.h>
 #include <nanogui/graph.h>
@@ -691,16 +690,14 @@ public:
             .visible(true)
             .layout(new BoxLayout(Orientation::Vertical, Alignment::Fill, 0, 0));
 
-        // Cache the editor's rendered output to a NanoVG FBO so we don't
-        // repaint glyphs on every frame.  CachedWidget auto-invalidates on
-        // events passing through it (keys, mouse, scroll, focus, layout);
-        // we additionally invalidate from the editor's change/caret
-        // callbacks for programmatic mutations.
-        auto* editorCache = new CachedWidget(Editor_TopWindow);
-        editorCache->set_layout(
-            new BoxLayout(Orientation::Vertical, Alignment::Fill, 0, 0));
+        // TextEditor lives in a retained container (set_layout enables cache).
+        // Events / caret / text callbacks mark the container's display list dirty.
+        auto* editorCache = Make<Widget>(Editor_TopWindow)
+            .layout(new BoxLayout(Orientation::Vertical, Alignment::Fill, 0, 0))
+            .get();
         editorCache->set_grow_parent(true);
-        editorCache->set_size( Editor_TopWindow->size());
+        editorCache->set_size(Editor_TopWindow->size());
+        editorCache->set_cached(true);
 
         TextEditor* editor = Make<TextEditor>(editorCache,
                                               TextEditor::Mode::Code)
@@ -941,15 +938,14 @@ public:
             .visible(true)
             .layout(new GroupLayout());
 
-        // Wrap the whole Split in a CachedWidget so the Window's contents
-        // are rendered once into an FBO and reused across frames.  Mouse
-        // drags on the splitter, keystrokes in either editor, and the
-        // explicit cache_dirty() calls below all trigger a rebuild.
-        auto* mdCache = new CachedWidget(mdWindow);
-        mdCache->set_layout(
-            new BoxLayout(Orientation::Horizontal, Alignment::Fill, 0, 0));
+        // Window body panel retains the Split via display list (layout => cache).
+        // Split drag and editor caret/text callbacks call cache_dirty().
+        auto* mdCache = Make<Widget>(mdWindow)
+            .layout(new BoxLayout(Orientation::Horizontal, Alignment::Fill, 0, 0))
+            .get();
         mdCache->set_grow_parent(true);
         mdCache->set_min_size(mdWindow->size());
+        mdCache->set_cached(true);
 
         // Vertical drag bar separating the two panes (Split::Horizontal
         // means "widgets side-by-side, vertical divider").
@@ -1027,8 +1023,8 @@ public:
         source->caret_callback = [mdCache](TextEditor::Position) {
             mdCache->cache_dirty();
         };
-        // Selection drag in the preview bypasses CachedWidget::mouse_drag_event
-        // (Screen dispatches directly to the drag widget), so the cached FBO
+        // Selection drag in the preview bypasses the container's mouse_drag_event
+        // (Screen dispatches directly to the drag widget), so the retained display list
         // never gets invalidated during the drag.  A caret_callback here fires
         // on every set_caret() call — including mid-drag — and keeps the cache
         // in sync so the selection highlight updates in real time.
