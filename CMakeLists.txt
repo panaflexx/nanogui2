@@ -60,6 +60,10 @@ option(NANOGUI_BUILD_GLFW                "Build GLFW?" ${NANOGUI_BUILD_GLFW_DEFA
 option(NANOGUI_INSTALL                   "Install NanoGUI on `make install`?" ON)
 option(NANOGUI_USE_FREETYPE				 "Build with Freetype2" ON)
 option(NANOGUI_USE_QUICKJS               "Build with QuickJS-NG scripting engine" OFF)
+# Native Wayland windowing (Linux). Enables real touchpad pinch via
+# zwp_pointer_gestures_v1. When OFF, GLFW uses X11/XWayland and pinch falls
+# back to Ctrl+wheel (libinput often maps pinch that way under X11).
+option(NANOGUI_USE_WAYLAND               "Use native Wayland + pinch gestures (Linux)" OFF)
 
 if (NOT NANOGUI_BACKEND)
   if (CMAKE_SYSTEM_PROCESSOR MATCHES "armv7" OR
@@ -174,15 +178,28 @@ if (CMAKE_CXX_COMPILER_ID MATCHES "Clang" AND NOT CMAKE_CXX_FLAGS MATCHES "-stdl
   endif()
 endif()
 
-# Compile GLFW
+# Compile GLFW (official 3.4+: single `glfw` target, multi-backend).
 if (NANOGUI_BUILD_GLFW)
   set(GLFW_BUILD_EXAMPLES OFF CACHE BOOL " " FORCE)
   set(GLFW_BUILD_TESTS OFF CACHE BOOL " " FORCE)
   set(GLFW_BUILD_DOCS OFF CACHE BOOL " " FORCE)
-  set(GLFW_BUILD_INSTALL OFF CACHE BOOL " " FORCE)
   set(GLFW_INSTALL OFF CACHE BOOL " " FORCE)
-  set(GLFW_USE_CHDIR OFF CACHE BOOL " " FORCE)
-  set(BUILD_SHARED_LIBS ${NANOGUI_BUILD_SHARED} CACHE BOOL " " FORCE)
+  # Embed as static PIC so we can link into shared libnanogui without a
+  # separate libglfw.so. Official GLFW 3.4 drops the old glfw_objects target.
+  set(GLFW_LIBRARY_TYPE "STATIC" CACHE STRING " " FORCE)
+
+  if (UNIX AND NOT APPLE)
+    # Prefer building both backends when Wayland is enabled so runtime can
+    # select via GLFW_PLATFORM / WAYLAND_DISPLAY (libdecor used on GNOME).
+    set(GLFW_BUILD_X11 ON CACHE BOOL "Build GLFW X11 support" FORCE)
+    if (NANOGUI_USE_WAYLAND)
+      set(GLFW_BUILD_WAYLAND ON CACHE BOOL "Build GLFW Wayland support" FORCE)
+      message(STATUS "NanoGUI: enabling GLFW Wayland+X11 (libdecor decorations).")
+    else()
+      set(GLFW_BUILD_WAYLAND OFF CACHE BOOL "Build GLFW Wayland support" FORCE)
+      message(STATUS "NanoGUI: enabling GLFW X11 backend only.")
+    endif()
+  endif()
 
   if (CMAKE_CXX_COMPILER_ID MATCHES "Clang")
     # Quench annoying deprecation warnings when compiling GLFW on OSX
@@ -190,19 +207,15 @@ if (NANOGUI_BUILD_GLFW)
   endif()
 
   add_subdirectory(ext/glfw)
-
-  # Two targets have now been defined: `glfw_objects`, which will be merged into
-  # NanoGUI at the end, and `glfw`.  The `glfw` target is the library itself
-  # (e.g., libglfw.so), but can be skipped as we do not need to link against it
-  # (because we merge `glfw_objects` into NanoGUI).  Skipping is required for
-  # XCode, but preferable for all build systems (reduces build artifacts).
+  set_property(TARGET glfw PROPERTY POSITION_INDEPENDENT_CODE ON)
   set_target_properties(glfw PROPERTIES EXCLUDE_FROM_ALL 1 EXCLUDE_FROM_DEFAULT_BUILD 1)
+  # Link static glfw into nanogui (via NANOGUI_LIBS below).
+  list(APPEND NANOGUI_LIBS glfw)
 
   mark_as_advanced(
-    GLFW_BUILD_DOCS GLFW_BUILD_EXAMPLES GLFW_BUILD_INSTALL GLFW_BUILD_TESTS
-    GLFW_DOCUMENT_INTERNALS GLFW_INSTALL GLFW_USE_CHDIR GLFW_USE_MENUBAR
-    GLFW_USE_OSMESA GLFW_VULKAN_STATIC GLFW_USE_RETINA GLFW_USE_MIR
-    BUILD_SHARED_LIBS USE_MSVC_RUNTIME_LIBRARY_DLL)
+    GLFW_BUILD_DOCS GLFW_BUILD_EXAMPLES GLFW_BUILD_TESTS GLFW_INSTALL
+    GLFW_LIBRARY_TYPE GLFW_BUILD_WAYLAND GLFW_BUILD_X11 GLFW_BUILD_WIN32
+    GLFW_BUILD_COCOA GLFW_USE_HYBRID_HPG USE_MSVC_RUNTIME_LIBRARY_DLL)
 endif()
 
 if (NANOGUI_BUILD_GLAD)
@@ -253,7 +266,11 @@ elseif (APPLE)
   endif()
   list(APPEND NANOGUI_EXTRA src/darwin.mm)
 elseif (CMAKE_SYSTEM MATCHES "Linux" OR CMAKE_SYSTEM_NAME MATCHES "BSD")
-  list(APPEND NANOGUI_LIBS X11 pthread)
+  # X11 libs still useful when GLFW_BUILD_X11 is on (default). GLFW 3.4
+  # dlopens Wayland libs at runtime, but we still need X11 at link time for
+  # the X11 backend object code when both backends are compiled in.
+  list(APPEND NANOGUI_LIBS X11 Xcursor Xinerama Xrandr Xi)
+  list(APPEND NANOGUI_LIBS pthread)
   if (NANOGUI_BACKEND STREQUAL "OpenGL")
     list(APPEND NANOGUI_LIBS GL)
   elseif (NANOGUI_BACKEND STREQUAL "GLES 2")
@@ -266,6 +283,42 @@ elseif (CMAKE_SYSTEM MATCHES "Linux" OR CMAKE_SYSTEM_NAME MATCHES "BSD")
   endif()
   if (CMAKE_SYSTEM MATCHES "Linux")
     list(APPEND NANOGUI_LIBS dl m)
+  endif()
+
+  # ---- Optional Wayland pinch / multitouch (src/wayland.cpp) -----------------
+  # GLFW 3.4 provides windowing + libdecor; we still generate the pointer-
+  # gestures protocol for touchpad pinch and compile src/wayland.cpp.
+  if (NANOGUI_USE_WAYLAND)
+    find_package(PkgConfig REQUIRED)
+    pkg_check_modules(WAYLAND_CLIENT REQUIRED wayland-client)
+    pkg_check_modules(WAYLAND_PROTOCOLS REQUIRED wayland-protocols>=1.15)
+    find_program(WAYLAND_SCANNER_EXECUTABLE NAMES wayland-scanner REQUIRED)
+    pkg_get_variable(WAYLAND_PROTOCOLS_BASE wayland-protocols pkgdatadir)
+
+    set(_PG_XML "${WAYLAND_PROTOCOLS_BASE}/unstable/pointer-gestures/pointer-gestures-unstable-v1.xml")
+    if (NOT EXISTS "${_PG_XML}")
+      message(FATAL_ERROR "pointer-gestures protocol not found at ${_PG_XML}. "
+        "Install wayland-protocols (e.g. apt install wayland-protocols).")
+    endif()
+
+    set(_PG_HDR "${CMAKE_CURRENT_BINARY_DIR}/pointer-gestures-unstable-v1-client-protocol.h")
+    set(_PG_SRC "${CMAKE_CURRENT_BINARY_DIR}/pointer-gestures-unstable-v1-protocol.c")
+    add_custom_command(
+      OUTPUT "${_PG_HDR}" "${_PG_SRC}"
+      COMMAND "${WAYLAND_SCANNER_EXECUTABLE}" client-header "${_PG_XML}" "${_PG_HDR}"
+      COMMAND "${WAYLAND_SCANNER_EXECUTABLE}" private-code  "${_PG_XML}" "${_PG_SRC}"
+      DEPENDS "${_PG_XML}"
+      COMMENT "Generating Wayland pointer-gestures protocol"
+      VERBATIM)
+
+    list(APPEND NANOGUI_EXTRA
+      src/wayland.cpp
+      "${_PG_SRC}"
+      "${_PG_HDR}")
+    list(APPEND NANOGUI_LIBS ${WAYLAND_CLIENT_LIBRARIES})
+    include_directories(${WAYLAND_CLIENT_INCLUDE_DIRS})
+    add_definitions(-DNANOGUI_WAYLAND)
+    message(STATUS "NanoGUI: Wayland pinch gestures enabled (src/wayland.cpp).")
   endif()
 endif()
 
@@ -359,11 +412,6 @@ elseif (CMAKE_CXX_COMPILER_ID STREQUAL "GNU")
     add_compile_options(-Wno-unused-function -Wno-unused-parameter)
 endif()
 
-if (NANOGUI_BUILD_GLFW)
-  list(APPEND NANOGUI_EXTRA $<TARGET_OBJECTS:glfw_objects>)
-endif()
-
-
 # Compile main NanoGUI library
 add_library(nanogui ${NANOGUI_LIBRARY_TYPE}
   # Merge NanoVG into the NanoGUI library
@@ -456,9 +504,7 @@ if (NANOGUI_BUILD_SHARED)
     )
   endif()
 
-  if (NANOGUI_BUILD_GLFW)
-    target_compile_definitions(nanogui PRIVATE _GLFW_BUILD_DLL)
-  endif()
+  # Static embedded GLFW: do not define _GLFW_BUILD_DLL / GLFW_DLL.
 endif()
 
 target_include_directories(nanogui PUBLIC

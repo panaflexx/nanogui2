@@ -30,6 +30,8 @@
 
 #include <map>
 #include <iostream>
+#include <cstring>
+#include <cstdint>
 
 #if defined(EMSCRIPTEN)
 #  include <emscripten/emscripten.h>
@@ -69,7 +71,12 @@
 #if defined(__APPLE__)
 #  define GLFW_EXPOSE_NATIVE_COCOA 1
 #  include <GLFW/glfw3native.h>
+#elif defined(NANOGUI_WAYLAND)
+#  define GLFW_EXPOSE_NATIVE_WAYLAND 1
+#  include <GLFW/glfw3native.h>
 #endif
+
+#include <nanogui/gestures.h>
 
 #if !defined(GL_RGBA_FLOAT_MODE)
 #  define GL_RGBA_FLOAT_MODE 0x8820
@@ -87,6 +94,15 @@ static bool glad_initialized = false;
 static float get_pixel_ratio(GLFWwindow* window) {
 #if defined(EMSCRIPTEN)
     return emscripten_get_device_pixel_ratio();
+#elif defined(NANOGUI_WAYLAND)
+    // Prefer GLFW's logical vs physical size (works for Wayland and others).
+    Vector2i fb_size, size;
+    glfwGetFramebufferSize(window, &fb_size[0], &fb_size[1]);
+    glfwGetWindowSize(window, &size[0], &size[1]);
+    if (size.x() <= 0)
+        return 1.f;
+    float r = (float)fb_size.x() / (float)size.x();
+    return r >= 1.f ? r : 1.f;
 #elif defined(_WIN32)
     HWND hwnd = glfwGetWin32Window(window);
     HMONITOR monitor = MonitorFromWindow(hwnd, MONITOR_DEFAULTTONEAREST);
@@ -249,6 +265,10 @@ Screen::Screen(const Vector2i& size, const std::string& caption, bool resizable,
 
     glfwWindowHint(GLFW_VISIBLE, GL_FALSE);
     glfwWindowHint(GLFW_RESIZABLE, resizable ? GL_TRUE : GL_FALSE);
+#if defined(NANOGUI_WAYLAND)
+    // Avoid glfwShowWindow -> focus errors on Wayland; compositor handles focus.
+    glfwWindowHint(GLFW_FOCUS_ON_SHOW, GLFW_FALSE);
+#endif
 
     for (int i = 0; i < 2; ++i) {
         if (fullscreen) {
@@ -324,7 +344,11 @@ Screen::Screen(const Vector2i& size, const std::string& caption, bool resizable,
         GL_STENCIL_BUFFER_BIT));
 
     glfwSwapInterval(0);
+#if !defined(NANOGUI_WAYLAND)
+    // On Wayland, swapping a still-hidden surface is either illegal or hangs
+    // waiting for a frame callback. First present is after set_visible(true).
     glfwSwapBuffers(m_glfw_window);
+#endif
 #endif
 
 #if defined(__APPLE__)
@@ -441,34 +465,17 @@ Screen::Screen(const Vector2i& size, const std::string& caption, bool resizable,
     );
     initialize(m_glfw_window, true);
 
-    /* -------------------------------------------------------------- */
-    /*  Register platform-specific pinch-to-zoom handlers            */
-    /* -------------------------------------------------------------- */
+    /* Pinch handlers installed in set_visible(true) on Wayland so the first
+       buffer maps cleanly. macOS can attach immediately. */
 #if defined(__APPLE__)
-    // darwin.mm provides these
-    extern void enable_macos_pinch_zoom(void*);
-    extern void set_macos_zoom_callback(const std::function<void(double,int,int)>&);
-	void* nswin = glfwGetCocoaWindow(m_glfw_window);
-    enable_macos_pinch_zoom(nswin);
-    set_macos_zoom_callback(
-        [this](double mag, int x, int y) {
-            this->zoom_callback_event(mag, Vector2i(x, y));
-        });
-#elif defined(WAYLAND)
-    // wayland.cpp provides these
-    extern void enable_wayland_pinch_zoom(struct wl_display*, struct wl_surface*);
-    extern void set_wayland_zoom_callback(const std::function<void(double,int,int)>&);
-    struct wl_display* dpy = glfwGetWaylandDisplay();
-    struct wl_surface* srf = glfwGetWaylandWindow(m_glfw_window);
-    if (dpy && srf) {
-        enable_wayland_pinch_zoom(dpy, srf);
-        set_wayland_zoom_callback(
+    {
+        void* nswin = glfwGetCocoaWindow(m_glfw_window);
+        enable_macos_pinch_zoom(nswin);
+        set_macos_zoom_callback(
             [this](double mag, int x, int y) {
                 this->zoom_callback_event(mag, Vector2i(x, y));
             });
     }
-#else
-	printf("Pinch zoom not enabled\n");
 #endif
 
 #if defined(NANOGUI_USE_METAL)
@@ -516,6 +523,8 @@ void Screen::initialize(GLFWwindow* window, bool shutdown_glfw) {
     }
     m_fbsize = Vector2i((int)w2, (int)h2);
     m_size = Vector2i((int)w, (int)h);
+#elif defined(NANOGUI_WAYLAND)
+    // Wayland window size is already logical; compositor applies scale.
 #elif defined(_WIN32) || defined(__linux__)
     if (m_pixel_ratio != 1 && !m_fullscreen)
         glfwSetWindowSize(window, m_size.x() * m_pixel_ratio,
@@ -564,8 +573,94 @@ void Screen::initialize(GLFWwindow* window, bool shutdown_glfw) {
     m_redraw = true;
     __nanogui_screens[m_glfw_window] = this;
 
-    for (size_t i = 0; i < (size_t)Cursor::CursorCount; ++i)
-        m_cursors[i] = glfwCreateStandardCursor(GLFW_ARROW_CURSOR + (int)i);
+    // Map NanoGUI Cursor enum -> GLFW standard shapes. Values are not a dense
+    // offset after Arrow (diagonal resize is a separate constant). On Wayland
+    // themes often lack nwse-resize; fall back to a custom pixel cursor.
+    {
+        GLFWerrorfun prev_err = glfwSetErrorCallback(nullptr);
+
+        const int shapes[(size_t)Cursor::CursorCount] = {
+            GLFW_ARROW_CURSOR,        // Arrow
+            GLFW_IBEAM_CURSOR,        // IBeam
+            GLFW_CROSSHAIR_CURSOR,    // Crosshair
+            GLFW_POINTING_HAND_CURSOR,// Hand
+            GLFW_RESIZE_EW_CURSOR,    // HResize
+            GLFW_RESIZE_NS_CURSOR,    // VResize
+#if defined(GLFW_RESIZE_NWSE_CURSOR)
+            GLFW_RESIZE_NWSE_CURSOR,  // HVResize (bottom-right / top-left)
+#else
+            GLFW_ARROW_CURSOR,
+#endif
+        };
+
+        GLFWcursor* arrow = glfwCreateStandardCursor(GLFW_ARROW_CURSOR);
+        for (size_t i = 0; i < (size_t)Cursor::CursorCount; ++i) {
+            m_cursors[i] = glfwCreateStandardCursor(shapes[i]);
+
+            if (!m_cursors[i] && (Cursor)i == Cursor::HVResize) {
+                // 16x16 NW–SE diagonal resize cursor: thick white interior + black outline
+                constexpr int S = 16;
+                unsigned char px[S * S * 4] = {0};
+
+                auto put = [&](int x, int y, uint8_t r, uint8_t g, uint8_t b, uint8_t a = 255) {
+                    if (x < 0 || y < 0 || x >= S || y >= S) return;
+                    int o = (y * S + x) * 4;
+                    px[o + 0] = r;
+                    px[o + 1] = g;
+                    px[o + 2] = b;
+                    px[o + 3] = a;
+                };
+
+                // === Black outline (thick) ===
+                for (int i2 = 0; i2 <= 14; ++i2) {
+                    // Main diagonal - thick black outline
+                    put(i2,     i2,     0,0,0);
+                    put(i2 + 1, i2,     0,0,0);
+                    put(i2,     i2 + 1, 0,0,0);
+                    put(i2 - 1, i2,     0,0,0);
+                    put(i2,     i2 - 1, 0,0,0);
+                }
+
+                // NW arrow head outline
+                for (int j = 0; j <= 5; ++j) {
+                    put(j, 0, 0,0,0);
+                    put(0, j, 0,0,0);
+                }
+                // SE arrow head outline
+                for (int j = 0; j <= 5; ++j) {
+                    put(15 - j, 15, 0,0,0);
+                    put(15, 15 - j, 0,0,0);
+                }
+
+                // === White interior (thicker) ===
+                for (int i2 = 2; i2 <= 12; ++i2) {
+                    // Thick white stem
+                    put(i2,     i2,     255,255,255);
+                    put(i2 + 1, i2,     255,255,255);
+                    put(i2,     i2 + 1, 255,255,255);
+                }
+
+                // NW white arrow head (thicker)
+                for (int j = 1; j <= 4; ++j) {
+                    put(j, 1, 255,255,255);
+                    put(1, j, 255,255,255);
+                }
+
+                // SE white arrow head (thicker)
+                for (int j = 1; j <= 4; ++j) {
+                    put(14 - j, 14, 255,255,255);
+                    put(14, 14 - j, 255,255,255);
+                }
+
+                GLFWimage img{ S, S, px };
+                m_cursors[i] = glfwCreateCursor(&img, 8, 8);
+            }
+
+            if (!m_cursors[i])
+                m_cursors[i] = arrow;   // your fallback arrow cursor
+        }
+        glfwSetErrorCallback(prev_err);
+    }
 
     /// Fixes retina display-related font rendering issue (#185)
     nvgBeginFrame(m_nvg_context, m_size[0], m_size[1], m_pixel_ratio);
@@ -598,10 +693,40 @@ void Screen::set_visible(bool visible) {
     if (m_visible != visible) {
         m_visible = visible;
 
-        if (visible)
+        if (visible) {
             glfwShowWindow(m_glfw_window);
-        else
+
+#if defined(NANOGUI_WAYLAND)
+            // Pump until the shell objects configure and sizes are real.
+            double t0 = glfwGetTime();
+            while (glfwGetTime() - t0 < 0.5) {
+                glfwWaitEventsTimeout(0.01);
+                int w = 0, h = 0, ww = 0, wh = 0;
+                glfwGetFramebufferSize(m_glfw_window, &w, &h);
+                glfwGetWindowSize(m_glfw_window, &ww, &wh);
+                if (w > 0 && h > 0 && ww > 0 && wh > 0)
+                    break;
+            }
+#endif
+            m_redraw = true;
+            draw_all();
+
+#if defined(NANOGUI_WAYLAND)
+            // Install pinch after first present. Only when actually on Wayland.
+            if (glfwGetPlatform() == GLFW_PLATFORM_WAYLAND) {
+                struct wl_display* dpy = glfwGetWaylandDisplay();
+                struct wl_surface* srf = glfwGetWaylandWindow(m_glfw_window);
+                if (dpy && srf) {
+                    enable_wayland_pinch_zoom(dpy, srf);
+                    set_wayland_zoom_callback([this](double factor, int x, int y) {
+                        this->zoom_callback_event(factor, Vector2i(x, y));
+                    });
+                }
+            }
+#endif
+        } else {
             glfwHideWindow(m_glfw_window);
+        }
     }
 }
 
@@ -615,7 +740,9 @@ void Screen::set_caption(const std::string& caption) {
 void Screen::set_size(const Vector2i& size) {
     Widget::set_size(size);
 
-#if defined(_WIN32) || defined(__linux__) || defined(EMSCRIPTEN)
+#if defined(NANOGUI_WAYLAND) || defined(__APPLE__)
+    glfwSetWindowSize(m_glfw_window, size.x(), size.y());
+#elif defined(_WIN32) || defined(__linux__) || defined(EMSCRIPTEN)
     glfwSetWindowSize(m_glfw_window, size.x() * m_pixel_ratio,
         size.y() * m_pixel_ratio);
 #else
@@ -651,13 +778,14 @@ void Screen::draw_setup() {
     m_fbsize = m_size;
 #endif
 
-#if defined(_WIN32) || defined(__linux__) || defined(EMSCRIPTEN)
+#if defined(NANOGUI_WAYLAND) || defined(__APPLE__)
+    /* Wayland / macOS: window size is logical, framebuffer is physical. */
+    if (m_size[0] > 0)
+        m_pixel_ratio = (float)m_fbsize[0] / (float)m_size[0];
+#elif defined(_WIN32) || defined(__linux__) || defined(EMSCRIPTEN)
+    /* Historical X11-style path: window size was inflated by m_pixel_ratio. */
     m_fbsize = m_size;
     m_size = Vector2i(Vector2f(m_size) / m_pixel_ratio);
-#else
-    /* Recompute pixel ratio on OSX */
-    if (m_size[0])
-        m_pixel_ratio = (float)m_fbsize[0] / (float)m_size[0];
 #endif
 
 #if defined(NANOGUI_USE_OPENGL) || defined(NANOGUI_USE_GLES)
@@ -667,6 +795,11 @@ void Screen::draw_setup() {
 
 void Screen::draw_teardown() {
 #if defined(NANOGUI_USE_OPENGL) || defined(NANOGUI_USE_GLES)
+#if defined(NANOGUI_WAYLAND)
+    // Never present while unmapped — eglSwapBuffers can hang or protocol-error.
+    if (!m_visible || glfwGetWindowAttrib(m_glfw_window, GLFW_VISIBLE) == 0)
+        return;
+#endif
     glfwSwapBuffers(m_glfw_window);
 #elif defined(NANOGUI_USE_METAL)
     mnvgSetColorTexture(m_nvg_context, nullptr);
@@ -1025,7 +1158,9 @@ void Screen::redraw() {
 void Screen::cursor_pos_callback_event(double x, double y) {
     Vector2i p((int)x, (int)y);
 
-#if defined(_WIN32) || defined(__linux__) || defined(EMSCRIPTEN)
+#if defined(NANOGUI_WAYLAND) || defined(__APPLE__)
+    // Coordinates already in logical pixels.
+#elif defined(_WIN32) || defined(__linux__) || defined(EMSCRIPTEN)
     p = Vector2i(Vector2f(p) / m_pixel_ratio);
 #endif
 
@@ -1302,7 +1437,9 @@ void Screen::resize_callback_event(int, int) {
         return;
     m_fbsize = fb_size; m_size = size;
 
-#if defined(_WIN32) || defined(__linux__) || defined(EMSCRIPTEN)
+#if defined(NANOGUI_WAYLAND) || defined(__APPLE__)
+    // Logical size already correct.
+#elif defined(_WIN32) || defined(__linux__) || defined(EMSCRIPTEN)
     m_size = Vector2i(Vector2f(m_size) / m_pixel_ratio);
 #endif
 

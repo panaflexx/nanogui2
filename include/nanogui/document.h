@@ -182,6 +182,15 @@ public:
         float                baseline;    ///< NVG baseline y
         float                x_start;     ///< x where first word begins
         std::vector<WordLayout> words;
+
+        /// Unified monospace code-block background (from blockWidth pass).
+        /// Replayed on the fast path so blocks don't flash once then vanish.
+        bool     mono_bg       = false;
+        float    mono_bg_x     = 0.f;
+        float    mono_bg_y     = 0.f;
+        float    mono_bg_w     = 0.f;
+        float    mono_bg_h     = 0.f;
+        NVGcolor mono_bg_color = NVGcolor{ { { 0.f, 0.f, 0.f, 0.f } } };
     };
 
     /// Caret geometry returned by richCaretInfo().

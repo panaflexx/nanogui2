@@ -265,6 +265,14 @@ void Document::draw(NVGcontext* ctx, float originX, float originY) {
             nvgStroke(ctx);
             continue;
         }
+        // Code-block / mono background (unified width across contiguous lines).
+        if (rl.mono_bg && rl.mono_bg_color.a > 0) {
+            nvgBeginPath(ctx);
+            nvgFillColor(ctx, rl.mono_bg_color);
+            nvgRect(ctx, rl.mono_bg_x, rl.mono_bg_y, rl.mono_bg_w, rl.mono_bg_h);
+            nvgFill(ctx);
+        }
+
         for (const WordLayout& wl : rl.words) {
             const Style& st = wl.style;
             applyFont(ctx, st);
@@ -471,6 +479,19 @@ float Document::drawParagraph(NVGcontext* ctx, const Paragraph& para,
             if (extraPerGap < 0.0f) extraPerGap = 0.0f;
         }
 
+        // --- build RichLine for layout cache ---
+        RichLine rich_line;
+        const bool capture_layout = (para_idx != SIZE_MAX);
+        if (capture_layout) {
+            rich_line.para_idx   = para_idx;
+            rich_line.byte_start = line.words.empty() ? 0 : line.words.front().byte_start;
+            rich_line.byte_end   = line.words.empty() ? 0 : line.words.back().byte_end;
+            rich_line.y_top      = y;
+            rich_line.y_bottom   = y + lineHeight + lineSpacing;
+            rich_line.baseline   = baseline;
+            rich_line.x_start    = lineX;
+        }
+
         if (!line.words.empty()) {
             const Style& fs = line.words.front().run->style;
             if (fs.bgColor.a > 0) {
@@ -486,25 +507,26 @@ float Document::drawParagraph(NVGcontext* ctx, const Paragraph& para,
                     bgR = wbX + wb.visualRight;
                 }
                 const float pad = 4.0f;
+                const float bgX = bgL - pad;
+                const float bgY = y - 1;
+                const float bgW = (bgR - bgL) + 2 * pad;
+                const float bgH = lineHeight + 6;
                 nvgBeginPath(ctx);
                 nvgFillColor(ctx, fs.bgColor);
-                nvgRect(ctx, bgL - pad, y - 1,
-                        (bgR - bgL) + 2 * pad, lineHeight + 6);
+                nvgRect(ctx, bgX, bgY, bgW, bgH);
                 nvgFill(ctx);
-            }
-        }
 
-        // --- build RichLine for layout cache ---
-        RichLine rich_line;
-        const bool capture_layout = (para_idx != SIZE_MAX);
-        if (capture_layout) {
-            rich_line.para_idx   = para_idx;
-            rich_line.byte_start = line.words.empty() ? 0 : line.words.front().byte_start;
-            rich_line.byte_end   = line.words.empty() ? 0 : line.words.back().byte_end;
-            rich_line.y_top      = y;
-            rich_line.y_bottom   = y + lineHeight + lineSpacing;
-            rich_line.baseline   = baseline;
-            rich_line.x_start    = lineX;
+                // Cache mono block bg for fast-path replay. Per-word non-mono
+                // backgrounds are re-derived from WordLayout on the fast path.
+                if (capture_layout && fs.monospace) {
+                    rich_line.mono_bg       = true;
+                    rich_line.mono_bg_x     = bgX;
+                    rich_line.mono_bg_y     = bgY;
+                    rich_line.mono_bg_w     = bgW;
+                    rich_line.mono_bg_h     = bgH;
+                    rich_line.mono_bg_color = fs.bgColor;
+                }
+            }
         }
 
         float x = drawX;

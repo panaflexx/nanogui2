@@ -1,117 +1,210 @@
 /*
-    src/wayland.cpp -- Wayland native pinch-to-zoom gesture support
-    using the zwp_pointer_gestures_v1 / zwp_pointer_gesture_pinch_v1 protocol.
+    src/wayland.cpp -- Wayland touchpad pinch-to-zoom
 
-    This file is compiled only on Linux Wayland builds.
+    Uses zwp_pointer_gestures_v1 / zwp_pointer_gesture_pinch_v1.
+
+    IMPORTANT: Never call wl_display_roundtrip() on GLFW's display from here.
+    GLFW owns the event loop; roundtrips re-dispatch and easily produce
+    xdg_wm_base protocol errors. Globals arrive via normal dispatch
+    (glfwPollEvents / WaitEvents).
 */
 
-#include <nanogui/nanogui.h>
-#include <wayland-client.h>
-#include <wayland-client-protocol.h>
+#include <nanogui/gestures.h>
 
-#include <functional>
+#include <wayland-client.h>
+#include "pointer-gestures-unstable-v1-client-protocol.h"
+
+#include <cmath>
+#include <cstdio>
 #include <cstring>
+
+using ::wl_display;
+using ::wl_surface;
+using ::wl_registry;
+using ::wl_seat;
+using ::wl_pointer;
+using ::wl_fixed_t;
 
 NAMESPACE_BEGIN(nanogui)
 
-/* ------------------------------------------------------------------ */
-/*  Generated Wayland protocol interface (must be generated from     */
-/*  pointer-gestures-unstable-v1.xml and included at build time)      */
-/* ------------------------------------------------------------------ */
+namespace {
 
-#include "pointer-gestures-unstable-v1-client-protocol.h"
+GestureZoomCallback g_zoom_cb;
 
-static std::function<void(double, int, int)> g_waylandZoomCallback;
-static struct zwp_pointer_gesture_pinch_v1 *g_pinch = nullptr;
-static double g_last_scale = 1.0;
-
-/* ------------------------------------------------------------------ */
-/*  Pinch gesture listeners                                           */
-/* ------------------------------------------------------------------ */
-
-static void pinch_begin(void *data,
-                        struct zwp_pointer_gesture_pinch_v1 *pinch,
-                        uint32_t serial, uint32_t time,
-                        struct wl_surface *surface, uint32_t fingers)
-{
-    g_last_scale = 1.0;
-}
-
-static void pinch_update(void *data,
-                         struct zwp_pointer_gesture_pinch_v1 *pinch,
-                         uint32_t time,
-                         wl_fixed_t x, wl_fixed_t y,
-                         wl_fixed_t dx, wl_fixed_t dy,
-                         wl_fixed_t scale,
-                         wl_fixed_t rotation)
-{
-    if (!g_waylandZoomCallback)
-        return;
-
-    double new_scale = wl_fixed_to_double(scale);
-    double delta = new_scale - g_last_scale;
-    g_last_scale = new_scale;
-
-    // Wayland surface coordinates are already in logical units.
-    // NanoGUI uses top-left origin, same as Wayland.
-    int px = (int)wl_fixed_to_double(x);
-    int py = (int)wl_fixed_to_double(y);
-
-    g_waylandZoomCallback(delta, px, py);
-}
-
-static void pinch_end(void *data,
-                      struct zwp_pointer_gesture_pinch_v1 *pinch,
-                      uint32_t serial, uint32_t time,
-                      uint32_t cancelled)
-{
-    // nothing special
-}
-
-static const struct zwp_pointer_gesture_pinch_v1_listener pinch_listener = {
-    .begin  = pinch_begin,
-    .update = pinch_update,
-    .end    = pinch_end
+struct GesturesState {
+    wl_display* display = nullptr;
+    wl_registry* registry = nullptr;
+    wl_seat* seat = nullptr;
+    wl_pointer* pointer = nullptr;
+    zwp_pointer_gestures_v1* gestures = nullptr;
+    zwp_pointer_gesture_pinch_v1* pinch = nullptr;
+    double last_scale = 1.0;
+    double pos_x = 0.0;
+    double pos_y = 0.0;
+    bool enabled = false;
 };
 
-/* ------------------------------------------------------------------ */
-/*  Public API                                                        */
-/* ------------------------------------------------------------------ */
+GesturesState g;
 
-void set_wayland_zoom_callback(const std::function<void(double, int, int)>& cb) {
-    g_waylandZoomCallback = cb;
+void pointer_enter(void*, wl_pointer*, uint32_t, wl_surface*,
+                   wl_fixed_t sx, wl_fixed_t sy) {
+    g.pos_x = wl_fixed_to_double(sx);
+    g.pos_y = wl_fixed_to_double(sy);
 }
 
-/**
- * Call this after you have a valid GLFW window and Wayland surface.
- * Typical usage in Screen constructor (Linux Wayland only):
- *
- *   struct wl_display *display = glfwGetWaylandDisplay();
- *   struct wl_surface *surface = glfwGetWaylandWindow(m_glfw_window);
- *   enable_wayland_pinch_zoom(display, surface);
- */
-void enable_wayland_pinch_zoom(struct wl_display *display,
-                               struct wl_surface *surface)
-{
-    if (!display || !surface)
+void pointer_leave(void*, wl_pointer*, uint32_t, wl_surface*) { }
+
+void pointer_motion(void*, wl_pointer*, uint32_t, wl_fixed_t sx, wl_fixed_t sy) {
+    g.pos_x = wl_fixed_to_double(sx);
+    g.pos_y = wl_fixed_to_double(sy);
+}
+
+void pointer_button(void*, wl_pointer*, uint32_t, uint32_t, uint32_t, uint32_t) { }
+void pointer_axis(void*, wl_pointer*, uint32_t, uint32_t, wl_fixed_t) { }
+void pointer_frame(void*, wl_pointer*) { }
+void pointer_axis_source(void*, wl_pointer*, uint32_t) { }
+void pointer_axis_stop(void*, wl_pointer*, uint32_t, uint32_t) { }
+void pointer_axis_discrete(void*, wl_pointer*, uint32_t, int32_t) { }
+
+const wl_pointer_listener pointer_listener = {
+    pointer_enter,
+    pointer_leave,
+    pointer_motion,
+    pointer_button,
+    pointer_axis,
+    pointer_frame,
+    pointer_axis_source,
+    pointer_axis_stop,
+    pointer_axis_discrete,
+    nullptr,
+    nullptr
+};
+
+void pinch_begin(void*, zwp_pointer_gesture_pinch_v1*,
+                 uint32_t, uint32_t, wl_surface*, uint32_t) {
+    g.last_scale = 1.0;
+}
+
+void pinch_update(void*, zwp_pointer_gesture_pinch_v1*,
+                  uint32_t,
+                  wl_fixed_t dx, wl_fixed_t dy,
+                  wl_fixed_t fscale,
+                  wl_fixed_t /*rotation*/) {
+    if (!g_zoom_cb)
         return;
 
-    // You must have already bound zwp_pointer_gestures_v1 via the registry.
-    // This example assumes you store the global in a singleton or similar.
-    extern struct zwp_pointer_gestures_v1 *g_pointer_gestures; // provided by app
+    g.pos_x += wl_fixed_to_double(dx);
+    g.pos_y += wl_fixed_to_double(dy);
 
-    if (!g_pointer_gestures)
+    double scale = wl_fixed_to_double(fscale);
+    if (!(scale > 0.0) || !std::isfinite(scale))
         return;
 
-    struct wl_seat *seat = glfwGetWaylandSeat(); // if GLFW exposes it, otherwise obtain manually
+    double factor = scale / (g.last_scale > 1e-9 ? g.last_scale : 1.0);
+    g.last_scale = scale;
 
-    if (g_pinch)
-        zwp_pointer_gesture_pinch_v1_destroy(g_pinch);
+    if (!std::isfinite(factor) || factor <= 0.0)
+        return;
+    if (std::fabs(factor - 1.0) < 1e-6)
+        return;
+    if (factor < 0.5) factor = 0.5;
+    if (factor > 2.0) factor = 2.0;
 
-    g_pinch = zwp_pointer_gestures_v1_get_pinch_gesture(g_pointer_gestures, seat);
+    g_zoom_cb(factor, (int)std::lround(g.pos_x), (int)std::lround(g.pos_y));
+}
 
-    if (g_pinch)
-        zwp_pointer_gesture_pinch_v1_add_listener(g_pinch, &pinch_listener, nullptr);
+void pinch_end(void*, zwp_pointer_gesture_pinch_v1*,
+               uint32_t, uint32_t, int32_t) {
+    g.last_scale = 1.0;
+}
+
+const zwp_pointer_gesture_pinch_v1_listener pinch_listener = {
+    pinch_begin,
+    pinch_update,
+    pinch_end
+};
+
+void ensure_pinch() {
+    if (g.pinch || !g.gestures || !g.pointer)
+        return;
+    g.pinch = zwp_pointer_gestures_v1_get_pinch_gesture(g.gestures, g.pointer);
+    if (g.pinch) {
+        zwp_pointer_gesture_pinch_v1_add_listener(g.pinch, &pinch_listener, nullptr);
+        std::fprintf(stderr, "nanogui: wayland: pinch-to-zoom gesture enabled\n");
+    }
+}
+
+void seat_capabilities(void*, wl_seat* seat, uint32_t caps) {
+    const bool has_pointer = (caps & WL_SEAT_CAPABILITY_POINTER) != 0;
+    if (has_pointer && !g.pointer) {
+        g.pointer = wl_seat_get_pointer(seat);
+        if (g.pointer) {
+            wl_pointer_add_listener(g.pointer, &pointer_listener, nullptr);
+            ensure_pinch();
+        }
+    } else if (!has_pointer && g.pointer) {
+        if (g.pinch) {
+            zwp_pointer_gesture_pinch_v1_destroy(g.pinch);
+            g.pinch = nullptr;
+        }
+        wl_pointer_destroy(g.pointer);
+        g.pointer = nullptr;
+    }
+}
+
+void seat_name(void*, wl_seat*, const char*) { }
+
+const wl_seat_listener seat_listener = {
+    seat_capabilities,
+    seat_name
+};
+
+void registry_global(void*, wl_registry* registry,
+                     uint32_t name, const char* interface, uint32_t version) {
+    if (std::strcmp(interface, wl_seat_interface.name) == 0) {
+        if (!g.seat) {
+            uint32_t v = version < 5 ? version : 5;
+            g.seat = (wl_seat*)wl_registry_bind(registry, name, &wl_seat_interface, v);
+            if (g.seat)
+                wl_seat_add_listener(g.seat, &seat_listener, nullptr);
+        }
+    } else if (std::strcmp(interface, zwp_pointer_gestures_v1_interface.name) == 0) {
+        if (!g.gestures) {
+            uint32_t v = version < 1 ? 1 : (version > 3 ? 3 : version);
+            g.gestures = (zwp_pointer_gestures_v1*)
+                wl_registry_bind(registry, name, &zwp_pointer_gestures_v1_interface, v);
+            ensure_pinch();
+        }
+    }
+}
+
+void registry_global_remove(void*, wl_registry*, uint32_t) { }
+
+const wl_registry_listener registry_listener = {
+    registry_global,
+    registry_global_remove
+};
+
+} // namespace
+
+void set_wayland_zoom_callback(const GestureZoomCallback& cb) {
+    g_zoom_cb = cb;
+}
+
+void enable_wayland_pinch_zoom(wl_display* display, wl_surface* surface) {
+    (void)surface;
+    if (!display || g.enabled)
+        return;
+
+    g.display = display;
+    g.registry = wl_display_get_registry(display);
+    if (!g.registry) {
+        std::fprintf(stderr, "nanogui: wayland: failed to get registry\n");
+        return;
+    }
+    wl_registry_add_listener(g.registry, &registry_listener, nullptr);
+    g.enabled = true;
+    // Do NOT roundtrip — wait for next glfwPollEvents/WaitEvents.
 }
 
 NAMESPACE_END(nanogui)
