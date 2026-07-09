@@ -109,7 +109,6 @@ public:
         const float borderSize = 4.0f;
         const float textHeight = 20.0f;
         const float padding = 10.0f;
-        const float titleHeight = 30.0f; // Height for "Loaded Images" title
 		const float wrap_width = parent()->size().x() - 25;
 
         for (const auto& img : m_images) {
@@ -589,7 +588,7 @@ public:
                 }
                 m_images.push_back(img);
                 glfwPostEmptyEvent();
-				// **MUST** run this async, as perform_layout in a draw will result in recursive loop 
+				// **MUST** run this async, as perform_layout in a draw will result in recursive loop
 				async([this] { screen()->perform_layout(); });
             } else {
                 std::cerr << "Failed to add image to stash: " << pending.name << std::endl;
@@ -637,7 +636,7 @@ public:
             m_redraw = true;
             glfwPostEmptyEvent();
         }
-        
+
         pthread_mutex_unlock(&m_highResMutex);
 
         // Filter the first image if available and not yet filtered
@@ -777,6 +776,3 @@ int main(int argc, char** argv) {
 
     return 0;
 }
-
-
-

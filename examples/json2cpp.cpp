@@ -37,7 +37,6 @@
 #include <iostream>
 #include <cmath>
 #include <string>
-#include <vector>
 
 // ---------------------------------------------------------------------------
 // Small dict.h helpers (duplicated from guieditor_json.cpp so that this

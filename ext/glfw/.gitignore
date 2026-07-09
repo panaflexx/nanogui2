@@ -1,5 +1,6 @@
 # The canonical out-of-tree build subdirectory
 build
+build-*
 
 # Visual Studio clutter
 _ReSharper*
@@ -101,7 +102,3 @@ tests/triangle-vulkan
 tests/window
 tests/windows
 
-# Ninja build system
-.ninja_deps
-.ninja_log
-*.ninja
