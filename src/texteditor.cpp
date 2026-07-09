@@ -59,9 +59,13 @@ TextEditor::TextEditor(Widget* parent, Mode mode)
         m_doc->addParagraph();
     }
 
-    // Scroll / selection / caret change every frame — draw live and exclude
-    // this widget from parent display-list bakes (see Widget::set_live).
-    set_live(true);
+    // TextEditor scrolls and reflows every interaction. Baking it into a parent
+    // display list freezes scroll offset and scissor. Keep ancestors uncached
+    // so scroll/selection/caret always draw live.
+    for (Widget* w = m_parent; w != nullptr; w = w->parent()) {
+        if (w->cached())
+            w->set_cached(false);
+    }
 }
 
 // ---------------------------------------------------------------------------

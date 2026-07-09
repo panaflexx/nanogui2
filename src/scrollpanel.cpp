@@ -20,18 +20,30 @@
 
 NAMESPACE_BEGIN(nanogui)
 
+namespace {
+// Flick / momentum scrolling advances in draw(). Parent display lists that
+// remain clean skip child draw(), freezing scroll and killing coasting.
+// Uncache the ancestor chain so every frame re-enters live painting.
+void uncache_scroll_ancestors(Widget* w) {
+    for (; w != nullptr; w = w->parent()) {
+        if (w->cached())
+            w->set_cached(false);
+    }
+}
+} // namespace
+
 ScrollPanel::ScrollPanel(Widget* parent)
     : WidgetCRTP<ScrollPanel>(parent), m_child_preferred_size(Vector2i(0, 0)),
     m_scroll(0.f, 0.f), m_update_layout(false), m_scroll_type(ScrollTypes::Vertical) {
     DebugName = m_parent->DebugName + ",ScrlPnl";
-    set_live(true);
+    uncache_scroll_ancestors(m_parent);
 }
 
 ScrollPanel::ScrollPanel(Widget* parent, ScrollTypes scroll_type)
     : WidgetCRTP<ScrollPanel>(parent), m_child_preferred_size(Vector2i(0, 0)),
     m_scroll(0.f, 0.f), m_update_layout(false), m_scroll_type(scroll_type) {
     DebugName = m_parent->DebugName + ",ScrlPnl";
-    set_live(true);
+    uncache_scroll_ancestors(m_parent);
 }
 
 

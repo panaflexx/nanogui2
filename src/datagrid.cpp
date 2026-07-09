@@ -40,8 +40,13 @@ DataGrid::DataGrid(Widget* parent)
     DebugName = (m_parent ? m_parent->DebugName : "") + ",DataGrid";
     set_font_size(16);
 
-    // Momentum scrolling runs in draw(); must be painted every frame.
-    set_live(true);
+    // Momentum / flick scrolling is advanced inside draw(). Parent display
+    // lists that stay clean never call child draw(), which kills inertia.
+    // Keep ancestors uncached so coasting frames always re-enter draw().
+    for (Widget* w = m_parent; w != nullptr; w = w->parent()) {
+        if (w->cached())
+            w->set_cached(false);
+    }
 }
 
 void DataGrid::set_model(std::shared_ptr<DataGridModel> model) {

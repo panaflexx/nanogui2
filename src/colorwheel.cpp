@@ -21,8 +21,14 @@ ColorWheel::ColorWheel(Widget* parent, const Color& rgb)
     : WidgetCRTP<ColorWheel>(parent), m_drag_region(None) {
     DebugName = m_parent->DebugName + ",ColW";
     set_color(rgb);
-    // Gradient fills + interactive hue: paint live, not from a parent bake.
-    set_live(true);
+    // Gradient-heavy custom painting does not yet round-trip reliably through
+    // retained parent display lists (solid wedges instead of hue blends).
+    // Keep the entire ancestor chain uncached so this widget always draws
+    // with live NanoVG gradient fills.
+    for (Widget* w = m_parent; w != nullptr; w = w->parent()) {
+        if (w->cached())
+            w->set_cached(false);
+    }
 }
 
 Vector2i ColorWheel::preferred_size(NVGcontext*) const {
