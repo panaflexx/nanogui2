@@ -23,8 +23,9 @@ NAMESPACE_BEGIN(nanogui)
 
 Window::Window(Widget* parent, const std::string& title, bool resizable)
     : WidgetCRTP<Window>(parent), m_title(title), m_button_panel(nullptr), m_modal(false), m_drag(false),
-      m_resize_dir(Vector2i(0, 0)), m_first_size(0), m_draw_shadow(false), m_resizable(resizable),
-	  m_can_move(true), m_snap_offset(8), m_can_snap(true)
+      m_resize(false), m_resize_dir(Vector2i(0, 0)), m_min_size(Vector2i(0, 0)), m_first_size(0),
+      m_draw_shadow(!title.empty()), m_resizable(resizable),
+	  m_can_move(!title.empty()), m_snap_offset(8), m_can_snap(!title.empty())
 {
 	    	DebugName = m_parent->DebugName + ",Window";
 }
@@ -90,28 +91,34 @@ void Window::perform_layout(NVGcontext* ctx) {
             width() - (m_button_panel->preferred_size(ctx).x() - 2), 4));
         m_button_panel->perform_layout(ctx);
     }
-    //// Calclate the minimum size that the window can resize to.
+    //// Calculate the minimum size that the window can resize to.
+    // Do NOT use preferred_size() here for resizable windows — it returns the
+    // current m_size and would ratchet the floor after every grow, preventing
+    // shrink ("Selected image" + ImageView). Query the layout/content floor.
     if (m_first_size == Vector2i(0, 0))
         m_first_size = m_size;
 
-    m_min_size = Vector2i(40, 40);
-    bool VScrollable = false;
-    bool HScrollable = false;
+    Vector2i content_min(40, 40);
+    if (m_layout) {
+        if (m_button_panel)
+            m_button_panel->set_visible(false);
+        content_min = Widget::preferred_size(ctx);
+        if (m_button_panel)
+            m_button_panel->set_visible(true);
+        content_min.x() = std::max(40, content_min.x());
+        content_min.y() = std::max(40, content_min.y());
+    }
+    m_min_size = content_min;
 
-    if (m_children.size() == 1)
-    {
-        ScrollPanel* CanICastScrollPanel = dynamic_cast<ScrollPanel*>(m_children[0]);
-        if (CanICastScrollPanel != NULL)
-        {
-            VScrollable = CanICastScrollPanel->VScrollable();
-            HScrollable = CanICastScrollPanel->HScrollable();
+    // Scrollable content can shrink further; only enforce a small floor.
+    if (m_children.size() == 1) {
+        if (auto* sp = dynamic_cast<ScrollPanel*>(m_children[0])) {
+            if (sp->VScrollable())
+                m_min_size.y() = 40;
+            if (sp->HScrollable())
+                m_min_size.x() = 40;
         }
     }
-    if (!VScrollable)
-        m_min_size.y() = m_first_size.y();
-    if (!HScrollable)
-        m_min_size.x() = m_first_size.x();
-
 }
 
 void Window::draw(NVGcontext* ctx) {

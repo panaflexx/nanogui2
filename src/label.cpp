@@ -45,27 +45,84 @@ Label::Label(Widget *parent, const std::string &caption, const std::string &font
       m_selection_start(-1), m_selection_end(-1), m_selecting(false),
       m_last_click_pos(0, 0) {
     DebugName = m_parent ? m_parent->DebugName + ",Label" : "Label";
-    if (m_theme) {
-        m_font_size = m_theme->m_standard_font_size;
-        m_color = m_theme->m_text_color;
-    }
+    m_style = Style::Body;
     if (font_size >= 0) {
         m_font_size = font_size;
-    } else if (m_font_size < 0) {
-        m_font_size = 16; // Fallback default font size
+        m_user_font_size = true;
     }
-    m_processed_text = caption; // Initialize with raw caption
+    apply_style_from_theme();
+    if (m_font_size < 0)
+        m_font_size = 16;
+    m_processed_text = caption;
+}
+
+Label::Label(Widget *parent, const std::string &caption, Style style)
+    : WidgetCRTP<Label>(parent), m_caption(caption), m_font("sans"),
+      m_line_break_mode(LineBreakMode::LineBreakByWordWrapping), m_cache_valid(false),
+      m_selectable(false), m_selection_color(DEFAULT_SELECTION_COLOR),
+      m_selection_start(-1), m_selection_end(-1), m_selecting(false),
+      m_last_click_pos(0, 0) {
+    DebugName = m_parent ? m_parent->DebugName + ",Label" : "Label";
+    m_style = style;
+    apply_style_from_theme();
+    m_processed_text = caption;
+}
+
+void Label::set_color(const Color& color) {
+    m_color = color;
+    m_user_color = true;
+    m_cache_valid = false;
+}
+
+void Label::set_style(Style style) {
+    m_style = style;
+    m_user_color = false;
+    m_user_font_size = false;
+    apply_style_from_theme();
+    m_cache_valid = false;
+}
+
+void Label::apply_style_from_theme() {
+    if (!m_theme)
+        return;
+
+    if (!m_user_font_size) {
+        switch (m_style) {
+            case Style::Caption:  m_font_size = m_theme->m_caption_font_size;  break;
+            case Style::Muted:    m_font_size = m_theme->m_muted_font_size;    break;
+            case Style::Heading:  m_font_size = m_theme->m_heading_font_size;  break;
+            case Style::Title:    m_font_size = m_theme->m_title_font_size;    break;
+            case Style::Accent:
+            case Style::Body:
+            default:              m_font_size = m_theme->m_standard_font_size; break;
+        }
+    }
+
+    if (!m_user_color) {
+        switch (m_style) {
+            case Style::Caption:  m_color = m_theme->m_text_secondary; break;
+            case Style::Muted:    m_color = m_theme->m_text_muted;     break;
+            case Style::Heading:  m_color = m_theme->m_text_heading;   break;
+            case Style::Title:    m_color = m_theme->m_text_heading;   break;
+            case Style::Accent:   m_color = m_theme->m_text_accent;    break;
+            case Style::Body:
+            default:              m_color = m_theme->m_text_color;     break;
+        }
+    }
+
+    // Prefer bold face for headings/titles unless the caller set a custom face.
+    if (m_style == Style::Heading || m_style == Style::Title) {
+        if (m_font == "sans" || m_font.empty())
+            m_font = "sans-bold";
+    }
 }
 
 void Label::set_theme(Theme *theme) {
     Widget::set_theme(theme);
-    if (m_theme) {
-        m_font_size = m_theme->m_standard_font_size;
-        m_color = m_theme->m_text_color;
-        m_selection_color = DEFAULT_SELECTION_COLOR; // Reset to default
-    }
-    m_cache_valid = false; // Invalidate cache on theme change
-    m_selection_start = m_selection_end = -1; // Clear selection
+    apply_style_from_theme();
+    m_selection_color = DEFAULT_SELECTION_COLOR;
+    m_cache_valid = false;
+    m_selection_start = m_selection_end = -1;
 }
 
 void Label::set_caption(const std::string &caption) {

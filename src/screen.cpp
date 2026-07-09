@@ -564,7 +564,7 @@ void Screen::initialize(GLFWwindow* window, bool shutdown_glfw) {
         throw std::runtime_error("Could not initialize NanoVG!");
 
     m_visible = glfwGetWindowAttrib(window, GLFW_VISIBLE) != 0;
-    set_theme(new Theme(m_nvg_context));
+    set_theme(new Theme(m_nvg_context, ThemeMode::Dark));
     m_mouse_pos = Vector2i(0);
     m_mouse_state = m_modifiers = 0;
     m_drag_active = false;
@@ -735,6 +735,55 @@ void Screen::set_caption(const std::string& caption) {
         glfwSetWindowTitle(m_glfw_window, caption.c_str());
         m_caption = caption;
     }
+}
+
+void Screen::set_theme(Theme* theme) {
+    Widget::set_theme(theme);
+    if (theme)
+        m_background = theme->m_screen_background;
+    redraw();
+}
+
+namespace {
+/// Mark retained display lists dirty for a subtree so a palette change paints.
+void dirty_theme_caches(Widget* w) {
+    if (!w)
+        return;
+    if (w->cached())
+        w->cache_dirty();
+    for (auto* child : w->children())
+        dirty_theme_caches(child);
+}
+} // namespace
+
+void Screen::set_theme_mode(ThemeMode mode) {
+    if (!m_theme) {
+        set_theme(new Theme(m_nvg_context, mode));
+        return;
+    }
+
+    // Keep the Theme object alive for the whole refresh. Never clear Screen's
+    // m_theme before children release — otherwise the last ref drops, the Theme
+    // is freed, and re-assign is a use-after-free (corrupt header metrics,
+    // “missing” title bars, broken theme switch).
+    ref<Theme> keep = m_theme;
+    keep->set_mode(mode);
+    m_background = keep->m_screen_background;
+
+    // Force re-apply past Widget::set_theme's pointer-equality early-out.
+    // Screen still holds `keep`, so clearing children is safe. MenuBar::set_theme
+    // intercepts and rebuilds its own skin from the source palette.
+    for (auto* child : m_children) {
+        child->set_theme(nullptr);
+        child->set_theme(keep.get());
+    }
+
+    dirty_theme_caches(this);
+    redraw();
+}
+
+ThemeMode Screen::theme_mode() const {
+    return m_theme ? m_theme->mode() : ThemeMode::Dark;
 }
 
 void Screen::set_size(const Vector2i& size) {

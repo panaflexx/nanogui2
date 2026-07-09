@@ -145,12 +145,12 @@ public:
     int fixed_height() const { return m_min_size.y(); }
     /// Set the fixed width (see \ref set_fixed_size())
     Widget& set_min_width(int width) { m_min_size.x() = width; return *this; }
-    /// Set the fixed height (see \ref set_fixed_size())
+    /// Set the minimum height (layout floor).
     Widget& set_min_height(int height) { m_min_size.y() = height; return *this; }
-	/// Set the fixed width (see \ref set_fixed_size())
-    Widget& set_max_width(int width) { m_min_size.x() = width; return *this; }
-    /// Set the fixed height (see \ref set_fixed_size())
-    Widget& set_max_height(int height) { m_min_size.y() = height; return *this; }
+    /// Set the maximum width (layout ceiling).
+    Widget& set_max_width(int width) { m_max_size.x() = width; return *this; }
+    /// Set the maximum height (layout ceiling).
+    Widget& set_max_height(int height) { m_max_size.y() = height; return *this; }
 
 	// New flex sizing
     Widget& set_width_flex(SizeMode mode) { m_width_mode = mode; return *this; }

@@ -14,21 +14,7 @@ using namespace nanogui;
 class FlexLayoutTest : public Screen {
 public:
     FlexLayoutTest() : Screen(Vector2i(1200, 800), "FlexLayout Test", true) {
-        // Initialize theme
-        Theme* theme = new Theme(m_nvg_context);
-        theme->m_standard_font_size = 16;
-        theme->m_button_font_size = 18;
-        theme->m_text_box_font_size = 16;
-        theme->m_window_corner_radius = 4;
-        theme->m_button_corner_radius = 4;
-        theme->m_window_fill_unfocused = Color(230, 230, 230, 230);
-        theme->m_window_fill_focused = Color(245, 245, 245, 230);
-        theme->m_button_gradient_top_focused = Color(64, 164, 232, 255);
-        theme->m_button_gradient_bot_focused = Color(48, 140, 200, 255);
-        theme->m_text_color = Color(0, 0, 0, 255);
-        theme->m_border_light = Color(150, 150, 150, 255);
-        theme->m_border_dark = Color(50, 50, 50, 255);
-        set_theme(theme);
+        set_theme_mode(ThemeMode::Light);
 
         // Main window with ScrollPanel
         Window* window = new Window(this, WindowConfig{

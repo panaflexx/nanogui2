@@ -97,6 +97,13 @@ public:
     /// Draw the widget
     virtual void draw(NVGcontext *ctx) override;
 
+    /**
+     * Preferred size is a stable default (or explicit min_size), not the current
+     * m_size. Returning m_size ratchets grow-only under Alignment::Fill layouts:
+     * the view expands with the window but will not shrink when resized smaller.
+     */
+    virtual Vector2i preferred_size(NVGcontext *ctx) const override;
+
 protected:
     ref<RenderPass> m_render_pass;
 #if defined(NANOGUI_USE_METAL)

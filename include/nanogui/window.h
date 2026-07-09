@@ -32,14 +32,21 @@ struct WindowConfig {
     class NANOGUI_EXPORT Window : public WidgetCRTP<Window> {
     friend class Popup;
     public:
-	    Window(Widget* parent, const WindowConfig& config) : WidgetCRTP<Window>(parent), m_title(config.title), m_resizable(config.resizable) {
+	    Window(Widget* parent, const WindowConfig& config)
+                : WidgetCRTP<Window>(parent), m_title(config.title),
+                  m_button_panel(nullptr), m_modal(false), m_drag(false),
+                  m_resize(false), m_resize_dir(Vector2i(0, 0)),
+                  m_min_size(Vector2i(0, 0)), m_first_size(0),
+                  m_draw_shadow(!config.title.empty()), m_resizable(config.resizable),
+                  m_can_move(!config.title.empty()), m_snap_offset(8),
+                  m_can_snap(!config.title.empty()) {
 			m_pos = config.position;
 			m_size = config.size;
 			if (config.layout) {
 				set_layout(config.layout);
 			}
 		} 
-        Window(Widget* parent, const std::string& title = "Untitled", bool resizable = false);
+        Window(Widget* parent, const std::string& title = "Untitled", bool resizable = true);
 
         /// Return the window title
         const std::string& title() const { return m_title; }

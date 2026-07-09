@@ -38,6 +38,16 @@ public:
  LineBreakByTruncatingMiddle ///< Truncate text from the middle with "...".
  };
 
+ /// Semantic text roles driven by the active Theme palette.
+ enum class Style {
+ Body,     ///< Primary body text (m_text_color, standard size).
+ Caption,  ///< Form field captions (m_text_secondary, caption size).
+ Muted,    ///< Status / helper text (m_text_muted, muted size).
+ Heading,  ///< Section headings (m_text_heading, heading size, bold).
+ Title,    ///< Large title (m_text_heading, title size, bold).
+ Accent    ///< Accent / emphasis (m_text_accent, standard size).
+ };
+
  /**
  * \brief Construct a label widget.
  * \param parent The parent widget.
@@ -47,6 +57,13 @@ public:
  */
  Label(Widget *parent, const std::string &caption,
  const std::string &font = "sans", int font_size = -1);
+
+ /**
+ * \brief Construct a label with a semantic Theme style.
+ * Font face/size/color are taken from the theme for the given role and
+ * re-applied when the theme mode changes.
+ */
+ Label(Widget *parent, const std::string &caption, Style style);
 
  /// Get the label's text caption.
  const std::string &caption() const { return m_caption; }
@@ -69,8 +86,12 @@ public:
  /// Get the label's text color.
  Color color() const { return m_color; }
 
- /// Set the label's text color.
- void set_color(const Color& color) { m_color = color; }
+ /// Set the label's text color (marks color as user-owned; theme style no longer drives it).
+ void set_color(const Color& color);
+
+ /// Semantic style (Body/Caption/Heading/...). Theme switches reapply styled colors/sizes.
+ Style style() const { return m_style; }
+ void set_style(Style style);
 
  /// Get the line break mode.
  LineBreakMode line_break_mode() const { return m_line_break_mode; }
@@ -90,7 +111,7 @@ public:
  /// Get whether the label's text is selectable and copyable.
  bool selectable() const { return m_selectable; }
 
- /// Set the theme and update font size and color.
+ /// Set the theme and reapply style-driven font size and color.
  virtual void set_theme(Theme *theme) override;
 
  /// Compute the preferred size needed to display the label.
@@ -112,6 +133,8 @@ public:
  virtual bool keyboard_event(int key, int scancode, int action, int modifiers) override;
 
 protected:
+ /// Apply m_style from the current theme (unless user overrode color/font).
+ void apply_style_from_theme();
  /**
  * \brief Process text according to the line break mode.
  * \param ctx NanoVG context for text measurement.
@@ -188,6 +211,9 @@ protected:
  std::string m_font; ///< The font used for rendering.
  mutable std::string m_processed_text; ///< Cached processed text for rendering.
  Color m_color; ///< The text color.
+ Style m_style = Style::Body; ///< Semantic role used when syncing to the Theme.
+ bool m_user_color = false; ///< True once set_color() is called manually.
+ bool m_user_font_size = false; ///< True once an explicit font size is set.
  LineBreakMode m_line_break_mode; ///< The line breaking mode.
  mutable Vector2i m_cached_size; ///< Cached preferred size for performance.
  mutable bool m_cache_valid; ///< Flag indicating if cached data is valid.

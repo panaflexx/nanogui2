@@ -103,6 +103,21 @@ public:
     /// Set the screen's background color
     void set_background(const Color& background) { m_background = background; }
 
+    /**
+     * \brief Switch the active Theme between light and dark at runtime.
+     *
+     * Updates the palette on the screen theme, re-propagates it through the
+     * widget tree (so Labels, MenuBars, etc. refresh), and sets the screen
+     * clear color from Theme::m_screen_background.
+     */
+    void set_theme_mode(ThemeMode mode);
+
+    /// Current ThemeMode of the active theme (Dark if no theme is set).
+    ThemeMode theme_mode() const;
+
+    /// Set the theme and sync the screen clear color from it.
+    virtual void set_theme(Theme* theme) override;
+
     /// Set the top-level window visibility (no effect on full-screen windows)
     void set_visible(bool visible);
 

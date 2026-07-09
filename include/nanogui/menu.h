@@ -221,7 +221,29 @@ public:
 
     bool process_shortcuts(int modifiers, int key);
 
+    /// Sync the menubar skin from the parent theme (light/dark aware).
+    virtual void set_theme(Theme *theme) override;
+
+    /// Prefer a compact strip height (not half the parent — MenuBar is chrome).
+    /// When parented to a Screen, width tracks the full screen width.
+    virtual Vector2i preferred_size(NVGcontext *ctx) const override;
+
+    virtual void perform_layout(NVGcontext *ctx) override;
+    virtual void draw(NVGcontext *ctx) override;
+
     virtual bool mouse_motion_event(const Vector2i &p, const Vector2i &rel, int button, int modifiers) override;
+
+protected:
+    /// Rebuild m_menu_theme from the source palette + menubar chrome overrides.
+    void sync_menubar_theme(Theme *source);
+
+    /// Pin geometry to a full-width strip on top of the parent (typically Screen).
+    void sync_strip_geometry();
+
+    /// Compact bar height for the active theme/font.
+    int strip_height() const;
+
+    ref<Theme> m_menu_theme;
 };
 
 /// Wrap another widget with a right-click popup menu

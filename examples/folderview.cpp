@@ -1078,16 +1078,9 @@ public:
     MailApp() : Screen(Vector2i(1100, 700), "Juicy Mail — Folder View Demo") {
         inc_ref();
 
-        // Theme — light background like macOS
-        Theme *theme = m_theme;
-        theme->m_window_fill_unfocused = Color(242, 242, 247, 255);
-        theme->m_window_fill_focused   = Color(245, 245, 250, 255);
-        theme->m_text_color            = Color(30, 30, 30, 255);
-        theme->m_icon_color            = Color(80, 130, 210, 255);
-        theme->m_disabled_text_color   = Color(120, 120, 130, 255);
-        theme->m_split_divider_width    = 2;
-        theme->m_standard_font_size     = 16.0f;
-
+        // Theme — light background like macOS Mail (toggle with Ctrl/Cmd+T)
+        set_theme_mode(ThemeMode::Light);
+        m_theme->m_split_divider_width = 2;
 
         // Root borderless window
         Window *window = new Window(this, "", true);
@@ -1228,6 +1221,15 @@ public:
             return true;
         if (key == GLFW_KEY_ESCAPE && action == GLFW_PRESS) {
             set_visible(false);
+            return true;
+        }
+        // Ctrl/Cmd+T toggles light/dark theme at runtime
+        if (key == GLFW_KEY_T && action == GLFW_PRESS &&
+            (modifiers & SYSTEM_COMMAND_MOD)) {
+            set_theme_mode(theme_mode() == ThemeMode::Light
+                               ? ThemeMode::Dark : ThemeMode::Light);
+            m_theme->m_split_divider_width = 2;
+            perform_layout();
             return true;
         }
         return false;

@@ -29,17 +29,7 @@ public:
 	CheckBox *m_has_trade_in;
 
     CarSalesFormApp() : Screen(Vector2i(1080, 800), "Car Sales Management System") {
-        //inc_ref();
-
-        // Custom theme for professional look
-		/*
-        Theme *theme = m_theme;
-        theme->m_window_fill_unfocused = Color(248, 249, 250, 255);
-        theme->m_window_fill_focused = Color(255, 255, 255, 255);
-        theme->m_text_color = Color(33, 37, 41, 255);
-        theme->m_button_gradient_top_unfocused = Color(52, 144, 220, 255);
-        theme->m_button_gradient_bot_unfocused = Color(41, 128, 204, 255);
-		*/
+        set_theme_mode(ThemeMode::Light);
 
         // Main window
         Window *window = new Window(this, "", true);

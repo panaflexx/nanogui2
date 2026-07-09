@@ -99,6 +99,10 @@ void Widget::set_theme(Theme* theme) {
     if (m_theme.get() == theme)
         return;
     m_theme = theme;
+    // Palette/metrics may have changed (or theme was nullptr → real theme).
+    // Stale display lists would keep the old look until something else dirties.
+    if (m_cached)
+        cache_dirty();
     for (auto child : m_children)
         child->set_theme(theme);
 }

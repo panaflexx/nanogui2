@@ -19,22 +19,25 @@
 #include <nanogui/theme.h>
 #include <regex>
 #include <iostream>
+#include <algorithm>
 
 NAMESPACE_BEGIN(nanogui)
 
-TextBox::TextBox(Widget *parent, const std::string &value)
+TextBox::TextBox(Widget *parent, const std::string &value,
+                 const std::string &placeholder)
     : WidgetCRTP<TextBox>(parent),
       m_editable(true),
       m_spinnable(false),
       m_committed(true),
       m_value(value),
       m_default_value(""),
-      m_alignment(Alignment::Center),
+      m_alignment(Alignment::Left),
       m_units(""),
       m_format(""),
       m_units_image(-1),
       m_valid_format(true),
       m_value_temp(value),
+      m_placeholder(placeholder),
       m_cursor_pos(-1),
       m_selection_pos(-1),
       m_mouse_pos(Vector2i(-1,-1)),
@@ -45,6 +48,7 @@ TextBox::TextBox(Widget *parent, const std::string &value)
       m_last_click(0) {
     if (m_theme) m_font_size = m_theme->m_text_box_font_size;
     m_icon_extra_scale = .8f;
+    set_cursor(Cursor::IBeam);
 }
 
 void TextBox::set_editable(bool editable) {
@@ -59,36 +63,59 @@ void TextBox::set_theme(Theme *theme) {
 }
 
 Vector2i TextBox::preferred_size(NVGcontext *ctx) const {
-    Vector2i size(0, font_size() * 1.4f);
+    int control_h = m_theme ? m_theme->m_control_height : (int)(font_size() * 1.8f);
+    int pad_x     = m_theme ? m_theme->m_control_padding_x : 10;
+
+    // Height: honor an explicit min height (e.g. fixed_size), else theme control height.
+    if (m_min_size.y() > 0)
+        control_h = std::max(control_h, m_min_size.y());
+
+    nvgFontSize(ctx, font_size());
+    nvgFontFace(ctx, "sans");
 
     float uw = 0;
     if (m_units_image > 0) {
         int w, h;
         nvgImageSize(ctx, m_units_image, &w, &h);
-        float uh = size[1] * 0.4f;
+        float uh = control_h * 0.4f;
         uw = w * uh / h;
     } else if (!m_units.empty()) {
         uw = nvgTextBounds(ctx, 0, 0, m_units.c_str(), nullptr, nullptr);
     }
-    float sw = 0;
-    if (m_spinnable) {
-        sw = 14.f;
-    }
+    float sw = m_spinnable ? 14.f : 0.f;
 
     float ts = nvgTextBounds(ctx, 0, 0, m_value.c_str(), nullptr, nullptr);
-    size[0] = size[1] + ts + uw + sw;
-    return size;
+    if (!m_placeholder.empty()) {
+        float ps = nvgTextBounds(ctx, 0, 0, m_placeholder.c_str(), nullptr, nullptr);
+        ts = std::max(ts, ps);
+    }
+
+    int content_w = (int)(ts + uw + sw) + pad_x * 2;
+    int width = content_w;
+    if (m_min_size.x() > 0) {
+        // Explicit min/fixed width: do not force the theme field floor on top.
+        width = std::max(content_w, m_min_size.x());
+    } else if (m_theme) {
+        // Unconstrained fields get a usable empty-field floor (forms, etc.).
+        width = std::max(content_w, m_theme->m_control_min_width);
+    }
+    return Vector2i(width, control_h);
 }
 
 void TextBox::draw(NVGcontext* ctx) {
     Widget::draw(ctx);
 
+    Color bg_top = m_theme ? m_theme->m_text_box_bg_top : Color(255, 32);
+    Color bg_bot = m_theme ? m_theme->m_text_box_bg_bot : Color(32, 32);
+    Color fg_top = m_theme ? m_theme->m_text_box_focused_bg_top : Color(150, 32);
+    Color fg_bot = m_theme ? m_theme->m_text_box_focused_bg_bot : Color(32, 32);
+
     NVGpaint bg = nvgBoxGradient(ctx,
         m_pos.x() + 1, m_pos.y() + 1 + 1.0f, m_size.x() - 2, m_size.y() - 2,
-        3, 4, Color(255, 32), Color(32, 32));
+        3, 4, bg_top, bg_bot);
     NVGpaint fg1 = nvgBoxGradient(ctx,
         m_pos.x() + 1, m_pos.y() + 1 + 1.0f, m_size.x() - 2, m_size.y() - 2,
-        3, 4, Color(150, 32), Color(32, 32));
+        3, 4, fg_top, fg_bot);
     NVGpaint fg2 = nvgBoxGradient(ctx,
         m_pos.x() + 1, m_pos.y() + 1 + 1.0f, m_size.x() - 2, m_size.y() - 2,
         3, 4, nvgRGBA(255, 0, 0, 100), nvgRGBA(255, 0, 0, 50));

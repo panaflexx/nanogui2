@@ -13,6 +13,7 @@
 #include <nanogui/popupbutton.h>
 #include <nanogui/theme.h>
 #include <nanogui/opengl.h>
+#include <algorithm>
 
 NAMESPACE_BEGIN(nanogui)
 
@@ -26,6 +27,7 @@ Button::Button(Widget* parent, const std::string& caption, int icon)
 
 Vector2i Button::preferred_size(NVGcontext* ctx) const {
     int font_size = m_font_size == -1 ? m_theme->m_button_font_size : m_font_size;
+    int control_h = m_theme ? m_theme->m_control_height : (font_size + 10);
     nvgFontSize(ctx, font_size);
     nvgFontFace(ctx, "sans-bold");
     float tw = nvgTextBounds(ctx, 0, 0, m_caption.c_str(), nullptr, nullptr);
@@ -37,7 +39,7 @@ Vector2i Button::preferred_size(NVGcontext* ctx) const {
             nvgFontFace(ctx, "icons");
             nvgFontSize(ctx, ih);
             iw = nvgTextBounds(ctx, 0, 0, utf8(m_icon).data(), nullptr, nullptr)
-                + m_size.y() * 0.15f;
+                + control_h * 0.15f;
         }
         else {
             int w, h;
@@ -46,7 +48,8 @@ Vector2i Button::preferred_size(NVGcontext* ctx) const {
             iw = w * ih / h;
         }
     }
-    return Vector2i((int)(tw + iw) + 20, font_size + 10);
+    int height = std::max(control_h, font_size + 10);
+    return Vector2i((int)(tw + iw) + 20, height);
 }
 
 bool Button::mouse_enter_event(const Vector2i& p, bool enter) {
@@ -286,6 +289,17 @@ void Button::draw(NVGcontext* ctx) {
     NVGcolor text_color =
         m_text_color.w() == 0 ? m_theme->m_text_color : m_text_color;
     NVGcolor icon_color = m_theme->m_icon_color;
+
+    // Auto-contrast caption when a solid background color is set and the
+    // caller has not overridden text color. Prefer light text on dark fills.
+    if (m_enabled && m_text_color.w() == 0 && m_background_color.w() > 0.5f) {
+        float lum = 0.2126f * m_background_color.r() +
+                    0.7152f * m_background_color.g() +
+                    0.0722f * m_background_color.b();
+        text_color = lum < 0.55f ? (NVGcolor)m_theme->m_button_text_on_solid
+                                 : (NVGcolor)m_theme->m_text_color;
+        icon_color = text_color;
+    }
 
     if (!m_enabled)
     {

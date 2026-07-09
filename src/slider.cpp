@@ -12,6 +12,7 @@
 #include <nanogui/slider.h>
 #include <nanogui/theme.h>
 #include <nanogui/opengl.h>
+#include <algorithm>
 
 NAMESPACE_BEGIN(nanogui)
 
@@ -23,7 +24,15 @@ Slider::Slider(Widget* parent)
 }
 
 Vector2i Slider::preferred_size(NVGcontext*) const {
-    return Vector2i(70, 16);
+    // Classic compact default (~80). Theme field min-width is for text inputs,
+    // not sliders — using it here inflated form panels and example windows.
+    int pref_w = 80;
+    if (m_min_size.x() > 0)
+        pref_w = m_min_size.x();
+    int h = m_theme ? std::max(16, m_theme->m_control_height / 2) : 16;
+    if (m_min_size.y() > 0)
+        h = std::max(h, m_min_size.y());
+    return Vector2i(pref_w, h);
 }
 
 bool Slider::mouse_drag_event(const Vector2i& p, const Vector2i& rel, int  button, int  modifiers) {

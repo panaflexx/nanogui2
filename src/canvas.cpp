@@ -31,6 +31,12 @@ Canvas::Canvas(Widget *parent, uint8_t samples,
     m_size = Vector2i(250, 250);
     m_border_color = m_theme->m_border_light;
 
+    // Canvas paints via real GL/Metal every frame. Parent Windows enable
+    // display-list caching when given a Layout; without live=true the cube is
+    // baked once (or skipped) and never animates. Live children are omitted
+    // from parent caches and redrawn after SubmitDrawList each frame.
+    set_live(true);
+
 #if defined(NANOGUI_USE_GLES)
     samples = 1;
 #endif
@@ -123,6 +129,16 @@ void Canvas::set_background_color(const Color &background_color) {
 
 const Color& Canvas::background_color() const {
     return m_render_pass->clear_color(0);
+}
+
+Vector2i Canvas::preferred_size(NVGcontext *) const {
+    // Do not return m_size: Fill layouts would lock that as a growing floor.
+    if (m_min_size.x() > 0 && m_min_size.y() > 0)
+        return m_min_size;
+    if (m_min_size.x() > 0 || m_min_size.y() > 0)
+        return Vector2i(m_min_size.x() > 0 ? m_min_size.x() : 250,
+                        m_min_size.y() > 0 ? m_min_size.y() : 250);
+    return Vector2i(250, 250);
 }
 
 void Canvas::draw_contents() { /* No-op. */ }

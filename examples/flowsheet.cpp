@@ -16,16 +16,7 @@ public:
 
     ChartingFormApp() : Screen(Vector2i(300, 450), "Patient Charting Form") {
         inc_ref();
-
-        // Custom theme for professional medical look
-		/*
-        Theme *theme = m_theme;
-        theme->m_window_fill_unfocused = Color(248, 249, 250, 255);
-        theme->m_window_fill_focused = Color(255, 255, 255, 255);
-        theme->m_text_color = Color(33, 37, 41, 255);
-        theme->m_button_gradient_top_unfocused = Color(40, 167, 69, 255);  // Green for submit
-        theme->m_button_gradient_bot_unfocused = Color(28, 118, 48, 255);
-		*/
+        set_theme_mode(ThemeMode::Light);
 
         // Main window
         Window *window = new Window(this, "", true);
@@ -35,8 +26,8 @@ public:
         window->set_layout(new BoxLayout(Orientation::Vertical, Alignment::Fill, 15, 15));
 
         // Add title
-        Label *titleLabel = new Label(window, "Add To Chart", "sans-bold", 24);
-        titleLabel->set_color(Color(40, 167, 69, 255));
+        Label *titleLabel = new Label(window, "Add To Chart", Label::Style::Title);
+        titleLabel->set_color(m_theme->m_success_color);
         titleLabel->set_min_height(30);
 
         // Create a scroll panel to contain the form fields
@@ -95,12 +86,13 @@ public:
 
         buttonContainer->set_layout(buttonLayout);
         Button *cancelButton = new Button(buttonContainer, "Cancel");
-        cancelButton->set_background_color(Color(220, 53, 69, 255));  // Red color for cancel
+        cancelButton->set_background_color(m_theme->m_danger_color);
         cancelButton->set_callback([this]() {
             set_visible(false);
         });
 
         Button *submitButton = new Button(buttonContainer, "Submit");
+        submitButton->set_background_color(m_theme->m_success_color);
         submitButton->set_callback([this]() {
             // Add your submission logic here
 			printf("Submitted\n");
@@ -120,9 +112,7 @@ private:
 
         // Add the textbox to the grid (it will automatically go to the next cell)
         TextBox *textBox = new TextBox(parent);
-        textBox->set_min_height(28);
-        textBox->set_alignment(TextBox::Alignment::Left);
-		if(spin)
+		if (spin)
 			textBox->set_spinnable(spin);
 
         return textBox;

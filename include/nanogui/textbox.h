@@ -40,7 +40,8 @@ public:
         Right
     };
 
-    TextBox(Widget *parent, const std::string &value = "");
+    TextBox(Widget *parent, const std::string &value = "",
+            const std::string &placeholder = "");
 
     bool editable() const { return m_editable; }
     void set_editable(bool editable);
@@ -150,6 +151,7 @@ public:
         set_min_max_values(std::numeric_limits<Scalar>::lowest(), std::numeric_limits<Scalar>::max());
         set_value(value);
         set_spinnable(false);
+        set_alignment(Alignment::Right);
     }
 
     Scalar value() const {
@@ -270,6 +272,7 @@ public:
                            std::numeric_limits<Scalar>::max());
         set_value(value);
         set_spinnable(false);
+        set_alignment(Alignment::Right);
     }
 
     std::string number_format() const { return m_number_format; }

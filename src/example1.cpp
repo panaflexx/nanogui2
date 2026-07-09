@@ -125,7 +125,7 @@ public:
 
     void CreateMenuBar()
     {
-		MenuBar *m_menubar = Make<MenuBar>(this, "");
+		m_menubar = Make<MenuBar>(this, "");
         auto menu = m_menubar->add_menu("File");
 
         auto add_item = [this, &menu](const vector<std::string> &aliases, int icon, const function<void(void)> &cb,
@@ -159,9 +159,39 @@ public:
         add_item({"Copy"}, FA_COPY, [] { printf("copy()"); }, {{SYSTEM_COMMAND_MOD, 'C'}});
         add_item({"Paste"}, FA_PASTE, [] { printf("paste()"); }, {{SYSTEM_COMMAND_MOD, 'V'}});
 
-		// Move menubar to front
+        menu = m_menubar->add_menu("View");
+        add_item({"Light Theme", "Use light appearance"}, FA_SUN,
+                 [this] { apply_theme_mode(ThemeMode::Light); },
+                 {{SYSTEM_COMMAND_MOD | GLFW_MOD_SHIFT, 'L'}}, false);
+        add_item({"Dark Theme", "Use dark appearance"}, FA_MOON,
+                 [this] { apply_theme_mode(ThemeMode::Dark); },
+                 {{SYSTEM_COMMAND_MOD | GLFW_MOD_SHIFT, 'D'}}, false);
+
+		// Move menubar to front; width tracks the screen via MenuBar itself.
         move_window_to_front(m_menubar);
-        m_menubar->set_min_width(width());
+    }
+
+    void apply_theme_mode(ThemeMode mode) {
+        set_theme_mode(mode);
+        // Keep any custom disabled-text tint used by this demo.
+        if (m_theme) {
+            if (mode == ThemeMode::Dark)
+                m_theme->m_disabled_text_color = Color(0, 153, 230, 230);
+            // Light palette already sets a sensible disabled color.
+        }
+        if (m_render_pass)
+            m_render_pass->set_clear_color(0, m_background);
+        perform_layout();
+        redraw();
+    }
+
+    virtual bool resize_event(const Vector2i &size) override {
+        // Keep the top menubar spanning the full client width.
+        if (m_menubar) {
+            m_menubar->set_width(size.x());
+            m_menubar->perform_layout(m_nvg_context);
+        }
+        return Screen::resize_event(size);
     }
 
     void CreateMainWindow()
@@ -1065,9 +1095,10 @@ public:
     ExampleApplication() : Screen(Vector2i(1024, 768), "NanoGUI Test") {
         inc_ref();
 
-        Theme* MainTheme = new Theme(m_nvg_context);
-        MainTheme->m_disabled_text_color = Color(0, 153, 230, 230);
-        set_theme(MainTheme);
+        // Start in dark mode (classic example1 look); switch via View menu.
+        set_theme_mode(ThemeMode::Dark);
+        if (m_theme)
+            m_theme->m_disabled_text_color = Color(0, 153, 230, 230);
 
         CreateMenuBar();
         CreateMovingMenuBar();
@@ -1090,7 +1121,7 @@ public:
         */
 
         m_render_pass = new RenderPass({ this });
-        m_render_pass->set_clear_color(0, Color(0.3f, 0.3f, 0.32f, 1.f));
+        m_render_pass->set_clear_color(0, m_background);
 
         m_shader = new Shader(
             m_render_pass,
@@ -1170,6 +1201,9 @@ public:
 
     virtual bool keyboard_event(int key, int scancode, int action, int modifiers) {
         if (Screen::keyboard_event(key, scancode, action, modifiers))
+            return true;
+        if (action == GLFW_PRESS && m_menubar &&
+            m_menubar->process_shortcuts(modifiers, key))
             return true;
         if (key == GLFW_KEY_ESCAPE && action == GLFW_PRESS) {
             set_visible(false);

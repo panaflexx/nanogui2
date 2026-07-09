@@ -1,12 +1,26 @@
 #include <nanogui/layout.h>
 #include <nanogui/widget.h>
 #include <nanogui/window.h>
+#include <nanogui/menu.h>
 #include <nanogui/theme.h>
 #include <nanogui/label.h>
 #include <nanogui/scrollpanel.h>
 #include <nanogui/opengl.h>
 #include <numeric>
 #include <cmath>
+
+namespace {
+/// Whether FlexLayout should use a half-container placeholder size instead of
+/// querying preferred_size (avoids recursion for some ScrollPanel/Window trees).
+/// MenuBar is a Window but must stay a thin strip — never expand it.
+bool flex_use_placeholder_size(const nanogui::Widget* child) {
+    if (dynamic_cast<const nanogui::ScrollPanel*>(child))
+        return true;
+    if (dynamic_cast<const nanogui::MenuBar*>(child))
+        return false;
+    return dynamic_cast<const nanogui::Window*>(child) != nullptr;
+}
+} // namespace
 
 NAMESPACE_BEGIN(nanogui)
 
@@ -438,6 +452,7 @@ void GridLayout::perform_layout(NVGcontext* ctx, Widget* widget) const {
         }
 
         if (grid_size < container_size[i]) {
+            // Expand cells to fill extra space (window grew).
             int gap = container_size[i] - grid_size;
             int g = gap / dim[i];
             int rest = gap - g * dim[i];
@@ -445,6 +460,17 @@ void GridLayout::perform_layout(NVGcontext* ctx, Widget* widget) const {
                 grid[i][j] += g;
             for (int j = 0; rest > 0 && j < dim[i]; --rest, ++j)
                 grid[i][j] += 1;
+        } else if (grid_size > container_size[i] && dim[i] > 0) {
+            // Shrink cells when the container is smaller (window shrank).
+            // Without this, preferred-sized cells (and Fill children) only grow.
+            int excess = grid_size - container_size[i];
+            int g = excess / dim[i];
+            int rest = excess - g * dim[i];
+            for (int j = 0; j < dim[i]; ++j) {
+                int reduce = g + (rest > 0 ? 1 : 0);
+                if (rest > 0) --rest;
+                grid[i][j] = std::max(0, grid[i][j] - reduce);
+            }
         }
     }
 
@@ -1094,13 +1120,13 @@ Vector2i FlexLayout::preferred_size(NVGcontext *ctx, const Widget *widget) const
     Vector2i parent_size = widget->size();
     if (parent_size == Vector2i(0, 0)) parent_size = default_size;
 
-    // Use half parent size for ScrollPanel/Window children to avoid recursion
+    // Use half parent size for some ScrollPanel/Window children to avoid recursion.
+    // MenuBar is exempt (see flex_use_placeholder_size) so it stays a thin strip.
     Vector2i default_child_size = default_size / 2;
     for (size_t i = 0; i < visible_children.size(); ++i) {
         Widget *child = visible_children[i];
         Vector2i child_pref;
-        // Use default size for ScrollPanel/Window to prevent recursion
-        if (dynamic_cast<const ScrollPanel*>(child) || dynamic_cast<const Window*>(child)) {
+        if (flex_use_placeholder_size(child)) {
             child_pref = default_child_size;
         } else {
             child_pref = child->preferred_size(ctx);
@@ -1179,7 +1205,7 @@ void FlexLayout::perform_layout(NVGcontext *ctx, Widget *widget) const {
     Vector2i default_child_size = default_container / 2; // Default for ScrollPanel/Window
     for (Widget *child : visible_children) {
         Vector2i child_pref;
-        if (dynamic_cast<const ScrollPanel*>(child) || dynamic_cast<const Window*>(child)) {
+        if (flex_use_placeholder_size(child)) {
             child_pref = default_child_size;
         } else {
             // layout_preferred_size honors animation overrides (SlideUp/SlideDown)

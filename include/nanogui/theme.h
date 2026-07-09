@@ -11,7 +11,7 @@
 /**
  * \file nanogui/theme.h
  *
- * \brief Storage class for basic theme-related properties.
+ * \brief Storage class for theme-related properties (colors, metrics, fonts).
  */
 
 #pragma once
@@ -21,225 +21,225 @@
 
 NAMESPACE_BEGIN(nanogui)
 
+/// Global light / dark appearance for a Theme palette.
+enum class ThemeMode {
+    Dark = 0,
+    Light
+};
+
 /**
  * \class Theme theme.h nanogui/theme.h
  *
- * \brief Storage class for basic theme-related properties.
+ * \brief Storage class for theme-related properties.
+ *
+ * Construct with a \ref ThemeMode (default: Dark). Call \ref set_mode to
+ * switch light/dark palettes at runtime — fonts are kept, colors and
+ * mode-dependent metrics are replaced. Use \ref Screen::set_theme_mode to
+ * apply a mode to a live UI tree.
  */
 class NANOGUI_EXPORT Theme : public Object {
 public:
-    Theme(NVGcontext *ctx);
+    /**
+     * \param ctx  NanoVG context used to load embedded fonts
+     * \param mode Initial light/dark palette (default Dark for classic look)
+     */
+    Theme(NVGcontext *ctx, ThemeMode mode = ThemeMode::Dark);
 
-    /* Fonts */
+    /// Current light/dark mode.
+    ThemeMode mode() const { return m_mode; }
+
+    /**
+     * \brief Replace the palette with the light or dark preset.
+     *
+     * Fonts and icons are preserved. Mode-independent structural defaults
+     * (corner radii, control height, etc.) are also refreshed so callers get
+     * a coherent preset.
+     */
+    void set_mode(ThemeMode mode);
+
+    /**
+     * \brief Configure this theme for use as a MenuBar skin.
+     *
+     * Call after \ref set_mode (or construction). Makes window fill match the
+     * menu bar strip, buttons transparent until hover, no window header/shadow.
+     * Safe to call repeatedly when the parent mode changes.
+     */
+    void configure_as_menubar();
+
+    /* ---- Fonts ------------------------------------------------------------ */
     /// The standard font face (default: ``"sans"`` from ``resources/roboto_regular.ttf``).
     int m_font_sans_regular;
-    /// The bold font face (default: ``"sans-bold"`` from ``resources/roboto_regular.ttf``).
+    /// The bold font face (default: ``"sans-bold"`` from ``resources/roboto_bold.ttf``).
     int m_font_sans_bold;
-    /// The icon font face (default: ``"icons"`` from ``resources/entypo.ttf``).
+    /// The icon font face (default: ``"icons"`` from Font Awesome).
     int m_font_icons;
     /// The monospace font face (default: ``"mono"`` from ``resources/inconsolata_regular.ttf``).
     int m_font_mono_regular;
-    /// The monospace font face (default: ``"emoji"`` from ``resources/NotoColorEmoji.ttf``).
+    /// The emoji font face (default: ``"emoji"`` from ``resources/NotoColorEmoji.ttf``).
     int m_font_emoji;
     /**
-     * The amount of scaling that is applied to each icon to fit the size of
-     * NanoGUI widgets.  The default value is ``0.77f``, setting to e.g. higher
-     * than ``1.0f`` is generally discouraged.
+     * Icon scaling relative to widget font size (default: ``0.60f``).
      */
     float m_icon_scale;
 
-    /* Spacing-related parameters */
-    /// The font size for all widgets other than buttons and textboxes (default: `` 16``).
+    /* ---- Typography ------------------------------------------------------- */
+    /// Body / label font size (default: 16).
     int m_standard_font_size;
-    /// The font size for buttons (default: ``20``).
+    /// Button caption font size (default: 16).
     int m_button_font_size;
-    /// The font size for text boxes (default: ``20``).
+    /// TextBox / numeric field font size (default: 16).
     int m_text_box_font_size;
-    /// Rounding radius for Window widget corners (default: ``2``).
+    /// Section heading font size (default: 20).
+    int m_heading_font_size;
+    /// Large title font size (default: 24).
+    int m_title_font_size;
+    /// Form caption / field-label font size (default: 13).
+    int m_caption_font_size;
+    /// Status / muted footer font size (default: 12).
+    int m_muted_font_size;
+
+    /* ---- Control metrics -------------------------------------------------- */
+    /// Preferred / min height for buttons, text boxes, dropdowns (default: 30).
+    int m_control_height;
+    /// Preferred min width for empty text boxes / combos (default: 120).
+    int m_control_min_width;
+    /// Horizontal padding inside text-like controls (default: 10).
+    int m_control_padding_x;
+    /// Default form label column width when laying out rows (default: 140).
+    int m_form_label_width;
+    /// Default spacing between form rows (default: 8).
+    int m_row_spacing;
+    /// Default spacing between form sections (default: 16).
+    int m_section_spacing;
+    /// Rounding radius for Window widget corners (default: 4).
     int m_window_corner_radius;
-    /// Default size of Window widget titles (default: ``30``).
+    /// Window title bar height (default: 30).
     int m_window_header_height;
-    /// Size of drop shadow rendered behind the Window widgets (default: ``10``).
+    /// Drop shadow size behind Window widgets (default: 10).
     int m_window_drop_shadow_size;
-    /// Rounding radius for Button (and derived types) widgets (default: ``2``).
+    /// Rounding radius for Button (and derived) widgets (default: 4).
     int m_button_corner_radius;
-    /// The border width for Tab_header widgets (default: ``0.75f``).
+    /// Tab header border width (default: 0.75f).
     float m_tab_border_width;
-    /// The inner margin on a Tab_header widget (default: ``5``).
+    /// Tab header inner margin (default: 5).
     int m_tab_inner_margin;
-    /// The minimum size for buttons on a Tab_header widget (default: ``20``).
+    /// Min tab button width (default: 20).
     int m_tab_min_button_width;
-    /// The maximum size for buttons on a Tab_header widget (default: ``160``).
+    /// Max tab button width (default: 160).
     int m_tab_max_button_width;
-    /// Used to help specify what lies "in bound" for a Tab_header widget (default: ``20``).
+    /// Tab control width bound (default: 20).
     int m_tab_control_width;
-    /// The amount of horizontal padding for a Tab_header widget (default: ``10``).
+    /// Tab button horizontal padding (default: 10).
     int m_tab_button_horizontal_padding;
-    /// The amount of vertical padding for a Tab_header widget (default: ``2``).
+    /// Tab button vertical padding (default: 2).
     int m_tab_button_vertical_padding;
-    /// Offset to the resize area.
+    /// Window resize grip / edge hit offset (default: 10).
     int m_resize_area_offset;
 
-    /* Generic colors */
-    /**
-     * The color of the drop shadow drawn behind widgets
-     * (default: intensity=``0``, alpha=``128``; see \ref nanogui::Color::Color(int,int)).
-     */
+    /* ---- Generic colors --------------------------------------------------- */
     Color m_drop_shadow;
-    /**
-     * The transparency color
-     * (default: intensity=``0``, alpha=``0``; see \ref nanogui::Color::Color(int,int)).
-     */
     Color m_transparent;
-    /**
-     * The dark border color
-     * (default: intensity=``29``, alpha=``255``; see \ref nanogui::Color::Color(int,int)).
-     */
     Color m_border_dark;
-    /**
-     * The light border color
-     * (default: intensity=``92``, alpha=``255``; see \ref nanogui::Color::Color(int,int)).
-     */
     Color m_border_light;
-    /**
-     * The medium border color
-     * (default: intensity=``35``, alpha=``255``; see \ref nanogui::Color::Color(int,int)).
-     */
     Color m_border_medium;
-    /**
-     * The text color
-     * (default: intensity=``255``, alpha=``160``; see \ref nanogui::Color::Color(int,int)).
-     */
+    /// Primary body text.
     Color m_text_color;
-    /**
-     * The disable dtext color
-     * (default: intensity=``255``, alpha=``80``; see \ref nanogui::Color::Color(int,int)).
-     */
+    /// Disabled body text.
     Color m_disabled_text_color;
-    /**
-     * The text shadow color
-     * (default: intensity=``0``, alpha=``160``; see \ref nanogui::Color::Color(int,int)).
-     */
+    /// Soft text shadow under captions (buttons/windows).
     Color m_text_color_shadow;
-    /// The icon color (default: \ref nanogui::Theme::m_text_color).
+    /// Form field captions / secondary labels.
+    Color m_text_secondary;
+    /// Section headings.
+    Color m_text_heading;
+    /// Muted status / helper text.
+    Color m_text_muted;
+    /// Accent / link / emphasis text.
+    Color m_text_accent;
+    /// Icon default color (typically matches text or accent).
     Color m_icon_color;
-    /// The icon color (default: \ref nanogui::Theme::m_text_color).
     Color m_disabled_icon_color;
-    /////// Intention Colors
-    Color m_success_color;
-    Color m_fail_color;
-    Color m_proceed_color;
-    Color m_warning_color;
 
-    /* Button colors */
-    /**
-     * The top gradient color for buttons in focus
-     * (default: intensity=``64``, alpha=``255``; see \ref nanogui::Color::Color(int,int)).
-     */
+    /* ---- Semantic / intention colors -------------------------------------- */
+    Color m_success_color;   ///< Positive / submit (green)
+    Color m_fail_color;      ///< Alias for danger / destructive
+    Color m_danger_color;    ///< Destructive / cancel (red)
+    Color m_proceed_color;   ///< Primary progressive action (blue)
+    Color m_warning_color;   ///< Caution (amber)
+    Color m_accent_color;    ///< Brand accent (buttons, selection)
+
+    /* ---- Screen / chrome -------------------------------------------------- */
+    /// Top-level Screen clear / background color.
+    Color m_screen_background;
+
+    /* ---- Button colors ---------------------------------------------------- */
     Color m_button_gradient_top_focused;
-    /**
-     * The bottom gradient color for buttons in focus
-     * (default: intensity=``48``, alpha=``255``; see \ref nanogui::Color::Color(int,int)).
-     */
     Color m_button_gradient_bot_focused;
-    /**
-     * The top gradient color for buttons not in focus
-     * (default: intensity=``74``, alpha=``255``; see \ref nanogui::Color::Color(int,int)).
-     */
     Color m_button_gradient_top_unfocused;
-    /**
-     * The bottom gradient color for buttons not in focus
-     * (default: intensity=``58``, alpha=``255``; see \ref nanogui::Color::Color(int,int)).
-     */
     Color m_button_gradient_bot_unfocused;
-    /**
-     * The top gradient color for buttons currently pushed
-     * (default: intensity=``41``, alpha=``255``; see \ref nanogui::Color::Color(int,int)).
-     */
     Color m_button_gradient_top_pushed;
-    /**
-     * The bottom gradient color for buttons currently pushed
-     * (default: intensity=``29``, alpha=``255``; see \ref nanogui::Color::Color(int,int)).
-     */
     Color m_button_gradient_bot_pushed;
+    /// Default button caption when drawn on a solid semantic fill (auto-contrast falls back to this).
+    Color m_button_text_on_solid;
 
-    /* Window colors */
-    /**
-     * The fill color for a Window that is not in focus
-     * (default: intensity=``43``, alpha=``230``; see \ref nanogui::Color::Color(int,int)).
-     */
+    /* ---- Window colors ---------------------------------------------------- */
     Color m_window_fill_unfocused;
-    /**
-     * The fill color for a Window that is in focus
-     * (default: intensity=``45``, alpha=``230``; see \ref nanogui::Color::Color(int,int)).
-     */
     Color m_window_fill_focused;
-    /**
-     * The title color for a Window that is not in focus
-     * (default: intensity=``220``, alpha=``160``; see \ref nanogui::Color::Color(int,int)).
-     */
     Color m_window_title_unfocused;
-    /**
-     * The title color for a Window that is in focus
-     * (default: intensity=``255``, alpha=``190``; see \ref nanogui::Color::Color(int,int)).
-     */
     Color m_window_title_focused;
-
-    /**
-     * The top gradient color for Window headings
-     * (default: \ref nanogui::Theme::m_button_gradient_top_unfocused).
-     */
     Color m_window_header_gradient_top;
-    /**
-     * The bottom gradient color for Window headings
-     * (default: \ref nanogui::Theme::m_button_gradient_bot_unfocused).
-     */
     Color m_window_header_gradient_bot;
-    /// The Window header top separation color (default: \ref nanogui::Theme::m_border_light).
     Color m_window_header_sep_top;
-    /// The Window header bottom separation color (default: \ref nanogui::Theme::m_border_dark).
     Color m_window_header_sep_bot;
-
-    /// The Split widget divider bar color (default: intensity=``200``, alpha=``255``).
-    Color m_split_divider;
-    /// The Split widget visual draw width in pixels (default: ``4``).
-    /// The interactive hotspot remains unchanged regardless of this value.
-    int m_split_divider_width;
-
-    /**
-     * The popup window color
-     * (default: intensity=``50``, alpha=``255``; see \ref nanogui::Color::Color(int,int))).
-     */
     Color m_window_popup;
-    /**
-     * The transparent popup window color
-     * (default: intensity=``50``, alpha=``0``; see \ref nanogui::Color::Color(int,int))).
-     */
     Color m_window_popup_transparent;
 
-    /// Icon to use for check box widgets (default: ``FA_CHECK``).
+    /* ---- Split ------------------------------------------------------------ */
+    Color m_split_divider;
+    int m_split_divider_width;
+
+    /* ---- MenuBar / menu strip --------------------------------------------- */
+    /// Menu bar strip fill (also used by configure_as_menubar()).
+    Color m_menubar_fill;
+    /// Hover / open highlight on menu titles.
+    Color m_menubar_button_focused;
+    /// Popup menu background.
+    Color m_menu_popup_fill;
+    /// Menu separator color.
+    Color m_menu_separator;
+
+    /* ---- Text field chrome ------------------------------------------------ */
+    /// TextBox unfocused background gradient top (alpha included).
+    Color m_text_box_bg_top;
+    Color m_text_box_bg_bot;
+    /// TextBox focused background.
+    Color m_text_box_focused_bg_top;
+    Color m_text_box_focused_bg_bot;
+
+    /* ---- Icons ------------------------------------------------------------ */
     int m_check_box_icon;
-    /// Icon to use for informational message dialog widgets (default: ``FA_INFO_CIRCLE``).
     int m_message_information_icon;
-    /// Icon to use for interrogative message dialog widgets (default: ``FA_QUESTION_CIRCLE``).
     int m_message_question_icon;
-    /// Icon to use for warning message dialog widgets (default: ``FA_EXCLAMATION_TRINAGLE``).
     int m_message_warning_icon;
-    /// Icon to use on message dialog alt button (default: ``FA_CIRCLE_WITH_CROSS``).
     int m_message_alt_button_icon;
-    /// Icon to use on message_dialog primary button (default: ``FA_CHECK``).
     int m_message_primary_button_icon;
-    /// Icon to use for Popup_button widgets opening to the right (default: ``FA_CHEVRON_RIGHT``).
     int m_popup_chevron_right_icon;
-    /// Icon to use for Popup_button widgets opening to the left (default: ``FA_CHEVRON_LEFT``).
     int m_popup_chevron_left_icon;
-    /// Icon to use when a text box has an up toggle (e.g. IntBox) (default: ``FA_CHEVRON_UP``).
     int m_text_box_up_icon;
-    /// Icon to use when a text box has a down toggle (e.g. IntBox) (default: ``FA_CHEVRON_DOWN``).
     int m_text_box_down_icon;
 
 protected:
-    /// Default destructor does nothing; allows for inheritance.
+    ThemeMode m_mode = ThemeMode::Dark;
+
+    /// Apply structural metrics shared by light and dark presets.
+    void apply_common_metrics();
+    /// Apply the dark color palette (and any dark-specific metrics).
+    void apply_dark_palette();
+    /// Apply the light color palette (and any light-specific metrics).
+    void apply_light_palette();
+    /// Load embedded fonts (once per Theme instance).
+    void load_fonts(NVGcontext *ctx);
+
     virtual ~Theme() { };
 };
 

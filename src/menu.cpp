@@ -261,62 +261,31 @@ void MenuItem::draw(NVGcontext *ctx)
 {
     Widget::draw(ctx);
 
-    NVGcolor grad_top = m_theme->m_button_gradient_top_unfocused;
-    NVGcolor grad_bot = m_theme->m_button_gradient_bot_unfocused;
-
-    if (m_highlighted)
-    {
-        grad_top = m_theme->m_button_gradient_top_focused;
-        grad_bot = m_theme->m_button_gradient_bot_focused;
-    }
-
-    nvgBeginPath(ctx);
-
-    nvgRoundedRect(ctx, m_pos.x() + 1, m_pos.y() + 1.0f, m_size.x() - 2, m_size.y() - 2,
-                   m_theme->m_button_corner_radius - 1);
-
-    if (m_background_color.w() != 0)
-    {
-        nvgFillColor(ctx, Color(m_background_color[0], m_background_color[1], m_background_color[2], 1.f));
+    // Flat menu row: solid highlight only (no bevel, no border, no rounded pill).
+    if (m_highlighted && m_enabled) {
+        nvgBeginPath(ctx);
+        nvgRect(ctx, m_pos.x() + 2.f, m_pos.y() + 1.f,
+                m_size.x() - 4.f, m_size.y() - 2.f);
+        nvgFillColor(ctx, m_theme->m_button_gradient_top_focused);
         nvgFill(ctx);
-        if (m_pushed)
-        {
-            grad_top.a = grad_bot.a = 0.8f;
-        }
-        else
-        {
-            double v   = 1 - m_background_color.w();
-            grad_top.a = grad_bot.a = m_enabled ? v : v * .5f + .5f;
-        }
     }
-
-    NVGpaint bg = nvgLinearGradient(ctx, m_pos.x(), m_pos.y(), m_pos.x(), m_pos.y() + m_size.y(), grad_top, grad_bot);
-
-    nvgFillPaint(ctx, bg);
-    nvgFill(ctx);
-
-    nvgBeginPath(ctx);
-    nvgStrokeWidth(ctx, 1.0f);
-    nvgRoundedRect(ctx, m_pos.x() + 0.5f, m_pos.y() + (m_pushed ? 0.5f : 1.5f), m_size.x() - 1,
-                   m_size.y() - 1 - (m_pushed ? 0.0f : 1.0f), m_theme->m_button_corner_radius);
-    nvgStrokeColor(ctx, m_theme->m_border_light);
-    nvgStroke(ctx);
-
-    nvgBeginPath(ctx);
-    nvgRoundedRect(ctx, m_pos.x() + 0.5f, m_pos.y() + 0.5f, m_size.x() - 1, m_size.y() - 2,
-                   m_theme->m_button_corner_radius);
-    nvgStrokeColor(ctx, m_theme->m_border_dark);
-    nvgStroke(ctx);
 
     int font_size = m_font_size == -1 ? m_theme->m_button_font_size : m_font_size;
     nvgFontSize(ctx, font_size);
-    nvgFontFace(ctx, "sans-bold");
+    nvgFontFace(ctx, "sans");
 
     Vector2f center = Vector2f(m_pos) + Vector2f(m_size) * 0.5f;
     Vector2f text_pos(6, center.y() - 1);
-    NVGcolor text_color = m_text_color.w() == 0 ? m_theme->m_text_color : m_text_color;
+    // On solid highlight, prefer light text for contrast on both themes.
+    NVGcolor text_color;
     if (!m_enabled)
         text_color = m_theme->m_disabled_text_color;
+    else if (m_highlighted)
+        text_color = m_theme->m_button_text_on_solid;
+    else if (m_text_color.w() != 0)
+        text_color = m_text_color;
+    else
+        text_color = m_theme->m_text_color;
 
     auto  icon = m_icon && !m_pushed ? utf8(m_icon) : utf8(FA_CHECK);
     float ih   = font_size * icon_scale();
@@ -339,22 +308,18 @@ void MenuItem::draw(NVGcontext *ctx)
     nvgFontSize(ctx, font_size);
     nvgFontFace(ctx, "sans");
     nvgTextAlign(ctx, NVG_ALIGN_LEFT | NVG_ALIGN_MIDDLE);
-    nvgFillColor(ctx, m_theme->m_text_color_shadow);
-    nvgText(ctx, text_pos.x(), text_pos.y(), m_caption.c_str(), nullptr);
     nvgFillColor(ctx, text_color);
-    nvgText(ctx, text_pos.x(), text_pos.y() + 1, m_caption.c_str(), nullptr);
+    nvgText(ctx, text_pos.x(), text_pos.y(), m_caption.c_str(), nullptr);
 
     if (!shortcut().text.size())
         return;
 
-    // float    sw = nvgTextBounds(ctx, 0, 0, shortcut().text.c_str(), nullptr, nullptr);
     Vector2f hotkey_pos(m_pos.x() + m_size.x() - 8, center.y() - 1);
-
     nvgTextAlign(ctx, NVG_ALIGN_RIGHT | NVG_ALIGN_MIDDLE);
-    nvgFillColor(ctx, m_theme->m_text_color_shadow);
+    nvgFillColor(ctx, m_highlighted && m_enabled
+                          ? m_theme->m_button_text_on_solid
+                          : m_theme->m_disabled_text_color);
     nvgText(ctx, hotkey_pos.x(), hotkey_pos.y(), shortcut().text.c_str(), nullptr);
-    nvgFillColor(ctx, m_theme->m_disabled_text_color);
-    nvgText(ctx, hotkey_pos.x(), hotkey_pos.y() + 1, shortcut().text.c_str(), nullptr);
 }
 
 Separator::Separator(Widget *parent) : MenuItem(parent, "--separator--")
@@ -371,7 +336,7 @@ void Separator::draw(NVGcontext *ctx)
     nvgBeginPath(ctx);
     nvgMoveTo(ctx, m_pos.x() + 8, m_pos.y() + m_size.y() * 0.5f);
     nvgLineTo(ctx, m_pos.x() + m_size.x() - 8, m_pos.y() + m_size.y() * 0.5f);
-    nvgStrokeColor(ctx, Color(89, 255));
+    nvgStrokeColor(ctx, m_theme ? m_theme->m_menu_separator : Color(89, 255));
     nvgStrokeWidth(ctx, 1.f);
     nvgStroke(ctx);
 }
@@ -621,33 +586,36 @@ void PopupMenu::draw(NVGcontext *ctx)
     if (!m_visible)
         return;
 
-    int ds = m_theme->m_window_drop_shadow_size, cr = m_theme->m_window_corner_radius;
+    // Flat menu panel: soft shadow + thin hairline, no heavy double-stroke bevel.
+    int ds = std::max(4, m_theme->m_window_drop_shadow_size);
+    float cr = 2.f; // slight rounding for the panel only (items themselves are flat)
 
     nvgSave(ctx);
     nvgResetScissor(ctx);
 
-    /* Draw a drop shadow */
-    NVGpaint shadow_paint = nvgBoxGradient(ctx, m_pos.x(), m_pos.y() + 0.25 * ds, m_size.x(), m_size.y(), cr * 2,
-                                           ds * 2, m_theme->m_drop_shadow, m_theme->m_transparent);
+    NVGpaint shadow_paint = nvgBoxGradient(ctx, m_pos.x(), m_pos.y() + 0.25f * ds,
+                                           m_size.x(), m_size.y(), cr * 2, ds * 2,
+                                           m_theme->m_drop_shadow, m_theme->m_transparent);
 
     nvgBeginPath(ctx);
-    nvgRect(ctx, m_pos.x() - ds, m_pos.y() - ds + 0.25 * ds, m_size.x() + 2 * ds, m_size.y() + 2 * ds);
+    nvgRect(ctx, m_pos.x() - ds, m_pos.y() - ds + 0.25f * ds,
+            m_size.x() + 2 * ds, m_size.y() + 2 * ds);
     nvgRoundedRect(ctx, m_pos.x(), m_pos.y(), m_size.x(), m_size.y(), cr);
     nvgPathWinding(ctx, NVG_HOLE);
     nvgFillPaint(ctx, shadow_paint);
     nvgFill(ctx);
 
-    /* Draw window */
     nvgBeginPath(ctx);
     nvgRoundedRect(ctx, m_pos.x(), m_pos.y(), m_size.x(), m_size.y(), cr);
-    nvgStrokeWidth(ctx, 3.f);
-    nvgStrokeColor(ctx, Color(6, 255));
-    nvgStroke(ctx);
-    nvgStrokeWidth(ctx, 2.f);
-    nvgStrokeColor(ctx, Color(89, 255));
-    nvgStroke(ctx);
     nvgFillColor(ctx, m_theme->m_window_popup);
     nvgFill(ctx);
+
+    nvgBeginPath(ctx);
+    nvgRoundedRect(ctx, m_pos.x() + 0.5f, m_pos.y() + 0.5f,
+                   m_size.x() - 1.f, m_size.y() - 1.f, cr);
+    nvgStrokeWidth(ctx, 1.f);
+    nvgStrokeColor(ctx, m_theme->m_menu_separator);
+    nvgStroke(ctx);
 
     nvgRestore(ctx);
 
@@ -771,13 +739,20 @@ void Dropdown::remove_item(int index) {
 Vector2i Dropdown::preferred_size(NVGcontext *ctx) const
 {
     int font_size = m_font_size == -1 ? m_theme->m_button_font_size : m_font_size;
+    int control_h = m_theme ? m_theme->m_control_height : (font_size + 10);
+    int min_w     = m_theme ? m_theme->m_control_min_width : 120;
     if (m_mode == ComboBox)
     {
         int w = 0;
         for (auto c : m_popup->children())
             if (auto i = dynamic_cast<MenuItem *>(c))
                 w = std::max(w, i->preferred_text_size(ctx).x());
-        return Vector2i(w + 0.5 * font_size * icon_scale(), font_size + 5);
+        // Include current caption for empty/placeholder combos
+        nvgFontSize(ctx, font_size);
+        nvgFontFace(ctx, "sans-bold");
+        w = std::max(w, (int)nvgTextBounds(ctx, 0, 0, m_caption.c_str(), nullptr, nullptr));
+        w = std::max(w, min_w);
+        return Vector2i(w + (int)(0.5f * font_size * icon_scale()) + 16, control_h);
     }
     else if (m_mode == Menu)
         return MenuItem::preferred_size(ctx) - Vector2i(4 + font_size * icon_scale(), 0);
@@ -920,74 +895,70 @@ void Dropdown::draw(NVGcontext *ctx)
 
     Widget::draw(ctx);
 
-    NVGcolor grad_top = m_theme->m_button_gradient_top_unfocused;
-    NVGcolor grad_bot = m_theme->m_button_gradient_bot_unfocused;
+    const bool menu_like = (m_mode == Menu || m_mode == Submenu);
+    const bool active =
+        m_enabled && (m_pushed ||
+                      (m_mode != Submenu && m_mouse_focus) ||
+                      (m_mode == Submenu && m_highlighted));
 
-    if (m_pushed)
-    {
-        grad_top = m_theme->m_button_gradient_top_pushed;
-        grad_bot = m_theme->m_button_gradient_bot_pushed;
-    }
-
-    if (m_mode != Submenu && m_mouse_focus && m_enabled)
-    {
-        grad_top = m_theme->m_button_gradient_top_focused;
-        grad_bot = m_theme->m_button_gradient_bot_focused;
-    }
-
-    if (m_mode == Submenu && m_highlighted && m_enabled)
-    {
-        grad_top = m_theme->m_button_gradient_top_focused;
-        grad_bot = m_theme->m_button_gradient_bot_focused;
-    }
-
-    nvgBeginPath(ctx);
-
-    nvgRoundedRect(ctx, m_pos.x() + 1, m_pos.y() + 1.0f, m_size.x() - 2, m_size.y() - 2,
-                   m_theme->m_button_corner_radius - 1);
-
-    if (m_background_color.w() != 0)
-    {
-        nvgFillColor(ctx, Color(m_background_color[0], m_background_color[1], m_background_color[2], 1.f));
+    if (menu_like) {
+        // Flat menubar / submenu title: solid rect highlight, no rounded button chrome.
+        if (active) {
+            nvgBeginPath(ctx);
+            nvgRect(ctx, m_pos.x() + 1.f, m_pos.y() + 1.f,
+                    m_size.x() - 2.f, m_size.y() - 2.f);
+            nvgFillColor(ctx, m_theme->m_button_gradient_top_focused);
+            nvgFill(ctx);
+        }
+    } else {
+        // ComboBox keeps button-like chrome (slightly flatter than before).
+        NVGcolor grad_top = m_theme->m_button_gradient_top_unfocused;
+        NVGcolor grad_bot = m_theme->m_button_gradient_bot_unfocused;
+        if (m_pushed) {
+            grad_top = m_theme->m_button_gradient_top_pushed;
+            grad_bot = m_theme->m_button_gradient_bot_pushed;
+        } else if (m_mouse_focus && m_enabled) {
+            grad_top = m_theme->m_button_gradient_top_focused;
+            grad_bot = m_theme->m_button_gradient_bot_focused;
+        }
+        float cr = (float)std::max(0, m_theme->m_button_corner_radius);
+        nvgBeginPath(ctx);
+        nvgRoundedRect(ctx, m_pos.x() + 1, m_pos.y() + 1.0f, m_size.x() - 2, m_size.y() - 2, cr);
+        if (m_background_color.w() != 0) {
+            nvgFillColor(ctx, Color(m_background_color[0], m_background_color[1],
+                                    m_background_color[2], 1.f));
+            nvgFill(ctx);
+        }
+        NVGpaint bg = nvgLinearGradient(ctx, m_pos.x(), m_pos.y(), m_pos.x(),
+                                        m_pos.y() + m_size.y(), grad_top, grad_bot);
+        nvgFillPaint(ctx, bg);
         nvgFill(ctx);
-        if (m_pushed)
-        {
-            grad_top.a = grad_bot.a = 0.8f;
-        }
-        else
-        {
-            double v   = 1 - m_background_color.w();
-            grad_top.a = grad_bot.a = m_enabled ? v : v * .5f + .5f;
+
+        if (m_theme->m_border_dark.w() > 0) {
+            nvgBeginPath(ctx);
+            nvgRoundedRect(ctx, m_pos.x() + 0.5f, m_pos.y() + 0.5f,
+                           m_size.x() - 1, m_size.y() - 1, cr);
+            nvgStrokeWidth(ctx, 1.0f);
+            nvgStrokeColor(ctx, m_theme->m_border_dark);
+            nvgStroke(ctx);
         }
     }
-
-    NVGpaint bg = nvgLinearGradient(ctx, m_pos.x(), m_pos.y(), m_pos.x(), m_pos.y() + m_size.y(), grad_top, grad_bot);
-
-    nvgFillPaint(ctx, bg);
-    nvgFill(ctx);
-
-    nvgBeginPath(ctx);
-    nvgStrokeWidth(ctx, 1.0f);
-    nvgRoundedRect(ctx, m_pos.x() + 0.5f, m_pos.y() + (m_pushed ? 0.5f : 1.5f), m_size.x() - 1,
-                   m_size.y() - 1 - (m_pushed ? 0.0f : 1.0f), m_theme->m_button_corner_radius);
-    nvgStrokeColor(ctx, m_theme->m_border_light);
-    nvgStroke(ctx);
-
-    nvgBeginPath(ctx);
-    nvgRoundedRect(ctx, m_pos.x() + 0.5f, m_pos.y() + 0.5f, m_size.x() - 1, m_size.y() - 2,
-                   m_theme->m_button_corner_radius);
-    nvgStrokeColor(ctx, m_theme->m_border_dark);
-    nvgStroke(ctx);
 
     int font_size = m_font_size == -1 ? m_theme->m_button_font_size : m_font_size;
     nvgFontSize(ctx, font_size);
-    nvgFontFace(ctx, "sans-bold");
+    nvgFontFace(ctx, "sans");
 
     Vector2f center = Vector2f(m_pos) + Vector2f(m_size) * 0.5f;
     Vector2f text_pos(m_pos.x() + 10, center.y() - 1);
-    NVGcolor text_color = m_text_color.w() == 0 ? m_theme->m_text_color : m_text_color;
+    NVGcolor text_color;
     if (!m_enabled)
         text_color = m_theme->m_disabled_text_color;
+    else if (menu_like && active)
+        text_color = m_theme->m_button_text_on_solid;
+    else if (m_text_color.w() != 0)
+        text_color = m_text_color;
+    else
+        text_color = m_theme->m_text_color;
 
     // add an icon to the left only for submenus
     if (m_mode == Submenu)
@@ -1013,10 +984,8 @@ void Dropdown::draw(NVGcontext *ctx)
     nvgFontSize(ctx, font_size);
     nvgFontFace(ctx, "sans");
     nvgTextAlign(ctx, NVG_ALIGN_LEFT | NVG_ALIGN_MIDDLE);
-    nvgFillColor(ctx, m_theme->m_text_color_shadow);
-    nvgText(ctx, text_pos.x(), text_pos.y(), m_caption.c_str(), nullptr);
     nvgFillColor(ctx, text_color);
-    nvgText(ctx, text_pos.x(), text_pos.y() + 1, m_caption.c_str(), nullptr);
+    nvgText(ctx, text_pos.x(), text_pos.y(), m_caption.c_str(), nullptr);
 
     if (m_mode != Menu)
     {
@@ -1036,35 +1005,152 @@ void Dropdown::draw(NVGcontext *ctx)
     }
 }
 
+void MenuBar::sync_menubar_theme(Theme *source) {
+    ThemeMode mode = source ? source->mode() : ThemeMode::Dark;
+    if (!m_menu_theme) {
+        m_menu_theme = new Theme(screen()->nvg_context(), mode);
+    } else if (m_menu_theme->mode() != mode) {
+        m_menu_theme->set_mode(mode);
+    } else if (source) {
+        // Palette may have been customized; copy menubar-related colors from source.
+        m_menu_theme->m_menubar_fill           = source->m_menubar_fill;
+        m_menu_theme->m_menubar_button_focused = source->m_menubar_button_focused;
+        m_menu_theme->m_menu_popup_fill        = source->m_menu_popup_fill;
+        m_menu_theme->m_menu_separator         = source->m_menu_separator;
+        m_menu_theme->m_text_color             = source->m_text_color;
+        m_menu_theme->m_disabled_text_color    = source->m_disabled_text_color;
+        m_menu_theme->m_icon_color             = source->m_icon_color;
+        m_menu_theme->m_text_secondary         = source->m_text_secondary;
+        m_menu_theme->m_accent_color           = source->m_accent_color;
+    }
+    // Re-copy full palette on mode change is already done by set_mode.
+    // Always reapply menubar geometry + ghost-button look.
+    if (source && m_menu_theme->mode() == source->mode()) {
+        // Keep text/icons in sync with the parent palette after configure.
+        m_menu_theme->m_text_color          = source->m_text_color;
+        m_menu_theme->m_disabled_text_color = source->m_disabled_text_color;
+        m_menu_theme->m_icon_color          = source->m_icon_color;
+        m_menu_theme->m_text_secondary      = source->m_text_secondary;
+        m_menu_theme->m_menubar_fill           = source->m_menubar_fill;
+        m_menu_theme->m_menubar_button_focused = source->m_menubar_button_focused;
+        m_menu_theme->m_menu_popup_fill        = source->m_menu_popup_fill;
+    }
+    m_menu_theme->configure_as_menubar();
+}
+
+int MenuBar::strip_height() const
+{
+    return m_theme ? std::max(menu_item_height + 4, m_theme->m_button_font_size + 12)
+                   : menu_item_height + 4;
+}
+
+void MenuBar::sync_strip_geometry()
+{
+    int bar_h = strip_height();
+    int w = 40;
+    if (m_parent && m_parent->width() > 0)
+        w = m_parent->width();
+    set_position(Vector2i(0, 0));
+    set_size(Vector2i(w, bar_h));
+    // Lock height; allow width to follow parent on resize (not frozen at create-time max).
+    set_min_size(Vector2i(0, bar_h));
+    set_max_size(Vector2i(std::max(w, 10000), bar_h));
+}
+
 MenuBar::MenuBar(Widget *parent, const string &title) : Window(parent, title)
 {
-    static auto menu_theme                      = new Theme(screen()->nvg_context());
-    menu_theme->m_standard_font_size            = 18;
-    menu_theme->m_button_font_size              = 17;
-    menu_theme->m_text_box_font_size            = 16;
-    menu_theme->m_window_corner_radius          = 0;
-    menu_theme->m_window_fill_unfocused         = Color(25, 255);
-    menu_theme->m_window_fill_focused           = Color(25, 255);
-    menu_theme->m_drop_shadow                   = Color(0, 100);
-    menu_theme->m_window_header_height          = 0;
-    menu_theme->m_window_drop_shadow_size       = 0;
-    menu_theme->m_button_corner_radius          = 4;
-    menu_theme->m_border_light                  = menu_theme->m_transparent;
-    menu_theme->m_border_dark                   = menu_theme->m_transparent;
-    menu_theme->m_button_gradient_top_focused   = Color(77, 124, 233, 255);
-    menu_theme->m_button_gradient_bot_focused   = menu_theme->m_button_gradient_top_focused;
-    menu_theme->m_button_gradient_top_pushed    = menu_theme->m_button_gradient_top_focused;
-    menu_theme->m_button_gradient_bot_pushed    = menu_theme->m_button_gradient_top_focused;
-    menu_theme->m_button_gradient_top_unfocused = menu_theme->m_transparent;
-    menu_theme->m_button_gradient_bot_unfocused = menu_theme->m_transparent;
-    menu_theme->m_window_popup                  = Color(38, 255);
-    menu_theme->m_text_color_shadow             = menu_theme->m_transparent;
+    // Derive the menubar skin from the parent/screen theme (light/dark aware).
+    Theme *source = parent && parent->theme() ? parent->theme()
+                    : (screen() ? screen()->theme() : nullptr);
+    sync_menubar_theme(source);
+    Window::set_theme(m_menu_theme.get());
 
-    set_theme(menu_theme);
-    set_position(nanogui::Vector2i(0, 0));
     set_layout(new BoxLayout(Orientation::Horizontal, Alignment::Middle, 2, 0));
+    set_draw_shadow(false);
+    set_can_move(false);
+    set_can_snap(false);
+    set_resizable(false);
+    sync_strip_geometry();
     // Menus are hover/keyboard interactive; never retain a frozen display list.
     set_cached(false);
+}
+
+Vector2i MenuBar::preferred_size(NVGcontext *ctx) const
+{
+    Vector2i ps = Window::preferred_size(ctx);
+    int bar_h = strip_height();
+    int w = (m_parent && m_parent->width() > 0) ? m_parent->width()
+                                                : std::max(ps.x(), 40);
+    return Vector2i(w, bar_h);
+}
+
+void MenuBar::perform_layout(NVGcontext *ctx)
+{
+    sync_strip_geometry();
+    Window::perform_layout(ctx);
+}
+
+void MenuBar::draw(NVGcontext *ctx)
+{
+    // Keep spanning the parent even if a resize path skips perform_layout.
+    if (m_parent && m_parent->width() > 0 && m_size.x() != m_parent->width())
+        sync_strip_geometry();
+
+    Window::draw(ctx);
+
+    // Visual separation from the screen background (especially light theme):
+    // soft drop under the strip + 1px hairline along the bottom edge.
+    const float y1 = m_pos.y() + m_size.y();
+    const float shadow_h = 5.f;
+    nvgSave(ctx);
+    nvgResetScissor(ctx);
+
+    NVGpaint shadow = nvgLinearGradient(
+        ctx, 0, y1, 0, y1 + shadow_h,
+        m_theme ? m_theme->m_drop_shadow : Color(0, 50),
+        m_theme ? m_theme->m_transparent : Color(0, 0));
+    nvgBeginPath(ctx);
+    nvgRect(ctx, m_pos.x(), y1, (float)m_size.x(), shadow_h);
+    nvgFillPaint(ctx, shadow);
+    nvgFill(ctx);
+
+    nvgBeginPath(ctx);
+    nvgMoveTo(ctx, m_pos.x(), y1 - 0.5f);
+    nvgLineTo(ctx, m_pos.x() + m_size.x(), y1 - 0.5f);
+    nvgStrokeWidth(ctx, 1.f);
+    Color edge = m_theme ? m_theme->m_menu_separator : Color(0, 60);
+    // In light mode the separator may be light gray on light fill; ensure a
+    // slightly darker edge so the bar doesn't bleed into the background.
+    if (m_theme && m_theme->mode() == ThemeMode::Light)
+        edge = Color(180, 182, 188, 255);
+    nvgStrokeColor(ctx, edge);
+    nvgStroke(ctx);
+
+    nvgRestore(ctx);
+}
+
+void MenuBar::set_theme(Theme *theme) {
+    // `theme` is the parent/screen theme (or nullptr during a refresh pass).
+    // Keep a dedicated menubar skin that follows its mode/palette — never
+    // mutate the caller's Theme with configure_as_menubar().
+    if (theme)
+        sync_menubar_theme(theme);
+    else if (!m_menu_theme)
+        return; // nothing to apply yet
+
+    // Force re-propagation even when m_menu_theme pointer is unchanged so
+    // menu captions pick up new text colors after a mode switch.
+    if (m_theme.get() == m_menu_theme.get()) {
+        m_theme = nullptr;
+        for (auto *child : m_children)
+            child->set_theme(nullptr);
+    }
+    Window::set_theme(m_menu_theme.get());
+    if (m_cached)
+        cache_dirty();
+    for (auto *child : m_children)
+        if (child->cached())
+            child->cache_dirty();
 }
 
 Dropdown *MenuBar::add_menu(const string &name)
