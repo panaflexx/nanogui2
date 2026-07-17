@@ -211,7 +211,7 @@ void fons__tt_getFontVMetrics(FONSttFontImpl *font, int *ascent, int *descent, i
                 raw_ascent = (int)(font->font->size->metrics.ascender >> 6);
                 raw_descent = (int)(font->font->size->metrics.descender >> 6);
                 raw_height = (int)(font->font->size->metrics.height >> 6);
-                dprintf("fons__tt_getFontVMetrics: Selected color strike 0; raw metrics updated.\n");
+                //dprintf("fons__tt_getFontVMetrics: Selected color strike 0; raw metrics updated.\n");
             }
         } else if (!FT_IS_SCALABLE(font->font)) {
             // Non-color bitmap font: Select closest strike to a default size (e.g., 32px).
@@ -233,7 +233,7 @@ void fons__tt_getFontVMetrics(FONSttFontImpl *font, int *ascent, int *descent, i
                     raw_ascent = (int)(font->font->size->metrics.ascender >> 6);
                     raw_descent = (int)(font->font->size->metrics.descender >> 6);
                     raw_height = (int)(font->font->size->metrics.height >> 6);
-                    dprintf("fons__tt_getFontVMetrics: Selected closest bitmap strike %d for size ~%d; raw metrics updated.\n", closest, default_size);
+                    //dprintf("fons__tt_getFontVMetrics: Selected closest bitmap strike %d for size ~%d; raw metrics updated.\n", closest, default_size);
                 }
             }
         } else {
@@ -247,7 +247,7 @@ void fons__tt_getFontVMetrics(FONSttFontImpl *font, int *ascent, int *descent, i
                 raw_ascent = (int)(font->font->size->metrics.ascender >> 6);
                 raw_descent = (int)(font->font->size->metrics.descender >> 6);
                 raw_height = (int)(font->font->size->metrics.height >> 6);
-                dprintf("fons__tt_getFontVMetrics: Set pixel size %u for scalable font; raw metrics updated.\n", ps);
+                //dprintf("fons__tt_getFontVMetrics: Set pixel size %u for scalable font; raw metrics updated.\n", ps);
             }
         }
         // If selection failed, fall back to defaults (handled downstream in fonsAddFontMem).
@@ -1873,7 +1873,7 @@ float fonsTextBounds(FONScontext* stash,
                 if (q.y0 > maxy) maxy = q.y0;
             }
         } else {
-			dprintf("fonsTextBounds: glyph is null\n");
+			//dprintf("fonsTextBounds: glyph is null\n");
 		}
         prevGlyphIndex = glyph != NULL ? glyph->index : -1;
     }
@@ -1988,7 +1988,7 @@ void fonsDeleteInternal(FONScontext* stash)
     if (stash->scratch) free(stash->scratch);
     free(stash);
     fons__tt_done(stash);
-	dprintf("fonsDeleteInternal()\n");
+	//dprintf("fonsDeleteInternal()\n");
 }
 
 void fonsSetErrorCallback(FONScontext* stash, void (*callback)(void* uptr, int error, int val), void* uptr)
