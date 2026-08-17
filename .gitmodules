@@ -13,3 +13,6 @@
 [submodule "ext/quickjs-ng"]
 	path = ext/quickjs-ng
 	url = https://github.com/quickjs-ng/quickjs.git
+[submodule "ext/gumbo"]
+	path = ext/gumbo
+	url = https://codeberg.org/gumbo-parser/gumbo-parser
