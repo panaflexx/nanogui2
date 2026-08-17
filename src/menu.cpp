@@ -750,6 +750,17 @@ Vector2i Dropdown::preferred_size(NVGcontext *ctx) const
 
 void Dropdown::update_popup_geometry() const
 {
+    /* A popup created dynamically (e.g. inside a window opened after the
+     * screen's initial layout pass) may never have been sized or laid
+     * out, and would render as a zero-size, unclickable frame.  Menus
+     * size to their content, so (re)apply the preferred size and lay out
+     * the items every time the popup is opened. */
+    NVGcontext *nvg = screen()->nvg_context();
+    Vector2i   pref = m_popup->preferred_size(nvg);
+    if (m_popup->size() != pref)
+        m_popup->set_size(pref);
+    m_popup->perform_layout(nvg);
+
     int      font_size = m_font_size == -1 ? m_theme->m_button_font_size : m_font_size;
     Vector2i offset;
     if (m_mode == ComboBox)

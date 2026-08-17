@@ -306,6 +306,48 @@ void TextEditor::set_caret(Position p, bool extend_selection) {
     if (caret_callback) caret_callback(m_caret);
 }
 
+void TextEditor::select_word(Position p) {
+    if (paragraph_count() == 0) return;
+    if (p.paragraph >= paragraph_count())
+        p.paragraph = paragraph_count() - 1;
+    const std::string text = m_doc->paragraphs[p.paragraph]->plain_text();
+    if (text.empty()) { set_caret({p.paragraph, 0}); return; }
+
+    size_t c = p.column > text.size() ? text.size() : p.column;
+    // Same character classes as keyboard word movement: bytes of multibyte
+    // UTF-8 characters all have the high bit set, so byte-wise expansion
+    // never splits a codepoint.
+    auto is_word = [](char ch) {
+        return std::isalnum((unsigned char)ch) || ch == '_' ||
+               (ch & 0x80);
+    };
+    // Clicking past the end of the text classifies the previous byte.
+    bool word = is_word(text[c == text.size() ? c - 1 : c]);
+    size_t start = c, end = c;
+    while (start > 0 && is_word(text[start - 1]) == word) --start;
+    while (end < text.size() && is_word(text[end]) == word) ++end;
+
+    set_caret({p.paragraph, start});
+    set_caret({p.paragraph, end}, /*extend_selection*/ true);
+}
+
+void TextEditor::select_paragraph(size_t paragraph) {
+    if (paragraph_count() == 0) return;
+    if (paragraph >= paragraph_count())
+        paragraph = paragraph_count() - 1;
+    set_caret({paragraph, 0});
+    set_caret({paragraph, m_doc->paragraphs[paragraph]->byte_length()},
+              /*extend_selection*/ true);
+}
+
+void TextEditor::select_all() {
+    if (paragraph_count() == 0) return;
+    size_t last = paragraph_count() - 1;
+    set_caret({0, 0});
+    set_caret({last, m_doc->paragraphs[last]->byte_length()},
+              /*extend_selection*/ true);
+}
+
 // ---------------------------------------------------------------------------
 // Editing primitives
 // ---------------------------------------------------------------------------
@@ -856,7 +898,30 @@ bool TextEditor::mouse_button_event(const Vector2i& p, int button, bool down,
         if (ctx) {
             Vector2i rel = p - m_pos;
             Position np = position_from_point(ctx, rel);
-            set_caret(np, (modifiers & GLFW_MOD_SHIFT) != 0);
+
+            /* Multi-click selection: rapid successive clicks cycle through
+               caret (1), word (2), paragraph (3) and whole document (4).
+               A shift-click always just extends the selection. */
+            double now = glfwGetTime();
+            bool near_last = (std::abs(rel.x() - m_last_click_pos.x()) +
+                              std::abs(rel.y() - m_last_click_pos.y())) <= 6;
+            if (m_last_click_time >= 0.0 &&
+                now - m_last_click_time < 0.4 && near_last &&
+                !(modifiers & GLFW_MOD_SHIFT)) {
+                if (m_click_count < 4)
+                    m_click_count++;
+            } else {
+                m_click_count = 1;
+            }
+            m_last_click_time = now;
+            m_last_click_pos  = rel;
+
+            switch (m_click_count) {
+                case 1:  set_caret(np, (modifiers & GLFW_MOD_SHIFT) != 0); break;
+                case 2:  select_word(np);            break;
+                case 3:  select_paragraph(np.paragraph); break;
+                default: select_all();               break;
+            }
         }
         return true;
     }

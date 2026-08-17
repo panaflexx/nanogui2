@@ -143,7 +143,7 @@ bool SmtpClient::send(const SmtpConfig &cfg,
                       const std::string &subject,
                       const std::string &body_text,
                       const std::string &in_reply_to,
-                      bool markdown,
+                      MailFormat format,
                       std::string &err) {
     close();
     char ebuf[512] = {0};
@@ -290,9 +290,19 @@ bool SmtpClient::send(const SmtpConfig &cfg,
         msg += "References: " + in_reply_to + "\r\n";
     }
     msg += "MIME-Version: 1.0\r\n";
-    msg += markdown ? "Content-Type: text/plain; charset=UTF-8; "
-                      "markup=markdown\r\n"
-                    : "Content-Type: text/plain; charset=UTF-8\r\n";
+    switch (format) {
+        case MailFormat::Markdown:
+            msg += "Content-Type: text/plain; charset=UTF-8; "
+                   "markup=markdown\r\n";
+            break;
+        case MailFormat::Html:
+            msg += "Content-Type: text/html; charset=UTF-8\r\n";
+            break;
+        case MailFormat::Plain:
+        default:
+            msg += "Content-Type: text/plain; charset=UTF-8\r\n";
+            break;
+    }
     msg += "Content-Transfer-Encoding: 8bit\r\n";
     msg += "\r\n";
 

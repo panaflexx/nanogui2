@@ -341,7 +341,11 @@ bool TextBox::mouse_button_event(const Vector2i &p, int button, bool down,
             }
             m_last_click = time;
         } else {
-            m_mouse_down_pos = Vector2i(-1, -1);
+            /* Keep m_mouse_down_pos for update_cursor() (called from draw):
+               press and release are often processed in the same event batch
+               before the next draw, and update_cursor() is what converts the
+               click x position into a cursor index.  Clearing it here would
+               leave the cursor at position 0 after every click. */
             m_mouse_drag_pos = Vector2i(-1, -1);
         }
         return true;
@@ -408,7 +412,12 @@ bool TextBox::focus_event(bool focused) {
         if (focused) {
             m_value_temp = m_value;
             m_committed = false;
-            m_cursor_pos = 0;
+            /* -2 = "end of text" sentinel consumed by update_cursor(), so
+               tabbing into the box places the cursor after the last
+               character.  A mouse press overrides this via m_mouse_down_pos
+               before the next draw, so clicks still position the cursor at
+               the click point. */
+            m_cursor_pos = -2;
         } else {
             if (m_valid_format) {
                 if (m_value_temp == "")
@@ -425,6 +434,7 @@ bool TextBox::focus_event(bool focused) {
             m_cursor_pos = -1;
             m_selection_pos = -1;
             m_text_offset = 0;
+            m_mouse_down_pos = Vector2i(-1, -1);
         }
 
         m_valid_format = (m_value_temp == "") || check_format(m_value_temp, m_format);

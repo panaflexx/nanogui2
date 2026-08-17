@@ -126,6 +126,13 @@ public:
     std::pair<Position, Position> selection() const;
     std::string selected_text() const;
 
+    /// Select the word (or whitespace/punctuation run) under `p`.
+    void select_word(Position p);
+    /// Select the whole paragraph (without its trailing newline).
+    void select_paragraph(size_t paragraph);
+    /// Select the entire document.
+    void select_all();
+
     void scroll_to_caret();
 
     // -------------------------------------------------------------------
@@ -273,6 +280,11 @@ protected:
     // caret + selection (m_anchor == m_caret means no selection)
     Position m_caret;
     Position m_anchor;
+
+    // multi-click selection state (1 = caret, 2 = word, 3 = paragraph, 4 = all)
+    double  m_last_click_time = -1.0;
+    int     m_click_count     = 0;
+    Vector2i m_last_click_pos = Vector2i(0, 0);
 
     // Pending typing attributes (see toggle_style): when active, inserted
     // text gets m_typing_style instead of inheriting the containing run's.

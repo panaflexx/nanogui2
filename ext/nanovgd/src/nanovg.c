@@ -905,6 +905,29 @@ static void nvg__transformVerts(NVGvertex* dst, const NVGvertex* src, int n, con
 	}
 }
 
+// Intersect two scissors that live in the same coordinate space. The result is
+// an axis-aligned approximation, mirroring nvgIntersectScissor().
+static NVGscissor nvg__scissorIntersect(const NVGscissor* a, const NVGscissor* b)
+{
+	NVGscissor r;
+	float aex = a->extent[0]*nvg__absf(a->xform[0]) + a->extent[1]*nvg__absf(a->xform[2]);
+	float aey = a->extent[0]*nvg__absf(a->xform[1]) + a->extent[1]*nvg__absf(a->xform[3]);
+	float bex = b->extent[0]*nvg__absf(b->xform[0]) + b->extent[1]*nvg__absf(b->xform[2]);
+	float bey = b->extent[0]*nvg__absf(b->xform[1]) + b->extent[1]*nvg__absf(b->xform[3]);
+	float minx = nvg__maxf(a->xform[4]-aex, b->xform[4]-bex);
+	float miny = nvg__maxf(a->xform[5]-aey, b->xform[5]-bey);
+	float maxx = nvg__minf(a->xform[4]+aex, b->xform[4]+bex);
+	float maxy = nvg__minf(a->xform[5]+aey, b->xform[5]+bey);
+	if (maxx < minx) maxx = minx;
+	if (maxy < miny) maxy = miny;
+	nvgTransformIdentity(r.xform);
+	r.xform[4] = (minx + maxx) * 0.5f;
+	r.xform[5] = (miny + maxy) * 0.5f;
+	r.extent[0] = (maxx - minx) * 0.5f;
+	r.extent[1] = (maxy - miny) * 0.5f;
+	return r;
+}
+
 // useStateXform=0: geometry is already in the destination space (per-frame IR).
 // useStateXform=1: list is in local space; apply the current state xform/scissor/alpha
 // so widget-local retained lists can be drawn under nvgTranslate/etc.
@@ -928,12 +951,22 @@ static void nvg__drawListSubmit(NVGcontext* ctx, const NVGdrawList* list, int us
 		float bounds[4];
 		const NVGscissor* scissorPtr;
 
-		// When the parent has an active scissor (typical for widget trees),
-		// prefer it so retained lists clip correctly inside scroll panels etc.
-		if (useStateXform && state->scissor.extent[0] >= 0.0f)
-			scissorPtr = &state->scissor;
-		else
-			scissorPtr = &scissor;
+		// Combine the recorded scissor with the current one: bring the
+		// list-local recorded scissor into the current space, then intersect
+		// with the parent's scissor so retained lists stay clipped both by
+		// their own clip rects (e.g. TextBox text) and by the container
+		// they are submitted under (e.g. scroll panels, windows).
+		if (useStateXform) {
+			if (scissor.extent[0] >= 0.0f && applyXform)
+				nvgTransformPremultiply(scissor.xform, state->xform);
+			if (state->scissor.extent[0] >= 0.0f) {
+				if (scissor.extent[0] >= 0.0f)
+					scissor = nvg__scissorIntersect(&scissor, &state->scissor);
+				else
+					scissor = state->scissor;
+			}
+		}
+		scissorPtr = &scissor;
 
 		if (useStateXform && applyXform)
 			nvgTransformPremultiply(paint.xform, state->xform);

@@ -17,21 +17,28 @@ struct SmtpConfig {
     std::string password;
 };
 
+/* Body format for SmtpClient::send. */
+enum class MailFormat {
+    Plain,      /* text/plain */
+    Markdown,   /* text/plain; markup=markdown (MailMate convention: the
+                   body is plain text holding Markdown) */
+    Html        /* text/html */
+};
+
 class SmtpClient {
 public:
     SmtpClient() = default;
     ~SmtpClient();
 
     /* Connect, authenticate if credentials are given, and send one
-     * plain-text message.  from/to are bare addresses.  in_reply_to is an
-     * optional Message-ID the message replies to (sets In-Reply-To and
-     * References).  markdown appends markup=markdown to the Content-Type
-     * (the MailMate convention: body is plain text holding Markdown).
+     * message.  from/to are bare addresses.  in_reply_to is an optional
+     * Message-ID the message replies to (sets In-Reply-To and
+     * References).  format selects the Content-Type (see MailFormat).
      * Returns false with a human-readable err on failure. */
     bool send(const SmtpConfig &cfg,
               const std::string &from, const std::string &to,
               const std::string &subject, const std::string &body_text,
-              const std::string &in_reply_to, bool markdown,
+              const std::string &in_reply_to, MailFormat format,
               std::string &err);
 
 private:

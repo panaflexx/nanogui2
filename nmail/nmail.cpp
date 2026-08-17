@@ -1392,6 +1392,120 @@ static std::string document_to_markdown(const Document &doc) {
 }
 
 // ---------------------------------------------------------------------------
+// document_to_html — serialize a Document to an HTML email body.  Mirrors
+// document_to_markdown's structure detection (headings by font size,
+// all-monospace paragraphs -> <pre>, isBullet -> <ul>/<li> with nesting by
+// indent level, leftIndent -> <blockquote>, isRule -> <hr>).
+// ---------------------------------------------------------------------------
+static std::string html_escape(const std::string &s) {
+    std::string out;
+    out.reserve(s.size());
+    for (char c : s) {
+        switch (c) {
+            case '&': out += "&amp;";  break;
+            case '<': out += "&lt;";   break;
+            case '>': out += "&gt;";   break;
+            case '"': out += "&quot;"; break;
+            default:  out += c;        break;
+        }
+    }
+    return out;
+}
+
+/* Inline runs -> HTML spans.  In-paragraph newlines become <br>.
+ * `in_heading` suppresses <strong> (headings are already bold). */
+static std::string html_inline(const Paragraph &para, bool in_heading = false) {
+    std::string out;
+    for (const Text &r : para.runs) {
+        if (r.content.empty()) continue;
+        std::string c = html_escape(r.content);
+        size_t pos = 0;
+        while ((pos = c.find('\n', pos)) != std::string::npos) {
+            c.replace(pos, 1, "<br>");
+            pos += 4;
+        }
+        std::string open, close;
+        if (r.style.monospace) { open += "<code>";    close = "</code>"    + close; }
+        if (r.style.bold && !in_heading) { open += "<strong>";  close = "</strong>"  + close; }
+        if (r.style.italic)    { open += "<em>";      close = "</em>"      + close; }
+        if (r.style.underline) { open += "<u>";       close = "</u>"       + close; }
+        out += open + c + close;
+    }
+    return out;
+}
+
+static std::string document_to_html(const Document &doc) {
+    std::string out = "<!DOCTYPE html>\n<html><body>\n";
+    int  list_depth = 0;   // number of open <ul> elements
+    bool in_pre     = false;
+
+    auto close_lists = [&]() {
+        while (list_depth > 0) { out += "</ul>\n"; --list_depth; }
+    };
+    auto close_pre = [&]() {
+        if (in_pre) { out += "</code></pre>\n"; in_pre = false; }
+    };
+
+    for (const auto &para : doc.paragraphs) {
+        /* Code block: all-monospace paragraph (blank code lines included).
+         * Consecutive ones share a single <pre>. */
+        bool is_code = !para->isRule && !para->isBullet &&
+                       !para->runs.empty();
+        for (const Text &r : para->runs)
+            if (!r.style.monospace) { is_code = false; break; }
+        if (is_code) {
+            close_lists();
+            if (!in_pre) { out += "<pre><code>"; in_pre = true; }
+            else         out += '\n';
+            std::string t = para->plain_text();
+            while (!t.empty() && t.back() == '\n') t.pop_back();
+            out += html_escape(t);
+            continue;
+        }
+        close_pre();
+
+        /* Bullet list item, nesting by indent level (16px per level). */
+        if (para->isBullet) {
+            int lvl = (int)(para->leftIndent / 16.0f + 0.5f) - 1;
+            if (lvl < 0) lvl = 0;
+            int target = lvl + 1;
+            while (list_depth < target) { out += "<ul>\n";  ++list_depth; }
+            while (list_depth > target) { out += "</ul>\n"; --list_depth; }
+            out += "<li>" + html_inline(*para) + "</li>\n";
+            continue;
+        }
+        close_lists();
+
+        if (para->isRule) { out += "<hr>\n"; continue; }
+
+        /* Heading detection: same size ratios as document_to_markdown. */
+        int level = 0;
+        if (!para->runs.empty() && para->runs[0].style.bold) {
+            float fs = para->runs[0].style.fontSize;
+            if (fs >= 24.0f)       level = 1;
+            else if (fs >= 18.5f)  level = 2;
+            else if (fs >= 16.75f) level = 3;
+        }
+
+        std::string content = html_inline(*para, level > 0);
+        if (content.empty()) continue;   // blank paragraphs add nothing
+
+        if (level) {
+            out += "<h" + std::to_string(level) + ">" + content +
+                   "</h" + std::to_string(level) + ">\n";
+        } else if (para->leftIndent > 0.0f) {
+            out += "<blockquote><p>" + content + "</p></blockquote>\n";
+        } else {
+            out += "<p>" + content + "</p>\n";
+        }
+    }
+    close_pre();
+    close_lists();
+    out += "</body></html>\n";
+    return out;
+}
+
+// ---------------------------------------------------------------------------
 // html_to_document — render a text/html part into a Document via Gumbo
 // ---------------------------------------------------------------------------
 
@@ -2253,15 +2367,26 @@ public:
         buttons->set_layout(new BoxLayout(Orientation::Horizontal,
                                           Alignment::Middle, 0, 8));
 
-        /* MailMate-style: body is sent as plain text holding Markdown,
-         * tagged markup=markdown so aware clients render it styled. */
-        CheckBox *md_box = new CheckBox(buttons, "Markdown");
-        md_box->set_checked(true);
-        md_box->set_tooltip("Send as plain text with markup=markdown; "
-                            "Markdown-aware clients render it styled");
+        /* Send format: plain text, Markdown (MailMate-style markup=
+         * markdown), or a generated HTML body. */
+        new Label(buttons, "Format:", "sans-bold");
+        Dropdown *fmt_box = new Dropdown(buttons, Dropdown::ComboBox,
+                                         "Format");
+        /* NB: use the 5-arg add_item — the 2-arg overload installs no
+         * callback, so clicking an item would never update the selection. */
+        fmt_box->add_item({"Plain text", "fmt_plain"}, FA_FONT,
+                          [] {}, {{0, 0}}, true);
+        fmt_box->add_item({"Markdown", "fmt_markdown"}, FA_HASHTAG,
+                          [] {}, {{0, 0}}, true);
+        fmt_box->add_item({"HTML", "fmt_html"}, FA_CODE,
+                          [] {}, {{0, 0}}, true);
+        fmt_box->set_selected_index(1);   // Markdown
+        fmt_box->set_tooltip(
+            "Plain: raw text.  Markdown: plain text with markup=markdown; "
+            "aware clients render it styled.  HTML: generated text/html");
 
         Button *send = new Button(buttons, "Send", FA_PAPER_PLANE);
-        send->set_callback([this, win, send, to, subj, body, md_box]() {
+        send->set_callback([this, win, send, to, subj, body, fmt_box]() {
             std::string to_s  = to->value();
             std::string sub_s = subj->value();
             if (to_s.empty()) {
@@ -2272,10 +2397,15 @@ public:
                 return;
             }
             send->set_enabled(false);
-            std::string text = md_box->checked()
-                ? document_to_markdown(*body->document())
-                : body->plain_text();
-            send_reply(win, send, to_s, sub_s, text, md_box->checked());
+            int fmt = fmt_box->selected_index();
+            if (fmt < 0) fmt = 1;   // default to Markdown
+            MailFormat format = fmt == 0 ? MailFormat::Plain
+                              : fmt == 2 ? MailFormat::Html
+                                         : MailFormat::Markdown;
+            std::string text = fmt == 0 ? body->plain_text()
+                             : fmt == 2 ? document_to_html(*body->document())
+                                        : document_to_markdown(*body->document());
+            send_reply(win, send, to_s, sub_s, text, format);
         });
 
         Button *cancel = new Button(buttons, "Cancel", FA_TIMES);
@@ -2289,7 +2419,7 @@ public:
      * IMAP worker); the result is marshalled back with nanogui::async. */
     void send_reply(Window *win, Button *send_btn,
                     const std::string &to, const std::string &subject,
-                    const std::string &body, bool markdown) {
+                    const std::string &body, MailFormat format) {
         SmtpConfig sc;
         sc.host     = m_config.smtp_host.empty() ? m_config.host
                                                  : m_config.smtp_host;
@@ -2301,10 +2431,10 @@ public:
 
         m_status->set_caption("Sending reply...");
         std::thread([this, win, send_btn, sc, from, to, subject, body,
-                     irt, markdown]() {
+                     irt, format]() {
             SmtpClient smtp;
             std::string err;
-            bool ok = smtp.send(sc, from, to, subject, body, irt, markdown,
+            bool ok = smtp.send(sc, from, to, subject, body, irt, format,
                                 err);
             nanogui::async(std::function<void()>(
                 [this, win, send_btn, ok, err]() {
