@@ -173,6 +173,11 @@ struct NVGdrawList {
 	NVGpath* pathScratch;
 	int cpathScratch;
 	float devicePxRatio;
+	// Font-atlas generation at record time.  Bumped whenever the atlas is
+	// reset (fonsResetAtlas), which invalidates all previously captured
+	// glyph UVs; retained lists recorded against an older generation must
+	// be rebuilt before submission.
+	int fontGeneration;
 };
 
 struct NVGcontext {
@@ -191,6 +196,7 @@ struct NVGcontext {
 	struct FONScontext* fs;
 	int fontImages[NVG_MAX_FONTIMAGES];
 	int fontImageIdx;
+	int fontGeneration;
 	int drawCallCount;
 	int fillTriCount;
 	int strokeTriCount;
@@ -463,6 +469,7 @@ void nvgBeginFrame(NVGcontext* ctx, float windowWidth, float windowHeight, float
 
 	nvg__setDevicePixelRatio(ctx, devicePixelRatio);
 	ctx->frameList.devicePxRatio = devicePixelRatio;
+	ctx->frameList.fontGeneration = ctx->fontGeneration;
 	nvg__drawListClear(&ctx->frameList);
 
 	ctx->params.renderViewport(ctx->params.userPtr, windowWidth, windowHeight, devicePixelRatio);
@@ -578,6 +585,7 @@ int nvgDrawListNeedsRebuild(NVGcontext* ctx, const NVGdrawList* list)
 	if (list->ncalls == 0) return 1;
 	if (ctx == NULL) return 1;
 	if (list->devicePxRatio != ctx->devicePxRatio) return 1;
+	if (list->fontGeneration != ctx->fontGeneration) return 1;
 	return 0;
 }
 
@@ -869,6 +877,7 @@ void nvgCloneDrawList(NVGdrawList* dst, const NVGdrawList* src)
 	nvg__drawListClear(dst);
 	if (src == NULL) return;
 	dst->devicePxRatio = src->devicePxRatio;
+	dst->fontGeneration = src->fontGeneration;
 	nvg__dlAppendList(dst, src, NULL);
 }
 
@@ -1051,6 +1060,7 @@ void nvgBeginDisplayList(NVGcontext* ctx, NVGdisplayList* dl)
 	nvg__flushFrameList(ctx);
 	nvgClearDrawList(dl);
 	dl->devicePxRatio = ctx->devicePxRatio;
+	dl->fontGeneration = ctx->fontGeneration;
 	ctx->recording = dl;
 }
 
@@ -3137,6 +3147,10 @@ static int nvg__allocTextAtlas(NVGcontext* ctx)
     }
     ++ctx->fontImageIdx;
     fonsResetAtlas(ctx->fs, iw, ih);
+    /* The reset wiped every glyph UV.  Retained draw/display lists recorded
+     * before this point reference stale atlas contents, so bump the
+     * generation — nvgDrawListNeedsRebuild() will force them to re-record. */
+    ++ctx->fontGeneration;
     return 1;
 }
 

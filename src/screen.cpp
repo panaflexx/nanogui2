@@ -1188,6 +1188,16 @@ bool Screen::keyboard_character_event(unsigned int codepoint) {
 }
 
 bool Screen::resize_event(const Vector2i& size) {
+    // Keep root content windows pinned to the full client area.
+    for (Widget *child : m_children) {
+        Window *w = dynamic_cast<Window *>(child);
+        if (w && w->is_root()) {
+            w->sync_root_geometry();
+            if (m_nvg_context)
+                w->perform_layout(m_nvg_context);
+        }
+    }
+
     if (m_resize_callback)
         m_resize_callback(size);
     m_redraw = true;

@@ -16,6 +16,7 @@
 #include <nanogui/icons.h>
 #include <nanogui_resources.h>
 #include <stdexcept>
+#include <algorithm>
 
 NAMESPACE_BEGIN(nanogui)
 
@@ -52,183 +53,282 @@ void Theme::set_mode(ThemeMode mode) {
 }
 
 void Theme::apply_common_metrics() {
-    m_standard_font_size            = 16;
-    m_button_font_size              = 16;
-    m_text_box_font_size            = 16;
+    // macOS Glass proportions: larger continuous radii, roomy title bars,
+    // soft deep shadows, compact but touchable controls.
+    m_standard_font_size            = 15;
+    m_button_font_size              = 15;
+    m_text_box_font_size            = 15;
     m_heading_font_size             = 20;
     m_title_font_size               = 24;
     m_caption_font_size             = 13;
     m_muted_font_size               = 12;
 
-    m_control_height                = 30;
+    m_control_height                = 28;
     m_control_min_width             = 120;
     m_control_padding_x             = 10;
     m_form_label_width              = 140;
     m_row_spacing                   = 8;
     m_section_spacing               = 16;
 
-    m_window_corner_radius          = 4;
-    m_window_header_height          = 30;
-    m_window_drop_shadow_size       = 10;
-    m_button_corner_radius          = 4;
-    m_tab_border_width              = 0.75f;
+    m_window_corner_radius          = 14;
+    m_window_header_height          = 36;
+    m_window_drop_shadow_size       = 28;
+    m_button_corner_radius          = 8;
+    m_tab_border_width              = 0.5f;
     m_tab_inner_margin              = 5;
     m_tab_min_button_width          = 20;
     m_tab_max_button_width          = 160;
     m_tab_control_width             = 20;
-    m_tab_button_horizontal_padding = 10;
-    m_tab_button_vertical_padding   = 2;
+    m_tab_button_horizontal_padding = 12;
+    m_tab_button_vertical_padding   = 6;
     m_resize_area_offset            = 10;
-    m_split_divider_width           = 4;
+    m_split_divider_width           = 1;
+    m_menu_item_corner_radius       = 6;
     m_icon_scale                    = 0.60f;
 }
 
 void Theme::apply_dark_palette() {
-    m_drop_shadow                   = Color(0, 128);
+    // macOS dark glass — deep charcoal with cool translucency and #0A84FF accent.
+    m_drop_shadow                   = Color(0, 0, 0, 110);
     m_transparent                   = Color(0, 0);
-    m_border_dark                   = Color(29, 255);
-    m_border_light                  = Color(92, 255);
-    m_border_medium                 = Color(35, 255);
+    m_border_dark                   = Color(0, 0, 0, 90);
+    m_border_light                  = Color(255, 255, 255, 40);
+    m_border_medium                 = Color(255, 255, 255, 22);
 
-    m_text_color                    = Color(255, 220);
-    m_disabled_text_color           = Color(255, 100);
-    m_text_color_shadow             = Color(0, 160);
-    m_text_secondary                = Color(200, 180);
-    m_text_heading                  = Color(230, 240);
-    m_text_muted                    = Color(170, 140);
-    m_text_accent                   = Color(100, 180, 255, 255);
+    m_text_color                    = Color(245, 245, 247, 255);
+    m_disabled_text_color           = Color(255, 255, 255, 90);
+    m_text_color_shadow             = Color(0, 0); // no hard text shadow on glass
+    m_text_secondary                = Color(174, 174, 178, 255);
+    m_text_heading                  = Color(255, 255, 255, 245);
+    m_text_muted                    = Color(142, 142, 147, 255);
+    m_text_accent                   = Color(10, 132, 255, 255);
     m_icon_color                    = m_text_color;
-    m_disabled_icon_color           = Color(120, 100);
+    m_disabled_icon_color           = Color(255, 255, 255, 70);
 
-    m_success_color                 = Color(40, 167, 69, 255);
-    m_danger_color                  = Color(220, 53, 69, 255);
+    m_success_color                 = Color(48, 209, 88, 255);
+    m_danger_color                  = Color(255, 69, 58, 255);
     m_fail_color                    = m_danger_color;
-    m_proceed_color                 = Color(52, 144, 220, 255);
-    m_warning_color                 = Color(255, 193, 7, 255);
-    m_accent_color                  = Color(64, 164, 232, 255);
+    m_proceed_color                 = Color(10, 132, 255, 255);
+    m_warning_color                 = Color(255, 214, 10, 255);
+    m_accent_color                  = Color(10, 132, 255, 255);
     m_button_text_on_solid          = Color(255, 255);
 
-    m_screen_background             = Color(48, 48, 52, 255);
+    m_glass_specular                = Color(255, 255, 255, 28);
+    m_glass_border                  = Color(255, 255, 255, 36);
+    m_focus_ring                    = Color(10, 132, 255, 160);
+    m_scrollbar_thumb               = Color(255, 255, 255, 70);
+    m_scrollbar_thumb_active        = Color(255, 255, 255, 140);
+    m_track_color                   = Color(255, 255, 255, 28);
+    m_track_fill_color              = m_accent_color;
+    m_checkbox_bg                   = Color(255, 255, 255, 22);
+    m_checkbox_border               = Color(255, 255, 255, 55);
 
-    m_button_gradient_top_focused   = Color(64, 255);
-    m_button_gradient_bot_focused   = Color(48, 255);
-    m_button_gradient_top_unfocused = Color(74, 255);
-    m_button_gradient_bot_unfocused = Color(58, 255);
-    m_button_gradient_top_pushed    = Color(41, 255);
-    m_button_gradient_bot_pushed    = Color(29, 255);
+    // Cool deep desktop wallpaper tone
+    m_screen_background             = Color(28, 28, 32, 255);
 
-    m_window_fill_unfocused         = Color(43, 230);
-    m_window_fill_focused           = Color(45, 230);
-    m_window_title_unfocused        = Color(220, 160);
-    m_window_title_focused          = Color(255, 190);
-    m_window_header_gradient_top    = Color(74, 255);
-    m_window_header_gradient_bot    = Color(58, 255);
-    m_window_header_sep_top         = m_border_light;
-    m_window_header_sep_bot         = m_border_dark;
-    m_window_popup                  = Color(50, 255);
-    m_window_popup_transparent      = Color(50, 0);
+    // Buttons: frosted translucent slabs (near-flat top/bot = soft glass, not bevel)
+    m_button_gradient_top_focused   = Color(255, 255, 255, 48);
+    m_button_gradient_bot_focused   = Color(255, 255, 255, 32);
+    m_button_gradient_top_unfocused = Color(255, 255, 255, 28);
+    m_button_gradient_bot_unfocused = Color(255, 255, 255, 18);
+    m_button_gradient_top_pushed    = Color(255, 255, 255, 16);
+    m_button_gradient_bot_pushed    = Color(0, 0, 0, 40);
 
-    m_split_divider                 = Color(90, 255);
+    // Windows: translucent charcoal glass
+    m_window_fill_unfocused         = Color(44, 44, 48, 230);
+    m_window_fill_focused           = Color(50, 50, 56, 236);
+    m_window_title_unfocused        = Color(174, 174, 178, 255);
+    m_window_title_focused          = Color(245, 245, 247, 255);
+    m_window_header_gradient_top    = Color(60, 60, 68, 240);
+    m_window_header_gradient_bot    = Color(48, 48, 54, 220);
+    m_window_header_sep_top         = Color(255, 255, 255, 30);
+    m_window_header_sep_bot         = Color(0, 0, 0, 50);
+    m_window_popup                  = Color(48, 48, 54, 245);
+    m_window_popup_transparent      = Color(48, 48, 54, 0);
 
-    m_menubar_fill                  = Color(32, 255);
-    // Flat selection: solid mid-gray-blue, not a glossy button fill
-    m_menubar_button_focused        = Color(55, 95, 180, 255);
-    m_menu_popup_fill               = Color(42, 255);
-    m_menu_separator                = Color(70, 255);
+    m_split_divider                 = Color(255, 255, 255, 28);
 
-    m_text_box_bg_top               = Color(255, 32);
-    m_text_box_bg_bot               = Color(32, 32);
-    m_text_box_focused_bg_top       = Color(150, 32);
-    m_text_box_focused_bg_bot       = Color(32, 32);
+    m_menubar_fill                  = Color(36, 36, 40, 240);
+    m_menubar_button_focused        = Color(10, 132, 255, 220);
+    m_menu_popup_fill               = Color(42, 42, 48, 250);
+    m_menu_separator                = Color(255, 255, 255, 28);
+
+    m_text_box_bg_top               = Color(0, 0, 0, 70);
+    m_text_box_bg_bot               = Color(0, 0, 0, 55);
+    m_text_box_focused_bg_top       = Color(0, 0, 0, 90);
+    m_text_box_focused_bg_bot       = Color(10, 40, 70, 70);
 }
 
 void Theme::apply_light_palette() {
-    m_drop_shadow                   = Color(0, 80);
+    // macOS light glass — airy translucent white over cool gray desktop, #007AFF.
+    m_drop_shadow                   = Color(0, 0, 0, 55);
     m_transparent                   = Color(0, 0);
-    m_border_dark                   = Color(160, 255);
-    m_border_light                  = Color(220, 255);
-    m_border_medium                 = Color(190, 255);
+    m_border_dark                   = Color(0, 0, 0, 28);
+    m_border_light                  = Color(255, 255, 255, 200);
+    m_border_medium                 = Color(0, 0, 0, 18);
 
-    m_text_color                    = Color(33, 37, 41, 255);
-    m_disabled_text_color           = Color(150, 150, 155, 255);
-    m_text_color_shadow             = Color(255, 0); // no shadow on light
-    m_text_secondary                = Color(73, 80, 87, 255);
-    m_text_heading                  = Color(52, 144, 220, 255);
-    m_text_muted                    = Color(108, 117, 125, 255);
-    m_text_accent                   = Color(52, 144, 220, 255);
-    m_icon_color                    = Color(80, 130, 210, 255);
-    m_disabled_icon_color           = Color(160, 160, 170, 255);
+    m_text_color                    = Color(29, 29, 31, 255);
+    m_disabled_text_color           = Color(60, 60, 67, 90);
+    m_text_color_shadow             = Color(0, 0);
+    m_text_secondary                = Color(60, 60, 67, 180);
+    m_text_heading                  = Color(0, 0, 0, 230);
+    m_text_muted                    = Color(60, 60, 67, 140);
+    m_text_accent                   = Color(0, 122, 255, 255);
+    m_icon_color                    = Color(0, 122, 255, 255);
+    m_disabled_icon_color           = Color(60, 60, 67, 80);
 
-    m_success_color                 = Color(40, 167, 69, 255);
-    m_danger_color                  = Color(220, 53, 69, 255);
+    m_success_color                 = Color(52, 199, 89, 255);
+    m_danger_color                  = Color(255, 59, 48, 255);
     m_fail_color                    = m_danger_color;
-    m_proceed_color                 = Color(52, 144, 220, 255);
-    m_warning_color                 = Color(255, 193, 7, 255);
-    m_accent_color                  = Color(52, 144, 220, 255);
+    m_proceed_color                 = Color(0, 122, 255, 255);
+    m_warning_color                 = Color(255, 204, 0, 255);
+    m_accent_color                  = Color(0, 122, 255, 255);
     m_button_text_on_solid          = Color(255, 255);
 
-    m_screen_background             = Color(235, 237, 242, 255);
+    m_glass_specular                = Color(255, 255, 255, 140);
+    m_glass_border                  = Color(255, 255, 255, 180);
+    m_focus_ring                    = Color(0, 122, 255, 150);
+    m_scrollbar_thumb               = Color(0, 0, 0, 50);
+    m_scrollbar_thumb_active        = Color(0, 0, 0, 110);
+    m_track_color                   = Color(0, 0, 0, 28);
+    m_track_fill_color              = m_accent_color;
+    m_checkbox_bg                   = Color(255, 255, 255, 180);
+    m_checkbox_border               = Color(0, 0, 0, 40);
 
-    // Soft blue-gray buttons on light chrome
-    m_button_gradient_top_focused   = Color(70, 150, 230, 255);
-    m_button_gradient_bot_focused   = Color(52, 130, 210, 255);
-    m_button_gradient_top_unfocused = Color(250, 250, 252, 255);
-    m_button_gradient_bot_unfocused = Color(235, 237, 240, 255);
-    m_button_gradient_top_pushed    = Color(48, 120, 200, 255);
-    m_button_gradient_bot_pushed    = Color(40, 100, 180, 255);
+    // Soft cool desktop
+    m_screen_background             = Color(220, 224, 232, 255);
 
-    m_window_fill_unfocused         = Color(248, 249, 250, 255);
-    m_window_fill_focused           = Color(255, 255, 255, 255);
-    m_window_title_unfocused        = Color(100, 100, 110, 255);
-    m_window_title_focused          = Color(30, 30, 35, 255);
-    m_window_header_gradient_top    = Color(245, 245, 248, 255);
-    m_window_header_gradient_bot    = Color(230, 232, 236, 255);
-    m_window_header_sep_top         = m_border_light;
-    m_window_header_sep_bot         = m_border_dark;
-    m_window_popup                  = Color(255, 255, 255, 255);
+    // Buttons: bright frosted glass
+    m_button_gradient_top_focused   = Color(255, 255, 255, 230);
+    m_button_gradient_bot_focused   = Color(240, 244, 250, 220);
+    m_button_gradient_top_unfocused = Color(255, 255, 255, 200);
+    m_button_gradient_bot_unfocused = Color(245, 247, 250, 185);
+    m_button_gradient_top_pushed    = Color(220, 228, 240, 220);
+    m_button_gradient_bot_pushed    = Color(200, 210, 225, 210);
+
+    // Windows: milky glass panels
+    m_window_fill_unfocused         = Color(250, 251, 253, 220);
+    m_window_fill_focused           = Color(255, 255, 255, 235);
+    m_window_title_unfocused        = Color(60, 60, 67, 160);
+    m_window_title_focused          = Color(29, 29, 31, 255);
+    m_window_header_gradient_top    = Color(255, 255, 255, 245);
+    m_window_header_gradient_bot    = Color(242, 244, 248, 220);
+    m_window_header_sep_top         = Color(255, 255, 255, 200);
+    m_window_header_sep_bot         = Color(0, 0, 0, 22);
+    m_window_popup                  = Color(255, 255, 255, 245);
     m_window_popup_transparent      = Color(255, 0);
 
-    m_split_divider                 = Color(200, 202, 210, 255);
+    m_split_divider                 = Color(0, 0, 0, 28);
 
-    m_menubar_fill                  = Color(245, 245, 248, 255);
-    // Flat selection: solid system-blue, no 3D bevels
+    m_menubar_fill                  = Color(250, 251, 253, 230);
     m_menubar_button_focused        = Color(0, 122, 255, 255);
-    m_menu_popup_fill               = Color(255, 255, 255, 255);
-    m_menu_separator                = Color(180, 182, 188, 255);
-    // Stronger drop so menubar separates from light screen background
-    m_drop_shadow                   = Color(0, 70);
+    m_menu_popup_fill               = Color(255, 255, 255, 250);
+    m_menu_separator                = Color(0, 0, 0, 28);
 
-    m_text_box_bg_top               = Color(255, 255, 255, 255);
-    m_text_box_bg_bot               = Color(245, 246, 248, 255);
-    m_text_box_focused_bg_top       = Color(255, 255, 255, 255);
-    m_text_box_focused_bg_bot       = Color(240, 246, 255, 255);
+    m_text_box_bg_top               = Color(255, 255, 255, 200);
+    m_text_box_bg_bot               = Color(245, 247, 250, 180);
+    m_text_box_focused_bg_top       = Color(255, 255, 255, 245);
+    m_text_box_focused_bg_bot       = Color(240, 246, 255, 230);
 }
 
 void Theme::configure_as_menubar() {
-    // Flat strip: no window chrome, no pill-shaped menu buttons
+    // Glass strip: no window chrome, transparent ghost buttons until hover
     m_window_corner_radius          = 0;
     m_window_header_height          = 0;
-    m_window_drop_shadow_size       = 6;
-    m_button_corner_radius          = 0;   // flat highlight, not rounded buttons
-    m_drop_shadow                   = Color(0, 90);
+    m_window_drop_shadow_size       = 10;
+    m_button_corner_radius          = 6;
+    m_drop_shadow                   = Color(0, 0, 0, 60);
 
-    // Fill is the menubar strip / popup panel
     m_window_fill_unfocused         = m_menubar_fill;
     m_window_fill_focused           = m_menubar_fill;
     m_window_popup                  = m_menu_popup_fill;
 
-    // Flat ghost chrome until hover/open: no borders, no gradients
     m_border_light                  = m_transparent;
     m_border_dark                   = m_transparent;
     m_border_medium                 = m_transparent;
     m_button_gradient_top_unfocused = m_transparent;
     m_button_gradient_bot_unfocused = m_transparent;
-    // Solid (flat) hover/open fill — same top/bot so there is no gradient
     m_button_gradient_top_focused   = m_menubar_button_focused;
     m_button_gradient_bot_focused   = m_menubar_button_focused;
     m_button_gradient_top_pushed    = m_menubar_button_focused;
     m_button_gradient_bot_pushed    = m_menubar_button_focused;
     m_text_color_shadow             = m_transparent;
+}
+
+void Theme::draw_glass_shadow(NVGcontext *ctx, float x, float y, float w, float h,
+                              float radius, float shadow_size) const {
+    float ds = shadow_size >= 0.f ? shadow_size : (float)m_window_drop_shadow_size;
+    if (ds < 1.f)
+        return;
+
+    // Soft ambient shadow slightly below the surface (macOS contact shadow)
+    NVGpaint ambient = nvgBoxGradient(
+        ctx, x, y + ds * 0.15f, w, h, radius * 1.2f, ds * 1.6f,
+        m_drop_shadow, m_transparent);
+
+    nvgBeginPath(ctx);
+    nvgRect(ctx, x - ds, y - ds * 0.4f, w + 2.f * ds, h + 2.2f * ds);
+    nvgRoundedRect(ctx, x, y, w, h, radius);
+    nvgPathWinding(ctx, NVG_HOLE);
+    nvgFillPaint(ctx, ambient);
+    nvgFill(ctx);
+}
+
+void Theme::draw_glass_surface(NVGcontext *ctx, float x, float y, float w, float h,
+                               float radius, const Color &fill,
+                               bool specular, bool border) const {
+    // Base fill
+    nvgBeginPath(ctx);
+    nvgRoundedRect(ctx, x, y, w, h, radius);
+    nvgFillColor(ctx, fill);
+    nvgFill(ctx);
+
+    if (specular && h > 2.f) {
+        // Soft top-edge specular — simulates light catching the glass rim
+        float band = std::min(h * 0.45f, 22.f);
+        NVGpaint wash = nvgLinearGradient(
+            ctx, x, y, x, y + band,
+            m_glass_specular, m_transparent);
+        nvgBeginPath(ctx);
+        nvgRoundedRect(ctx, x + 0.5f, y + 0.5f, w - 1.f, band, radius);
+        nvgFillPaint(ctx, wash);
+        nvgFill(ctx);
+    }
+
+    if (border) {
+        // Hairline glass edge
+        nvgBeginPath(ctx);
+        nvgRoundedRect(ctx, x + 0.5f, y + 0.5f, w - 1.f, h - 1.f, std::max(0.f, radius - 0.5f));
+        nvgStrokeWidth(ctx, 1.f);
+        nvgStrokeColor(ctx, m_glass_border);
+        nvgStroke(ctx);
+
+        // Subtle inner dark edge for definition on light backgrounds
+        nvgBeginPath(ctx);
+        nvgRoundedRect(ctx, x + 1.f, y + 1.f, w - 2.f, h - 2.f, std::max(0.f, radius - 1.f));
+        nvgStrokeWidth(ctx, 0.5f);
+        nvgStrokeColor(ctx, m_border_dark);
+        nvgStroke(ctx);
+    }
+}
+
+void Theme::draw_focus_ring(NVGcontext *ctx, float x, float y, float w, float h,
+                            float radius) const {
+    // Outer soft glow
+    nvgBeginPath(ctx);
+    nvgRoundedRect(ctx, x - 1.5f, y - 1.5f, w + 3.f, h + 3.f, radius + 1.5f);
+    nvgStrokeWidth(ctx, 3.f);
+    Color soft = m_focus_ring;
+    soft.a() *= 0.35f;
+    nvgStrokeColor(ctx, soft);
+    nvgStroke(ctx);
+
+    // Crisp ring
+    nvgBeginPath(ctx);
+    nvgRoundedRect(ctx, x - 0.5f, y - 0.5f, w + 1.f, h + 1.f, radius + 0.5f);
+    nvgStrokeWidth(ctx, 2.f);
+    nvgStrokeColor(ctx, m_focus_ring);
+    nvgStroke(ctx);
 }
 
 void Theme::load_fonts(NVGcontext *ctx) {

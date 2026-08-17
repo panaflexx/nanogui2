@@ -283,6 +283,18 @@ static void swapBuffersEGL(_GLFWwindow* window)
         // NOTE: Swapping buffers on a hidden window on Wayland makes it visible
         if (!window->wl.visible)
             return;
+
+        /* Apply any pending EGL window resize once per frame, right before
+         * the swap, instead of once per configure event (GLFW issue #2493). */
+        if (window->wl.egl.needsFramebufferResize)
+        {
+            window->wl.egl.needsFramebufferResize = GLFW_FALSE;
+            if (window->wl.egl.window)
+                wl_egl_window_resize(window->wl.egl.window,
+                                     window->wl.fbWidth,
+                                     window->wl.fbHeight,
+                                     0, 0);
+        }
     }
 #endif
 

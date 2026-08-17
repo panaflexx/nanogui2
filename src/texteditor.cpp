@@ -299,13 +299,9 @@ void TextEditor::set_caret(Position p, bool extend_selection) {
 
     m_caret = p;
     if (!extend_selection) {
-		/*
-        printf("set_caret ANCHOR RESET to {%zu,%zu} (was anchor={%zu,%zu} caret={%zu,%zu})\n",
-               p.paragraph, p.column,
-               m_anchor.paragraph, m_anchor.column,
-               m_caret.paragraph,  m_caret.column);
-		*/
         m_anchor = m_caret;
+        /* An explicit caret move cancels pending typing attributes. */
+        m_typing_style_active = false;
     }
     if (caret_callback) caret_callback(m_caret);
 }
@@ -327,6 +323,40 @@ RunHit hit_run(const Paragraph& p, size_t col) {
     }
     if (p.runs.empty()) return { 0, 0 };
     return { p.runs.size() - 1, p.runs.back().content.size() };
+}
+
+/* UTF-8 codepoint boundaries (caret moves must not split a character). */
+size_t utf8_next_boundary(const std::string& s, size_t col) {
+    if (col >= s.size()) return s.size();
+    ++col;
+    while (col < s.size() && (s[col] & 0xC0) == 0x80) ++col;
+    return col;
+}
+
+size_t utf8_prev_boundary(const std::string& s, size_t col) {
+    if (col == 0) return 0;
+    --col;
+    while (col > 0 && (s[col] & 0xC0) == 0x80) --col;
+    return col;
+}
+
+bool style_flag(const Style& s, TextEditor::StyleFlag f) {
+    switch (f) {
+        case TextEditor::StyleFlag::Bold:      return s.bold;
+        case TextEditor::StyleFlag::Italic:    return s.italic;
+        case TextEditor::StyleFlag::Underline: return s.underline;
+        case TextEditor::StyleFlag::Monospace: return s.monospace;
+    }
+    return false;
+}
+
+void style_set(Style& s, TextEditor::StyleFlag f, bool v) {
+    switch (f) {
+        case TextEditor::StyleFlag::Bold:      s.bold      = v; break;
+        case TextEditor::StyleFlag::Italic:    s.italic    = v; break;
+        case TextEditor::StyleFlag::Underline: s.underline = v; break;
+        case TextEditor::StyleFlag::Monospace: s.monospace = v; break;
+    }
 }
 } // namespace
 
@@ -353,8 +383,19 @@ void TextEditor::insert_string(Position at, const std::string& s) {
                                                        : m_default_style);
 
     auto inject = [&](Paragraph* par, size_t col, const std::string& chunk) {
-        RunHit h = hit_run(*par, col);
         if (chunk.empty()) return;
+        if (m_typing_style_active) {
+            /* Pending typing attributes: break the run at the caret and
+             * insert a new run carrying the pending style. */
+            size_t ri = par->split_run_at(col);
+            Text t;
+            t.style   = m_typing_style;
+            t.content = chunk;
+            par->runs.insert(par->runs.begin() + (ptrdiff_t)ri,
+                             std::move(t));
+            return;
+        }
+        RunHit h = hit_run(*par, col);
         par->runs[h.run_idx].content.insert(h.in_run, chunk);
     };
 
@@ -377,7 +418,18 @@ void TextEditor::insert_string(Position at, const std::string& s) {
             p->runs.resize(h.run_idx + 1);
         }
 
-        Style baseStyle = p->runs[h.run_idx].style;
+        Style baseStyle = m_typing_style_active ? m_typing_style
+                                                : p->runs[h.run_idx].style;
+
+        /* Enter at the END of a heading starts a body paragraph
+         * (word-processor convention) — otherwise the heading's large
+         * style leaks into the following line, looking like a huge gap
+         * below the header.  Splitting mid-heading keeps the style. */
+        const bool is_header = !p->runs.empty() && p->runs[0].style.bold &&
+            p->runs[0].style.fontSize >= m_default_style.fontSize * 1.046875f;
+        if (tail.empty() && chunks.size() == 2 && chunks[1].empty() &&
+            is_header && m_mode == Mode::RichText)
+            baseStyle = m_default_style;
 
         // Append first chunk to current paragraph.
         p->runs[h.run_idx].content += chunks.front();
@@ -386,6 +438,11 @@ void TextEditor::insert_string(Position at, const std::string& s) {
         for (size_t i = 1; i < chunks.size(); ++i) {
             Paragraph* np = m_doc->insertParagraph(at.paragraph + i);
             np->addText(chunks[i], baseStyle);
+            // Enter inside a bullet list item continues the list.
+            if (p->isBullet) {
+                np->isBullet   = true;
+                np->leftIndent = p->leftIndent;
+            }
         }
 
         // Append tail to the last new paragraph.
@@ -517,17 +574,17 @@ void TextEditor::delete_at_caret(bool forward) {
         return;
     }
     Position a = m_caret, b = m_caret;
+    const std::string text = m_doc->paragraphs[a.paragraph]->plain_text();
     if (forward) {
-        size_t lim = m_doc->paragraphs[a.paragraph]->byte_length();
-        if (a.column < lim) {
-            b.column = a.column + 1;
+        if (a.column < text.size()) {
+            b.column = utf8_next_boundary(text, a.column);
         } else if (a.paragraph + 1 < paragraph_count()) {
             b.paragraph = a.paragraph + 1;
             b.column    = 0;
         } else return;
     } else {
         if (a.column > 0) {
-            a.column = a.column - 1;
+            a.column = utf8_prev_boundary(text, a.column);
         } else if (a.paragraph > 0) {
             a.paragraph = a.paragraph - 1;
             a.column    = m_doc->paragraphs[a.paragraph]->byte_length();
@@ -543,6 +600,23 @@ void TextEditor::insert_newline() {
     if (has_selection()) {
         auto [a, b] = selection();
         delete_range(a, b);
+    }
+    /* Enter on an EMPTY bullet item does not add another item: a nested
+     * item outdents one level first, a top-level item becomes normal
+     * text (word-processor convention). */
+    if (m_mode == Mode::RichText && m_caret.paragraph < paragraph_count()) {
+        Paragraph* p = m_doc->paragraphs[m_caret.paragraph].get();
+        if (p->isBullet && p->byte_length() == 0) {
+            if (p->leftIndent > 16.0f)
+                p->leftIndent -= 16.0f;
+            else {
+                p->isBullet   = false;
+                p->leftIndent = 0.0f;
+            }
+            scroll_to_caret();
+            fire_changed();
+            return;
+        }
     }
     insert_string(m_caret, "\n");
     scroll_to_caret();
@@ -560,6 +634,156 @@ void TextEditor::insert_tab() {
     } else {
         insert_text("\t");
     }
+}
+
+// ---------------------------------------------------------------------------
+// Rich-text style editing
+// ---------------------------------------------------------------------------
+
+Style TextEditor::style_at_caret() const {
+    if (m_typing_style_active) return m_typing_style;
+    if (m_caret.paragraph < paragraph_count()) {
+        const Paragraph* p = m_doc->paragraphs[m_caret.paragraph].get();
+        size_t acc = 0;
+        for (const Text& r : p->runs) {
+            size_t n = r.content.size();
+            if (m_caret.column <= acc + n) return r.style;  // left-biased
+            acc += n;
+        }
+        if (!p->runs.empty()) return p->runs.back().style;
+    }
+    return m_mode == Mode::Code ? m_code_style : m_default_style;
+}
+
+void TextEditor::toggle_style(StyleFlag flag) {
+    if (m_read_only) return;
+
+    if (!has_selection()) {
+        /* No selection: flip a pending typing attribute. */
+        if (!m_typing_style_active) {
+            m_typing_style        = style_at_caret();
+            m_typing_style_active = true;
+        }
+        bool v = style_flag(m_typing_style, flag);
+        style_set(m_typing_style, flag, !v);
+        if (caret_callback) caret_callback(m_caret);   // toolbar refresh
+        if (screen()) screen()->redraw();
+        return;
+    }
+
+    auto [a, b] = selection();
+
+    /* Decide direction: remove the flag only when every touched run has
+     * it, otherwise add it (standard editor behavior). */
+    bool any = false, all_set = true;
+    for (size_t pi = a.paragraph;
+         pi <= b.paragraph && pi < paragraph_count(); ++pi) {
+        const Paragraph* p = m_doc->paragraphs[pi].get();
+        size_t lo = (pi == a.paragraph) ? a.column : 0;
+        size_t hi = (pi == b.paragraph) ? b.column : p->byte_length();
+        size_t acc = 0;
+        for (const Text& r : p->runs) {
+            size_t rlo = acc, rhi = acc + r.content.size();
+            acc = rhi;
+            if (rhi <= lo || rlo >= hi || r.content.empty()) continue;
+            any = true;
+            if (!style_flag(r.style, flag)) { all_set = false; break; }
+        }
+        if (!all_set) break;
+    }
+    bool value = any ? !all_set : true;
+
+    /* Split at both ends (lo first: byte columns don't shift), flip the
+     * flag on the covered runs, then merge neighbors back together. */
+    for (size_t pi = a.paragraph;
+         pi <= b.paragraph && pi < paragraph_count(); ++pi) {
+        Paragraph* p = m_doc->paragraphs[pi].get();
+        size_t lo = (pi == a.paragraph) ? a.column : 0;
+        size_t hi = (pi == b.paragraph) ? b.column : p->byte_length();
+        size_t ri_lo = p->split_run_at(lo);
+        size_t ri_hi = p->split_run_at(hi);
+        for (size_t ri = ri_lo; ri < ri_hi && ri < p->runs.size(); ++ri)
+            style_set(p->runs[ri].style, flag, value);
+        p->coalesce_runs();
+    }
+    fire_changed();
+    if (screen()) screen()->redraw();
+}
+
+// ---------------------------------------------------------------------------
+// Paragraph-level formatting
+// ---------------------------------------------------------------------------
+
+int TextEditor::paragraph_header() const {
+    if (m_caret.paragraph >= paragraph_count()) return 0;
+    const Paragraph* p = m_doc->paragraphs[m_caret.paragraph].get();
+    if (p->runs.empty() || !p->runs[0].style.bold) return 0;
+    /* Thresholds mirror document_to_markdown()'s heading detection,
+     * scaled by the editor's base font size (base 16: h1 26, h2 20,
+     * h3 17). */
+    const float fs   = p->runs[0].style.fontSize;
+    const float base = m_default_style.fontSize;
+    if (fs >= base * 1.5f)      return 1;
+    if (fs >= base * 1.15625f)  return 2;
+    if (fs >= base * 1.046875f) return 3;
+    return 0;
+}
+
+void TextEditor::set_paragraph_header(int level) {
+    if (m_read_only || m_caret.paragraph >= paragraph_count()) return;
+    if (paragraph_header() == level) level = 0;   // toggle off
+    const float base  = m_default_style.fontSize;
+    const float scale = level == 1 ? 1.625f  :
+                        level == 2 ? 1.25f   :
+                        level == 3 ? 1.0625f : 1.0f;
+    Paragraph* p = m_doc->paragraphs[m_caret.paragraph].get();
+    for (Text& r : p->runs) {
+        r.style.bold     = level > 0;
+        r.style.fontSize = base * scale;
+    }
+    fire_changed();
+    if (screen()) screen()->redraw();
+}
+
+bool TextEditor::paragraph_bullet() const {
+    if (m_caret.paragraph >= paragraph_count()) return false;
+    return m_doc->paragraphs[m_caret.paragraph]->isBullet;
+}
+
+void TextEditor::toggle_paragraph_bullet() {
+    if (m_read_only || m_caret.paragraph >= paragraph_count()) return;
+    Paragraph* p = m_doc->paragraphs[m_caret.paragraph].get();
+    p->isBullet   = !p->isBullet;
+    p->leftIndent = p->isBullet ? 16.0f : 0.0f;
+    fire_changed();
+    if (screen()) screen()->redraw();
+}
+
+bool TextEditor::paragraph_code() const {
+    if (m_caret.paragraph >= paragraph_count()) return false;
+    const Paragraph* p = m_doc->paragraphs[m_caret.paragraph].get();
+    if (p->runs.empty()) return false;
+    for (const Text& r : p->runs)
+        if (!r.style.monospace) return false;
+    return true;
+}
+
+void TextEditor::toggle_paragraph_code() {
+    if (m_read_only || m_caret.paragraph >= paragraph_count()) return;
+    Paragraph* p = m_doc->paragraphs[m_caret.paragraph].get();
+    if (p->runs.empty())
+        p->addText(std::string{}, m_default_style);  // so typing inherits
+    const bool on = !paragraph_code();
+    const float fs = on ? m_default_style.fontSize * 0.875f
+                        : m_default_style.fontSize;
+    for (Text& r : p->runs) {
+        r.style.monospace = on;
+        r.style.fontSize  = fs;
+        r.style.bgColor   = on ? nvgRGBA(128, 128, 128, 48)
+                               : nvgRGBA(0, 0, 0, 0);
+    }
+    fire_changed();
+    if (screen()) screen()->redraw();
 }
 
 // ---------------------------------------------------------------------------
@@ -681,32 +905,88 @@ bool TextEditor::keyboard_event(int key, int scancode, int action, int mods) {
 
     const bool shift = (mods & GLFW_MOD_SHIFT)   != 0;
     const bool ctrl  = (mods & GLFW_MOD_CONTROL) != 0;
+    const bool cmd   = (mods & SYSTEM_COMMAND_MOD) != 0;
 
     auto move_h = [&](int delta) {
         Position np = m_caret;
-        long c = (long)np.column + delta;
-        if (c < 0) {
-            if (np.paragraph > 0) {
+        const std::string text =
+            m_doc->paragraphs[np.paragraph]->plain_text();
+        if (delta < 0) {
+            if (np.column > 0) {
+                np.column = utf8_prev_boundary(text, np.column);
+            } else if (np.paragraph > 0) {
                 np.paragraph--;
                 np.column = m_doc->paragraphs[np.paragraph]->byte_length();
-            } else {
-                np.column = 0;
             }
         } else {
-            size_t lim = m_doc->paragraphs[np.paragraph]->byte_length();
-            if ((size_t)c > lim) {
-                if (np.paragraph + 1 < paragraph_count()) {
-                    np.paragraph++;
-                    np.column = 0;
-                } else {
-                    np.column = lim;
-                }
-            } else {
-                np.column = (size_t)c;
+            if (np.column < text.size()) {
+                np.column = utf8_next_boundary(text, np.column);
+            } else if (np.paragraph + 1 < paragraph_count()) {
+                np.paragraph++;
+                np.column = 0;
             }
         }
         set_caret(np, shift);
         scroll_to_caret();
+    };
+
+    auto move_word = [&](int delta) {
+        Position np = m_caret;
+        const std::string text =
+            m_doc->paragraphs[np.paragraph]->plain_text();
+        auto is_word = [](char c) {
+            return std::isalnum((unsigned char)c) || c == '_' ||
+                   (c & 0x80);   // multibyte UTF-8 bytes count as word chars
+        };
+        if (delta > 0) {
+            size_t c = np.column;
+            while (c < text.size() && !is_word(text[c])) ++c;
+            while (c < text.size() &&  is_word(text[c])) ++c;
+            if (c == np.column && np.paragraph + 1 < paragraph_count()) {
+                np.paragraph++;
+                np.column = 0;
+            } else {
+                np.column = c;
+            }
+        } else {
+            size_t c = np.column;
+            while (c > 0 && !is_word(text[c - 1])) --c;
+            while (c > 0 &&  is_word(text[c - 1])) --c;
+            if (c == np.column && np.paragraph > 0) {
+                np.paragraph--;
+                np.column = m_doc->paragraphs[np.paragraph]->byte_length();
+            } else {
+                np.column = c;
+            }
+        }
+        set_caret(np, shift);
+        scroll_to_caret();
+    };
+
+    auto clipboard_copy = [&]() {
+        Screen* s = screen();
+        if (s && has_selection())
+            glfwSetClipboardString(s->glfw_window(),
+                                   selected_text().c_str());
+    };
+
+    auto clipboard_cut = [&]() {
+        if (m_read_only) return;
+        clipboard_copy();
+        if (has_selection()) {
+            auto [a, b] = selection();
+            delete_range(a, b);
+            scroll_to_caret();
+            fire_changed();
+        }
+    };
+
+    auto clipboard_paste = [&]() {
+        if (m_read_only) return;
+        Screen* s = screen();
+        const char* cb = s ? glfwGetClipboardString(s->glfw_window())
+                           : nullptr;
+        if (cb && *cb) insert_text(cb);
     };
 
     auto move_v = [&](int delta) {
@@ -743,8 +1023,12 @@ bool TextEditor::keyboard_event(int key, int scancode, int action, int mods) {
     };
 
     switch (key) {
-        case GLFW_KEY_LEFT:      move_h(-1); return true;
-        case GLFW_KEY_RIGHT:     move_h(+1); return true;
+        case GLFW_KEY_LEFT:
+            if (ctrl) move_word(-1); else move_h(-1);
+            return true;
+        case GLFW_KEY_RIGHT:
+            if (ctrl) move_word(+1); else move_h(+1);
+            return true;
         case GLFW_KEY_UP:        move_v(-1); return true;
         case GLFW_KEY_DOWN:      move_v(+1); return true;
         case GLFW_KEY_HOME: {
@@ -762,7 +1046,57 @@ bool TextEditor::keyboard_event(int key, int scancode, int action, int mods) {
         case GLFW_KEY_DELETE:    delete_at_caret(true);  return true;
         case GLFW_KEY_ENTER:
         case GLFW_KEY_KP_ENTER:  insert_newline(); return true;
-        case GLFW_KEY_TAB:       insert_tab();     return true;
+        case GLFW_KEY_TAB: {
+            /* At the start of a bullet item, Tab indents it into a
+             * sub-level; Shift+Tab outdents, and outdenting a top-level
+             * item removes the bullet (normal text). */
+            if (m_mode == Mode::RichText && !m_read_only &&
+                !has_selection() && m_caret.column == 0 &&
+                m_caret.paragraph < paragraph_count()) {
+                Paragraph* p = m_doc->paragraphs[m_caret.paragraph].get();
+                if (p->isBullet) {
+                    if (shift) {
+                        if (p->leftIndent > 16.0f)
+                            p->leftIndent -= 16.0f;
+                        else {
+                            p->isBullet   = false;
+                            p->leftIndent = 0.0f;
+                        }
+                    } else {
+                        p->leftIndent += 16.0f;
+                    }
+                    fire_changed();
+                    if (screen()) screen()->redraw();
+                    return true;
+                }
+            }
+            insert_tab();
+            return true;
+        }
+        case GLFW_KEY_C:
+            if (cmd) { clipboard_copy();  return true; }
+            break;
+        case GLFW_KEY_X:
+            if (cmd) { clipboard_cut();   return true; }
+            break;
+        case GLFW_KEY_V:
+            if (cmd) { clipboard_paste(); return true; }
+            break;
+        case GLFW_KEY_B:
+            if (cmd && m_mode == Mode::RichText) {
+                toggle_style(StyleFlag::Bold); return true;
+            }
+            break;
+        case GLFW_KEY_I:
+            if (cmd && m_mode == Mode::RichText) {
+                toggle_style(StyleFlag::Italic); return true;
+            }
+            break;
+        case GLFW_KEY_U:
+            if (cmd && m_mode == Mode::RichText) {
+                toggle_style(StyleFlag::Underline); return true;
+            }
+            break;
         case GLFW_KEY_A:
             if (ctrl) {
                 Position start{0, 0};

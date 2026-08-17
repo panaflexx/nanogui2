@@ -1071,7 +1071,6 @@ static void parse_markdown(Document &doc, const std::string &md,
 // ---------------------------------------------------------------------------
 class MailApp : public Screen {
 public:
-    Window        *m_rootWindow    = nullptr;
     EmailListView *m_email_list     = nullptr;
     TextEditor    *m_editor         = nullptr;
 
@@ -1082,18 +1081,21 @@ public:
         set_theme_mode(ThemeMode::Light);
         m_theme->m_split_divider_width = 2;
 
-        // Root borderless window
-        Window *window = new Window(this, "", true);
-        m_rootWindow = window;
-        window->set_position(Vector2i(0, 0));
-        window->set_size(this->size());
-        window->set_layout(
-            new BoxLayout(Orientation::Vertical, Alignment::Fill, 0, 0));
+        // Full-screen content surface — tracks Screen resizes automatically.
+        // FlexLayout so the Split can flex_grow into all remaining height
+        // (BoxLayout + set_grow_parent leaves a bottom gap: grow_parent assumes
+        // symmetric margins, so bottom inset equals the toolbar offset).
+        auto *root_flex = new FlexLayout(FlexDirection::Column,
+                                         JustifyContent::FlexStart,
+                                         AlignItems::Stretch, 0, 0);
+        RootWindow *window = new RootWindow(this, root_flex);
 
         // ---- Toolbar ----
         Widget *toolbar = new Widget(window);
         toolbar->set_min_height(60);
         toolbar->set_height(60);
+        toolbar->set_min_size(Vector2i(0, 60));
+        toolbar->set_height_flex(SizeMode::Fixed);
         toolbar->set_layout(
             new BoxLayout(Orientation::Horizontal, Alignment::Middle, 0, 0));
 
@@ -1131,11 +1133,17 @@ public:
         search_box->set_min_width(150);
         // Removed set_padding(5) as it's not a member of TextBox
 
-        // ---- Horizontal split: sidebar | content ----
+        // ---- Horizontal split: sidebar | content (fills all space below toolbar) ----
         Split *split = new Split(window, Split::Orientation::Horizontal);
-        split->set_max_size({2048, 2048});
+        // Split::set_min/max_size are panel drag limits, not Widget bounds.
         split->set_min_size(100);
-        split->set_grow_parent(true);
+        split->set_max_size({2048, 2048});
+        // Peg sidebar width in pixels when the window resizes (content pane grows/shrinks).
+        split->set_keep_size_on_resize(true);
+        // flex: 1 1 0 — grow/shrink with basis 0 so height tracks the container
+        // instead of preferred_size (which for Split aggregates child m_size and
+        // ratcheted wider/taller on every resize).
+        root_flex->set_flex_item(split, FlexLayout::FlexItem(1.0f, 1.0f, 0));
 
         // ---- Left: FolderView sidebar ----
         auto fv = new FolderView(split, [this](FolderItem *item) {
@@ -1145,13 +1153,10 @@ public:
 
         // ---- Right side: inner Split  (email list | message pane) ----
         Split *inner_split = new Split(split, Split::Orientation::Horizontal);
-        inner_split->set_max_size({2048, 2048});
         inner_split->set_min_size(100);
-        // NOTE: do NOT call set_grow_parent(true) here.
-        // The outer Split already sizes inner_split explicitly via set_size() before
-        // calling perform_layout(). set_grow_parent triggers apply_fill_parent() which
-        // uses a symmetric-margin formula (width = parent_w - 2*pos_x) and chops off
-        // exactly one sidebar-width from the right edge.
+        inner_split->set_max_size({2048, 2048});
+        // Peg email-list width; message pane absorbs window resize.
+        inner_split->set_keep_size_on_resize(true);
 
         // ---- Middle: email list ----
         m_email_list = new EmailListView(inner_split,
@@ -1190,7 +1195,6 @@ public:
 
         split->set_drag_position(0.22f);
         inner_split->set_drag_position(0.38f);
-        window->set_size(this->size());
         perform_layout();
     }
 
@@ -1247,15 +1251,6 @@ public:
         nvgFill(ctx);
         nvgRestore(ctx);
         Screen::draw(ctx);
-    }
-
-    virtual bool resize_event(const Vector2i &size) override {
-        if (m_rootWindow) {
-            m_rootWindow->set_size(size);
-            perform_layout();
-        }
-        Screen::resize_event(size);
-        return true;
     }
 };
 

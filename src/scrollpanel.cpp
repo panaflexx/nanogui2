@@ -290,10 +290,12 @@ void ScrollPanel::draw(NVGcontext* ctx) {
         child->draw(ctx);
     nvgRestore(ctx);
 
-    // ---- Pill-style overlay scrollbar (no track drawn) ----
-    constexpr float SB_W      = 6.0f;
+    // ---- macOS overlay pill scrollbar (no track drawn) ----
+    constexpr float SB_W      = 5.0f;
     constexpr float SB_MARGIN = 3.0f;
     constexpr float SB_MIN    = 28.0f;
+    Color thumb_idle   = m_theme ? m_theme->m_scrollbar_thumb        : Color(150, 180);
+    Color thumb_active = m_theme ? m_theme->m_scrollbar_thumb_active : Color(100, 230);
 
     if (m_child_preferred_size.y() > m_size.y() && VScrollable()) {
         float vis   = (float)m_size.y() / (float)m_child_preferred_size.y();
@@ -303,7 +305,7 @@ void ScrollPanel::draw(NVGcontext* ctx) {
         float tx    = m_pos.x() + (float)m_size.x() - SB_W - SB_MARGIN;
         nvgBeginPath(ctx);
         nvgRoundedRect(ctx, tx, ty + 3.f, SB_W, th - 6.f, SB_W * 0.5f);
-        nvgFillColor(ctx, m_scrolling_y ? nvgRGBA(100,110,130,230) : nvgRGBA(150,155,165,180));
+        nvgFillColor(ctx, m_scrolling_y ? thumb_active : thumb_idle);
         nvgFill(ctx);
     }
     if (m_child_preferred_size.x() > m_size.x() && HScrollable()) {
@@ -314,7 +316,7 @@ void ScrollPanel::draw(NVGcontext* ctx) {
         float ty    = m_pos.y() + (float)m_size.y() - SB_W - SB_MARGIN;
         nvgBeginPath(ctx);
         nvgRoundedRect(ctx, tx + 3.f, ty, tw - 6.f, SB_W, SB_W * 0.5f);
-        nvgFillColor(ctx, m_scrolling_x ? nvgRGBA(100,110,130,230) : nvgRGBA(150,155,165,180));
+        nvgFillColor(ctx, m_scrolling_x ? thumb_active : thumb_idle);
         nvgFill(ctx);
     }
 }

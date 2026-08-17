@@ -29,7 +29,7 @@ Vector2i Slider::preferred_size(NVGcontext*) const {
     int pref_w = 80;
     if (m_min_size.x() > 0)
         pref_w = m_min_size.x();
-    int h = m_theme ? std::max(16, m_theme->m_control_height / 2) : 16;
+    int h = m_theme ? std::max(22, m_theme->m_control_height) : 22;
     if (m_min_size.y() > 0)
         h = std::max(h, m_min_size.y());
     return Vector2i(pref_w, h);
@@ -39,7 +39,7 @@ bool Slider::mouse_drag_event(const Vector2i& p, const Vector2i& rel, int  butto
     if (!m_enabled)
         return false;
 
-    const float kr = (int)(m_size.y() * 0.4f), kshadow = 3;
+    const float kr = (int)(m_size.y() * 0.42f), kshadow = 2;
     const float start_x = kr + kshadow + m_pos.x() - 1;
     const float width_x = m_size.x() - 2 * (kr + kshadow);
 
@@ -55,7 +55,7 @@ bool Slider::mouse_button_event(const Vector2i& p, int /* button */, bool down, 
     if (!m_enabled)
         return false;
 
-    const float kr = (int)(m_size.y() * 0.4f), kshadow = 3;
+    const float kr = (int)(m_size.y() * 0.42f), kshadow = 2;
     const float start_x = kr + kshadow + m_pos.x() - 1;
     const float width_x = m_size.x() - 2 * (kr + kshadow);
 
@@ -71,66 +71,79 @@ bool Slider::mouse_button_event(const Vector2i& p, int /* button */, bool down, 
 
 void Slider::draw(NVGcontext* ctx) {
     Vector2f center = Vector2f(m_pos) + Vector2f(m_size) * 0.5f;
-    float kr = (int)(m_size.y() * 0.4f), kshadow = 3;
+    float kr = (int)(m_size.y() * 0.42f);
+    float kshadow = 2.f;
+    float track_h = std::max(3.f, m_size.y() * 0.18f);
 
     float start_x = kr + kshadow + m_pos.x();
     float width_x = m_size.x() - 2 * (kr + kshadow);
+    float t = (m_range.second > m_range.first)
+        ? (m_value - m_range.first) / (m_range.second - m_range.first) : 0.f;
+    t = std::min(std::max(t, 0.f), 1.f);
 
-    Vector2f knob_pos(start_x + (m_value - m_range.first) /
-        (m_range.second - m_range.first) * width_x,
-        center.y() + 0.5f);
+    Vector2f knob_pos(start_x + t * width_x, center.y());
 
-    NVGpaint bg = nvgBoxGradient(
-        ctx, start_x, center.y() - 3 + 1, width_x, 6, 3, 3,
-        Color(0, m_enabled ? 32 : 10), Color(0, m_enabled ? 128 : 210));
-
+    // Track base (recessed glass)
+    float ty = center.y() - track_h * 0.5f;
     nvgBeginPath(ctx);
-    nvgRoundedRect(ctx, start_x, center.y() - 3 + 1, width_x, 6, 2);
-    nvgFillPaint(ctx, bg);
+    nvgRoundedRect(ctx, start_x, ty, width_x, track_h, track_h * 0.5f);
+    Color track = m_theme->m_track_color;
+    if (!m_enabled)
+        track.a() *= 0.5f;
+    nvgFillColor(ctx, track);
     nvgFill(ctx);
+
+    // Filled portion (accent)
+    if (t > 0.001f) {
+        nvgBeginPath(ctx);
+        nvgRoundedRect(ctx, start_x, ty, width_x * t, track_h, track_h * 0.5f);
+        Color fill = m_theme->m_track_fill_color;
+        if (!m_enabled)
+            fill.a() *= 0.45f;
+        nvgFillColor(ctx, fill);
+        nvgFill(ctx);
+    }
 
     if (m_highlighted_range.second != m_highlighted_range.first) {
         nvgBeginPath(ctx);
-        nvgRoundedRect(ctx, start_x + m_highlighted_range.first * m_size.x(),
-            center.y() - kshadow + 1,
-            width_x *
-            (m_highlighted_range.second - m_highlighted_range.first),
-            kshadow * 2, 2);
+        nvgRoundedRect(ctx, start_x + m_highlighted_range.first * width_x,
+            ty, width_x * (m_highlighted_range.second - m_highlighted_range.first),
+            track_h, track_h * 0.5f);
         nvgFillColor(ctx, m_highlight_color);
         nvgFill(ctx);
     }
 
-    NVGpaint knob_shadow =
-        nvgRadialGradient(ctx, knob_pos.x(), knob_pos.y(), kr - kshadow,
-            kr + kshadow, Color(0, 64), m_theme->m_transparent);
-
+    // Soft knob shadow
+    NVGpaint knob_shadow = nvgRadialGradient(
+        ctx, knob_pos.x(), knob_pos.y() + 1.f, kr * 0.4f, kr + 3.f,
+        Color(0, 0, 0, m_enabled ? 70 : 30), m_theme->m_transparent);
     nvgBeginPath(ctx);
-    nvgRect(ctx, knob_pos.x() - kr - 5, knob_pos.y() - kr - 5, kr * 2 + 10,
-        kr * 2 + 10 + kshadow);
-    nvgCircle(ctx, knob_pos.x(), knob_pos.y(), kr);
-    nvgPathWinding(ctx, NVG_HOLE);
+    nvgCircle(ctx, knob_pos.x(), knob_pos.y() + 1.f, kr + 2.f);
     nvgFillPaint(ctx, knob_shadow);
     nvgFill(ctx);
 
+    // White glass knob (macOS style)
+    Color knob_top = m_enabled ? Color(255, 255, 255, 255) : Color(220, 220, 225, 200);
+    Color knob_bot = m_enabled ? Color(235, 238, 242, 255) : Color(200, 200, 205, 180);
     NVGpaint knob = nvgLinearGradient(ctx,
-        m_pos.x(), center.y() - kr, m_pos.x(), center.y() + kr,
-        m_theme->m_border_light, m_theme->m_border_medium);
-    NVGpaint knob_reverse = nvgLinearGradient(ctx,
-        m_pos.x(), center.y() - kr, m_pos.x(), center.y() + kr,
-        m_theme->m_border_medium,
-        m_theme->m_border_light);
+        knob_pos.x(), knob_pos.y() - kr, knob_pos.x(), knob_pos.y() + kr,
+        knob_top, knob_bot);
 
     nvgBeginPath(ctx);
     nvgCircle(ctx, knob_pos.x(), knob_pos.y(), kr);
-    nvgStrokeColor(ctx, m_theme->m_border_dark);
     nvgFillPaint(ctx, knob);
-    nvgStroke(ctx);
     nvgFill(ctx);
+
     nvgBeginPath(ctx);
-    nvgCircle(ctx, knob_pos.x(), knob_pos.y(), kr / 2);
-    nvgFillColor(ctx, Color(150, m_enabled ? 255 : 100));
-    nvgStrokePaint(ctx, knob_reverse);
+    nvgCircle(ctx, knob_pos.x(), knob_pos.y(), kr - 0.5f);
+    nvgStrokeWidth(ctx, 1.f);
+    nvgStrokeColor(ctx, m_theme->m_border_dark);
     nvgStroke(ctx);
+
+    // Tiny specular highlight on knob
+    nvgBeginPath(ctx);
+    nvgCircle(ctx, knob_pos.x() - kr * 0.2f, knob_pos.y() - kr * 0.25f, kr * 0.35f);
+    nvgFillColor(ctx, nvgRGBA(255, 255, 255, m_enabled ? 90 : 40));
     nvgFill(ctx);
 }
 

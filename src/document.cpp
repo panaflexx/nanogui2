@@ -43,6 +43,49 @@ size_t Paragraph::byte_length() const {
     return n;
 }
 
+static bool style_equal(const Style& a, const Style& b) {
+    return a.fontSize == b.fontSize &&
+           a.bold == b.bold && a.italic == b.italic &&
+           a.underline == b.underline && a.monospace == b.monospace &&
+           std::memcmp(&a.fgColor, &b.fgColor, sizeof(NVGcolor)) == 0 &&
+           std::memcmp(&a.bgColor, &b.bgColor, sizeof(NVGcolor)) == 0;
+}
+
+size_t Paragraph::split_run_at(size_t col) {
+    size_t acc = 0;
+    for (size_t i = 0; i < runs.size(); ++i) {
+        size_t n = runs[i].content.size();
+        if (col <= acc)
+            return i;                    // already at a run boundary
+        if (col < acc + n) {             // strictly inside run i: split it
+            Text tail;
+            tail.style   = runs[i].style;
+            tail.content = runs[i].content.substr(col - acc);
+            runs[i].content.erase(col - acc);
+            runs.insert(runs.begin() + (ptrdiff_t)i + 1, std::move(tail));
+            return i + 1;
+        }
+        acc += n;
+    }
+    return runs.size();                  // at/after the end of the paragraph
+}
+
+void Paragraph::coalesce_runs() {
+    // Drop empty runs first.
+    runs.erase(std::remove_if(runs.begin(), runs.end(),
+                              [](const Text& t) { return t.content.empty(); }),
+               runs.end());
+    // Merge neighbors with identical styles.
+    for (size_t i = 1; i < runs.size();) {
+        if (style_equal(runs[i - 1].style, runs[i].style)) {
+            runs[i - 1].content += runs[i].content;
+            runs.erase(runs.begin() + (ptrdiff_t)i);
+        } else {
+            ++i;
+        }
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Document construction helpers
 // ---------------------------------------------------------------------------
@@ -181,6 +224,16 @@ void forEachWord(std::string_view line, Fn fn) {
     }
 }
 
+/// True when every run of the paragraph is monospace (i.e. it renders as
+/// part of a code block).  Empty runs count as code — a blank line inside
+/// a code block must not split it — but a run-less paragraph does not.
+bool paragraph_is_code(const Paragraph& p) {
+    if (p.runs.empty()) return false;
+    for (const Text& r : p.runs)
+        if (!r.style.monospace) return false;
+    return true;
+}
+
 } // namespace
 
 // ---------------------------------------------------------------------------
@@ -239,7 +292,19 @@ void Document::draw(NVGcontext* ctx, float originX, float originY) {
                 y = ry + pad;
             } else {
                 y = drawParagraph(ctx, *para, originX, y, pi);
-                y += paragraphSpacing;
+                /* Tight spacing: consecutive fully-monospace paragraphs
+                 * form one code block (they serialize as a single fenced
+                 * ``` block), and consecutive bullet items form one list —
+                 * keep their lines contiguous instead of inserting
+                 * paragraph spacing. */
+                bool tight = false;
+                if (pi + 1 < paragraphs.size()) {
+                    const Paragraph& next = *paragraphs[pi + 1];
+                    tight = (paragraph_is_code(*para) &&
+                             paragraph_is_code(next)) ||
+                            (para->isBullet && next.isBullet);
+                }
+                y += tight ? 0.0f : paragraphSpacing;
             }
         }
         last_drawn_height = y - originY;
@@ -270,6 +335,13 @@ void Document::draw(NVGcontext* ctx, float originX, float originY) {
             nvgBeginPath(ctx);
             nvgFillColor(ctx, rl.mono_bg_color);
             nvgRect(ctx, rl.mono_bg_x, rl.mono_bg_y, rl.mono_bg_w, rl.mono_bg_h);
+            nvgFill(ctx);
+        }
+        // Bullet list marker.
+        if (rl.bullet) {
+            nvgBeginPath(ctx);
+            nvgCircle(ctx, rl.bullet_cx, rl.bullet_cy, rl.bullet_r);
+            nvgFillColor(ctx, rl.bullet_color);
             nvgFill(ctx);
         }
 
@@ -310,20 +382,73 @@ void Document::draw(NVGcontext* ctx, float originX, float originY) {
 
 float Document::drawParagraph(NVGcontext* ctx, const Paragraph& para,
                               float originX, float startY, size_t para_idx) {
-    if (para.runs.empty()) {
+    /* Empty paragraph (no runs, or runs with no words — e.g. the empty run
+     * left behind when Enter splits a paragraph): reserve one full line of
+     * height and emit a zero-word RichLine so the caret stays visible and
+     * the line remains clickable. */
+    auto emit_empty_line = [&]() -> float {
+        const Style es = para.runs.empty() ? Style{}
+                                           : para.runs.front().style;
+        const VMetrics m = metricsFor(ctx, es);
+        const float lineHeight = m.ascender - m.descender;  // descender < 0
+        const float baseline   = startY + m.ascender;
+        const float indent     = para.leftIndent + para.firstLineIndent;
+        /* Blank line inside a code block: paint a one-column background
+         * stripe so the block reads as continuous. */
+        const bool mono_bg = es.monospace && es.bgColor.a > 0;
+        float bg_x = 0.f, bg_y = 0.f, bg_w = 0.f, bg_h = 0.f;
+        if (mono_bg) {
+            const float pad = 4.0f;
+            bg_x = originX + indent - pad;
+            bg_y = startY - 1;
+            bg_w = spaceWidthFor(ctx, es) + 2 * pad;
+            bg_h = lineHeight + 6;
+            nvgBeginPath(ctx);
+            nvgFillColor(ctx, es.bgColor);
+            nvgRect(ctx, bg_x, bg_y, bg_w, bg_h);
+            nvgFill(ctx);
+        }
+        if (para.isBullet) {
+            const float br  = std::max(1.5f, lineHeight * 0.10f);
+            const float bcx = originX + para.leftIndent - br * 3.0f;
+            const float bcy = baseline - m.ascender * 0.35f;
+            nvgBeginPath(ctx);
+            nvgCircle(ctx, bcx, bcy, br);
+            nvgFillColor(ctx, es.fgColor);
+            nvgFill(ctx);
+        }
         if (para_idx != SIZE_MAX) {
             RichLine rl;
             rl.para_idx   = para_idx;
             rl.byte_start = 0;
             rl.byte_end   = 0;
             rl.y_top      = startY;
-            rl.y_bottom   = startY + lineSpacing;
-            rl.baseline   = startY;
-            rl.x_start    = originX;
+            rl.y_bottom   = startY + lineHeight + lineSpacing;
+            rl.baseline   = baseline;
+            rl.x_start    = originX + indent;
+            if (mono_bg) {
+                rl.mono_bg       = true;
+                rl.mono_bg_x     = bg_x;
+                rl.mono_bg_y     = bg_y;
+                rl.mono_bg_w     = bg_w;
+                rl.mono_bg_h     = bg_h;
+                rl.mono_bg_color = es.bgColor;
+            }
+            if (para.isBullet) {
+                const float br = std::max(1.5f, lineHeight * 0.10f);
+                rl.bullet       = true;
+                rl.bullet_cx    = originX + para.leftIndent - br * 3.0f;
+                rl.bullet_cy    = baseline - m.ascender * 0.35f;
+                rl.bullet_r     = br;
+                rl.bullet_color = es.fgColor;
+            }
             m_rich_layout.push_back(std::move(rl));
         }
-        return startY;
-    }
+        return startY + lineHeight + lineSpacing;
+    };
+
+    if (para.runs.empty())
+        return emit_empty_line();
 
     std::vector<LayoutLine> lines;
     LayoutLine current;
@@ -344,22 +469,30 @@ float Document::drawParagraph(NVGcontext* ctx, const Paragraph& para,
                         size_t bstart, size_t bend) {
         const float sp     = run.style.monospace ? 0.0f
                                                  : spaceWidthFor(ctx, run.style);
+        /* Only insert inter-word spacing when the source text actually has
+         * whitespace before this word: run boundaries produced by mid-word
+         * style toggles (or per-keystroke typing-attribute runs) must not
+         * open phantom gaps ("hello" split into runs must not draw as
+         * "h e l l o"). Byte offsets are paragraph-global and contiguous
+         * across runs, so adjacency is exact. */
+        const bool sep = !current.words.empty() &&
+                         current.words.back().byte_end != bstart;
         const float indent = lineIndent();
         const float avail  = contentWidth - indent;
 
         const float needed = current.words.empty()
                              ? advance
-                             : current.advanceWidth + sp + advance;
+                             : current.advanceWidth + (sep ? sp : 0.0f) + advance;
         if (!current.words.empty() && needed > avail)
             flushLine(false);
 
-        if (current.words.empty()) {
-            current.advanceWidth = 0.0f;
-        } else if (!run.style.monospace) {
+        bool spaceBefore = false;
+        if (!current.words.empty() && sep && !run.style.monospace) {
             current.advanceWidth += sp;
+            spaceBefore = true;
         }
 
-        Word w{ &run, std::string(text), advance, leftBearing, visualRight, bstart, bend };
+        Word w{ &run, std::string(text), advance, leftBearing, visualRight, bstart, bend, spaceBefore };
         current.words.push_back(std::move(w));
         current.advanceWidth += advance;
 
@@ -403,7 +536,7 @@ float Document::drawParagraph(NVGcontext* ctx, const Paragraph& para,
         run_byte_base += run.content.size();
     }
     if (!current.words.empty()) flushLine(true);
-    if (lines.empty()) return startY;
+    if (lines.empty()) return emit_empty_line();
 
     // ----- mono background block width pass --------------------------------
     std::vector<float> blockWidth(lines.size(), 0.0f);
@@ -470,7 +603,9 @@ float Document::drawParagraph(NVGcontext* ctx, const Paragraph& para,
         if (isMonoBg)
             drawX -= line.words.front().leftBearing;
 
-        const int  numGaps = (int)line.words.size() - 1;
+        int numGaps = 0;
+        for (size_t wi = 1; wi < line.words.size(); ++wi)
+            if (line.words[wi].spaceBefore) ++numGaps;
         const bool justify = (para.alignment == TextAlignment::Justify) &&
                              !isLastLine && numGaps > 0;
         float extraPerGap  = 0.0f;
@@ -526,6 +661,27 @@ float Document::drawParagraph(NVGcontext* ctx, const Paragraph& para,
                     rich_line.mono_bg_h     = bgH;
                     rich_line.mono_bg_color = fs.bgColor;
                 }
+            }
+        }
+
+        // Bullet list marker: a small filled circle left of the first line.
+        if (isFirstLine && para.isBullet) {
+            const float br = std::max(1.5f, lineHeight * 0.10f);
+            const float bcx = originX + indent - br * 3.0f;
+            const float bcy = baseline - line.ascent * 0.35f;
+            const NVGcolor bc = line.words.empty()
+                ? para.ruleColor
+                : line.words.front().run->style.fgColor;
+            nvgBeginPath(ctx);
+            nvgCircle(ctx, bcx, bcy, br);
+            nvgFillColor(ctx, bc);
+            nvgFill(ctx);
+            if (capture_layout) {
+                rich_line.bullet       = true;
+                rich_line.bullet_cx    = bcx;
+                rich_line.bullet_cy    = bcy;
+                rich_line.bullet_r     = br;
+                rich_line.bullet_color = bc;
             }
         }
 
@@ -594,8 +750,9 @@ float Document::drawParagraph(NVGcontext* ctx, const Paragraph& para,
 
             if (!(justify && wi + 1 == line.words.size())) {
                 x += word.advance;
-                if (wi + 1 < line.words.size() && !st.monospace) {
-                    x += spaceWidthFor(ctx, st);
+                if (wi + 1 < line.words.size() &&
+                    line.words[wi + 1].spaceBefore) {
+                    x += spaceWidthFor(ctx, line.words[wi + 1].run->style);
                     if (justify) x += extraPerGap;
                 }
             }
@@ -759,14 +916,39 @@ Document::richCaretInfo(NVGcontext* ctx, size_t para_idx, size_t byte_col) const
 
     if (found->words.empty()) { info.x = found->x_start; return info; }
 
+    /* Measure the width of text bytes [from, to) that produced no layout
+     * words (whitespace skipped by the word splitter), summing per-run
+     * advances so trailing/inter-run spaces still move the caret. */
+    auto measure_gap = [&](size_t from, size_t to) -> float {
+        if (to <= from || para_idx >= paragraphs.size()) return 0.f;
+        const Paragraph& para_ref = *paragraphs[para_idx];
+        float adv = 0.f;
+        size_t run_byte = 0;
+        for (const Text& run : para_ref.runs) {
+            size_t run_end = run_byte + run.content.size();
+            size_t lo = std::max(from, run_byte);
+            size_t hi = std::min(to, run_end);
+            if (lo < hi) {
+                applyFont(ctx, run.style);
+                float b[4];
+                adv += nvgTextBounds(ctx, 0.f, 0.f,
+                                     run.content.data() + (lo - run_byte),
+                                     run.content.data() + (hi - run_byte), b);
+            }
+            run_byte = run_end;
+        }
+        return adv;
+    };
+
     // Before first word
     if (byte_col <= found->words.front().byte_start) {
         info.x = found->words.front().x; return info;
     }
-    // After last word
+    // After last word (e.g. caret past a trailing space the layout elided)
     if (byte_col >= found->words.back().byte_end) {
         const WordLayout& lw = found->words.back();
-        info.x = lw.x + lw.advance; return info;
+        info.x = lw.x + lw.advance + measure_gap(lw.byte_end, byte_col);
+        return info;
     }
 
     // Within or between words

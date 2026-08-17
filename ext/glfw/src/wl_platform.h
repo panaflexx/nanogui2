@@ -363,6 +363,12 @@ typedef struct _GLFWwindowWayland
 
     struct {
         struct wl_egl_window*   window;
+        /* Set when the framebuffer size changed but the wl_egl_window has
+         * not been resized yet.  The resize is deferred to just before the
+         * next eglSwapBuffers (once per frame) instead of happening once
+         * per configure event — the immediate path makes interactive
+         * resizing on mutter extremely choppy (GLFW issue #2493). */
+        GLFWbool                needsFramebufferResize;
     } egl;
 
     struct {

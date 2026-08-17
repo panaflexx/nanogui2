@@ -261,11 +261,12 @@ void MenuItem::draw(NVGcontext *ctx)
 {
     Widget::draw(ctx);
 
-    // Flat menu row: solid highlight only (no bevel, no border, no rounded pill).
+    // macOS menu highlight: rounded glass selection pill
     if (m_highlighted && m_enabled) {
+        float cr = m_theme ? (float)m_theme->m_menu_item_corner_radius : 6.f;
         nvgBeginPath(ctx);
-        nvgRect(ctx, m_pos.x() + 2.f, m_pos.y() + 1.f,
-                m_size.x() - 4.f, m_size.y() - 2.f);
+        nvgRoundedRect(ctx, m_pos.x() + 4.f, m_pos.y() + 1.f,
+                       m_size.x() - 8.f, m_size.y() - 2.f, cr);
         nvgFillColor(ctx, m_theme->m_button_gradient_top_focused);
         nvgFill(ctx);
     }
@@ -348,27 +349,31 @@ PopupMenu::PopupMenu(Screen *screen, Window *parent_window, MenuItem *parent_ite
     set_cached(false);
     set_visible(false);
 
-    auto flat_theme                             = new Theme(screen->nvg_context());
-    flat_theme->m_standard_font_size            = 18;
-    flat_theme->m_button_font_size              = 17;
-    flat_theme->m_text_box_font_size            = 16;
-    flat_theme->m_window_corner_radius          = 4;
-    flat_theme->m_window_fill_unfocused         = Color(50, 255);
-    flat_theme->m_window_fill_focused           = Color(52, 255);
-    flat_theme->m_window_header_height          = 0;
-    flat_theme->m_drop_shadow                   = Color(0, 100);
-    flat_theme->m_button_corner_radius          = 4;
-    flat_theme->m_border_light                  = flat_theme->m_transparent;
-    flat_theme->m_border_dark                   = flat_theme->m_transparent;
-    flat_theme->m_button_gradient_top_focused   = Color(77, 124, 233, 255);
-    flat_theme->m_button_gradient_bot_focused   = flat_theme->m_button_gradient_top_focused;
-    flat_theme->m_button_gradient_top_unfocused = flat_theme->m_transparent;
-    flat_theme->m_button_gradient_bot_unfocused = flat_theme->m_transparent;
-    flat_theme->m_button_gradient_top_pushed    = flat_theme->m_transparent;
-    flat_theme->m_button_gradient_bot_pushed    = flat_theme->m_button_gradient_top_pushed;
-    flat_theme->m_window_popup                  = Color(38, 255);
-    flat_theme->m_text_color_shadow             = flat_theme->m_transparent;
-    set_theme(flat_theme);
+    // Glass popup menu: inherit light/dark mode from the screen, then
+    // specialize for a floating menu surface.
+    ThemeMode mode = screen->theme() ? screen->theme()->mode() : ThemeMode::Dark;
+    auto glass_theme = new Theme(screen->nvg_context(), mode);
+    glass_theme->m_standard_font_size            = 14;
+    glass_theme->m_button_font_size              = 14;
+    glass_theme->m_window_corner_radius          = 10;
+    glass_theme->m_window_header_height          = 0;
+    glass_theme->m_window_drop_shadow_size       = 22;
+    glass_theme->m_button_corner_radius          = glass_theme->m_menu_item_corner_radius;
+    glass_theme->m_border_light                  = glass_theme->m_transparent;
+    glass_theme->m_border_dark                   = glass_theme->m_transparent;
+    glass_theme->m_border_medium                 = glass_theme->m_transparent;
+    // Highlight uses accent (system blue) — solid, not a 3D gradient
+    glass_theme->m_button_gradient_top_focused   = glass_theme->m_accent_color;
+    glass_theme->m_button_gradient_bot_focused   = glass_theme->m_accent_color;
+    glass_theme->m_button_gradient_top_unfocused = glass_theme->m_transparent;
+    glass_theme->m_button_gradient_bot_unfocused = glass_theme->m_transparent;
+    glass_theme->m_button_gradient_top_pushed    = glass_theme->m_accent_color;
+    glass_theme->m_button_gradient_bot_pushed    = glass_theme->m_accent_color;
+    glass_theme->m_window_fill_unfocused         = glass_theme->m_menu_popup_fill;
+    glass_theme->m_window_fill_focused           = glass_theme->m_menu_popup_fill;
+    glass_theme->m_window_popup                  = glass_theme->m_menu_popup_fill;
+    glass_theme->m_text_color_shadow             = glass_theme->m_transparent;
+    set_theme(glass_theme);
 }
 
 MenuItem *PopupMenu::item(int idx) const
@@ -586,36 +591,19 @@ void PopupMenu::draw(NVGcontext *ctx)
     if (!m_visible)
         return;
 
-    // Flat menu panel: soft shadow + thin hairline, no heavy double-stroke bevel.
-    int ds = std::max(4, m_theme->m_window_drop_shadow_size);
-    float cr = 2.f; // slight rounding for the panel only (items themselves are flat)
+    // Floating glass menu: deep soft shadow + frosted panel + specular rim
+    int ds = std::max(12, m_theme->m_window_drop_shadow_size);
+    float cr = 10.f;
+    float fx = (float)m_pos.x(), fy = (float)m_pos.y();
+    float fw = (float)m_size.x(), fh = (float)m_size.y();
 
     nvgSave(ctx);
     nvgResetScissor(ctx);
 
-    NVGpaint shadow_paint = nvgBoxGradient(ctx, m_pos.x(), m_pos.y() + 0.25f * ds,
-                                           m_size.x(), m_size.y(), cr * 2, ds * 2,
-                                           m_theme->m_drop_shadow, m_theme->m_transparent);
-
-    nvgBeginPath(ctx);
-    nvgRect(ctx, m_pos.x() - ds, m_pos.y() - ds + 0.25f * ds,
-            m_size.x() + 2 * ds, m_size.y() + 2 * ds);
-    nvgRoundedRect(ctx, m_pos.x(), m_pos.y(), m_size.x(), m_size.y(), cr);
-    nvgPathWinding(ctx, NVG_HOLE);
-    nvgFillPaint(ctx, shadow_paint);
-    nvgFill(ctx);
-
-    nvgBeginPath(ctx);
-    nvgRoundedRect(ctx, m_pos.x(), m_pos.y(), m_size.x(), m_size.y(), cr);
-    nvgFillColor(ctx, m_theme->m_window_popup);
-    nvgFill(ctx);
-
-    nvgBeginPath(ctx);
-    nvgRoundedRect(ctx, m_pos.x() + 0.5f, m_pos.y() + 0.5f,
-                   m_size.x() - 1.f, m_size.y() - 1.f, cr);
-    nvgStrokeWidth(ctx, 1.f);
-    nvgStrokeColor(ctx, m_theme->m_menu_separator);
-    nvgStroke(ctx);
+    m_theme->draw_glass_shadow(ctx, fx, fy, fw, fh, cr, (float)ds);
+    m_theme->draw_glass_surface(ctx, fx, fy, fw, fh, cr,
+                                m_theme->m_window_popup,
+                                /*specular=*/true, /*border=*/true);
 
     nvgRestore(ctx);
 
@@ -1070,6 +1058,7 @@ MenuBar::MenuBar(Widget *parent, const string &title) : Window(parent, title)
     set_can_move(false);
     set_can_snap(false);
     set_resizable(false);
+    set_traffic_lights(false); // strip is not a floating window
     sync_strip_geometry();
     // Menus are hover/keyboard interactive; never retain a frozen display list.
     set_cached(false);

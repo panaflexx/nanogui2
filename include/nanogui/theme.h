@@ -12,12 +12,17 @@
  * \file nanogui/theme.h
  *
  * \brief Storage class for theme-related properties (colors, metrics, fonts).
+ *
+ * Default visual language is macOS Glass: translucent surfaces, soft shadows,
+ * large continuous corner radii, specular top edges, and system-blue accents.
  */
 
 #pragma once
 
 #include <nanogui/vector.h>
 #include <nanogui/object.h>
+
+struct NVGcontext;
 
 NAMESPACE_BEGIN(nanogui)
 
@@ -36,6 +41,9 @@ enum class ThemeMode {
  * switch light/dark palettes at runtime — fonts are kept, colors and
  * mode-dependent metrics are replaced. Use \ref Screen::set_theme_mode to
  * apply a mode to a live UI tree.
+ *
+ * Both modes use a macOS Glass material language (frosted translucent panels,
+ * hairline specular borders, soft layered shadows, system accent).
  */
 class NANOGUI_EXPORT Theme : public Object {
 public:
@@ -66,6 +74,27 @@ public:
      */
     void configure_as_menubar();
 
+    /* ---- Glass drawing helpers -------------------------------------------- */
+    /**
+     * Soft multi-layer drop shadow behind a rounded rectangle (macOS depth).
+     * Draws outside the rect; caller should \c nvgResetScissor if needed.
+     */
+    void draw_glass_shadow(NVGcontext *ctx, float x, float y, float w, float h,
+                           float radius, float shadow_size = -1.f) const;
+
+    /**
+     * Frosted glass surface: base fill, optional top specular wash, hairline border.
+     */
+    void draw_glass_surface(NVGcontext *ctx, float x, float y, float w, float h,
+                            float radius, const Color &fill,
+                            bool specular = true, bool border = true) const;
+
+    /**
+     * System-blue focus ring (outer soft glow + crisp inner stroke).
+     */
+    void draw_focus_ring(NVGcontext *ctx, float x, float y, float w, float h,
+                         float radius) const;
+
     /* ---- Fonts ------------------------------------------------------------ */
     /// The standard font face (default: ``"sans"`` from ``resources/roboto_regular.ttf``).
     int m_font_sans_regular;
@@ -85,9 +114,9 @@ public:
     /* ---- Typography ------------------------------------------------------- */
     /// Body / label font size (default: 16).
     int m_standard_font_size;
-    /// Button caption font size (default: 16).
+    /// Button caption font size (default: 15).
     int m_button_font_size;
-    /// TextBox / numeric field font size (default: 16).
+    /// TextBox / numeric field font size (default: 15).
     int m_text_box_font_size;
     /// Section heading font size (default: 20).
     int m_heading_font_size;
@@ -99,7 +128,7 @@ public:
     int m_muted_font_size;
 
     /* ---- Control metrics -------------------------------------------------- */
-    /// Preferred / min height for buttons, text boxes, dropdowns (default: 30).
+    /// Preferred / min height for buttons, text boxes, dropdowns (default: 28).
     int m_control_height;
     /// Preferred min width for empty text boxes / combos (default: 120).
     int m_control_min_width;
@@ -111,15 +140,15 @@ public:
     int m_row_spacing;
     /// Default spacing between form sections (default: 16).
     int m_section_spacing;
-    /// Rounding radius for Window widget corners (default: 4).
+    /// Rounding radius for Window widget corners (default: 14).
     int m_window_corner_radius;
-    /// Window title bar height (default: 30).
+    /// Window title bar height (default: 36).
     int m_window_header_height;
-    /// Drop shadow size behind Window widgets (default: 10).
+    /// Drop shadow size behind Window widgets (default: 28).
     int m_window_drop_shadow_size;
-    /// Rounding radius for Button (and derived) widgets (default: 4).
+    /// Rounding radius for Button (and derived) widgets (default: 8).
     int m_button_corner_radius;
-    /// Tab header border width (default: 0.75f).
+    /// Tab header border width (default: 0.5f).
     float m_tab_border_width;
     /// Tab header inner margin (default: 5).
     int m_tab_inner_margin;
@@ -129,9 +158,9 @@ public:
     int m_tab_max_button_width;
     /// Tab control width bound (default: 20).
     int m_tab_control_width;
-    /// Tab button horizontal padding (default: 10).
+    /// Tab button horizontal padding (default: 12).
     int m_tab_button_horizontal_padding;
-    /// Tab button vertical padding (default: 2).
+    /// Tab button vertical padding (default: 6).
     int m_tab_button_vertical_padding;
     /// Window resize grip / edge hit offset (default: 10).
     int m_resize_area_offset;
@@ -167,6 +196,25 @@ public:
     Color m_proceed_color;   ///< Primary progressive action (blue)
     Color m_warning_color;   ///< Caution (amber)
     Color m_accent_color;    ///< Brand accent (buttons, selection)
+
+    /* ---- Glass material extras -------------------------------------------- */
+    /// Specular top-edge wash (white with low alpha).
+    Color m_glass_specular;
+    /// Outer hairline border color for glass surfaces.
+    Color m_glass_border;
+    /// Soft focus-ring / selection glow color (usually accent @ mid alpha).
+    Color m_focus_ring;
+    /// Scrollbar thumb idle / active.
+    Color m_scrollbar_thumb;
+    Color m_scrollbar_thumb_active;
+    /// Slider / progress track base fill.
+    Color m_track_color;
+    /// Slider / progress filled portion (defaults to accent).
+    Color m_track_fill_color;
+    /// Checkbox unchecked glass fill.
+    Color m_checkbox_bg;
+    /// Checkbox border when unchecked.
+    Color m_checkbox_border;
 
     /* ---- Screen / chrome -------------------------------------------------- */
     /// Top-level Screen clear / background color.
@@ -207,6 +255,8 @@ public:
     Color m_menu_popup_fill;
     /// Menu separator color.
     Color m_menu_separator;
+    /// Rounded menu-item highlight radius (default: 6).
+    int m_menu_item_corner_radius;
 
     /* ---- Text field chrome ------------------------------------------------ */
     /// TextBox unfocused background gradient top (alpha included).

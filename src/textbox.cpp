@@ -110,19 +110,17 @@ void TextBox::draw(NVGcontext* ctx) {
     Color fg_top = m_theme ? m_theme->m_text_box_focused_bg_top : Color(150, 32);
     Color fg_bot = m_theme ? m_theme->m_text_box_focused_bg_bot : Color(32, 32);
 
-    NVGpaint bg = nvgBoxGradient(ctx,
-        m_pos.x() + 1, m_pos.y() + 1 + 1.0f, m_size.x() - 2, m_size.y() - 2,
-        3, 4, bg_top, bg_bot);
-    NVGpaint fg1 = nvgBoxGradient(ctx,
-        m_pos.x() + 1, m_pos.y() + 1 + 1.0f, m_size.x() - 2, m_size.y() - 2,
-        3, 4, fg_top, fg_bot);
-    NVGpaint fg2 = nvgBoxGradient(ctx,
-        m_pos.x() + 1, m_pos.y() + 1 + 1.0f, m_size.x() - 2, m_size.y() - 2,
-        3, 4, nvgRGBA(255, 0, 0, 100), nvgRGBA(255, 0, 0, 50));
+    float fx = m_pos.x() + 0.5f, fy = m_pos.y() + 0.5f;
+    float fw = m_size.x() - 1.f, fh = m_size.y() - 1.f;
+    float cr = std::min(8.f, fh * 0.5f);
+
+    NVGpaint bg = nvgLinearGradient(ctx, fx, fy, fx, fy + fh, bg_top, bg_bot);
+    NVGpaint fg1 = nvgLinearGradient(ctx, fx, fy, fx, fy + fh, fg_top, fg_bot);
+    NVGpaint fg2 = nvgLinearGradient(ctx, fx, fy, fx, fy + fh,
+        nvgRGBA(255, 59, 48, 80), nvgRGBA(255, 59, 48, 40));
 
     nvgBeginPath(ctx);
-    nvgRoundedRect(ctx, m_pos.x() + 1, m_pos.y() + 1 + 1.0f, m_size.x() - 2,
-                   m_size.y() - 2, 3);
+    nvgRoundedRect(ctx, fx, fy, fw, fh, cr);
 
     if (m_editable && focused())
         m_valid_format ? nvgFillPaint(ctx, fg1) : nvgFillPaint(ctx, fg2);
@@ -130,14 +128,23 @@ void TextBox::draw(NVGcontext* ctx) {
         nvgFillPaint(ctx, fg1);
     else
         nvgFillPaint(ctx, bg);
-
     nvgFill(ctx);
 
+    // Glass hairline
     nvgBeginPath(ctx);
-    nvgRoundedRect(ctx, m_pos.x() + 0.5f, m_pos.y() + 0.5f, m_size.x() - 1,
-                   m_size.y() - 1, 2.5f);
-    nvgStrokeColor(ctx, Color(0, 48));
+    nvgRoundedRect(ctx, fx, fy, fw, fh, cr);
+    nvgStrokeWidth(ctx, 1.f);
+    nvgStrokeColor(ctx, m_theme ? m_theme->m_glass_border : Color(255, 40));
     nvgStroke(ctx);
+    nvgBeginPath(ctx);
+    nvgRoundedRect(ctx, fx + 0.5f, fy + 0.5f, fw - 1.f, fh - 1.f, std::max(0.f, cr - 0.5f));
+    nvgStrokeWidth(ctx, 0.5f);
+    nvgStrokeColor(ctx, m_theme ? m_theme->m_border_dark : Color(0, 40));
+    nvgStroke(ctx);
+
+    // macOS focus ring when editing
+    if (m_editable && focused() && m_valid_format && m_theme)
+        m_theme->draw_focus_ring(ctx, fx, fy, fw, fh, cr);
 
     nvgFontSize(ctx, font_size());
     nvgFontFace(ctx, "sans");

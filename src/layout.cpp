@@ -58,15 +58,11 @@ Vector2i BoxLayout::preferred_size(NVGcontext* ctx, const Widget* widget) const 
         Vector2i min_s = w->min_size();
         Vector2i max_s = w->max_size();
 
-        Vector2i clamped_pref = ps;
-        clamped_pref = max(clamped_pref, min_s);
-        // Use parent widget size as default, with fallback to avoid recursion
-        Vector2i parent_size = widget->size();
-        Vector2i default_size = widget->parent() && widget->parent()->size() != Vector2i(0, 0)
-            ? widget->parent()->size() : Vector2i(1000, 1000);
-        if (parent_size == Vector2i(0, 0)) parent_size = default_size;
-        if (max_s.x() == 0) clamped_pref.x() = std::min(clamped_pref.x(), parent_size.x() - 2 * m_margin);
-        if (max_s.y() == 0) clamped_pref.y() = std::min(clamped_pref.y(), parent_size.y() - 2 * m_margin);
+        // Intrinsic preferred only — never clamp down to current container size
+        // (that ratchets children smaller after every layout pass).
+        Vector2i clamped_pref = max(ps, min_s);
+        if (max_s.x() > 0) clamped_pref.x() = std::min(clamped_pref.x(), max_s.x());
+        if (max_s.y() > 0) clamped_pref.y() = std::min(clamped_pref.y(), max_s.y());
 
         size[axis1] += clamped_pref[axis1];
         size[axis2] = std::max(size[axis2], clamped_pref[axis2] + 2 * m_margin);
@@ -198,11 +194,6 @@ Vector2i GroupLayout::preferred_size(NVGcontext* ctx, const Widget* widget) cons
         height += window->theme()->m_window_header_height - m_margin / 2;
 
     bool first = true, indent = false;
-    Vector2i default_size = widget->parent() && widget->parent()->size() != Vector2i(0, 0)
-        ? widget->parent()->size() : Vector2i(1000, 1000);
-    Vector2i parent_size = widget->size();
-    if (parent_size == Vector2i(0, 0)) parent_size = default_size;
-
     for (auto c : widget->children()) {
         if (!c->visible())
             continue;
@@ -215,10 +206,12 @@ Vector2i GroupLayout::preferred_size(NVGcontext* ctx, const Widget* widget) cons
         Vector2i min_s = c->min_size();
         Vector2i max_s = c->max_size();
 
-        Vector2i clamped_pref = ps;
-        clamped_pref = max(clamped_pref, min_s);
-        if (max_s.x() == 0) clamped_pref.x() = std::min(clamped_pref.x(), parent_size.x() - 2 * m_margin);
-        if (max_s.y() == 0) clamped_pref.y() = std::min(clamped_pref.y(), parent_size.y() - 2 * m_margin);
+        // Intrinsic preferred only — do NOT clamp down to the widget's current
+        // size. That created a one-way shrink ratchet on every perform_layout
+        // (e.g. Misc. widgets + TabWidget while resize-dragging).
+        Vector2i clamped_pref = max(ps, min_s);
+        if (max_s.x() > 0) clamped_pref.x() = std::min(clamped_pref.x(), max_s.x());
+        if (max_s.y() > 0) clamped_pref.y() = std::min(clamped_pref.y(), max_s.y());
 
         bool indent_cur = indent && label == nullptr;
         height += clamped_pref.y();
@@ -254,14 +247,18 @@ void GroupLayout::perform_layout(NVGcontext* ctx, Widget* widget) const {
         first = false;
 
         bool indent_cur = indent && label == nullptr;
-        Vector2i ps = Vector2i(available_width - (indent_cur ? m_group_indent : 0), c->preferred_size(ctx).y());
+        int child_w = available_width - (indent_cur ? m_group_indent : 0);
+        Vector2i ps = Vector2i(child_w, c->preferred_size(ctx).y());
         Vector2i min_s = c->min_size();
         Vector2i max_s = c->max_size();
 
-        Vector2i clamped_pref = ps;
-        clamped_pref = max(clamped_pref, min_s);
-        if (max_s.x() == 0) clamped_pref.x() = std::min(clamped_pref.x(), available_width - (indent_cur ? m_group_indent : 0));
-        if (max_s.y() == 0) clamped_pref.y() = std::min(clamped_pref.y(), widget->height() - 2 * m_margin);
+        Vector2i clamped_pref = max(ps, min_s);
+        // Width always tracks the container (stretch). Height uses preferred,
+        // capped only by an explicit max_size — never by current container
+        // height (that reintroduced the shrink ratchet for nested layouts).
+        clamped_pref.x() = child_w;
+        if (max_s.x() > 0) clamped_pref.x() = std::min(clamped_pref.x(), max_s.x());
+        if (max_s.y() > 0) clamped_pref.y() = std::min(clamped_pref.y(), max_s.y());
 
         c->set_position(Vector2i(m_margin + (indent_cur ? m_group_indent : 0), height));
         c->set_size(clamped_pref);
@@ -1217,24 +1214,31 @@ void FlexLayout::perform_layout(NVGcontext *ctx, Widget *widget) const {
         Vector2i min_s = child->layout_min_size();
         Vector2i max_s = child->max_size();
 
-        // Effective minimum on main axis: user-set min, or intrinsic preferred when unset (CSS 'min: auto')
-        int eff_main_min = min_s[main_axis_idx] > 0 ? min_s[main_axis_idx] : child_pref[main_axis_idx];
-
-        // NOTE: Do NOT clamp preferred DOWN to available container space; the flex shrink algorithm
-        // below handles fitting into the available space. Clamping here causes a permanent shrink
-        // ratchet (items never grow back when container expands).
-        Vector2i clamped_pref = max(child_pref, min_s);
-
         FlexItem flex_item = get_flex_item(child);
 
-        int base_size = flex_item.flex_basis >= 0 ? flex_item.flex_basis : clamped_pref[main_axis_idx];
+        // Flexible items (grow > 0 or explicit flex-basis) use only the user min as
+        // floor — like CSS `min-height: 0` on flex children. Using preferred as a
+        // floor (CSS min:auto) ratchets: widgets whose preferred_size() returns
+        // current m_size (EmailListView, empty panes, Split aggregates) can never
+        // shrink, so resizes push sibling panes out of view / leave empty strips.
+        bool flexible = flex_item.flex_grow > 0.f || flex_item.flex_basis >= 0;
+        int eff_main_min = min_s[main_axis_idx];
+        if (!flexible && !child->animation_overrides_layout_size())
+            eff_main_min = min_s[main_axis_idx] > 0 ? min_s[main_axis_idx]
+                                                     : child_pref[main_axis_idx];
+
+        // NOTE: Do NOT clamp preferred DOWN to available container space.
+        Vector2i clamped_pref = max(child_pref, min_s);
+
+        int base_size = flex_item.flex_basis >= 0 ? flex_item.flex_basis
+                                                 : clamped_pref[main_axis_idx];
         int axis_max = max_s[main_axis_idx] > 0 ? max_s[main_axis_idx] : INT_MAX;
         base_size = std::max(eff_main_min, std::min(base_size, axis_max));
 
         base_sizes.push_back(base_size);
         total_base_size += base_size;
         total_flex_grow += flex_item.flex_grow;
-        total_flex_shrink_scaled += flex_item.flex_shrink * base_size;
+        total_flex_shrink_scaled += flex_item.flex_shrink * std::max(1, base_size);
     }
 
     int remaining_space = available_main_space - total_base_size - total_gaps;
@@ -1248,19 +1252,22 @@ void FlexLayout::perform_layout(NVGcontext *ctx, Widget *widget) const {
             float grow_factor = flex_item.flex_grow / total_flex_grow;
             final_size += (int)(remaining_space * grow_factor);
         } else if (remaining_space < 0 && total_flex_shrink_scaled > 0) {
-            float shrink_factor = (flex_item.flex_shrink * base_sizes[i]) / total_flex_shrink_scaled;
+            float shrink_factor = (flex_item.flex_shrink * std::max(1, base_sizes[i]))
+                               / total_flex_shrink_scaled;
             final_size += (int)(remaining_space * shrink_factor);
             final_size = std::max(0, final_size);
         }
 
-        // Effective min on main axis: respect user min, else fall back to intrinsic preferred.
-        // During SlideUp/SlideDown, layout_min_size drops to 0 so the widget can collapse.
         Vector2i layout_min = child->layout_min_size();
         int user_min = layout_min[main_axis_idx];
-        int axis_min = child->animation_overrides_layout_size()
-            ? user_min
-            : (user_min > 0 ? user_min : pref_sizes[i][main_axis_idx]);
-        int axis_max = child->max_size()[main_axis_idx] > 0 ? child->max_size()[main_axis_idx] : INT_MAX;
+        bool flexible = flex_item.flex_grow > 0.f || flex_item.flex_basis >= 0;
+        int axis_min;
+        if (child->animation_overrides_layout_size() || flexible)
+            axis_min = user_min; // flexible: only explicit min (may be 0)
+        else
+            axis_min = user_min > 0 ? user_min : pref_sizes[i][main_axis_idx];
+        int axis_max = child->max_size()[main_axis_idx] > 0
+                           ? child->max_size()[main_axis_idx] : INT_MAX;
         final_size = std::max(axis_min, std::min(final_size, axis_max));
 
         final_sizes.push_back(final_size);
@@ -1354,14 +1361,18 @@ void FlexLayout::perform_layout(NVGcontext *ctx, Widget *widget) const {
         Vector2i min_s = child->layout_min_size();
         Vector2i max_s = child->max_size();
 
-        AlignItems align = (flex_item.align_self != AlignItems::FlexStart) ? flex_item.align_self : m_align_items;
+        AlignItems align = (flex_item.align_self != AlignItems::FlexStart)
+                               ? flex_item.align_self : m_align_items;
         int cross_size = child_pref[cross_axis_idx];
-        // Effective cross min: respect user min, else intrinsic preferred (CSS 'min: auto').
-        // Animations override this to allow collapsing past the intrinsic floor.
-        int cross_min = child->animation_overrides_layout_size()
-            ? min_s[cross_axis_idx]
-            : (min_s[cross_axis_idx] > 0 ? min_s[cross_axis_idx] : child_pref[cross_axis_idx]);
-        int cross_max = max_s[cross_axis_idx] > 0 ? max_s[cross_axis_idx] : available_cross_space;
+        // Non-stretch: preferred as soft min when user min unset (min:auto).
+        // Stretch: only explicit min — must track container, not last-frame size.
+        int cross_min = min_s[cross_axis_idx];
+        if (align != AlignItems::Stretch &&
+            !child->animation_overrides_layout_size() &&
+            cross_min <= 0)
+            cross_min = child_pref[cross_axis_idx];
+        int cross_max = max_s[cross_axis_idx] > 0 ? max_s[cross_axis_idx]
+                                                  : available_cross_space;
         cross_size = std::max(cross_min, std::min(cross_size, cross_max));
 
         switch (align) {
@@ -1377,10 +1388,16 @@ void FlexLayout::perform_layout(NVGcontext *ctx, Widget *widget) const {
                 child_pos[cross_axis_idx] = m_margin + (available_cross_space - cross_size) / 2;
                 child_size[cross_axis_idx] = cross_size;
                 break;
-            case AlignItems::Stretch:
+            case AlignItems::Stretch: {
+                // Match container cross size (clamped only by explicit min/max).
+                int floor = min_s[cross_axis_idx] > 0 ? min_s[cross_axis_idx] : 0;
+                int ceil  = max_s[cross_axis_idx] > 0 ? max_s[cross_axis_idx]
+                                                      : available_cross_space;
                 child_pos[cross_axis_idx] = m_margin;
-                child_size[cross_axis_idx] = std::max(cross_min, std::min(available_cross_space, cross_max));
+                child_size[cross_axis_idx] =
+                    std::max(floor, std::min(available_cross_space, ceil));
                 break;
+            }
             case AlignItems::Baseline:
                 child_pos[cross_axis_idx] = m_margin;
                 child_size[cross_axis_idx] = cross_size;

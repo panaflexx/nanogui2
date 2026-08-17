@@ -7,23 +7,17 @@ using namespace nanogui;
 
 class CarSalesApp : public Screen {
 public:
-	Window *m_rootWindow = nullptr;
-
     CarSalesApp() : Screen(Vector2i(800, 600), "Car Dealership Sales Entry", true) {
 		inc_ref();
         // Professional light defaults from Theme (switchable at runtime).
         set_theme_mode(ThemeMode::Light);
         Theme* theme = m_theme.get();
 
-        Window* window = new Window(this, WindowConfig{
-            .title = "", // Content panel: no title chrome
-            .position = Vector2i(0, 0),
-            .size = Vector2i(300, 420),
-            .resizable = true,
-            .layout = new FlexLayout(FlexDirection::Column, JustifyContent::FlexStart, AlignItems::Stretch, 10, 10)
-        });
-		window->set_size(this->size());
-		m_rootWindow = window;
+        // Root content surface: fills the Screen and tracks resizes automatically
+        // (no manual resize_event / set_size / center plumbing).
+        RootWindow* window = new RootWindow(this,
+            new FlexLayout(FlexDirection::Column, JustifyContent::FlexStart,
+                           AlignItems::Stretch, 10, 10));
 
         // Menu bar — derives colors from the active ThemeMode
         MenuBar* menuBar = new MenuBar(window, "");
@@ -145,19 +139,7 @@ public:
         clearButton->set_background_color(theme->m_danger_color);
 
         perform_layout(m_nvg_context);
-        window->center();
     }
-
-	// Makes background window resize with system window (screen)
-    virtual bool resize_event(const Vector2i &size) override {
-        if (m_rootWindow) {
-            m_rootWindow->set_size(size);
-            perform_layout(); 
-        }
-        Screen::resize_event(size);
-        return true;
-    }
-
 
 private:
     TextBox* customerName;

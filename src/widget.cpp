@@ -48,8 +48,12 @@ Widget::Widget(Widget* parent)
     {
         DebugName = parent->DebugName;
         parent->add_child(this);
-        m_min_size = Vector2i(0,0);
-        m_max_size = parent->size();
+        m_min_size = Vector2i(0, 0);
+        // Leave m_max_size at (0,0) = unlimited. Capturing parent->size() here
+        // permanently capped children to the parent's size at construction time,
+        // so after a RootWindow/Screen grew, flex Stretch could not expand them
+        // (and left empty strips that looked like status bars).
+        m_max_size = Vector2i(0, 0);
     }
 }
 

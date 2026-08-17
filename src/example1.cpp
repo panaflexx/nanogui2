@@ -68,11 +68,6 @@ public:
     std::vector<MenuItem *> m_edit_items;   /// Menu items that are enabled iff we have an editable image
     MenuBar *m_menubar = NULL;
 
-	void addWindowButtons(Window *w) {
-        w->button_panel()->add<Button>("X")
-            .callback([w] { w->dispose(); });
-    }
-
 	void ask_to_quit() {
         Make<MessageDialog>(this, MessageDialog::Type::Information, "Warning!", "🛑 Quit?", "Yes", "No", true)
             .tap([this](MessageDialog* dlg) {
@@ -199,7 +194,6 @@ public:
         auto ButtonDemoWindow = this->add<Window>("", true)
             .pos({15, 40})
             .layout(new GroupLayout());
-        addWindowButtons(ButtonDemoWindow);
 
         ButtonDemoWindow->add<Label>("Push buttons", "sans-bold");
 
@@ -259,7 +253,6 @@ public:
         Window* BasicWidgetsWindow = Make<Window>(this, "Basic widgets", true)
             .pos({200, 15})
             .layout(new BoxLayout(Orientation::Vertical, Alignment::Middle, 0, 6));
-        addWindowButtons(BasicWidgetsWindow);
         // BasicWidgetsWindow->set_fixed_size({ TempWidth/2, TempHeight/2 });
 
         // // attach a vertical scroll panel
@@ -335,7 +328,6 @@ public:
             .pos({710, 15})
             //.layout(new GroupLayout(3))
             .layout(new GridLayout(Orientation::Horizontal, 1, Alignment::Fill, 2, 2));
-        addWindowButtons(image_window);
 
         // Create a Texture instance for each object
         for (auto& icon : icons) {
@@ -441,7 +433,6 @@ public:
         Window* MiscWidgetsWindow = Make<Window>(this, "Misc. widgets", true)
             .pos({425, 15})
             .layout(new GroupLayout());
-        addWindowButtons(MiscWidgetsWindow);
 
         TabWidget* tab_widget = Make<TabWidget>(MiscWidgetsWindow);
 
@@ -532,7 +523,6 @@ public:
         Window* GridWindow = Make<Window>(this, "Grid of small widgets", true)
             .pos({200, 520})
             .layout(layout);
-        addWindowButtons(GridWindow);
 
         /* FP widget */ {
             Make<Label>(GridWindow, "Floating point :", "sans-bold");
@@ -599,7 +589,6 @@ public:
         Window* ColorPickerWindow = Make<Window>(this, "Color Picker Fast Callback", true)
             .pos({425, 500})
             .layout(layout2);
-        addWindowButtons(ColorPickerWindow);
 
         Make<Label>(ColorPickerWindow, "Combined: ");
         Button* b = Make<Button>(ColorPickerWindow, "ColorWheel", FA_INFINITY);
@@ -631,7 +620,6 @@ public:
         Window* TreeViewWindow = Make<Window>(this, "TreeView Example", true)
             .pos({700, 350})
             .layout(new BoxLayout(Orientation::Vertical, Alignment::Middle, 15));
-        addWindowButtons(TreeViewWindow);
 
         ScrollPanel* scroll = Make<ScrollPanel>(TreeViewWindow)
             .tap([](ScrollPanel* s) { s->set_scroll_type(ScrollPanel::ScrollTypes::Both); });

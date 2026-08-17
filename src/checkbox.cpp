@@ -12,6 +12,7 @@
 #include <nanogui/checkbox.h>
 #include <nanogui/opengl.h>
 #include <nanogui/theme.h>
+#include <algorithm>
 
 NAMESPACE_BEGIN(nanogui)
 
@@ -67,27 +68,62 @@ void CheckBox::draw(NVGcontext *ctx) {
     nvgText(ctx, m_pos.x() + 1.6f * font_size(), m_pos.y() + m_size.y() * 0.5f,
             m_caption.c_str(), nullptr);
 
-    NVGpaint bg = nvgBoxGradient(ctx, m_pos.x() + 1.5f, m_pos.y() + 1.5f,
-                                 m_size.y() - 2.0f, m_size.y() - 2.0f, 3, 3,
-                                 m_pushed ? Color(0, 100) : Color(0, 32),
-                                 Color(0, 0, 0, 180));
-
-    nvgBeginPath(ctx);
-    nvgRoundedRect(ctx, m_pos.x() + 1.0f, m_pos.y() + 1.0f, m_size.y() - 2.0f,
-                   m_size.y() - 2.0f, 3);
-    nvgFillPaint(ctx, bg);
-    nvgFill(ctx);
+    // macOS-style rounded square checkbox
+    float box = std::min((float)m_size.y() - 2.f, font_size() * 1.15f);
+    float bx = m_pos.x() + 1.f;
+    float by = m_pos.y() + (m_size.y() - box) * 0.5f;
+    float cr = std::max(4.f, box * 0.28f);
 
     if (m_checked) {
-        nvgFontSize(ctx, icon_scale() * m_size.y());
+        // Filled system-blue with soft specular
+        Color fill = m_enabled ? m_theme->m_accent_color
+                               : Color(m_theme->m_accent_color.r(),
+                                       m_theme->m_accent_color.g(),
+                                       m_theme->m_accent_color.b(), 0.4f);
+        if (m_pushed)
+            fill.a() *= 0.85f;
+
+        nvgBeginPath(ctx);
+        nvgRoundedRect(ctx, bx, by, box, box, cr);
+        nvgFillColor(ctx, fill);
+        nvgFill(ctx);
+
+        NVGpaint wash = nvgLinearGradient(ctx, bx, by, bx, by + box * 0.55f,
+            nvgRGBA(255, 255, 255, 70), nvgRGBA(255, 255, 255, 0));
+        nvgBeginPath(ctx);
+        nvgRoundedRect(ctx, bx + 0.5f, by + 0.5f, box - 1.f, box * 0.55f, cr);
+        nvgFillPaint(ctx, wash);
+        nvgFill(ctx);
+
+        // White check mark
+        nvgFontSize(ctx, icon_scale() * box * 0.95f);
         nvgFontFace(ctx, "icons");
-        nvgFillColor(ctx, m_enabled ? m_theme->m_icon_color
-                                   : m_theme->m_disabled_text_color);
+        nvgFillColor(ctx, nvgRGBA(255, 255, 255, m_enabled ? 255 : 180));
         nvgTextAlign(ctx, NVG_ALIGN_CENTER | NVG_ALIGN_MIDDLE);
-        nvgText(ctx, m_pos.x() + m_size.y() * 0.5f + 1,
-                m_pos.y() + m_size.y() * 0.5f, utf8(m_theme->m_check_box_icon).data(),
-                nullptr);
+        nvgText(ctx, bx + box * 0.5f, by + box * 0.5f,
+                utf8(m_theme->m_check_box_icon).data(), nullptr);
+    } else {
+        // Glass empty box
+        Color bg = m_pushed ? Color(m_theme->m_checkbox_bg.r(),
+                                    m_theme->m_checkbox_bg.g(),
+                                    m_theme->m_checkbox_bg.b(),
+                                    std::min(1.f, m_theme->m_checkbox_bg.a() * 1.4f))
+                            : m_theme->m_checkbox_bg;
+        nvgBeginPath(ctx);
+        nvgRoundedRect(ctx, bx, by, box, box, cr);
+        nvgFillColor(ctx, bg);
+        nvgFill(ctx);
+
+        nvgBeginPath(ctx);
+        nvgRoundedRect(ctx, bx + 0.5f, by + 0.5f, box - 1.f, box - 1.f, cr - 0.5f);
+        nvgStrokeWidth(ctx, 1.25f);
+        nvgStrokeColor(ctx, m_enabled ? m_theme->m_checkbox_border
+                                      : m_theme->m_disabled_text_color);
+        nvgStroke(ctx);
     }
+
+    if (focused() && m_enabled)
+        m_theme->draw_focus_ring(ctx, bx - 1.f, by - 1.f, box + 2.f, box + 2.f, cr + 1.f);
 }
 
 NAMESPACE_END(nanogui)

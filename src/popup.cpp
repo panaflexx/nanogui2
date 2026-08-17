@@ -14,6 +14,7 @@
 #include <nanogui/popupbutton.h>
 #include <nanogui/theme.h>
 #include <nanogui/opengl.h>
+#include <algorithm>
 
 NAMESPACE_BEGIN(nanogui)
 
@@ -79,46 +80,53 @@ void Popup::draw(NVGcontext* ctx) {
     if (!m_visible)
         return;
 
-    int ds = m_theme->m_window_drop_shadow_size,
-        cr = m_theme->m_window_corner_radius;
+    int ds = m_theme->m_window_drop_shadow_size;
+    // Popovers are slightly tighter than windows but still glass-rounded
+    float cr = std::max(10.f, (float)m_theme->m_window_corner_radius - 2.f);
+    float fx = (float)m_pos.x(), fy = (float)m_pos.y();
+    float fw = (float)m_size.x(), fh = (float)m_size.y();
 
     nvgSave(ctx);
     nvgResetScissor(ctx);
 
-    /* Draw a drop shadow */
-    NVGpaint shadow_paint = nvgBoxGradient(
-        ctx, m_pos.x(), m_pos.y(), m_size.x(), m_size.y(), cr * 2, ds * 2,
-        m_theme->m_drop_shadow, m_theme->m_transparent);
+    m_theme->draw_glass_shadow(ctx, fx, fy, fw, fh, cr, (float)ds);
 
+    /* Glass body + anchor beak as one filled path */
     nvgBeginPath(ctx);
-    nvgRect(ctx, m_pos.x() - ds, m_pos.y() - ds, m_size.x() + 2 * ds, m_size.y() + 2 * ds);
-    nvgRoundedRect(ctx, m_pos.x(), m_pos.y(), m_size.x(), m_size.y(), cr);
-    nvgPathWinding(ctx, NVG_HOLE);
-    nvgFillPaint(ctx, shadow_paint);
-    nvgFill(ctx);
-
-    /* Draw window */
-    nvgBeginPath(ctx);
-    nvgRoundedRect(ctx, m_pos.x(), m_pos.y(), m_size.x(), m_size.y(), cr);
+    nvgRoundedRect(ctx, fx, fy, fw, fh, cr);
     if (m_side == Side::Right) {
         nvgMoveTo(ctx, m_anchor_pos.x() + m_anchor_size, m_anchor_pos.y());
         nvgLineTo(ctx, m_anchor_pos.x() - 1, m_anchor_pos.y() - m_anchor_size);
         nvgLineTo(ctx, m_anchor_pos.x() - 1, m_anchor_pos.y() + m_anchor_size);
-    }
-    if (m_side == Side::Left) {// draw a diamond in case we move the anchor to the bottom
+    } else if (m_side == Side::Left) {
         nvgMoveTo(ctx, m_anchor_pos.x() + m_anchor_size, m_anchor_pos.y());
         nvgLineTo(ctx, m_anchor_pos.x(), m_anchor_pos.y() - m_anchor_size);
         nvgLineTo(ctx, m_anchor_pos.x() - m_anchor_size, m_anchor_pos.y());
         nvgLineTo(ctx, m_anchor_pos.x(), m_anchor_pos.y() + m_anchor_size);
-    }
-    else// bottom
-    {
+    } else {
         nvgMoveTo(ctx, m_anchor_pos.x(), m_anchor_pos.y() + m_anchor_size);
         nvgLineTo(ctx, m_anchor_pos.x() - m_anchor_size, m_anchor_pos.y() - 1);
         nvgLineTo(ctx, m_anchor_pos.x() + m_anchor_size, m_anchor_pos.y() - 1);
     }
     nvgFillColor(ctx, m_theme->m_window_popup);
     nvgFill(ctx);
+
+    /* Hairline glass edge on body */
+    nvgBeginPath(ctx);
+    nvgRoundedRect(ctx, fx + 0.5f, fy + 0.5f, fw - 1.f, fh - 1.f, cr - 0.5f);
+    nvgStrokeWidth(ctx, 1.f);
+    nvgStrokeColor(ctx, m_theme->m_glass_border);
+    nvgStroke(ctx);
+
+    /* Soft specular on popup top */
+    float band = std::min(fh * 0.35f, 18.f);
+    NVGpaint wash = nvgLinearGradient(ctx, fx, fy, fx, fy + band,
+                                      m_theme->m_glass_specular, m_theme->m_transparent);
+    nvgBeginPath(ctx);
+    nvgRoundedRect(ctx, fx + 1.f, fy + 1.f, fw - 2.f, band, cr - 1.f);
+    nvgFillPaint(ctx, wash);
+    nvgFill(ctx);
+
     nvgRestore(ctx);
 
     Widget::draw(ctx);

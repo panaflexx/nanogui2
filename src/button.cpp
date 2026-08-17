@@ -14,6 +14,7 @@
 #include <nanogui/theme.h>
 #include <nanogui/opengl.h>
 #include <algorithm>
+#include <cmath>
 
 NAMESPACE_BEGIN(nanogui)
 
@@ -227,57 +228,75 @@ bool Button::keyboard_event(int key, int scancode, int action, int modifiers) {
 void Button::draw(NVGcontext* ctx) {
     Widget::draw(ctx);
 
-    NVGcolor grad_top = m_make_transparent ? m_theme->m_window_fill_unfocused : m_theme->m_button_gradient_top_unfocused;
-    NVGcolor grad_bot = m_make_transparent ? m_theme->m_window_fill_unfocused : m_theme->m_button_gradient_bot_unfocused;
+    float fx = m_pos.x() + 0.5f, fy = m_pos.y() + 0.5f;
+    float fw = m_size.x() - 1.f, fh = m_size.y() - 1.f;
+    // Pill-ish continuous curve: radius approaches half-height
+    float cr = std::min((float)m_theme->m_button_corner_radius, fh * 0.5f);
+
+    NVGcolor grad_top = m_make_transparent ? m_theme->m_transparent
+                                           : m_theme->m_button_gradient_top_unfocused;
+    NVGcolor grad_bot = m_make_transparent ? m_theme->m_transparent
+                                           : m_theme->m_button_gradient_bot_unfocused;
 
     if (m_pushed || (m_mouse_focus && (m_flags & MenuButton))) {
         grad_top = m_theme->m_button_gradient_top_pushed;
         grad_bot = m_theme->m_button_gradient_bot_pushed;
-    }
-    else if (m_mouse_focus && m_enabled) {
+    } else if (m_mouse_focus && m_enabled) {
         grad_top = m_theme->m_button_gradient_top_focused;
         grad_bot = m_theme->m_button_gradient_bot_focused;
     }
 
-    nvgBeginPath(ctx);
-
-    nvgRoundedRect(ctx, m_pos.x() + 1, m_pos.y() + 1.0f, m_size.x() - 2,
-        m_size.y() - 2, m_theme->m_button_corner_radius - 1);
-
-    if (m_background_color.w() != 0) {
-        nvgFillColor(ctx, Color(m_background_color[0], m_background_color[1],
-            m_background_color[2], 1.f));
-        nvgFill(ctx);
-        if (m_pushed) {
-            grad_top.a = grad_bot.a = 0.8f;
-        }
-        else {
-            double v = 1 - m_background_color.w();
-            grad_top.a = grad_bot.a = m_enabled ? v : v * .5f + .5f;
-        }
-    }
-
-    NVGpaint bg = nvgLinearGradient(ctx, m_pos.x(), m_pos.y(), m_pos.x(),
-        m_pos.y() + m_size.y(), grad_top, grad_bot);
-
-    nvgFillPaint(ctx, bg);
-    nvgFill(ctx);
-
-    if (!m_make_transparent)
-    {
+    bool solid_bg = m_background_color.w() != 0;
+    if (solid_bg) {
+        // Semantic / solid accent button — soft filled pill with specular
+        Color fill(m_background_color[0], m_background_color[1],
+                   m_background_color[2], m_background_color[3]);
+        if (m_pushed)
+            fill.a() *= 0.85f;
+        else if (!m_enabled)
+            fill.a() *= 0.45f;
         nvgBeginPath(ctx);
-        nvgStrokeWidth(ctx, 1.0f);
-        nvgRoundedRect(ctx, m_pos.x() + 0.5f, m_pos.y() + (m_pushed ? 0.5f : 1.5f), m_size.x() - 1,
-            m_size.y() - 1 - (m_pushed ? 0.0f : 1.0f), m_theme->m_button_corner_radius);
-        nvgStrokeColor(ctx, m_theme->m_border_light);
+        nvgRoundedRect(ctx, fx, fy, fw, fh, cr);
+        nvgFillColor(ctx, fill);
+        nvgFill(ctx);
+        // Top specular
+        NVGpaint wash = nvgLinearGradient(ctx, fx, fy, fx, fy + fh * 0.55f,
+            nvgRGBA(255, 255, 255, m_pushed ? 20 : 55), nvgRGBA(255, 255, 255, 0));
+        nvgBeginPath(ctx);
+        nvgRoundedRect(ctx, fx + 0.5f, fy + 0.5f, fw - 1.f, fh * 0.55f, cr);
+        nvgFillPaint(ctx, wash);
+        nvgFill(ctx);
+        nvgBeginPath(ctx);
+        nvgRoundedRect(ctx, fx, fy, fw, fh, cr);
+        nvgStrokeWidth(ctx, 1.f);
+        nvgStrokeColor(ctx, m_theme->m_glass_border);
         nvgStroke(ctx);
+    } else if (!m_make_transparent || m_pushed || (m_mouse_focus && m_enabled)) {
+        // Frosted glass button
+        NVGpaint bg = nvgLinearGradient(ctx, fx, fy, fx, fy + fh, grad_top, grad_bot);
+        nvgBeginPath(ctx);
+        nvgRoundedRect(ctx, fx, fy, fw, fh, cr);
+        nvgFillPaint(ctx, bg);
+        nvgFill(ctx);
+
+        if (!m_make_transparent || m_mouse_focus || m_pushed) {
+            nvgBeginPath(ctx);
+            nvgRoundedRect(ctx, fx, fy, fw, fh, cr);
+            nvgStrokeWidth(ctx, 1.f);
+            nvgStrokeColor(ctx, m_theme->m_glass_border);
+            nvgStroke(ctx);
+            nvgBeginPath(ctx);
+            nvgRoundedRect(ctx, fx + 0.5f, fy + 0.5f, fw - 1.f, fh - 1.f,
+                           std::max(0.f, cr - 0.5f));
+            nvgStrokeWidth(ctx, 0.5f);
+            nvgStrokeColor(ctx, m_theme->m_border_dark);
+            nvgStroke(ctx);
+        }
     }
 
-    nvgBeginPath(ctx);
-    nvgRoundedRect(ctx, m_pos.x() + 0.5f, m_pos.y() + 0.5f, m_size.x() - 1,
-        m_size.y() - 2, m_theme->m_button_corner_radius);
-    nvgStrokeColor(ctx, m_theme->m_border_dark);
-    nvgStroke(ctx);
+    // Keyboard focus ring
+    if (focused() && m_enabled)
+        m_theme->draw_focus_ring(ctx, fx, fy, fw, fh, cr);
 
     int font_size = m_font_size == -1 ? m_theme->m_button_font_size : m_font_size;
     nvgFontSize(ctx, font_size);
@@ -285,7 +304,7 @@ void Button::draw(NVGcontext* ctx) {
     float tw = nvgTextBounds(ctx, 0, 0, m_caption.c_str(), nullptr, nullptr);
 
     Vector2f center = Vector2f(m_pos) + Vector2f(m_size) * 0.5f;
-    Vector2f text_pos(center.x() - tw * 0.5f, center.y() - 1);
+    Vector2f text_pos(center.x() - tw * 0.5f, center.y());
     NVGcolor text_color =
         m_text_color.w() == 0 ? m_theme->m_text_color : m_text_color;
     NVGcolor icon_color = m_theme->m_icon_color;
@@ -301,8 +320,7 @@ void Button::draw(NVGcontext* ctx) {
         icon_color = text_color;
     }
 
-    if (!m_enabled)
-    {
+    if (!m_enabled) {
         text_color = m_theme->m_disabled_text_color;
         icon_color = m_theme->m_disabled_icon_color;
     }
@@ -316,8 +334,7 @@ void Button::draw(NVGcontext* ctx) {
             nvgFontSize(ctx, ih);
             nvgFontFace(ctx, "icons");
             iw = nvgTextBounds(ctx, 0, 0, icon.data(), nullptr, nullptr);
-        }
-        else {
+        } else {
             int w, h;
             ih *= 0.9f;
             nvgImageSize(ctx, m_icon, &w, &h);
@@ -328,30 +345,24 @@ void Button::draw(NVGcontext* ctx) {
         nvgFillColor(ctx, icon_color);
         nvgTextAlign(ctx, NVG_ALIGN_LEFT | NVG_ALIGN_MIDDLE);
         Vector2f icon_pos = center;
-        icon_pos.y() -= 1;
 
         if (m_icon_position == IconPosition::LeftCentered) {
             icon_pos.x() -= (tw + iw) * 0.5f;
             text_pos.x() += iw * 0.5f;
-        }
-        else if (m_icon_position == IconPosition::RightCentered) {
+        } else if (m_icon_position == IconPosition::RightCentered) {
             text_pos.x() -= iw * 0.5f;
             icon_pos.x() += tw * 0.5f;
-        }
-        else if (m_icon_position == IconPosition::Left) {
+        } else if (m_icon_position == IconPosition::Left) {
             icon_pos.x() = m_pos.x() + 8;
-        }
-        else if (m_icon_position == IconPosition::Right) {
+        } else if (m_icon_position == IconPosition::Right) {
             icon_pos.x() = m_pos.x() + m_size.x() - iw - 8;
         }
 
         if (nvg_is_font_icon(m_icon)) {
-            nvgText(ctx, icon_pos.x(), icon_pos.y() + 1, icon.data(), nullptr);
-        }
-        else {
+            nvgText(ctx, icon_pos.x(), icon_pos.y(), icon.data(), nullptr);
+        } else {
             NVGpaint img_paint = nvgImagePattern(ctx,
                 icon_pos.x(), icon_pos.y() - ih / 2, iw, ih, 0, m_icon, m_enabled ? 0.5f : 0.25f);
-
             nvgFillPaint(ctx, img_paint);
             nvgFill(ctx);
         }
@@ -360,10 +371,8 @@ void Button::draw(NVGcontext* ctx) {
     nvgFontSize(ctx, font_size);
     nvgFontFace(ctx, "sans-bold");
     nvgTextAlign(ctx, NVG_ALIGN_LEFT | NVG_ALIGN_MIDDLE);
-    nvgFillColor(ctx, m_theme->m_text_color_shadow);
-    nvgText(ctx, text_pos.x(), text_pos.y(), m_caption.c_str(), nullptr);
     nvgFillColor(ctx, text_color);
-    nvgText(ctx, text_pos.x(), text_pos.y() + 1, m_caption.c_str(), nullptr);
+    nvgText(ctx, text_pos.x(), text_pos.y(), m_caption.c_str(), nullptr);
 }
 
 NAMESPACE_END(nanogui)

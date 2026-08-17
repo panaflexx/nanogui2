@@ -17,20 +17,314 @@
 #include <nanogui/popup.h>
 #include <nanogui/scrollpanel.h>
 #include <nanogui/messagedialog.h>
+#include <nanogui/common.h>
 #include <chrono>
+#include <algorithm>
+#include <cmath>
 
 NAMESPACE_BEGIN(nanogui)
+
+namespace {
+// macOS traffic-light geometry (logical pixels)
+constexpr float kTlRadius   = 6.0f;
+constexpr float kTlGap      = 20.0f;  // center-to-center
+constexpr float kTlLeft     = 16.0f;  // first center x from window left
+constexpr float kTlHitPad   = 3.0f;   // extra hit radius beyond the disc
+} // namespace
+
+Window::Window(Widget* parent, const WindowConfig& config)
+    : WidgetCRTP<Window>(parent), m_title(config.title),
+      m_button_panel(nullptr), m_modal(false), m_drag(false),
+      m_resize(false), m_resize_dir(Vector2i(0, 0)),
+      m_min_size(Vector2i(0, 0)), m_first_size(0),
+      m_draw_shadow(!config.title.empty() && !config.root),
+      m_resizable(config.root ? false : config.resizable),
+      m_can_move(!config.title.empty() && !config.root), m_snap_offset(8),
+      m_can_snap(!config.title.empty() && !config.root),
+      m_traffic_lights(config.traffic_lights && !config.title.empty() && !config.root),
+      m_root(config.root)
+{
+    DebugName = m_parent ? m_parent->DebugName + ",Window" : "Window";
+    m_pos = config.position;
+    m_size = config.size;
+    if (config.layout)
+        set_layout(config.layout);
+    if (m_root)
+        set_root(true); // apply chrome + geometry
+}
 
 Window::Window(Widget* parent, const std::string& title, bool resizable)
     : WidgetCRTP<Window>(parent), m_title(title), m_button_panel(nullptr), m_modal(false), m_drag(false),
       m_resize(false), m_resize_dir(Vector2i(0, 0)), m_min_size(Vector2i(0, 0)), m_first_size(0),
       m_draw_shadow(!title.empty()), m_resizable(resizable),
-	  m_can_move(!title.empty()), m_snap_offset(8), m_can_snap(!title.empty())
+      m_can_move(!title.empty()), m_snap_offset(8), m_can_snap(!title.empty()),
+      m_traffic_lights(!title.empty()), m_root(false)
 {
-	    	DebugName = m_parent->DebugName + ",Window";
+    DebugName = m_parent->DebugName + ",Window";
+}
+
+void Window::set_root(bool root) {
+    m_root = root;
+    if (!root)
+        return;
+    // Full-bleed content surface: no floating chrome.
+    m_title.clear();
+    m_draw_shadow = false;
+    m_resizable = false;
+    m_can_move = false;
+    m_can_snap = false;
+    m_traffic_lights = false;
+    m_modal = false;
+    m_minimized = false;
+    m_maximized = false;
+    m_drag = false;
+    m_resize = false;
+    sync_root_geometry();
+}
+
+void Window::sync_root_geometry() {
+    if (!m_root || !m_parent)
+        return;
+    m_pos = Vector2i(0, 0);
+    m_size = m_parent->size();
+}
+
+bool Window::traffic_lights_active() const {
+    return m_traffic_lights && !m_title.empty() && m_theme &&
+           m_theme->m_window_header_height > 0;
+}
+
+void Window::traffic_light_center(int index, float &cx, float &cy) const {
+    int hh = m_theme ? m_theme->m_window_header_height : 36;
+    cx = m_pos.x() + kTlLeft + index * kTlGap;
+    cy = m_pos.y() + hh * 0.5f;
+}
+
+int Window::traffic_light_at(const Vector2i& p) const {
+    if (!traffic_lights_active())
+        return -1;
+    for (int i = 0; i < 3; ++i) {
+        if (!(m_traffic_mask & (1 << i)))
+            continue;
+        float cx, cy;
+        traffic_light_center(i, cx, cy);
+        float dx = p.x() - cx, dy = p.y() - cy;
+        if (dx * dx + dy * dy <= (kTlRadius + kTlHitPad) * (kTlRadius + kTlHitPad))
+            return i;
+    }
+    return -1;
+}
+
+void Window::save_restore_geometry() {
+    if (!m_maximized && !m_minimized) {
+        m_restore_pos = m_pos;
+        m_restore_size = m_size;
+    }
+}
+
+void Window::apply_maximized_geometry() {
+    Widget *p = parent();
+    if (!p)
+        return;
+    // Fill parent with a tiny margin so glass shadow remains visible
+    constexpr int margin = 6;
+    int x = margin, y = margin;
+    int w = std::max(40, p->width() - 2 * margin);
+    int h = std::max(40, p->height() - 2 * margin);
+
+    // If a MenuBar strip is present at the top of the screen, sit below it
+    if (auto *scr = dynamic_cast<Screen *>(p)) {
+        for (Widget *child : scr->children()) {
+            // MenuBar is a Window with header height 0 and top-left strip geometry
+            Window *win = dynamic_cast<Window *>(child);
+            if (!win || win == this || !win->visible())
+                continue;
+            if (win->position() == Vector2i(0, 0) &&
+                win->width() >= scr->width() - 2 &&
+                win->height() > 0 && win->height() < 64 &&
+                !win->can_move()) {
+                y = win->height() + 2;
+                h = std::max(40, scr->height() - y - margin);
+                break;
+            }
+        }
+    }
+    m_pos = Vector2i(x, y);
+    m_size = Vector2i(w, h);
+}
+
+void Window::set_minimized(bool minimized) {
+    if (m_minimized == minimized)
+        return;
+    if (minimized) {
+        save_restore_geometry();
+        m_minimized = true;
+        m_maximized = false;
+        int hh = m_theme ? m_theme->m_window_header_height : 36;
+        m_size.y() = hh;
+        // Hide content children (keep button_panel for layout bookkeeping)
+        for (Widget *child : m_children) {
+            if (child != m_button_panel)
+                child->set_visible(false);
+        }
+    } else {
+        m_minimized = false;
+        if (m_restore_size.x() > 0 && m_restore_size.y() > 0) {
+            m_pos = m_restore_pos;
+            m_size = m_restore_size;
+        }
+        for (Widget *child : m_children) {
+            if (child != m_button_panel)
+                child->set_visible(true);
+        }
+    }
+    if (Screen *scr = screen()) {
+        perform_layout(scr->nvg_context());
+        scr->redraw();
+    }
+}
+
+void Window::set_maximized(bool maximized) {
+    if (m_maximized == maximized && !m_minimized)
+        return;
+    // Coming out of minimize always restores content visibility
+    if (m_minimized) {
+        m_minimized = false;
+        for (Widget *child : m_children) {
+            if (child != m_button_panel)
+                child->set_visible(true);
+        }
+    }
+    if (maximized) {
+        save_restore_geometry();
+        m_maximized = true;
+        apply_maximized_geometry();
+    } else {
+        m_maximized = false;
+        if (m_restore_size.x() > 0 && m_restore_size.y() > 0) {
+            m_pos = m_restore_pos;
+            m_size = m_restore_size;
+        }
+    }
+    if (Screen *scr = screen()) {
+        perform_layout(scr->nvg_context());
+        scr->redraw();
+    }
+}
+
+void Window::toggle_maximize() {
+    set_maximized(!m_maximized);
+}
+
+void Window::draw_traffic_lights(NVGcontext *ctx) {
+    if (!traffic_lights_active())
+        return;
+
+    // Classic macOS palette
+    const NVGcolor colors[3] = {
+        nvgRGB(255, 95, 87),   // close
+        nvgRGB(255, 189, 46),  // minimize
+        nvgRGB(40, 200, 64),   // maximize
+    };
+    const NVGcolor borders[3] = {
+        nvgRGB(224, 70, 62),
+        nvgRGB(224, 160, 35),
+        nvgRGB(30, 170, 50),
+    };
+    // Dim slightly when window is unfocused (macOS does this)
+    float dim = m_focused || m_mouse_focus ? 1.f : 0.55f;
+    bool show_glyphs = (m_traffic_hover >= 0) || m_focused;
+
+    for (int i = 0; i < 3; ++i) {
+        if (!(m_traffic_mask & (1 << i)))
+            continue;
+        float cx, cy;
+        traffic_light_center(i, cx, cy);
+        bool hover = (m_traffic_hover == i);
+        float r = kTlRadius + (hover ? 0.5f : 0.f);
+
+        // Soft contact shadow under each disc
+        nvgBeginPath(ctx);
+        nvgCircle(ctx, cx, cy + 0.6f, r);
+        nvgFillColor(ctx, nvgRGBA(0, 0, 0, (int)(40 * dim)));
+        nvgFill(ctx);
+
+        // Filled disc
+        NVGcolor fill = colors[i];
+        fill.r *= dim; fill.g *= dim; fill.b *= dim;
+        nvgBeginPath(ctx);
+        nvgCircle(ctx, cx, cy, r);
+        nvgFillColor(ctx, fill);
+        nvgFill(ctx);
+
+        // Specular highlight
+        NVGpaint wash = nvgLinearGradient(ctx, cx, cy - r, cx, cy,
+            nvgRGBA(255, 255, 255, (int)(110 * dim)), nvgRGBA(255, 255, 255, 0));
+        nvgBeginPath(ctx);
+        nvgCircle(ctx, cx, cy - r * 0.15f, r * 0.85f);
+        nvgFillPaint(ctx, wash);
+        nvgFill(ctx);
+
+        // Rim
+        nvgBeginPath(ctx);
+        nvgCircle(ctx, cx, cy, r - 0.5f);
+        nvgStrokeWidth(ctx, 0.75f);
+        NVGcolor rim = borders[i];
+        rim.r *= dim; rim.g *= dim; rim.b *= dim;
+        nvgStrokeColor(ctx, rim);
+        nvgStroke(ctx);
+
+        // Glyphs on hover / focus (× − + / restore)
+        if (show_glyphs) {
+            nvgStrokeWidth(ctx, 1.35f);
+            nvgStrokeColor(ctx, nvgRGBA(60, 30, 20, (int)(180 * dim)));
+            nvgFillColor(ctx, nvgRGBA(60, 30, 20, (int)(180 * dim)));
+            float s = 2.6f;
+            if (i == 0) {
+                // × close
+                nvgBeginPath(ctx);
+                nvgMoveTo(ctx, cx - s, cy - s);
+                nvgLineTo(ctx, cx + s, cy + s);
+                nvgMoveTo(ctx, cx + s, cy - s);
+                nvgLineTo(ctx, cx - s, cy + s);
+                nvgStroke(ctx);
+            } else if (i == 1) {
+                // − minimize
+                nvgBeginPath(ctx);
+                nvgMoveTo(ctx, cx - s - 0.5f, cy);
+                nvgLineTo(ctx, cx + s + 0.5f, cy);
+                nvgStroke(ctx);
+            } else {
+                // + maximize, or restore-box when maximized
+                if (m_maximized) {
+                    float a = 2.4f;
+                    nvgBeginPath(ctx);
+                    nvgRect(ctx, cx - a, cy - a + 1.2f, a * 1.4f, a * 1.4f);
+                    nvgStroke(ctx);
+                    nvgBeginPath(ctx);
+                    nvgMoveTo(ctx, cx - a + 1.6f, cy - a + 1.2f);
+                    nvgLineTo(ctx, cx - a + 1.6f, cy - a);
+                    nvgLineTo(ctx, cx + a + 0.2f, cy - a);
+                    nvgLineTo(ctx, cx + a + 0.2f, cy + a - 1.6f);
+                    nvgLineTo(ctx, cx + a - 1.4f, cy + a - 1.6f);
+                    nvgStroke(ctx);
+                } else {
+                    nvgBeginPath(ctx);
+                    nvgMoveTo(ctx, cx - s, cy);
+                    nvgLineTo(ctx, cx + s, cy);
+                    nvgMoveTo(ctx, cx, cy - s);
+                    nvgLineTo(ctx, cx, cy + s);
+                    nvgStroke(ctx);
+                }
+            }
+        }
+    }
 }
 
 Vector2i Window::preferred_size(NVGcontext* ctx) const {
+    if (m_root && m_parent)
+        return m_parent->size();
+
     if (!m_resizable || m_size == 0)// calculate prefered size only if not resizable. else keep curr size
     {
         if (m_button_panel)
@@ -61,6 +355,9 @@ Widget* Window::button_panel() {
 }
 
 void Window::perform_layout(NVGcontext* ctx) {
+    if (m_root)
+        sync_root_geometry();
+
     if (!m_button_panel) {
 
         if (m_children.size() == 1)
@@ -91,6 +388,12 @@ void Window::perform_layout(NVGcontext* ctx) {
             width() - (m_button_panel->preferred_size(ctx).x() - 2), 4));
         m_button_panel->perform_layout(ctx);
     }
+    // Root windows track the Screen; no interactive min-size floor.
+    if (m_root) {
+        m_min_size = Vector2i(0, 0);
+        return;
+    }
+
     //// Calculate the minimum size that the window can resize to.
     // Do NOT use preferred_size() here for resizable windows — it returns the
     // current m_size and would ratchet the floor after every grow, preventing
@@ -122,80 +425,90 @@ void Window::perform_layout(NVGcontext* ctx) {
 }
 
 void Window::draw(NVGcontext* ctx) {
+    /* Root window: full-bleed panel, no floating chrome (shadow/radius/title). */
+    if (m_root) {
+        if (m_parent && (m_pos != Vector2i(0, 0) || m_size != m_parent->size()))
+            sync_root_geometry();
+
+        float fx = (float)m_pos.x(), fy = (float)m_pos.y();
+        float fw = (float)m_size.x(), fh = (float)m_size.y();
+        nvgBeginPath(ctx);
+        nvgRect(ctx, fx, fy, fw, fh);
+        nvgFillColor(ctx, m_theme->m_window_fill_focused);
+        nvgFill(ctx);
+
+#if defined(_DEBUG) || !defined(NDEBUG)
+        auto t0 = std::chrono::high_resolution_clock::now();
+#endif
+        Widget::draw(ctx);
+#if defined(_DEBUG) || !defined(NDEBUG)
+        auto t1 = std::chrono::high_resolution_clock::now();
+        m_last_drawtime_ms = std::chrono::duration<float, std::milli>(t1 - t0).count();
+#endif
+        return;
+    }
+
     int ds = m_theme->m_window_drop_shadow_size, cr = m_theme->m_window_corner_radius;
     int hh = m_theme->m_window_header_height;
+    float fx = (float)m_pos.x(), fy = (float)m_pos.y();
+    float fw = (float)m_size.x(), fh = (float)m_size.y();
 
-    /* Draw window */
     nvgSave(ctx);
-    nvgBeginPath(ctx);
-    nvgRoundedRect(ctx, m_pos.x(), m_pos.y(), m_size.x(), m_size.y(), cr);
 
-    nvgFillColor(ctx, m_mouse_focus ? m_theme->m_window_fill_focused
-        : m_theme->m_window_fill_unfocused);
-    nvgFill(ctx);
-
-
-    /* Draw a drop shadow */
-    if (m_draw_shadow)
-    {
-        NVGpaint shadow_paint = nvgBoxGradient(
-            ctx, m_pos.x(), m_pos.y(), m_size.x(), m_size.y(), cr * 2, ds * 2,
-            m_theme->m_drop_shadow, m_theme->m_transparent);
-
+    /* Soft layered glass shadow */
+    if (m_draw_shadow) {
         nvgSave(ctx);
         nvgResetScissor(ctx);
-        nvgBeginPath(ctx);
-        nvgRect(ctx, m_pos.x() - ds, m_pos.y() - ds, m_size.x() + 2 * ds, m_size.y() + 2 * ds);
-        nvgRoundedRect(ctx, m_pos.x(), m_pos.y(), m_size.x(), m_size.y(), cr);
-        nvgPathWinding(ctx, NVG_HOLE);
-        nvgFillPaint(ctx, shadow_paint);
-        nvgFill(ctx);
+        m_theme->draw_glass_shadow(ctx, fx, fy, fw, fh, (float)cr, (float)ds);
         nvgRestore(ctx);
     }
 
+    /* Frosted glass body */
+    Color body = m_mouse_focus ? m_theme->m_window_fill_focused
+                               : m_theme->m_window_fill_unfocused;
+    m_theme->draw_glass_surface(ctx, fx, fy, fw, fh, (float)cr, body,
+                                /*specular=*/true, /*border=*/true);
+
     if (!m_title.empty()) {
-        /* Draw header */
+        /* Integrated glass title bar — soft header wash, hairline separator */
+        nvgSave(ctx);
+        nvgIntersectScissor(ctx, fx, fy, fw, (float)hh);
         NVGpaint header_paint = nvgLinearGradient(
-            ctx, m_pos.x(), m_pos.y(), m_pos.x(),
-            m_pos.y() + hh,
+            ctx, fx, fy, fx, fy + (float)hh,
             m_theme->m_window_header_gradient_top,
             m_theme->m_window_header_gradient_bot);
-
         nvgBeginPath(ctx);
-        nvgRoundedRect(ctx, m_pos.x(), m_pos.y(), m_size.x(), hh, cr);
-
+        nvgRoundedRect(ctx, fx, fy, fw, (float)hh + (float)cr, (float)cr);
         nvgFillPaint(ctx, header_paint);
         nvgFill(ctx);
 
+        /* Top specular rim */
         nvgBeginPath(ctx);
-        nvgRoundedRect(ctx, m_pos.x(), m_pos.y(), m_size.x(), hh, cr);
+        nvgMoveTo(ctx, fx + (float)cr, fy + 0.75f);
+        nvgLineTo(ctx, fx + fw - (float)cr, fy + 0.75f);
+        nvgStrokeWidth(ctx, 1.f);
         nvgStrokeColor(ctx, m_theme->m_window_header_sep_top);
-
-        nvgSave(ctx);
-        nvgIntersectScissor(ctx, m_pos.x(), m_pos.y(), m_size.x(), 0.5f);
         nvgStroke(ctx);
         nvgRestore(ctx);
 
+        /* Soft header divider (no hard bevel) */
         nvgBeginPath(ctx);
-        nvgMoveTo(ctx, m_pos.x() + 0.5f, m_pos.y() + hh - 1.5f);
-        nvgLineTo(ctx, m_pos.x() + m_size.x() - 0.5f, m_pos.y() + hh - 1.5);
+        nvgMoveTo(ctx, fx + 10.f, fy + (float)hh - 0.5f);
+        nvgLineTo(ctx, fx + fw - 10.f, fy + (float)hh - 0.5f);
+        nvgStrokeWidth(ctx, 1.f);
         nvgStrokeColor(ctx, m_theme->m_window_header_sep_bot);
         nvgStroke(ctx);
 
-        nvgFontSize(ctx, 18.0f);
+        nvgFontSize(ctx, 14.0f);
         nvgFontFace(ctx, "sans-bold");
         nvgTextAlign(ctx, NVG_ALIGN_CENTER | NVG_ALIGN_MIDDLE);
-
-        nvgFontBlur(ctx, 2);
-        nvgFillColor(ctx, m_theme->m_drop_shadow);
-        nvgText(ctx, m_pos.x() + m_size.x() / 2,
-            m_pos.y() + hh / 2, m_title.c_str(), nullptr);
-
         nvgFontBlur(ctx, 0);
         nvgFillColor(ctx, m_focused ? m_theme->m_window_title_focused
-            : m_theme->m_window_title_unfocused);
-        nvgText(ctx, m_pos.x() + m_size.x() / 2, m_pos.y() + hh / 2 - 1,
-            m_title.c_str(), nullptr);
+                                    : m_theme->m_window_title_unfocused);
+        nvgText(ctx, fx + fw * 0.5f, fy + hh * 0.5f, m_title.c_str(), nullptr);
+
+        /* macOS traffic lights (left side of title bar) */
+        draw_traffic_lights(ctx);
     }
 
     nvgRestore(ctx);
@@ -209,18 +522,21 @@ void Window::draw(NVGcontext* ctx) {
     m_last_drawtime_ms = std::chrono::duration<float, std::milli>(t1 - t0).count();
 #endif
 
-    /* Draw the resize grip last so it sits on top of any child widgets
-       that happen to overlap the bottom-right corner. */
-    if (m_resizable)
-    {
+    /* Subtle macOS-style resize corner marks (hidden while minimized) */
+    if (m_resizable && !m_minimized) {
         nvgSave(ctx);
         nvgResetScissor(ctx);
-        nvgBeginPath(ctx);
-        nvgMoveTo(ctx, m_pos.x() + m_size.x() - 10, m_pos.y() + m_size.y());
-        nvgLineTo(ctx, m_pos.x() + m_size.x(), m_pos.y() + m_size.y() - 10);
-        nvgLineTo(ctx, m_pos.x() + m_size.x(), m_pos.y() + m_size.y());
-        nvgFillColor(ctx, m_theme->m_window_header_gradient_top);
-        nvgFill(ctx);
+        float rx = fx + fw - 3.f;
+        float ry = fy + fh - 3.f;
+        nvgStrokeWidth(ctx, 1.25f);
+        nvgStrokeColor(ctx, m_theme->m_border_medium);
+        for (int i = 0; i < 3; ++i) {
+            float o = 3.f + i * 3.5f;
+            nvgBeginPath(ctx);
+            nvgMoveTo(ctx, rx - o, ry);
+            nvgLineTo(ctx, rx, ry - o);
+            nvgStroke(ctx);
+        }
         nvgRestore(ctx);
     }
 }
@@ -241,6 +557,11 @@ void Window::center() {
 
 bool Window::mouse_enter_event(const Vector2i& p, bool enter) {
     Widget::mouse_enter_event(p, enter);
+    if (!enter && m_traffic_hover != -1) {
+        m_traffic_hover = -1;
+        if (Screen *scr = screen())
+            scr->redraw();
+    }
     return true;
 }
 
@@ -420,32 +741,90 @@ bool Window::mouse_drag_event(const Vector2i& p, const Vector2i& rel, int button
 }
 
 bool Window::mouse_motion_event(const Vector2i& p, const Vector2i& rel, int button, int modifiers) {
+    int tl = traffic_light_at(p);
+    if (tl != m_traffic_hover) {
+        m_traffic_hover = tl;
+        if (Screen *scr = screen())
+            scr->redraw();
+    }
+    if (tl >= 0) {
+        m_cursor = Cursor::Hand;
+        return true;
+    }
 
-    if (m_resizable && check_horizontal_resize(p) && check_vertical_resize(p))
+    if (m_resizable && !m_minimized && check_horizontal_resize(p) && check_vertical_resize(p))
         m_cursor = Cursor::HVResize;
-    else if (m_resizable && check_horizontal_resize(p))
+    else if (m_resizable && !m_minimized && check_horizontal_resize(p))
         m_cursor = Cursor::HResize;
-    else if (m_resizable && check_vertical_resize(p))
+    else if (m_resizable && !m_minimized && check_vertical_resize(p))
         m_cursor = Cursor::VResize;
-    else
-    {
+    else {
         m_cursor = Cursor::Arrow;
 
         // Only forward to children if we're not over a resize zone.
-        if (m_resizable &&
+        if (m_resizable && !m_minimized &&
             (check_horizontal_resize(p) || check_vertical_resize(p)))
             return true;
 
-        return (Widget::mouse_motion_event(p, rel, button, modifiers));
+        return Widget::mouse_motion_event(p, rel, button, modifiers);
     }
     return true;
-
 }
 
 bool Window::mouse_button_event(const Vector2i& p, int button, bool down, int modifiers) {
+    // Traffic lights take precedence over drag / children
+    if (button == GLFW_MOUSE_BUTTON_1 && traffic_lights_active()) {
+        int tl = traffic_light_at(p);
+        if (tl >= 0) {
+            if (down) {
+                request_focus();
+                return true;
+            }
+            // Activate on release while still over the same button
+            if (traffic_light_at(p) == tl) {
+                if (tl == 0) {
+                    // Close — defer dispose so the current event stack unwinds
+                    if (m_close_callback) {
+                        m_close_callback();
+                    } else {
+                        Window *win = this;
+                        async([win] {
+                            if (win && win->parent())
+                                win->dispose();
+                        });
+                    }
+                } else if (tl == 1) {
+                    // Minimize / restore
+                    set_minimized(!m_minimized);
+                } else {
+                    // Maximize / restore (also un-minimizes)
+                    if (m_minimized)
+                        set_minimized(false);
+                    toggle_maximize();
+                }
+            }
+            return true;
+        }
+    }
+
+    // Double-click title bar (not on traffic lights) toggles maximize — macOS-ish
+    if (button == GLFW_MOUSE_BUTTON_1 && down && !m_title.empty() && m_theme &&
+        (p.y() - m_pos.y()) < m_theme->m_window_header_height &&
+        traffic_light_at(p) < 0) {
+        double now = glfwGetTime();
+        if (m_last_title_click > 0.0 && (now - m_last_title_click) < 0.35) {
+            m_last_title_click = 0.0;
+            if (m_minimized)
+                set_minimized(false);
+            else
+                toggle_maximize();
+            return true;
+        }
+        m_last_title_click = now;
+    }
 
     // Give resize precedence over child widgets.
-    if (m_resizable && down && button == GLFW_MOUSE_BUTTON_1) {
+    if (m_resizable && !m_minimized && down && button == GLFW_MOUSE_BUTTON_1) {
         if (check_horizontal_resize(p) || check_vertical_resize(p)) {
             m_resize_dir.x() = check_horizontal_resize(p) ? 1 : 0;
             m_resize_dir.y() = check_vertical_resize(p) ? 1 : 0;
@@ -461,15 +840,28 @@ bool Window::mouse_button_event(const Vector2i& p, int button, bool down, int mo
         return true;
 
     if (button == GLFW_MOUSE_BUTTON_1) {
-        m_drag = down && !m_title.empty() && (p.y() - m_pos.y()) < m_theme->m_window_header_height;
-        if(down)request_focus();
-        if (m_drag)
-        {
+        m_drag = down && m_can_move && !m_title.empty() &&
+                 (p.y() - m_pos.y()) < m_theme->m_window_header_height &&
+                 traffic_light_at(p) < 0;
+        if (down)
+            request_focus();
+        if (m_drag) {
+            // Dragging a maximized window demotes it back to floating
+            if (m_maximized) {
+                m_maximized = false;
+                // Keep current width/height ratio feel: restore size but pin under cursor
+                if (m_restore_size.x() > 0) {
+                    float relx = m_size.x() > 0
+                        ? (p.x() - m_pos.x()) / (float)m_size.x() : 0.5f;
+                    m_size = m_restore_size;
+                    m_pos.x() = p.x() - (int)(relx * m_size.x());
+                    m_pos.y() = m_pos.y();
+                }
+            }
             m_snap_init = position();
             m_snap_tot_rel = Vector2f(0, 0);
             return true;
-        }
-        else if (m_resizable && down) {
+        } else if (m_resizable && !m_minimized && down) {
             m_resize_dir.x() = check_horizontal_resize(p) ? 1 : 0;
             m_resize_dir.y() = check_vertical_resize(p) ? 1 : 0;
             m_resize = m_resize_dir.x() != 0 || m_resize_dir.y() != 0;
@@ -478,7 +870,6 @@ bool Window::mouse_button_event(const Vector2i& p, int button, bool down, int mo
             if (m_resize)
                 return true;
         }
-
     }
 
     return false;
@@ -498,7 +889,11 @@ Widget* Window::find_widget(const Vector2i& p) {
        absolute (screen) frame that check_horizontal_resize /
        check_vertical_resize expect. */
     Vector2i abs_p = m_parent ? m_parent->absolute_position() + p : p;
-    if (m_resizable && visible() && contains(p) &&
+    // Traffic lights claim the hit so title-bar children don't steal clicks
+    // p is in the parent coordinate frame (same as m_pos)
+    if (visible() && contains(p) && traffic_light_at(p) >= 0)
+        return this;
+    if (m_resizable && !m_minimized && visible() && contains(p) &&
         (check_horizontal_resize(abs_p) || check_vertical_resize(abs_p)))
         return this;
     return Widget::find_widget(p);
@@ -509,7 +904,9 @@ const Widget* Window::find_widget(const Vector2i& p) const {
     /* check_horizontal_resize / check_vertical_resize are non-const helpers,
        so route through the non-const overload for the resize-zone test. */
     Window* self = const_cast<Window*>(this);
-    if (m_resizable && visible() && contains(p) &&
+    if (visible() && contains(p) && self->traffic_light_at(p) >= 0)
+        return this;
+    if (m_resizable && !m_minimized && visible() && contains(p) &&
         (self->check_horizontal_resize(abs_p) ||
          self->check_vertical_resize(abs_p)))
         return this;

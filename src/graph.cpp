@@ -12,16 +12,18 @@
 #include <nanogui/graph.h>
 #include <nanogui/theme.h>
 #include <nanogui/opengl.h>
+#include <algorithm>
 
 NAMESPACE_BEGIN(nanogui)
 
 Graph::Graph(Widget *parent, const std::string &caption)
     : WidgetCRTP<Graph>(parent), m_caption(caption) {
     DebugName = m_parent->DebugName + ",Grph";
-    m_background_color = Color(20, 128);
-    m_fill_color = Color(255, 192, 0, 128);
-    m_stroke_color = Color(100, 255);
-    m_text_color = Color(240, 192);
+    // Soft glass well; fill/stroke pick up accent when a theme is present
+    m_background_color = Color(0, 0, 0, 40);
+    m_fill_color = Color(10, 132, 255, 90);
+    m_stroke_color = Color(10, 132, 255, 200);
+    m_text_color = Color(255, 200);
 }
 
 Vector2i Graph::preferred_size(NVGcontext *) const {
@@ -31,52 +33,78 @@ Vector2i Graph::preferred_size(NVGcontext *) const {
 void Graph::draw(NVGcontext *ctx) {
     Widget::draw(ctx);
 
+    float cr = m_theme ? (float)m_theme->m_button_corner_radius : 6.f;
+    float fx = (float)m_pos.x(), fy = (float)m_pos.y();
+    float fw = (float)m_size.x(), fh = (float)m_size.y();
+
+    Color bg = m_background_color;
+    if (m_theme && m_background_color.w() < 0.01f)
+        bg = m_theme->m_track_color;
     nvgBeginPath(ctx);
-    nvgRect(ctx, m_pos.x(), m_pos.y(), m_size.x(), m_size.y());
-    nvgFillColor(ctx, m_background_color);
+    nvgRoundedRect(ctx, fx, fy, fw, fh, cr);
+    nvgFillColor(ctx, bg);
     nvgFill(ctx);
+    nvgBeginPath(ctx);
+    nvgRoundedRect(ctx, fx + 0.5f, fy + 0.5f, fw - 1.f, fh - 1.f, std::max(0.f, cr - 0.5f));
+    nvgStrokeWidth(ctx, 1.f);
+    nvgStrokeColor(ctx, m_theme ? m_theme->m_glass_border : Color(255, 30));
+    nvgStroke(ctx);
 
     if (m_values.size() < 2)
         return;
 
+    Color stroke = m_stroke_color;
+    Color fill   = m_fill_color;
+    if (m_theme) {
+        if (stroke.w() > 0.9f && stroke.r() < 0.5f)
+            stroke = m_theme->m_accent_color;
+        if (fill.a() < 0.5f)
+            fill = Color(m_theme->m_accent_color.r(), m_theme->m_accent_color.g(),
+                         m_theme->m_accent_color.b(), 0.35f);
+    }
+
+    nvgSave(ctx);
+    nvgIntersectScissor(ctx, fx, fy, fw, fh);
     nvgBeginPath(ctx);
-    nvgMoveTo(ctx, m_pos.x(), m_pos.y()+m_size.y());
+    nvgMoveTo(ctx, fx, fy + fh);
     for (size_t i = 0; i < (size_t) m_values.size(); i++) {
         float value = m_values[i];
-        float vx = m_pos.x() + i * m_size.x() / (float) (m_values.size() - 1);
-        float vy = m_pos.y() + (1-value) * m_size.y();
+        float vx = fx + i * fw / (float) (m_values.size() - 1);
+        float vy = fy + (1 - value) * fh;
         nvgLineTo(ctx, vx, vy);
     }
-
-    nvgLineTo(ctx, m_pos.x() + m_size.x(), m_pos.y() + m_size.y());
-    nvgStrokeColor(ctx, m_stroke_color);
+    nvgLineTo(ctx, fx + fw, fy + fh);
+    nvgStrokeColor(ctx, stroke);
+    nvgStrokeWidth(ctx, 1.5f);
     nvgStroke(ctx);
-    if (m_fill_color.w() > 0) {
-        nvgFillColor(ctx, m_fill_color);
+    if (fill.w() > 0) {
+        nvgFillColor(ctx, fill);
         nvgFill(ctx);
     }
+    nvgRestore(ctx);
 
     nvgFontFace(ctx, "sans");
+    Color tc = m_theme ? m_theme->m_text_secondary : m_text_color;
 
     if (!m_caption.empty()) {
-        nvgFontSize(ctx, 14.0f);
+        nvgFontSize(ctx, 13.0f);
         nvgTextAlign(ctx, NVG_ALIGN_LEFT | NVG_ALIGN_TOP);
-        nvgFillColor(ctx, m_text_color);
-        nvgText(ctx, m_pos.x() + 3, m_pos.y() + 1, m_caption.c_str(), NULL);
+        nvgFillColor(ctx, tc);
+        nvgText(ctx, fx + 6, fy + 3, m_caption.c_str(), NULL);
     }
 
     if (!m_header.empty()) {
-        nvgFontSize(ctx, 18.0f);
+        nvgFontSize(ctx, 16.0f);
         nvgTextAlign(ctx, NVG_ALIGN_RIGHT | NVG_ALIGN_TOP);
-        nvgFillColor(ctx, m_text_color);
-        nvgText(ctx, m_pos.x() + m_size.x() - 3, m_pos.y() + 1, m_header.c_str(), NULL);
+        nvgFillColor(ctx, m_theme ? m_theme->m_text_color : m_text_color);
+        nvgText(ctx, fx + fw - 6, fy + 3, m_header.c_str(), NULL);
     }
 
     if (!m_footer.empty()) {
-        nvgFontSize(ctx, 15.0f);
+        nvgFontSize(ctx, 13.0f);
         nvgTextAlign(ctx, NVG_ALIGN_RIGHT | NVG_ALIGN_BOTTOM);
-        nvgFillColor(ctx, m_text_color);
-        nvgText(ctx, m_pos.x() + m_size.x() - 3, m_pos.y() + m_size.y() - 1, m_footer.c_str(), NULL);
+        nvgFillColor(ctx, tc);
+        nvgText(ctx, fx + fw - 6, fy + fh - 3, m_footer.c_str(), NULL);
     }
 
     nvgBeginPath(ctx);

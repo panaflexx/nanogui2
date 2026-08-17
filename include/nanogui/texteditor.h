@@ -146,6 +146,51 @@ public:
     void insert_tab();
 
     // -------------------------------------------------------------------
+    // Rich-text style editing (WYSIWYG)
+    // -------------------------------------------------------------------
+
+    enum class StyleFlag { Bold, Italic, Underline, Monospace };
+
+    /// Toggle a style flag.  With an active selection, the flag is applied
+    /// to (removed from, when every run already has it) the selected range
+    /// by splitting runs at the boundaries.  Without a selection, the flag
+    /// flips a pending typing attribute that the next inserted text gets;
+    /// the pending attribute is cancelled by any explicit caret move.
+    void  toggle_style(StyleFlag flag);
+
+    /// Style in effect at the caret (run style merged with any pending
+    /// typing attributes) — drives toolbar button state.
+    Style style_at_caret() const;
+
+    /// Whether a pending typing attribute is active (see toggle_style).
+    bool  typing_style_active() const { return m_typing_style_active; }
+
+    /// Clear the pending typing attribute without changing text.
+    void  clear_typing_style() { m_typing_style_active = false; }
+
+    // -------------------------------------------------------------------
+    // Paragraph-level formatting (RichText mode)
+    // -------------------------------------------------------------------
+
+    /// Set the caret paragraph's header level: 0 = body, 1..3 = "#".."###".
+    /// Re-applies font size (scaled from default_style().fontSize by the
+    /// same ratios the markdown renderer uses) and bold to every run of
+    /// the paragraph.  Re-applying the active level resets to body text.
+    void set_paragraph_header(int level);
+
+    /// Header level of the caret paragraph (0 = body text).
+    int  paragraph_header() const;
+
+    /// Toggle the caret paragraph as a bullet list item ("- " in markdown).
+    void toggle_paragraph_bullet();
+    bool paragraph_bullet() const;
+
+    /// Toggle the caret paragraph as a code block (monospace; serialized
+    /// as a fenced ``` block in markdown).
+    void toggle_paragraph_code();
+    bool paragraph_code() const;
+
+    // -------------------------------------------------------------------
     // External callbacks
     // -------------------------------------------------------------------
 
@@ -228,6 +273,11 @@ protected:
     // caret + selection (m_anchor == m_caret means no selection)
     Position m_caret;
     Position m_anchor;
+
+    // Pending typing attributes (see toggle_style): when active, inserted
+    // text gets m_typing_style instead of inheriting the containing run's.
+    Style m_typing_style;
+    bool  m_typing_style_active = false;
 
     // viewport offset in pixels (positive scrolls content up/left)
     float    m_scroll_x;

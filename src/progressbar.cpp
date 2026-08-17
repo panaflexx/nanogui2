@@ -11,6 +11,8 @@
 
 #include <nanogui/progressbar.h>
 #include <nanogui/opengl.h>
+#include <nanogui/theme.h>
+#include <algorithm>
 
 NAMESPACE_BEGIN(nanogui)
 
@@ -20,34 +22,40 @@ ProgressBar::ProgressBar(Widget *parent)
 }
 
 Vector2i ProgressBar::preferred_size(NVGcontext *) const {
-    return Vector2i(70, 12);
+    return Vector2i(90, 8);
 }
 
 void ProgressBar::draw(NVGcontext* ctx) {
     Widget::draw(ctx);
 
-    NVGpaint paint = nvgBoxGradient(
-        ctx, m_pos.x() + 1, m_pos.y() + 1,
-        m_size.x()-2, m_size.y(), 3, 4, Color(0, 32), Color(0, 92));
+    float cr = std::min(m_size.y() * 0.5f, 6.f);
+    float fx = (float)m_pos.x(), fy = (float)m_pos.y();
+    float fw = (float)m_size.x(), fh = (float)m_size.y();
+
+    // Recessed track
     nvgBeginPath(ctx);
-    nvgRoundedRect(ctx, m_pos.x(), m_pos.y(), m_size.x(), m_size.y(), 3);
-    nvgFillPaint(ctx, paint);
+    nvgRoundedRect(ctx, fx, fy, fw, fh, cr);
+    nvgFillColor(ctx, m_theme ? m_theme->m_track_color : Color(0, 40));
     nvgFill(ctx);
 
     float value = std::min(std::max(0.0f, m_value), 1.0f);
-    int bar_pos = (int) std::round((m_size.x() - 2) * value);
+    float bar_w = std::max(0.f, (fw - 2.f) * value);
 
-    paint = nvgBoxGradient(
-        ctx, m_pos.x(), m_pos.y(),
-        bar_pos+1.5f, m_size.y()-1, 3, 4,
-        Color(220, 100), Color(128, 100));
+    if (bar_w > 0.5f) {
+        Color fill = m_theme ? m_theme->m_track_fill_color : Color(0, 122, 255, 255);
+        nvgBeginPath(ctx);
+        nvgRoundedRect(ctx, fx + 1.f, fy + 1.f, bar_w, fh - 2.f, std::max(0.f, cr - 1.f));
+        nvgFillColor(ctx, fill);
+        nvgFill(ctx);
 
-    nvgBeginPath(ctx);
-    nvgRoundedRect(
-        ctx, m_pos.x()+1, m_pos.y()+1,
-        bar_pos, m_size.y()-2, 3);
-    nvgFillPaint(ctx, paint);
-    nvgFill(ctx);
+        // Soft specular on the filled portion
+        NVGpaint wash = nvgLinearGradient(ctx, fx, fy, fx, fy + fh,
+            nvgRGBA(255, 255, 255, 50), nvgRGBA(255, 255, 255, 0));
+        nvgBeginPath(ctx);
+        nvgRoundedRect(ctx, fx + 1.f, fy + 1.f, bar_w, fh * 0.5f, std::max(0.f, cr - 1.f));
+        nvgFillPaint(ctx, wash);
+        nvgFill(ctx);
+    }
 }
 
 NAMESPACE_END(nanogui)

@@ -627,6 +627,14 @@ if (NANOGUI_BUILD_EXAMPLES)
   add_executable(json2cpp      examples/json2cpp.cpp)
   add_executable(folderview    examples/folderview.cpp)
   add_executable(datatest      examples/datatest.cpp)
+  # Vendored Gumbo HTML5 parser (ext/gumbo submodule), used by nmail to
+  # render text/html message bodies.
+  file(GLOB GUMBO_SOURCES CONFIGURE_DEPENDS ext/gumbo/src/*.c)
+  add_library(gumbo STATIC ${GUMBO_SOURCES})
+  target_include_directories(gumbo PUBLIC ext/gumbo/src)
+  set_target_properties(gumbo PROPERTIES POSITION_INDEPENDENT_CODE ON)
+
+  add_executable(nmail         nmail/nmail.cpp nmail/imap_client.cpp nmail/smtp_client.cpp nmail/nmail_socket.c)
 
   target_link_libraries(example1      nanogui)
   target_link_libraries(example2      nanogui)
@@ -641,6 +649,19 @@ if (NANOGUI_BUILD_EXAMPLES)
   target_link_libraries(flextest	  nanogui)
   target_link_libraries(folderview    nanogui)
   target_link_libraries(datatest      nanogui)
+  target_include_directories(nmail PRIVATE
+      nmail/
+      ${CMAKE_CURRENT_SOURCE_DIR})
+  # Output name "nmail" would collide with the nmail/ source directory
+  set_target_properties(nmail PROPERTIES
+      RUNTIME_OUTPUT_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}/bin)
+  target_link_libraries(nmail         nanogui pthread gumbo)
+  # STARTTLS / imaps support in nmail_socket.c (guarded by HAVE_OPENSSL)
+  find_package(OpenSSL)
+  if (OPENSSL_FOUND)
+    target_compile_definitions(nmail PRIVATE HAVE_OPENSSL)
+    target_link_libraries(nmail OpenSSL::SSL OpenSSL::Crypto)
+  endif()
   target_link_libraries(nanovg-colorfont-atlas nanogui ${NANOGUI_LIBS})
   target_link_libraries(imagestash_test nanogui ${NANOGUI_LIBS})
   target_link_libraries(guieditor nanogui ${NANOGUI_LIBS})

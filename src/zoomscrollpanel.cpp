@@ -498,7 +498,10 @@ void ZoomScrollPanel::draw(NVGcontext* ctx) {
         float tx    = m_pos.x() + (float)m_size.x() - SB_W - SB_MARGIN;
         nvgBeginPath(ctx);
         nvgRoundedRect(ctx, tx, ty + 3.f, SB_W, th - 6.f, SB_W * 0.5f);
-        nvgFillColor(ctx, m_scrolling_y ? nvgRGBA(100,110,130,230) : nvgRGBA(150,155,165,180));
+        Color thumb = m_theme
+            ? (m_scrolling_y ? m_theme->m_scrollbar_thumb_active : m_theme->m_scrollbar_thumb)
+            : Color(150, 180);
+        nvgFillColor(ctx, thumb);
         nvgFill(ctx);
     }
     if (show_hbar) {
@@ -510,7 +513,10 @@ void ZoomScrollPanel::draw(NVGcontext* ctx) {
         float ty    = m_pos.y() + (float)m_size.y() - SB_W - SB_MARGIN;
         nvgBeginPath(ctx);
         nvgRoundedRect(ctx, tx + 3.f, ty, tw - 6.f, SB_W, SB_W * 0.5f);
-        nvgFillColor(ctx, m_scrolling_x ? nvgRGBA(100,110,130,230) : nvgRGBA(150,155,165,180));
+        Color thumb = m_theme
+            ? (m_scrolling_x ? m_theme->m_scrollbar_thumb_active : m_theme->m_scrollbar_thumb)
+            : Color(150, 180);
+        nvgFillColor(ctx, thumb);
         nvgFill(ctx);
     }
 }

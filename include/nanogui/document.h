@@ -66,6 +66,9 @@ public:
     bool              isRule          = false;
     NVGcolor          ruleColor       = NVGcolor{ { { 0.65f, 0.65f, 0.70f, 1.f } } };
     float             ruleThickness   = 1.0f;
+    // Bullet list item ("- " in markdown): draws a marker before the first
+    // line; text is expected to be indented via leftIndent.
+    bool              isBullet        = false;
 
     Paragraph() = default;
 
@@ -73,6 +76,13 @@ public:
         runs.emplace_back(std::move(text), style);
     }
     void addText(const Text& t) { runs.push_back(t); }
+
+    /// Split the run containing byte offset `col` so a run boundary exists
+    /// at `col`; returns the index of the run starting at `col`.
+    size_t      split_run_at(size_t col);
+
+    /// Merge adjacent runs with identical styles and drop empty runs.
+    void        coalesce_runs();
 
     /// Concatenate every run's content into a single string.
     std::string plain_text() const;
@@ -191,6 +201,14 @@ public:
         float    mono_bg_w     = 0.f;
         float    mono_bg_h     = 0.f;
         NVGcolor mono_bg_color = NVGcolor{ { { 0.f, 0.f, 0.f, 0.f } } };
+
+        /// Bullet marker for list-item paragraphs (drawn as a filled circle,
+        /// font-independent). Replayed on the fast path.
+        bool     bullet       = false;
+        float    bullet_cx    = 0.f;
+        float    bullet_cy    = 0.f;
+        float    bullet_r     = 0.f;
+        NVGcolor bullet_color = NVGcolor{ { { 0.f, 0.f, 0.f, 1.f } } };
     };
 
     /// Caret geometry returned by richCaretInfo().
@@ -238,6 +256,7 @@ private:
         float       visualRight;
         size_t      byte_start = 0;   ///< byte offset in paragraph plain_text
         size_t      byte_end   = 0;   ///< exclusive
+        bool        spaceBefore = false; ///< source text has whitespace before this word
     };
     struct LayoutLine {
         std::vector<Word> words;

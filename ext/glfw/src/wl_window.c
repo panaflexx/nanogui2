@@ -326,10 +326,11 @@ static void resizeFramebuffer(_GLFWwindow* window)
 
     if (window->wl.egl.window)
     {
-        wl_egl_window_resize(window->wl.egl.window,
-                             window->wl.fbWidth,
-                             window->wl.fbHeight,
-                             0, 0);
+        /* Defer to just before the next eglSwapBuffers (swapBuffersEGL):
+         * wl_egl_window_resize only takes effect on the next swap anyway,
+         * and calling it per configure event causes severe resize lag on
+         * mutter (GLFW issue #2493). */
+        window->wl.egl.needsFramebufferResize = GLFW_TRUE;
     }
 
     if (!window->wl.transparent)
