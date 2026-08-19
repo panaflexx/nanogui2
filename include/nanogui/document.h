@@ -69,6 +69,13 @@ public:
     // Bullet list item ("- " in markdown): draws a marker before the first
     // line; text is expected to be indented via leftIndent.
     bool              isBullet        = false;
+    // Image block paragraph: skips text layout and draws a full-width
+    // (aspect-preserving) image instead.  `image` is an NVG image id
+    // owned by the caller; image_w/image_h are the intrinsic pixel size.
+    bool              isImage         = false;
+    int               image           = 0;
+    float             image_w         = 0.0f;
+    float             image_h         = 0.0f;
 
     Paragraph() = default;
 
@@ -180,6 +187,7 @@ public:
         float  visualRight = 0.f;
         Style  style;        ///< style snapshot for cheap re-draw without re-layout
         std::string text;    ///< word / glyph cluster text
+        int    image = 0;    ///< NVG image id for "\x01IMAGE" sentinel words
     };
 
     /// Geometry of one visual line (possibly a soft-wrapped portion of a paragraph).

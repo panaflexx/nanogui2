@@ -28,6 +28,12 @@ struct MailSummary {
     bool seen = false;
 };
 
+struct MailImage {
+    std::string cid;          // Content-ID without angle brackets ("" if none)
+    std::string mime;         // e.g. "image/png"
+    std::string data;         // decoded image bytes (PNG/JPEG/GIF)
+};
+
 struct MailMessage {
     std::string from;
     std::string from_addr;     // bare address of the sender (for replies)
@@ -39,6 +45,7 @@ struct MailMessage {
     std::string message_id;    // Message-ID header (for reply threading)
     bool body_markdown = false; // text part declared markup=markdown
                                 // (MailMate convention) or text/markdown
+    std::vector<MailImage> images;   // inline image/* parts (for cid: srcs)
 };
 
 class ImapClient {

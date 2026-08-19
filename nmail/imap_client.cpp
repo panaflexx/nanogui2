@@ -397,7 +397,8 @@ static std::string mime_base_type(const std::string &ct) {
  * or is text/markdown outright. */
 static void mime_extract_parts(const std::string &head, const std::string &body,
                                std::string &plain, std::string &html,
-                               bool &plain_markdown, int depth) {
+                               bool &plain_markdown,
+                               std::vector<MailImage> &images, int depth) {
     if (depth > 6) return;
     auto headers = parse_headers(head);
     std::string ct;
@@ -425,9 +426,27 @@ static void mime_extract_parts(const std::string &head, const std::string &body,
                 break;
             std::string ph, pb;
             split_head_body(part, ph, pb);
-            mime_extract_parts(ph, pb, plain, html, plain_markdown, depth + 1);
+            mime_extract_parts(ph, pb, plain, html, plain_markdown,
+                               images, depth + 1);
             pos = next;
         }
+        return;
+    }
+
+    /* Inline image part (referenced from the HTML via cid:). */
+    if (starts_with(base, "image/")) {
+        MailImage img;
+        img.mime = base;
+        it = headers.find("content-id");
+        if (it != headers.end()) {
+            std::string cid = trim(it->second);
+            if (!cid.empty() && cid.front() == '<') cid = cid.substr(1);
+            if (!cid.empty() && cid.back() == '>') cid.pop_back();
+            img.cid = cid;
+        }
+        img.data = cte_decode(body, cte);
+        if (!img.data.empty())
+            images.push_back(std::move(img));
         return;
     }
 
@@ -574,11 +593,183 @@ static std::string format_internaldate(const std::string &s) {
     return buf;
 }
 
-static std::string sanitize_preview(const std::string &text) {
+/* Reduce an HTML snippet to plain text for previews: drop <!...> and
+   <script>/<style> blocks, remove all tags, decode the common entities. */
+static std::string html_to_text_preview(const std::string &html) {
     std::string out;
-    out.reserve(text.size());
+    out.reserve(html.size());
+    size_t i = 0;
+    const size_t n = html.size();
+
+    auto tag_name_at = [&](size_t pos) -> std::string {
+        /* pos is just after '<' (and optional '/'); read [a-zA-Z]+ */
+        std::string name;
+        if (pos < n && html[pos] == '/') ++pos;
+        while (pos < n && std::isalpha((unsigned char)html[pos]))
+            name += (char)std::tolower((unsigned char)html[pos++]);
+        return name;
+    };
+    /* Case-insensitive search for "</name" starting at i. */
+    auto find_close = [&](const char *name) -> size_t {
+        std::string needle = "</";
+        needle += name;
+        for (size_t j = i; j + needle.size() <= n; ++j) {
+            size_t k = 0;
+            while (k < needle.size() &&
+                   std::tolower((unsigned char)html[j + k]) == needle[k])
+                ++k;
+            if (k == needle.size()) return j;
+        }
+        return n;
+    };
+
+    while (i < n && out.size() < 512) {
+        if (html[i] == '<') {
+            std::string name = tag_name_at(i + 1);
+            size_t gt = html.find('>', i);
+            if (name == "script" || name == "style" || name == "head") {
+                /* Drop the whole element, content included. */
+                size_t close = find_close(name.c_str());
+                if (close == n) break;
+                size_t end = html.find('>', close);
+                i = (end == std::string::npos) ? n : end + 1;
+            } else {
+                i = (gt == std::string::npos) ? n : gt + 1;
+            }
+        } else if (html[i] == '&') {
+            size_t semi = html.find(';', i);
+            if (semi != std::string::npos && semi - i <= 8) {
+                std::string e = html.substr(i + 1, semi - i - 1);
+                for (char &c : e) c = (char)std::tolower((unsigned char)c);
+                if      (e == "amp")   out += '&';
+                else if (e == "lt")    out += '<';
+                else if (e == "gt")    out += '>';
+                else if (e == "quot")  out += '"';
+                else if (e == "apos" || e == "#39") out += '\'';
+                else if (e == "nbsp")  out += ' ';
+                else { out += html[i]; semi = i; }   // unknown: keep '&'
+                i = (semi == i) ? i + 1 : semi + 1;
+            } else {
+                out += html[i++];
+            }
+        } else {
+            out += html[i++];
+        }
+    }
+    return out;
+}
+
+/* True for lines that are MIME structure rather than message text:
+   boundaries, part headers, multipart preambles and base64 payloads. */
+static bool is_mime_noise_line(const std::string &line) {
+    if (line.empty()) return false;
+    if (starts_with(line, "--")) return true;              // boundary
+    std::string l;
+    l.reserve(line.size());
+    for (unsigned char c : line) l += (char)std::tolower(c);
+    if (starts_with(l, "content-") || starts_with(l, "mime-version"))
+        return true;                                      // part headers
+    if (l.find("multi-part message") != std::string::npos ||
+        l.find("multipart message") != std::string::npos)
+        return true;                                      // preamble
+    /* base64 payload: long run of nothing but the base64 alphabet */
+    if (line.size() >= 32) {
+        bool b64 = true;
+        for (unsigned char c : line) {
+            if (!std::isalnum(c) && c != '+' && c != '/' && c != '=') {
+                b64 = false; break;
+            }
+        }
+        if (b64) return true;
+    }
+    return false;
+}
+
+/* Strip MIME scaffolding line by line, keeping only message text. */
+static std::string strip_mime_scaffolding(const std::string &text) {
+    /* Quick check: does this look like a raw multipart dump at all? */
+    std::string head;
+    for (size_t i = 0; i < text.size() && i < 512; ++i)
+        head += (char)std::tolower((unsigned char)text[i]);
+    if (head.find("content-type") == std::string::npos &&
+        head.find("content-transfer") == std::string::npos &&
+        !starts_with(head, "--") && head.find("\n--") == std::string::npos)
+        return text;
+
+    bool qp = head.find("quoted-printable") != std::string::npos;
+
+    std::string out;
+    size_t i = 0, n = text.size();
+    bool in_part_headers = false;   // previous line was a Content-* header
+    while (i < n) {
+        size_t eol = text.find('\n', i);
+        std::string line = (eol == std::string::npos)
+                           ? text.substr(i) : text.substr(i, eol - i);
+        if (!line.empty() && line.back() == '\r') line.pop_back();
+
+        /* Folded header continuation (e.g. ` charset="utf-8"` or
+           ` boundary="----..."` on its own line): whitespace-led lines
+           directly following a part header are still header.  A blank
+           line always ends the header block. */
+        bool continuation = in_part_headers &&
+                            !line.empty() &&
+                            (line[0] == ' ' || line[0] == '\t');
+        if (!continuation)
+            in_part_headers = false;
+
+        if (qp) {
+            /* Light quoted-printable decode: =XX bytes, soft breaks. */
+            std::string dec;
+            for (size_t k = 0; k < line.size(); ++k) {
+                if (line[k] == '=' && k + 2 < line.size() &&
+                    std::isxdigit((unsigned char)line[k + 1]) &&
+                    std::isxdigit((unsigned char)line[k + 2])) {
+                    dec += (char)std::strtol(line.substr(k + 1, 2).c_str(),
+                                             nullptr, 16);
+                    k += 2;
+                } else if (line[k] == '=' && k + 1 == line.size()) {
+                    break;   // soft break at end of line
+                } else {
+                    dec += line[k];
+                }
+            }
+            line.swap(dec);
+        }
+        bool noise = is_mime_noise_line(line);
+        if (noise) {
+            std::string l;
+            for (unsigned char c : line) l += (char)std::tolower(c);
+            if (starts_with(l, "content-") || starts_with(l, "mime-version"))
+                in_part_headers = true;
+        }
+        if (!noise && !continuation) {
+            out += line;
+            out += '\n';
+        }
+        if (eol == std::string::npos) break;
+        i = eol + 1;
+    }
+    return out;
+}
+
+static std::string sanitize_preview(const std::string &text) {
+    /* BODY.PEEK[TEXT] of a multipart mail returns the whole MIME
+       structure; strip boundaries/part headers first. */
+    std::string plain = strip_mime_scaffolding(text);
+
+    /* HTML (direct or one part of a multipart) -> plain text. */
+    std::string head;
+    head.reserve(plain.size());
+    for (size_t i = 0; i < plain.size() && i < 512; ++i)
+        head += (char)std::tolower((unsigned char)plain[i]);
+    if (head.find("<!doctype") != std::string::npos ||
+        head.find("<html") != std::string::npos)
+        plain = html_to_text_preview(plain);
+
+    std::string out;
+    out.reserve(plain.size());
     bool ws = true;
-    for (unsigned char c : text) {
+    for (unsigned char c : plain) {
         if (std::isspace(c)) {
             if (!ws) out += ' ';
             ws = true;
@@ -1022,7 +1213,7 @@ bool ImapClient::fetch_summaries(int first, int last,
     /* Some servers reject partial body fetches; fall back if needed. */
     if (!run("FETCH " + range +
              " (FLAGS INTERNALDATE BODY.PEEK[HEADER.FIELDS (FROM SUBJECT DATE)]"
-             " BODY.PEEK[TEXT]<0.160>)", untagged, err)) {
+             " BODY.PEEK[TEXT]<0.512>)", untagged, err)) {
         err.clear();
         if (!run("FETCH " + range +
                  " (FLAGS INTERNALDATE BODY.PEEK[HEADER.FIELDS (FROM SUBJECT DATE)])",
@@ -1069,7 +1260,8 @@ bool ImapClient::fetch_message(int seq, MailMessage &msg, std::string &err) {
 
     std::string plain, html;
     bool plain_markdown = false;
-    mime_extract_parts(head, body, plain, html, plain_markdown, 0);
+    mime_extract_parts(head, body, plain, html, plain_markdown,
+                       msg.images, 0);
     msg.html = html;
     msg.body = !plain.empty() ? plain
              : !html.empty()  ? strip_html(html)

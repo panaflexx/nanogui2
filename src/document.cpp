@@ -236,6 +236,17 @@ bool paragraph_is_code(const Paragraph& p) {
 
 } // namespace
 
+/* Draw an NVG image into a rect (used by image block paragraphs). */
+static void draw_image_block(NVGcontext* ctx, int image,
+                             float x, float y, float w, float h) {
+    if (image <= 0 || w <= 0.0f || h <= 0.0f) return;
+    NVGpaint p = nvgImagePattern(ctx, x, y, w, h, 0.0f, image, 1.0f);
+    nvgBeginPath(ctx);
+    nvgRect(ctx, x, y, w, h);
+    nvgFillPaint(ctx, p);
+    nvgFill(ctx);
+}
+
 // ---------------------------------------------------------------------------
 // Top-level draw
 // ---------------------------------------------------------------------------
@@ -259,7 +270,39 @@ void Document::draw(NVGcontext* ctx, float originX, float originY) {
         float y = originY;
         for (size_t pi = 0; pi < paragraphs.size(); ++pi) {
             auto& para = paragraphs[pi];
-            if (para->isRule) {
+            if (para->isImage) {
+                float pad = paragraphSpacing * 0.5f;
+                /* Fit to the content width, preserve aspect ratio. */
+                float scale = (para->image_w > contentWidth && para->image_w > 0.f)
+                              ? contentWidth / para->image_w : 1.0f;
+                float dw = para->image_w * scale;
+                float dh = para->image_h * scale;
+                float iy = y + pad;
+
+                /* Sentinel line/word so hit-test and the fast path can
+                   recognize the block (mirrors the RULE pattern). */
+                RichLine img_line;
+                img_line.para_idx   = pi;
+                img_line.byte_start = 0;
+                img_line.byte_end   = 0;
+                img_line.y_top      = y;
+                img_line.y_bottom   = iy + dh + pad;
+                img_line.baseline   = iy;
+                img_line.x_start    = originX;
+                WordLayout iw;
+                iw.byte_start = 0;
+                iw.byte_end   = 0;
+                iw.x          = originX;
+                iw.advance    = dw;                 // draw width
+                iw.style.fontSize = dh;             // draw height (piggy-back)
+                iw.image      = para->image;
+                iw.text       = "\x01IMAGE";
+                img_line.words.push_back(std::move(iw));
+                m_rich_layout.push_back(std::move(img_line));
+
+                draw_image_block(ctx, para->image, originX, iy, dw, dh);
+                y = iy + dh + pad;
+            } else if (para->isRule) {
                 float pad = paragraphSpacing * 0.5f;
                 float ry  = y + pad;
                 // Capture a zero-word line so hit-test can skip rules cleanly.
@@ -319,6 +362,12 @@ void Document::draw(NVGcontext* ctx, float originX, float originY) {
     // ---- Fast path: content/width/origin unchanged (selection drag, hover).
     // Replay from the layout cache — no nvgTextBounds reflow.
     for (const RichLine& rl : m_rich_layout) {
+        if (rl.words.size() == 1 && rl.words[0].text == "\x01IMAGE") {
+            const WordLayout& iw = rl.words[0];
+            draw_image_block(ctx, iw.image, iw.x, rl.baseline,
+                             iw.advance, iw.style.fontSize);
+            continue;
+        }
         if (rl.words.size() == 1 && rl.words[0].text == "\x01RULE") {
             const WordLayout& rw = rl.words[0];
             float ry = rl.baseline;

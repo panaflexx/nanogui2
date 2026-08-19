@@ -32,6 +32,8 @@
 #include <sstream>
 #include <array>
 #include <map>
+#include <unordered_map>
+#include <unordered_set>
 #include <algorithm>
 #include <thread>
 #include <mutex>
@@ -45,6 +47,7 @@
 #include "dict.h"
 #include "imap_client.h"
 #include "smtp_client.h"
+#include "nmail_socket.h"
 #include "gumbo.h"
 
 using namespace nanogui;
@@ -129,6 +132,9 @@ public:
     std::function<void(const std::vector<MailFolder> &)>        cb_folders;
     std::function<void(const std::string &,
                        const std::vector<MailSummary> &)>       cb_summaries;
+    /* Older-message page (appended to the bottom of the list). */
+    std::function<void(const std::string &,
+                       const std::vector<MailSummary> &)>       cb_older;
     std::function<void(int, const MailMessage &)>               cb_body;
     std::function<void(const std::string &,
                        const std::string &)>                    cb_error;
@@ -158,9 +164,10 @@ public:
     void refresh()                              { post(Type::Refresh); }
     void select_folder(const std::string &name) { post(Type::Select, name); }
     void fetch_body(int seq)                    { post(Type::FetchBody, "", seq); }
+    void fetch_older()                          { post(Type::FetchOlder); }
 
 private:
-    enum class Type { Connect, Refresh, Select, FetchBody };
+    enum class Type { Connect, Refresh, Select, FetchBody, FetchOlder };
     struct Cmd {
         Type type;
         std::string folder;
@@ -217,6 +224,7 @@ private:
             return false;
         }
         m_selected_folder.clear();
+        m_first_loaded = 0;
         return do_list_folders();
     }
 
@@ -243,23 +251,53 @@ private:
             return;
         }
         m_selected_folder = folder;
+        m_first_loaded    = 0;
         do_fetch_summaries(folder, exists);
     }
 
     void do_fetch_summaries(const std::string &folder, int exists) {
         std::vector<MailSummary> summaries;
         std::string err;
-        int first = std::max(1, exists - 149);
+        /* First load shows the newest 150 messages; refreshes re-fetch the
+           whole window the user has paged back through. */
+        int first = m_first_loaded > 0 ? m_first_loaded
+                                       : std::max(1, exists - 149);
         if (!m_imap.fetch_summaries(first, exists, summaries, err)) {
             report_error("Could not fetch messages", err);
             return;
         }
+        m_first_loaded = first;
         /* Newest first. */
         std::reverse(summaries.begin(), summaries.end());
         report_status(folder + ": " + std::to_string(exists) +
                       (exists == 1 ? " message" : " messages"));
         deliver([this, folder, summaries]() {
             if (cb_summaries) cb_summaries(folder, summaries);
+        });
+    }
+
+    /* Fetch the next older page: the 150 messages just below the oldest
+       one currently shown. */
+    void do_fetch_older() {
+        if (m_selected_folder.empty() || m_first_loaded <= 1)
+            return;   // nothing older
+        std::string folder = m_selected_folder;
+        int last  = m_first_loaded - 1;
+        int first = std::max(1, last - 149);
+
+        report_status("Loading older messages...");
+        std::vector<MailSummary> summaries;
+        std::string err;
+        if (!m_imap.fetch_summaries(first, last, summaries, err)) {
+            report_error("Could not fetch older messages", err);
+            return;
+        }
+        m_first_loaded = first;
+        /* Newest first, so the GUI can append them after the current
+           (newer) page. */
+        std::reverse(summaries.begin(), summaries.end());
+        deliver([this, folder, summaries]() {
+            if (cb_older) cb_older(folder, summaries);
         });
     }
 
@@ -319,6 +357,14 @@ private:
                 });
                 break;
             }
+            case Type::FetchOlder:
+                if (!m_imap.is_open()) {
+                    report_error("Not connected",
+                                 "Set up the server in Preferences first.");
+                    break;
+                }
+                do_fetch_older();
+                break;
             }
         }
     }
@@ -331,6 +377,9 @@ private:
     MailConfig              m_config;
     ImapClient              m_imap;
     std::string             m_selected_folder;
+    /* Oldest sequence number currently shown in m_selected_folder
+       (0 = nothing loaded).  Drives "load older" paging. */
+    int                     m_first_loaded = 0;
 };
 
 // ---------------------------------------------------------------------------
@@ -718,7 +767,11 @@ public:
 
     EmailListView(Widget *parent,
                   std::function<void(int, const EmailData &)> on_select = nullptr)
-        : Widget(parent), m_on_select(std::move(on_select)) {}
+        : Widget(parent), m_on_select(std::move(on_select)) {
+        /* Virtual-scroll + inertia + spinner: repaint every frame instead of
+           being baked into a retained parent display list. */
+        set_live(true);
+    }
 
     /* ---- geometry helpers ---- */
     float row_h()      const { return std::floor(font_size() * ROW_SCALE); }
@@ -879,6 +932,15 @@ public:
                      (float)m_size.x());
         nvgRestore(ctx);
 
+        if (m_loading_more) {
+            draw_loading_strip(ctx);
+            screen()->redraw();   // keep the spinner animating
+        }
+
+        // Notify when the bottom is reached (drives "load older" paging)
+        if (m_on_hit_bottom && m_scroll >= max_scroll() - 2.0f)
+            m_on_hit_bottom();
+
         draw_scrollbar(ctx);  // drawn on top, no clip
     }
 
@@ -890,6 +952,27 @@ public:
         m_scroll   = 0.0f;
         m_vel      = 0.0f;
         screen()->redraw();
+    }
+
+    /* Append older rows (from a "load more" fetch) without resetting
+       scroll or selection. */
+    void append_emails(std::vector<EmailData> more) {
+        m_emails.insert(m_emails.end(),
+                        std::make_move_iterator(more.begin()),
+                        std::make_move_iterator(more.end()));
+        screen()->redraw();
+    }
+
+    /* Spinner strip at the bottom while older messages are fetched. */
+    void set_loading_more(bool v) {
+        if (m_loading_more == v) return;
+        m_loading_more = v;
+        screen()->redraw();
+    }
+
+    /* Called from draw() whenever the list is scrolled to the bottom. */
+    void set_on_hit_bottom(std::function<void()> cb) {
+        m_on_hit_bottom = std::move(cb);
     }
 
     /* ---- appearance ---- */
@@ -924,6 +1007,47 @@ private:
         nvgFill(ctx);
     }
 
+    /* Overlay strip with a spinner + caption shown while older messages
+       are being fetched. */
+    void draw_loading_strip(NVGcontext *ctx) {
+        const float h = 34.0f;
+        const float x = (float)m_pos.x();
+        const float w = (float)m_size.x();
+        const float y = (float)m_pos.y() + (float)m_size.y() - h;
+
+        nvgSave(ctx);
+        nvgIntersectScissor(ctx, x, y, w, h);
+        nvgBeginPath(ctx);
+        nvgRect(ctx, x, y, w, h);
+        nvgFillColor(ctx, m_dark ? Color( 30,  31,  38, 235)
+                                 : Color(228, 230, 238, 235));
+        nvgFill(ctx);
+
+        const Color fg = m_dark ? Color(180, 182, 196, 255)
+                                : Color( 90,  90, 105, 255);
+
+        // Spinner arc
+        const float r  = 8.0f;
+        const float cy = y + h * 0.5f;
+        float tb[4] = {};
+        nvgFontSize(ctx, 14.0f);
+        nvgFontFace(ctx, "sans");
+        nvgTextBounds(ctx, 0, 0, "Loading older messages...", nullptr, tb);
+        const float text_w = tb[2] - tb[0];
+        const float cx = x + (w - text_w - r * 2.0f - 10.0f) * 0.5f;
+        const float a0 = (float)glfwGetTime() * 6.0f;
+        nvgBeginPath(ctx);
+        nvgArc(ctx, cx, cy, r, a0, a0 + NVG_PI * 1.5f, NVG_CW);
+        nvgStrokeColor(ctx, fg);
+        nvgStrokeWidth(ctx, 2.5f);
+        nvgStroke(ctx);
+
+        nvgFillColor(ctx, fg);
+        nvgTextAlign(ctx, NVG_ALIGN_LEFT | NVG_ALIGN_MIDDLE);
+        nvgText(ctx, cx + r + 10.0f, cy, "Loading older messages...", nullptr);
+        nvgRestore(ctx);
+    }
+
     int idx_at(int abs_y) const {
         float iy  = (float)(abs_y - m_pos.y()) + m_scroll;
         int   idx = (int)(iy / row_h());
@@ -941,7 +1065,7 @@ private:
         const float h          = row_h();
         const float padx       = 10.0f;
         const float pady       = 6.0f;
-        const float scroll_rsv = SB_W + SB_MARGIN * 2.0f + 3.0f;
+        const float scroll_rsv = SB_W + SB_MARGIN;   // rows touch the scrollbar
         const float cw         = w - scroll_rsv;
         const float rounding   = 10.0f;
 
@@ -959,12 +1083,12 @@ private:
         // Background
         if (sel) {
             nvgBeginPath(ctx);
-            nvgRoundedRect(ctx, x + 3, y + 2, cw - 6, h - 4, rounding);
+            nvgRoundedRect(ctx, x + 3, y + 2, cw - 3, h - 4, rounding);
             nvgFillColor(ctx, Color(58, 90, 210, 255));
             nvgFill(ctx);
         } else if (hov) {
             nvgBeginPath(ctx);
-            nvgRoundedRect(ctx, x + 3, y + 2, cw - 6, h - 4, rounding);
+            nvgRoundedRect(ctx, x + 3, y + 2, cw - 3, h - 4, rounding);
             nvgFillColor(ctx, m_dark ? Color( 58,  60,  72, 255)
                                      : Color(210, 214, 222, 255));
             nvgFill(ctx);
@@ -1006,7 +1130,7 @@ private:
         // Subject (small bold, clipped)
         {
             nvgSave(ctx);
-            nvgIntersectScissor(ctx, x + padx, y, cw - padx * 2.0f, h);
+            nvgIntersectScissor(ctx, x + padx, y, cw - padx - 3.0f, h);
             nvgFontSize(ctx, subject_fs);
             nvgFontFace(ctx, d.seen ? "sans" : "sans-bold");
             nvgFillColor(ctx, subj_col);
@@ -1024,9 +1148,9 @@ private:
             float clip_h = (y4 - y3) + preview_fs * 1.35f;
             nvgSave(ctx);
             nvgIntersectScissor(ctx, x + padx, y3 - preview_fs * 0.6f,
-                                cw - padx * 2.0f, clip_h + preview_fs * 0.3f);
+                                cw - padx - 3.0f, clip_h + preview_fs * 0.3f);
             nvgTextBox(ctx, x + padx, y3 - preview_fs * 0.55f,
-                       cw - padx * 2.0f, d.preview.c_str(), nullptr);
+                       cw - padx - 3.0f, d.preview.c_str(), nullptr);
             nvgRestore(ctx);
         }
 
@@ -1034,7 +1158,7 @@ private:
         if (!sel) {
             nvgBeginPath(ctx);
             nvgMoveTo(ctx, x + padx,      y + h - 0.5f);
-            nvgLineTo(ctx, x + cw - padx, y + h - 0.5f);
+            nvgLineTo(ctx, x + cw, y + h - 0.5f);
             nvgStrokeColor(ctx, m_dark ? Color( 62,  64,  76, 255)
                                        : Color(195, 198, 208, 255));
             nvgStrokeWidth(ctx, 1.0f);
@@ -1067,8 +1191,10 @@ private:
     float m_sb_drag_start  = 0.0f;
     float m_sb_drag_origin = 0.0f;
     bool  m_dark           = false;
+    bool  m_loading_more   = false;   // spinner strip while paging older mail
 
     std::function<void(int, const EmailData &)> m_on_select;
+    std::function<void()> m_on_hit_bottom;
 };
 
 // ---------------------------------------------------------------------------
@@ -1537,6 +1663,11 @@ static NVGcolor parse_html_color(const char *s, bool &ok) {
     return nvgRGB(0, 0, 0);
 }
 
+struct ResolvedImage {
+    int   id = 0;          // NVG image id (0 = unresolved)
+    float w  = 0.0f, h = 0.0f;
+};
+
 struct HtmlRender {
     Document  &doc;
     Paragraph *cur = nullptr;
@@ -1546,6 +1677,9 @@ struct HtmlRender {
     NVGcolor   accent;
     NVGcolor   meta;
     NVGcolor   code_bg;
+    /* Resolve an <img> src to an NVG image (cid: or http:); null or
+       returning id==0 falls back to the alt-text placeholder. */
+    std::function<ResolvedImage(const std::string &src)> img_resolve;
 
     explicit HtmlRender(Document &d) : doc(d) {}
 
@@ -1623,11 +1757,29 @@ static void html_walk(HtmlRender &R, GumboNode *node, Style st) {
         R.doc.addParagraph()->isRule = true;
         return;
     case GUMBO_TAG_IMG: {
+        GumboAttribute *src = gumbo_get_attribute(&el->attributes, "src");
         GumboAttribute *alt = gumbo_get_attribute(&el->attributes, "alt");
+        if (src && src->value && src->value[0] && R.img_resolve) {
+            ResolvedImage ri = R.img_resolve(src->value);
+            if (ri.id > 0 && ri.w > 0.0f && ri.h > 0.0f) {
+                R.brk();
+                Paragraph *ip = R.doc.addParagraph();
+                ip->isImage = true;
+                ip->image   = ri.id;
+                ip->image_w = ri.w;
+                ip->image_h = ri.h;
+                R.brk();
+                return;
+            }
+        }
         if (alt && alt->value && alt->value[0]) {
             Style ms = st;
             ms.fgColor = R.meta;
             R.emit(std::string("[image: ") + alt->value + "]", ms);
+        } else if (src && src->value && src->value[0]) {
+            Style ms = st;
+            ms.fgColor = R.meta;
+            R.emit(std::string("[image: ") + src->value + "]", ms);
         }
         return;
     }
@@ -1717,7 +1869,8 @@ static void html_walk(HtmlRender &R, GumboNode *node, Style st) {
 }
 
 static void html_to_document(Document &doc, const std::string &html,
-                             NVGcolor text_color, NVGcolor meta_color) {
+                             NVGcolor text_color, NVGcolor meta_color,
+                             const std::function<ResolvedImage(const std::string&)> &img_resolve = nullptr) {
     /* Light text on dark background -> dark mode colors. */
     bool dark_text_is_light =
         (text_color.r + text_color.g + text_color.b) > 1.5f;
@@ -1728,6 +1881,7 @@ static void html_to_document(Document &doc, const std::string &html,
                                    : nvgRGBA(10, 80, 220, 255);
     R.code_bg = dark_text_is_light ? nvgRGBA(50, 52, 62, 255)
                                    : nvgRGBA(228, 229, 236, 255);
+    R.img_resolve = img_resolve;
 
     GumboOutput *out = gumbo_parse(html.c_str());
     Style base;
@@ -1739,7 +1893,8 @@ static void html_to_document(Document &doc, const std::string &html,
 
 /* Render a fetched message into the reading pane document. */
 static void render_message(Document &doc, const MailMessage &msg,
-                           NVGcolor text_color, NVGcolor meta_color) {
+                           NVGcolor text_color, NVGcolor meta_color,
+                           const std::function<ResolvedImage(const std::string&)> &img_resolve = nullptr) {
     doc.paragraphs.clear();
 
     Style normal; normal.fontSize = 17.0f; normal.fgColor = text_color;
@@ -1769,7 +1924,7 @@ static void render_message(Document &doc, const MailMessage &msg,
 
     if (!msg.html.empty()) {
         /* Rich render of the HTML part (preferred, like other clients). */
-        html_to_document(doc, msg.html, text_color, meta_color);
+        html_to_document(doc, msg.html, text_color, meta_color, img_resolve);
     } else if (msg.body_markdown) {
         /* MailMate-style markup=markdown (or text/markdown): render the
          * plain body as Markdown.  parse_markdown() clears its target, so
@@ -1806,6 +1961,7 @@ public:
     Label        *m_status      = nullptr;
     Button       *m_theme_btn   = nullptr;
     Button       *m_reply_btn   = nullptr;
+    Button       *m_images_btn  = nullptr;
 
     MailConfig  m_config;
     MailWorker  m_worker;
@@ -1816,8 +1972,16 @@ public:
     std::string              m_current_folder;
     std::string              m_filter;
     int                      m_loading_seq = -1;
+    bool                     m_older_inflight = false;  // fetch_older posted
     MailMessage              m_current_message;
     bool                     m_has_message = false;
+
+    /* ---- inline/remote images in the reading pane ---- */
+    std::unordered_map<std::string, int>         m_img_tex;        // src -> nvg id
+    std::unordered_map<std::string, std::string> m_remote_bytes;   // url -> bytes
+    std::unordered_set<std::string>              m_remote_pending;
+    bool                     m_show_remote_images = false;  // user opt-in
+    bool                     m_has_remote_images  = false;  // current msg refs
 
     /* Session-only caches; dropped on Refresh or reconnect. */
     std::map<std::string, std::vector<MailSummary>> m_summary_cache;
@@ -1858,6 +2022,15 @@ public:
         m_reply_btn = make_button_tool(FA_REPLY, "Reply to this message");
         m_reply_btn->set_enabled(false);
         m_reply_btn->set_callback([this]() { show_compose(); });
+
+        m_images_btn = make_button_tool(FA_IMAGE,
+            "Load remote images (off by default to block tracking pixels)");
+        m_images_btn->set_enabled(false);
+        m_images_btn->set_callback([this]() {
+            m_show_remote_images = true;
+            m_images_btn->set_enabled(false);
+            render_current();
+        });
 
         Button *prefs_btn = make_button_tool(FA_COG, "Preferences");
         prefs_btn->set_callback([this]() { show_preferences(); });
@@ -1906,6 +2079,7 @@ public:
             [this](int idx, const EmailData &d) { on_email_selected(idx, d); });
         m_email_list->set_min_width(280);
         m_email_list->set_font_size(26);
+        m_email_list->set_on_hit_bottom([this]() { maybe_fetch_older(); });
 
         // ---- Right: message area ----
         Widget *right = new Widget(inner_split);
@@ -1946,6 +2120,10 @@ public:
         m_worker.cb_summaries = [this](const std::string &folder,
                                        const std::vector<MailSummary> &sums) {
             on_summaries(folder, sums);
+        };
+        m_worker.cb_older = [this](const std::string &folder,
+                                   const std::vector<MailSummary> &sums) {
+            on_older(folder, sums);
         };
         m_worker.cb_body = [this](int seq, const MailMessage &msg) {
             on_body(seq, msg);
@@ -2012,8 +2190,7 @@ public:
         m_email_list->set_dark(m_dark);
         style_editor();
         if (m_has_message)
-            render_message(*m_editor->document(), m_current_message,
-                           text_color(), meta_color());
+            render_current();
         else
             show_welcome();
         perform_layout();
@@ -2056,7 +2233,59 @@ public:
         m_current_folder = folder;
         m_summaries      = sums;
         m_summary_cache[folder] = sums;
+        m_older_inflight = false;
+        m_email_list->set_loading_more(false);
         apply_filter();
+    }
+
+    /* Ask the worker for the next older page when the list hits bottom. */
+    void maybe_fetch_older() {
+        if (m_older_inflight || m_current_folder.empty() ||
+            m_summaries.empty())
+            return;
+        int oldest = m_summaries.back().seq;   // list is newest-first
+        if (oldest <= 1) return;               // already at the first message
+        m_older_inflight = true;
+        m_email_list->set_loading_more(true);
+        m_status->set_caption("Loading older messages...");
+        m_worker.fetch_older();
+    }
+
+    void on_older(const std::string &folder,
+                  const std::vector<MailSummary> &sums) {
+        m_older_inflight = false;
+        m_email_list->set_loading_more(false);
+        if (folder != m_current_folder || sums.empty()) return;
+
+        m_summaries.insert(m_summaries.end(), sums.begin(), sums.end());
+        m_summary_cache[folder] = m_summaries;
+
+        /* Append only the rows passing the active filter; unlike
+           apply_filter() this leaves scroll position and selection alone. */
+        std::string needle = m_filter;
+        for (char &c : needle) c = (char)std::tolower((unsigned char)c);
+        std::vector<EmailData> rows;
+        rows.reserve(sums.size());
+        for (const MailSummary &s : sums) {
+            if (!needle.empty()) {
+                std::string hay = s.from + "\n" + s.subject;
+                for (char &c : hay) c = (char)std::tolower((unsigned char)c);
+                if (hay.find(needle) == std::string::npos) continue;
+            }
+            EmailData d;
+            d.seq     = s.seq;
+            d.sender  = s.from;
+            d.subject = s.subject;
+            d.preview = s.preview;
+            d.date    = s.date;
+            d.seen    = s.seen;
+            rows.push_back(d);
+        }
+        m_email_list->append_emails(std::move(rows));
+        m_status->set_caption(folder + ": showing " +
+                              std::to_string(m_summaries.size()) +
+                              " messages");
+        redraw();
     }
 
     void on_body(int seq, const MailMessage &msg) {
@@ -2067,12 +2296,12 @@ public:
         m_reply_btn->set_enabled(true);
         if (m_body_cache.size() > 256) m_body_cache.clear();
         m_body_cache[m_current_folder + ":" + std::to_string(seq)] = msg;
-        render_message(*m_editor->document(), msg, text_color(), meta_color());
-        m_editor->set_caret({0, 0});
-        redraw();
+        render_current();
     }
 
     void on_worker_error(const std::string &title, const std::string &msg) {
+        m_older_inflight = false;
+        if (m_email_list) m_email_list->set_loading_more(false);
         auto *dlg = new MessageDialog(this, MessageDialog::Type::Warning,
                                       title, msg, "OK", "", false);
         dlg->center();
@@ -2086,6 +2315,8 @@ public:
         m_email_list->set_emails({});
         m_loading_seq  = -1;
         m_has_message  = false;
+        m_older_inflight = false;
+        m_email_list->set_loading_more(false);
         m_reply_btn->set_enabled(false);
 
         /* Serve the last-known list instantly, then refresh from the
@@ -2112,10 +2343,7 @@ public:
             m_current_message = cached->second;
             m_has_message     = true;
             m_reply_btn->set_enabled(true);
-            render_message(*m_editor->document(), cached->second,
-                           text_color(), meta_color());
-            m_editor->set_caret({0, 0});
-            redraw();
+            render_current();
             return;
         }
         m_loading_seq = d.seq;
@@ -2159,6 +2387,166 @@ public:
             rows.push_back(d);
         }
         m_email_list->set_emails(std::move(rows));
+    }
+
+    /* ---- inline / remote images in the reading pane ---- */
+
+    void clear_image_textures() {
+        for (auto &kv : m_img_tex)
+            nvgDeleteImage(nvg_context(), kv.second);
+        m_img_tex.clear();
+    }
+
+    /* Resolve an <img> src to an NVG image, creating the texture on first
+       use.  Remote URLs load only after the user opts in; a cache miss
+       kicks an async fetch and resolves to id 0 (placeholder) this pass. */
+    ResolvedImage resolve_image(const std::string &src) {
+        ResolvedImage ri;
+        auto cached = m_img_tex.find(src);
+        if (cached != m_img_tex.end()) {
+            ri.id = cached->second;
+            int w, h;
+            nvgImageSize(nvg_context(), ri.id, &w, &h);
+            ri.w = (float)w; ri.h = (float)h;
+            return ri;
+        }
+
+        std::string bytes;
+        if (src.rfind("cid:", 0) == 0) {
+            std::string cid = src.substr(4);
+            for (const MailImage &img : m_current_message.images)
+                if (img.cid == cid) { bytes = img.data; break; }
+        } else if (src.rfind("http://", 0) == 0 ||
+                   src.rfind("https://", 0) == 0) {
+            m_has_remote_images = true;
+            if (!m_show_remote_images) return ri;
+            auto it = m_remote_bytes.find(src);
+            if (it != m_remote_bytes.end())
+                bytes = it->second;
+            else {
+                queue_remote_fetch(src);
+                return ri;
+            }
+        }
+        if (bytes.empty()) return ri;
+
+        int id = nvgCreateImageMem(nvg_context(), NVG_IMAGE_PREMULTIPLIED,
+                                   (unsigned char *)bytes.data(),
+                                   (int)bytes.size());
+        if (id <= 0) return ri;
+        m_img_tex[src] = id;
+        ri.id = id;
+        int w, h;
+        nvgImageSize(nvg_context(), id, &w, &h);
+        ri.w = (float)w; ri.h = (float)h;
+        return ri;
+    }
+
+    /* Minimal blocking HTTP(S) GET; called on a worker thread only. */
+    static bool http_get(const std::string &url, std::string &out) {
+        bool https = url.rfind("https://", 0) == 0;
+        size_t p = url.find("://");
+        if (p == std::string::npos) return false;
+        size_t host_b = p + 3;
+        size_t slash = url.find('/', host_b);
+        std::string hostport = url.substr(host_b, slash == std::string::npos
+                                          ? std::string::npos : slash - host_b);
+        std::string path = (slash == std::string::npos) ? "/" : url.substr(slash);
+        std::string host = hostport;
+        int port = https ? 443 : 80;
+        size_t colon = hostport.rfind(':');
+        if (colon != std::string::npos) {
+            host = hostport.substr(0, colon);
+            port = std::atoi(hostport.substr(colon + 1).c_str());
+            if (port <= 0) return false;
+        }
+
+        char ebuf[256];
+        int fd = nmail_sock_connect(host.c_str(), port, ebuf, sizeof(ebuf));
+        if (fd < 0) return false;
+        if (https && nmail_sock_starttls(fd, ebuf, sizeof(ebuf)) < 0) {
+            nmail_sock_close(fd);
+            return false;
+        }
+        std::string req = "GET " + path + " HTTP/1.0\r\nHost: " + hostport +
+                          "\r\nUser-Agent: nmail\r\nConnection: close\r\n\r\n";
+        if (nmail_sock_send(fd, req.c_str(), (int)req.size()) < 0) {
+            nmail_sock_close(fd);
+            return false;
+        }
+        std::string raw;
+        char buf[16384];
+        for (;;) {
+            int r = nmail_sock_recv(fd, buf, sizeof(buf));
+            if (r <= 0) break;   // close, timeout or error
+            raw.append(buf, (size_t)r);
+        }
+        nmail_sock_close(fd);
+
+        size_t he = raw.find("\r\n\r\n");
+        if (he == std::string::npos) return false;
+        const std::string &head = raw.substr(0, he);
+        size_t sp = head.find(' ');   // "HTTP/1.1 200 ..."
+        if (sp == std::string::npos || sp + 1 >= head.size() ||
+            head[sp + 1] != '2')
+            return false;
+        std::string body = raw.substr(he + 4);
+
+        std::string lhead;
+        for (unsigned char c : head) lhead += (char)std::tolower(c);
+        if (lhead.find("transfer-encoding: chunked") != std::string::npos) {
+            std::string dec;
+            size_t pos = 0;
+            while (pos < body.size()) {
+                size_t eol = body.find("\r\n", pos);
+                if (eol == std::string::npos) break;
+                long n = std::strtol(body.substr(pos, eol - pos).c_str(),
+                                     nullptr, 16);
+                if (n <= 0) break;
+                pos = eol + 2;
+                if (pos + (size_t)n > body.size()) break;
+                dec.append(body, pos, (size_t)n);
+                pos += (size_t)n + 2;
+            }
+            out = std::move(dec);
+        } else {
+            out = std::move(body);
+        }
+        return !out.empty();
+    }
+
+    void queue_remote_fetch(const std::string &url) {
+        if (m_remote_pending.count(url)) return;
+        m_remote_pending.insert(url);
+        std::thread([this, url]() {
+            std::string bytes;
+            bool ok = http_get(url, bytes);
+            nanogui::async([this, url, ok, bytes]() {
+                m_remote_pending.erase(url);
+                if (ok) {
+                    m_remote_bytes[url] = bytes;
+                    if (m_has_message) render_current();
+                }
+            });
+            glfwPostEmptyEvent();
+        }).detach();
+    }
+
+    /* (Re-)render the current message — on select, body arrival, theme
+       change, and when remote image bytes land. */
+    void render_current() {
+        if (!m_has_message) return;
+        clear_image_textures();
+        m_has_remote_images = false;
+        render_message(*m_editor->document(), m_current_message,
+                       text_color(), meta_color(),
+                       [this](const std::string &src) {
+                           return resolve_image(src);
+                       });
+        m_images_btn->set_enabled(m_has_remote_images &&
+                                  !m_show_remote_images);
+        m_editor->set_caret({0, 0});
+        redraw();
     }
 
     /* ---- Preferences window ---- */

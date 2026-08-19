@@ -123,6 +123,27 @@ struct fd_hash_entry {
 
 struct fd_hash_entry *fd_to_index = NULL;
 
+/* Guards clients[] and fd_to_index for callers that open/close connections
+ * from several threads at once (e.g. parallel image fetches).  Recursive so
+ * conn_del() can call get_conn() while holding it. */
+#include <pthread.h>
+static pthread_mutex_t g_clients_lock;
+static pthread_once_t g_clients_lock_once = PTHREAD_ONCE_INIT;
+static void clients_lock_init(void) {
+    pthread_mutexattr_t a;
+    pthread_mutexattr_init(&a);
+    pthread_mutexattr_settype(&a, PTHREAD_MUTEX_RECURSIVE);
+    pthread_mutex_init(&g_clients_lock, &a);
+    pthread_mutexattr_destroy(&a);
+}
+static inline void clients_lock(void) {
+    pthread_once(&g_clients_lock_once, clients_lock_init);
+    pthread_mutex_lock(&g_clients_lock);
+}
+static inline void clients_unlock(void) {
+    pthread_mutex_unlock(&g_clients_lock);
+}
+
 struct socket_info {
     int fds[MAX_FDS];
     int num_fds;
@@ -321,19 +342,25 @@ static inline void socket_server_init_hash(void) {
 }
 
 static inline int get_conn(int fd) {
+    clients_lock();
     int idx = hmget(fd_to_index, fd);
+    clients_unlock();
     return idx;
 }
 
 static inline int conn_add(int loopfd, int fd, bool is_listen) {
     if (fd < 1) return -1;
     int i;
+    clients_lock();
     for (i = 0; i < NUM_CLIENTS; i++) {
         if (clients[i].fd == 0) {
             break;
         }
     }
-    if (i == NUM_CLIENTS) return -1;
+    if (i == NUM_CLIENTS) {
+        clients_unlock();
+        return -1;
+    }
     clients[i].fd = fd;
     clients[i].on_data = NULL;
     clients[i].is_listen = is_listen;
@@ -365,13 +392,18 @@ static inline int conn_add(int loopfd, int fd, bool is_listen) {
     clients[i].listen_uri = NULL;
     clients[i].si = NULL;
     hmput(fd_to_index, fd, i);
+    clients_unlock();
     return 0;
 }
 
 static inline int conn_del(int fd) {
     if (fd < 1) return -1;
+    clients_lock();
     int i = get_conn(fd);
-    if (i == -1) return -1;
+    if (i == -1) {
+        clients_unlock();
+        return -1;
+    }
 #ifdef HAVE_OPENSSL
     if (clients[i].ssl) {
         SSL_shutdown(clients[i].ssl);
@@ -405,6 +437,7 @@ static inline int conn_del(int fd) {
     clients[i].on_data = NULL;
     clients[i].is_listen = false;
     hmdel(fd_to_index, fd);
+    clients_unlock();
     return close(fd);
 }
 

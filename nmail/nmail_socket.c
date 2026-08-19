@@ -8,14 +8,12 @@
 #include "nmail_socket.h"
 #define STRINGBUF_IMPLEMENTATION  /* one TU must provide stringbuf's impl */
 #include "socket_server.h"
+#include <pthread.h>
 
-static int g_sock_inited = 0;
+static pthread_once_t g_sock_init_once = PTHREAD_ONCE_INIT;
 
 int nmail_sock_connect(const char *host, int port, char *errbuf, int errlen) {
-    if (!g_sock_inited) {
-        socket_server_init_hash();
-        g_sock_inited = 1;
-    }
+    pthread_once(&g_sock_init_once, socket_server_init_hash);
 
     char portstr[16];
     snprintf(portstr, sizeof(portstr), "%d", port);
@@ -108,27 +106,35 @@ int nmail_sock_recv(int fd, char *buf, int maxlen) {
     return (int)n;
 }
 
+#ifdef HAVE_OPENSSL
+/* Process-wide client context, built exactly once (concurrent fetch
+ * threads raced the previous lazy init).  Certificate verification
+ * intentionally disabled for now — same "don't worry about SSL" policy
+ * as the rest of nmail. */
+static SSL_CTX *g_tls_ctx = NULL;
+static pthread_once_t g_tls_ctx_once = PTHREAD_ONCE_INIT;
+static void tls_ctx_init(void) {
+    OPENSSL_init_ssl(OPENSSL_INIT_LOAD_SSL_STRINGS |
+                     OPENSSL_INIT_LOAD_CRYPTO_STRINGS, NULL);
+    g_tls_ctx = SSL_CTX_new(TLS_client_method());
+    if (g_tls_ctx)
+        SSL_CTX_set_verify(g_tls_ctx, SSL_VERIFY_NONE, NULL);
+}
+#endif
+
 int nmail_sock_starttls(int fd, char *errbuf, int errlen) {
 #ifdef HAVE_OPENSSL
-    static SSL_CTX *tls_ctx = NULL;
-    if (!tls_ctx) {
-        OPENSSL_init_ssl(OPENSSL_INIT_LOAD_SSL_STRINGS |
-                         OPENSSL_INIT_LOAD_CRYPTO_STRINGS, NULL);
-        tls_ctx = SSL_CTX_new(TLS_client_method());
-        if (!tls_ctx) {
-            snprintf(errbuf, (size_t)errlen, "SSL_CTX_new failed");
-            return -1;
-        }
-        /* Certificate verification intentionally disabled for now —
-         * same "don't worry about SSL" policy as the rest of nmail. */
-        SSL_CTX_set_verify(tls_ctx, SSL_VERIFY_NONE, NULL);
+    pthread_once(&g_tls_ctx_once, tls_ctx_init);
+    if (!g_tls_ctx) {
+        snprintf(errbuf, (size_t)errlen, "SSL_CTX_new failed");
+        return -1;
     }
     int idx = get_conn(fd);
     if (idx < 0) {
         snprintf(errbuf, (size_t)errlen, "unknown socket");
         return -1;
     }
-    SSL *ssl = SSL_new(tls_ctx);
+    SSL *ssl = SSL_new(g_tls_ctx);
     if (!ssl || SSL_set_fd(ssl, fd) <= 0) {
         snprintf(errbuf, (size_t)errlen, "SSL setup failed");
         if (ssl) SSL_free(ssl);
