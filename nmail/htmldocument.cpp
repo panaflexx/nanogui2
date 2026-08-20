@@ -255,7 +255,9 @@ void apply_style_attr(const char *css, Style &st,
             else if (val == "justify"){ align = TextAlignment::Justify; has_align = true; }
             else if (val == "left")   { align = TextAlignment::Left;    has_align = true; }
         } else if (key == "vertical-align") {
-            if (val == "super" || val == "top")
+            /* "top" on a TD is table layout, not superscript.  Inline
+             * spans (price cents) still set it via walk_inline. */
+            if (val == "super")
                 st.superscript = true;
             else if (val == "baseline" || val == "middle" || val == "bottom")
                 st.superscript = false;
@@ -296,6 +298,39 @@ void apply_style_attr(const char *css, Style &st,
                 if (pct <= 0.0f) box->height_px = px;
             } else if (key == "max-height") {
                 if (pct <= 0.0f) box->max_height_px = px;
+            }
+        } else if (key == "border" || key == "border-width" ||
+                   key == "border-color" || key == "border-style") {
+            if (val == "none" || val == "0" || val == "0px" ||
+                val.find("none") == 0) {
+                if (key != "border-color")
+                    st.borderWidth = 0.0f;
+                continue;
+            }
+            std::string rest = val;
+            while (!rest.empty()) {
+                while (!rest.empty() && std::isspace((unsigned char)rest[0]))
+                    rest.erase(0, 1);
+                if (rest.empty()) break;
+                size_t sp = rest.find_first_of(" \t");
+                std::string tok = (sp == std::string::npos) ? rest
+                                  : rest.substr(0, sp);
+                rest = (sp == std::string::npos) ? "" : rest.substr(sp);
+                if (tok == "solid" || tok == "dashed" || tok == "dotted" ||
+                    tok == "double" || tok == "groove" || tok == "ridge")
+                    continue;
+                float px = 0, pct = 0;
+                if (parse_css_len(tok, px, pct) && pct == 0.0f) {
+                    st.borderWidth = px;
+                    continue;
+                }
+                bool ok = false;
+                NVGcolor c = parse_html_color(tok.c_str(), ok);
+                if (ok) {
+                    st.borderColor = c;
+                    if (st.borderWidth <= 0.0f && key == "border-color")
+                        st.borderWidth = 1.0f;
+                }
             }
         } else if (box && key == "border-radius") {
             float px = 0, pct = 0;
@@ -454,13 +489,18 @@ public:
 class HtmlBlock : public Widget {
 public:
     NVGcolor m_bg = NVGcolor{ { { 0.f, 0.f, 0.f, 0.f } } };
+    float    m_radius = 0.0f;
 
     explicit HtmlBlock(Widget *parent) : Widget(parent) { set_live(true); }
 
     virtual Vector2i preferred_size(NVGcontext *ctx) const override {
         Vector2i p = Widget::preferred_size(ctx);
-        if (m_max_size.x() > 0)
-            p.x() = std::max(p.x(), m_max_size.x());
+        if (m_max_size.x() > 0) {
+            /* Block boxes with max-width want to fill that width (CSS
+             * width:100%; max-width:N).  HtmlDocument::preferred_size
+             * still reports 0 so the split can shrink. */
+            p.x() = m_max_size.x();
+        }
         return p;
     }
 
@@ -479,9 +519,16 @@ public:
                 return;
         }
         if (m_bg.a > 0.0f) {
+            float x = (float)m_pos.x(), y = (float)m_pos.y();
+            float w = (float)m_size.x(), h = (float)m_size.y();
+            float rad = m_radius;
+            if (rad > 0.5f)
+                rad = std::min(rad, std::min(w, h) * 0.5f);
             nvgBeginPath(ctx);
-            nvgRect(ctx, (float)m_pos.x(), (float)m_pos.y(),
-                    (float)m_size.x(), (float)m_size.y());
+            if (rad > 0.5f)
+                nvgRoundedRect(ctx, x, y, w, h, rad);
+            else
+                nvgRect(ctx, x, y, w, h);
             nvgFillColor(ctx, m_bg);
             nvgFill(ctx);
         }
@@ -505,6 +552,8 @@ struct CssSel {
     std::string tag;
     std::string id;
     std::vector<std::string> classes;
+    std::string ancestor_class; /* ".foo bar" — some parent has class foo */
+    std::string ancestor_tag;
     int spec = 0;
 };
 
@@ -598,6 +647,26 @@ void css_skip_ws(const std::string &s, size_t &i, size_t end) {
 bool parse_simple_selector(const std::string &raw, CssSel &out) {
     std::string s = trim_lower(raw);
     if (s.empty()) return false;
+    /* One descendant step: ".st-LinkTextBlock a" */
+    size_t sp = s.find_first_of(" \t");
+    if (sp != std::string::npos && s.find_first_of(">+~[:") == std::string::npos) {
+        std::string anc = trim_lower(s.substr(0, sp));
+        std::string rest = trim_lower(s.substr(sp));
+        if (rest.find_first_of(" \t") != std::string::npos)
+            return false;
+        CssSel a, b;
+        if (!parse_simple_selector(anc, a) || !parse_simple_selector(rest, b))
+            return false;
+        out = b;
+        if (!a.classes.empty())
+            out.ancestor_class = a.classes[0];
+        else if (!a.tag.empty())
+            out.ancestor_tag = a.tag;
+        else
+            return false;
+        out.spec += 10;
+        return true;
+    }
     if (s.find_first_of(" >+~[:") != std::string::npos)
         return false;
     out = CssSel{};
@@ -751,7 +820,7 @@ std::vector<std::string> elem_classes(GumboElement *el) {
     return out;
 }
 
-bool css_sel_matches(const CssSel &sel, GumboElement *el) {
+bool css_sel_matches(const CssSel &sel, GumboElement *el, GumboNode *node) {
     if (!sel.tag.empty() && sel.tag != elem_tag_name(el))
         return false;
     if (!sel.id.empty()) {
@@ -766,19 +835,41 @@ bool css_sel_matches(const CssSel &sel, GumboElement *el) {
                 return false;
         }
     }
+    if (!sel.ancestor_class.empty() || !sel.ancestor_tag.empty()) {
+        bool ok = false;
+        for (GumboNode *p = node ? node->parent : nullptr; p; p = p->parent) {
+            if (p->type != GUMBO_NODE_ELEMENT) continue;
+            GumboElement *pe = &p->v.element;
+            if (!sel.ancestor_class.empty()) {
+                auto have = elem_classes(pe);
+                if (std::find(have.begin(), have.end(), sel.ancestor_class)
+                        != have.end()) {
+                    ok = true;
+                    break;
+                }
+            }
+            if (!sel.ancestor_tag.empty() &&
+                elem_tag_name(pe) == sel.ancestor_tag) {
+                ok = true;
+                break;
+            }
+        }
+        if (!ok)
+            return false;
+    }
     return true;
 }
 
 void apply_css(GumboElement *el, Style &st, TextAlignment &align,
                const Stylesheet &sheet, bool dark, BoxProps *box,
-               ApplyMode mode) {
+               ApplyMode mode, GumboNode *node = nullptr) {
     struct Hit { int spec, order; const CssRule *r; };
     std::vector<Hit> hits;
     for (const auto &r : sheet.rules) {
         if (r.media == CssMedia::Skip) continue;
         if (r.media == CssMedia::Dark && !dark) continue;
         if (r.media == CssMedia::Light && dark) continue;
-        if (!css_sel_matches(r.sel, el)) continue;
+        if (!css_sel_matches(r.sel, el, node)) continue;
         hits.push_back({ r.sel.spec, r.order, &r });
     }
     std::sort(hits.begin(), hits.end(), [](const Hit &a, const Hit &b) {
@@ -795,8 +886,9 @@ void apply_css(GumboElement *el, Style &st, TextAlignment &align,
  * then !important stylesheet, then !important inline — so MJML's
  * `.mj-column-per-33 { width:33% !important }` beats inline width:100%. */
 void apply_cascade(GumboElement *el, Style &st, TextAlignment &align,
-                   const Builder &B, BoxProps *box = nullptr) {
-    apply_css(el, st, align, B.sheet, B.dark, box, ApplyMode::NonImportant);
+                   const Builder &B, BoxProps *box = nullptr,
+                   GumboNode *node = nullptr) {
+    apply_css(el, st, align, B.sheet, B.dark, box, ApplyMode::NonImportant, node);
     const char *align_attr = attr(el, "align");
     if (align_attr) {
         bool dummy = true;
@@ -809,7 +901,7 @@ void apply_cascade(GumboElement *el, Style &st, TextAlignment &align,
         apply_style_attr(style_attr, st, align, has_align, box,
                          ApplyMode::NonImportant);
     }
-    apply_css(el, st, align, B.sheet, B.dark, box, ApplyMode::Important);
+    apply_css(el, st, align, B.sheet, B.dark, box, ApplyMode::Important, node);
     if (style_attr) {
         bool has_align = false;
         apply_style_attr(style_attr, st, align, has_align, box,
@@ -1045,7 +1137,7 @@ void walk_inline(GumboNode *node, Style st, Flow &F, Builder &B,
     case GUMBO_TAG_PRE: case GUMBO_TAG_LISTING: {
         st.monospace = true;
         st.bgColor = B.code_bg;
-        apply_cascade(el, st, F.align, B);
+        apply_cascade(el, st, F.align, B, nullptr, node);
         bool pre_save = F.pre;
         F.pre = true;
         walk_inline_children(&el->children, st, F, B, list_depth);
@@ -1065,6 +1157,10 @@ void walk_inline(GumboNode *node, Style st, Flow &F, Builder &B,
     case GUMBO_TAG_BLOCKQUOTE:
         st.italic = true;
         st.fgColor = B.meta;
+        break;
+    case GUMBO_TAG_SUP:
+        st.superscript = true;
+        st.fontSize *= 0.65f;
         break;
     case GUMBO_TAG_SMALL: st.fontSize *= 0.85f; break;
     case GUMBO_TAG_BIG:   st.fontSize *= 1.2f;  break;
@@ -1099,7 +1195,18 @@ void walk_inline(GumboNode *node, Style st, Flow &F, Builder &B,
         break;
     }
 
-    apply_cascade(el, st, F.align, B);
+    apply_cascade(el, st, F.align, B, nullptr, node);
+    if (tag == GUMBO_TAG_SPAN || tag == GUMBO_TAG_FONT ||
+        tag == GUMBO_TAG_LABEL) {
+        const char *css = attr(el, "style");
+        if (css) {
+            std::string l = trim_lower(css);
+            if (l.find("vertical-align:top") != std::string::npos ||
+                l.find("vertical-align: top") != std::string::npos ||
+                l.find("vertical-align:super") != std::string::npos)
+                st.superscript = true;
+        }
+    }
 
     walk_inline_children(&el->children, st, F, B, list_depth);
 
@@ -1108,10 +1215,11 @@ void walk_inline(GumboNode *node, Style st, Flow &F, Builder &B,
 }
 
 /* Create a container widget (column flex by default) under `parent`. */
-HtmlBlock *make_block(Widget *parent, FlexDirection dir, int gap) {
+HtmlBlock *make_block(Widget *parent, FlexDirection dir, int gap,
+                      AlignItems align = AlignItems::Stretch) {
     HtmlBlock *w = new HtmlBlock(parent);
     w->set_layout(new FlexLayout(dir, JustifyContent::FlexStart,
-                                 AlignItems::Stretch, 0, gap));
+                                 align, 0, gap));
     /* set_layout() makes any container a retained display-list cache root.
      * HTML content is far too dynamic for that: baked packets (text, link
      * underlines, bg rects, baked child scissor rects) were being replayed
@@ -1177,6 +1285,65 @@ bool element_is_full_width(GumboElement *el, const Builder &B) {
     return box.width_pct >= 99.0f;
 }
 
+void element_box(GumboElement *el, const Builder &B, BoxProps &box) {
+    Style dummy;
+    TextAlignment a = TextAlignment::Left;
+    apply_cascade(el, dummy, a, B, &box);
+}
+
+int element_height_px(GumboElement *el, const BoxProps &box) {
+    if (box.height_px > 1.0f)
+        return (int)box.height_px;
+    const char *h = attr(el, "height");
+    if (h && h[0]) {
+        int n = (int)strtof(h, nullptr);
+        if (n > 1)
+            return n;
+    }
+    return 0;
+}
+
+/* Pixel width of a table cell.  -1 = auto/%;  0 = collapse (width="0"). */
+int cell_px_width(GumboElement *el, const Builder &B) {
+    const char *w = attr(el, "width");
+    if (w && w[0]) {
+        std::string v = trim_lower(w);
+        if (!v.empty() && v.back() != '%') {
+            int n = (int)strtof(v.c_str(), nullptr);
+            if (n >= 0 && n < 2000)
+                return n;
+        }
+        return -1;
+    }
+    BoxProps box;
+    element_box(el, B, box);
+    if (box.width_px > 0.0f && box.width_px < 2000.0f && box.width_pct <= 0.0f)
+        return (int)box.width_px;
+    return -1;
+}
+
+void decorate_block(HtmlBlock *b, GumboElement *el, const Builder &B) {
+    BoxProps box;
+    element_box(el, B, box);
+    if (box.max_width_px > 80.0f && box.max_width_px < 4000.0f)
+        b->set_max_width((int)box.max_width_px);
+    if (box.width_px > 0.0f && box.width_px < 4000.0f &&
+        box.width_pct <= 0.0f) {
+        int w = (int)box.width_px;
+        b->set_min_width(w);
+        b->set_max_width(w);
+    }
+    if (box.radius_px > 0.0f)
+        b->m_radius = box.radius_px;
+    int h = element_height_px(el, box);
+    if (h > 1)
+        b->set_min_height(h);
+    if (h >= 24 && b->m_bg.a > 0.0f) {
+        if (auto *fl = dynamic_cast<FlexLayout *>(b->layout()))
+            fl->set_justify_content(JustifyContent::Center);
+    }
+}
+
 /* Only introduce a widget when the element actually paints a background.
  * Transparent wrappers are the save-stack bomb in the NMAIL_DEBUG_DRAW log. */
 Widget *wrap_if_bg(Widget *parent, GumboElement *el, int gap, const Builder &B) {
@@ -1192,6 +1359,7 @@ Widget *wrap_if_bg(Widget *parent, GumboElement *el, int gap, const Builder &B) 
     }
     HtmlBlock *b = make_block(parent, FlexDirection::Column, gap);
     b->m_bg = bg;
+    decorate_block(b, el, B);
     return b;
 }
 
@@ -1313,24 +1481,35 @@ void build_children(Widget *container, GumboVector *kids, Style st,
         case GUMBO_TAG_TBODY:
         case GUMBO_TAG_THEAD:
         case GUMBO_TAG_TFOOT: {
-            /* 1-col tables and tbody/thead/tfoot are layout wrappers in
-             * HTML email (nested spacer tables). Recurse into the parent
-             * instead of allocating a widget per wrapper — that chain is
-             * what drove NVG_MAX_STATES overflow and xform tx=0 in the
-             * NMAIL_DEBUG_DRAW log. Multi-col tables still become rows. */
             bool save_fw = B.in_full_width;
             if (tag == GUMBO_TAG_TABLE)
                 B.in_full_width = element_is_full_width(el, B);
             Widget *target = container;
-            if (tag == GUMBO_TAG_TABLE)
-                target = wrap_if_bg(container, el, 2, B);
+            if (tag == GUMBO_TAG_TABLE) {
+                BoxProps box;
+                element_box(el, B, box);
+                NVGcolor bg = block_background(el, B);
+                bool cap = box.max_width_px > 80.0f && box.max_width_px < 4000.0f;
+                /* Email convention: max-width:600px (even with width:100%)
+                 * is a centered column, not a shrink-wrapped align=center
+                 * cell — that path collapsed Amazon's 33/67 rows. */
+                if (cap) {
+                    HtmlBlock *outer = make_block(container, FlexDirection::Column,
+                                                  0, AlignItems::Center);
+                    target = outer;
+                }
+                if (bg.a > 0.0f || cap || box.radius_px > 0.0f) {
+                    HtmlBlock *inner = make_block(target, FlexDirection::Column, 2);
+                    inner->m_bg = bg;
+                    decorate_block(inner, el, B);
+                    target = inner;
+                }
+            }
             build_children(target, &el->children, st, B, list_depth, align);
             B.in_full_width = save_fw;
             break;
         }
         case GUMBO_TAG_TR: {
-            /* A single-cell row is a stack item, not a grid. Keep a row
-             * widget only when there are 2+ cells to sit side by side. */
             if (count_row_cells(el) <= 1 && container_is_column(container)) {
                 Widget *target = wrap_if_bg(container, el, 2, B);
                 for (unsigned j = 0; j < el->children.length; ++j) {
@@ -1339,23 +1518,44 @@ void build_children(Widget *container, GumboVector *kids, Style st,
                     GumboElement *ce = &cn->v.element;
                     if (ce->tag != GUMBO_TAG_TD && ce->tag != GUMBO_TAG_TH)
                         continue;
-                    /* Shrink-to-fit tables (Learn More chip): a TD bgcolor
-                     * must not become a full-column yellow strip. */
+                    if (element_is_hidden(ce, B))
+                        continue;
                     Widget *cell = target;
-                    if (B.in_full_width || element_is_full_width(ce, B))
+                    bool ch = false;
+                    TextAlignment ta = element_align(ce, align, ch, B);
+                    BoxProps box;
+                    element_box(ce, B, box);
+                    int h = element_height_px(ce, box);
+                    bool paint = B.in_full_width || element_is_full_width(ce, B);
+                    if (paint)
                         cell = wrap_if_bg(target, ce, 2, B);
+                    if (cell == target && (h > 1 || box.radius_px > 0.0f ||
+                                           box.max_width_px > 80.0f)) {
+                        HtmlBlock *sp = make_block(target, FlexDirection::Column, 0);
+                        decorate_block(sp, ce, B);
+                        cell = sp;
+                    }
                     Style cst = st;
+                    apply_cascade(ce, cst, ta, B);
+                    cst.superscript = st.superscript;
                     if (ce->tag == GUMBO_TAG_TH)
                         cst.bold = true;
-                    build_children(cell, &ce->children, cst, B, list_depth,
-                                   align);
+                    build_children(cell, &ce->children, cst, B, list_depth, ta);
                 }
                 break;
             }
-            HtmlBlock *row = make_block(container, FlexDirection::Row, 8);
+            bool has_px = false;
+            for (unsigned j = 0; j < el->children.length; ++j) {
+                GumboNode *cn = (GumboNode *)el->children.data[j];
+                if (cn->type != GUMBO_NODE_ELEMENT) continue;
+                GumboTag ct = cn->v.element.tag;
+                if (ct != GUMBO_TAG_TD && ct != GUMBO_TAG_TH) continue;
+                if (cell_px_width(&cn->v.element, B) > 0)
+                    has_px = true;
+            }
+            HtmlBlock *row = make_block(container, FlexDirection::Row,
+                                        has_px ? 0 : 8);
             row->m_bg = block_background(el, B);
-            /* Column shares: explicit width="N%" cells take N; the
-             * remaining percentage is split evenly between auto cells. */
             float explicit_sum = 0.0f;
             int auto_cells = 0;
             for (unsigned j = 0; j < el->children.length; ++j) {
@@ -1363,9 +1563,12 @@ void build_children(Widget *container, GumboVector *kids, Style st,
                 if (cn->type != GUMBO_NODE_ELEMENT) continue;
                 GumboTag ct = cn->v.element.tag;
                 if (ct != GUMBO_TAG_TD && ct != GUMBO_TAG_TH) continue;
+                if (cell_px_width(&cn->v.element, B) >= 0)
+                    continue;
                 const char *w = attr(&cn->v.element, "width");
                 std::string ws = w ? trim_lower(w) : "";
-                if (!ws.empty() && ws.back() == '%' && strtof(ws.c_str(), nullptr) > 0.f)
+                if (!ws.empty() && ws.back() == '%' && strtof(ws.c_str(), nullptr) > 0.f
+                    && strtof(ws.c_str(), nullptr) < 99.f)
                     explicit_sum += strtof(ws.c_str(), nullptr);
                 else
                     auto_cells++;
@@ -1379,22 +1582,46 @@ void build_children(Widget *container, GumboVector *kids, Style st,
                 GumboElement *ce = &cn->v.element;
                 if (ce->tag != GUMBO_TAG_TD && ce->tag != GUMBO_TAG_TH)
                     continue;
+                if (element_is_hidden(ce, B))
+                    continue;
                 HtmlBlock *cell = make_block(row, FlexDirection::Column, 2);
                 cell->m_bg = block_background(ce, B);
+                decorate_block(cell, ce, B);
+                bool ch = false;
+                TextAlignment ta = element_align(ce, align, ch, B);
                 Style cst = st;
+                apply_cascade(ce, cst, ta, B);
+                cst.superscript = st.superscript;
                 if (ce->tag == GUMBO_TAG_TH)
                     cst.bold = true;
-                build_children(cell, &ce->children, cst, B, list_depth, align);
+                build_children(cell, &ce->children, cst, B, list_depth, ta);
+                int px = cell_px_width(ce, B);
                 float grow = auto_grow;
-                const char *w = attr(ce, "width");
-                std::string ws = w ? trim_lower(w) : "";
-                if (!ws.empty() && ws.back() == '%' &&
-                    strtof(ws.c_str(), nullptr) > 0.f)
-                    grow = strtof(ws.c_str(), nullptr);
-                else if (const char *cs = attr(ce, "colspan"))
-                    grow = auto_grow * (float)std::max(atoi(cs), 1);
+                float shrink = 1.0f;
+                int basis = 0;
+                if (px > 0) {
+                    grow = 0.0f;
+                    shrink = 0.0f;
+                    basis = px;
+                    cell->set_min_width(px);
+                    cell->set_max_width(px);
+                } else if (px == 0) {
+                    grow = 0.0f;
+                    shrink = 0.0f;
+                    basis = 0;
+                    cell->set_max_width(0);
+                } else {
+                    const char *w = attr(ce, "width");
+                    std::string ws = w ? trim_lower(w) : "";
+                    if (!ws.empty() && ws.back() == '%' &&
+                        strtof(ws.c_str(), nullptr) > 0.f &&
+                        strtof(ws.c_str(), nullptr) < 99.f)
+                        grow = strtof(ws.c_str(), nullptr);
+                    else if (const char *cs = attr(ce, "colspan"))
+                        grow = auto_grow * (float)std::max(atoi(cs), 1);
+                }
                 if (auto *fl = dynamic_cast<FlexLayout *>(row->layout()))
-                    fl->set_flex_item(cell, FlexLayout::FlexItem(grow, 1.0f, 0));
+                    fl->set_flex_item(cell, FlexLayout::FlexItem(grow, shrink, basis));
             }
             break;
         }
@@ -1439,36 +1666,41 @@ void build_children(Widget *container, GumboVector *kids, Style st,
         }
         case GUMBO_TAG_HTML:
         case GUMBO_TAG_BODY: {
-            /* Transparent: recurse into the same container (a body
-             * bgcolor becomes the view background). */
             NVGcolor bg = block_background(el, B);
             if (tag == GUMBO_TAG_BODY && bg.a > 0.0f) {
                 if (auto *hb = dynamic_cast<HtmlBlock *>(container))
                     hb->m_bg = bg;
+                B.view->set_background(bg);
             }
             build_children(container, &el->children, st, B, list_depth, align);
             break;
         }
         default: {
-            /* div/section/article/... : skip the widget if it has no
-             * background, doesn't change alignment, and doesn't cap width. */
             bool align_changed = false;
             TextAlignment child_align = element_align(el, align, align_changed, B);
             NVGcolor bg = block_background(el, B);
             BoxProps box;
-            Style dummy;
-            TextAlignment a2 = align;
-            apply_cascade(el, dummy, a2, B, &box);
-            int cap = (box.max_width_px > 80.0f && box.max_width_px < 2000.0f)
+            element_box(el, B, box);
+            int cap = (box.max_width_px > 80.0f && box.max_width_px < 4000.0f)
                           ? (int)box.max_width_px : 0;
-            if (bg.a <= 0.0f && !align_changed && cap <= 0) {
-                build_children(container, &el->children, st, B, list_depth,
-                               align);
+            if (bg.a <= 0.0f && !align_changed && cap <= 0 &&
+                box.radius_px <= 0.0f && !box.center) {
+                Style cst = st;
+                TextAlignment ta = child_align;
+                apply_cascade(el, cst, ta, B);
+                cst.superscript = st.superscript;
+                build_children(container, &el->children, cst, B, list_depth,
+                               ta);
             } else {
-                HtmlBlock *blk = make_block(container, FlexDirection::Column, 4);
+                Widget *host = container;
+                if (cap > 0) {
+                    HtmlBlock *outer = make_block(container, FlexDirection::Column,
+                                                  0, AlignItems::Center);
+                    host = outer;
+                }
+                HtmlBlock *blk = make_block(host, FlexDirection::Column, 4);
                 blk->m_bg = bg;
-                if (cap > 0)
-                    blk->set_max_width(cap);
+                decorate_block(blk, el, B);
                 build_children(blk, &el->children, st, B, list_depth,
                                child_align);
             }
@@ -1487,7 +1719,7 @@ void build_children(Widget *container, GumboVector *kids, Style st,
 
 HtmlDocument::HtmlDocument(Widget *parent) : Widget(parent) {
     set_layout(new FlexLayout(FlexDirection::Column, JustifyContent::FlexStart,
-                              AlignItems::Center, 16, 4));
+                              AlignItems::Stretch, 16, 4));
     set_live(true);   // see make_block: never bake HTML content into draw lists
 #ifdef DEBUG
     if (debug_draw())
@@ -1504,6 +1736,14 @@ void HtmlDocument::clear() {
     while (!m_children.empty())
         remove_child(m_children.back());
     m_has_remote = false;
+}
+
+Vector2i HtmlDocument::preferred_size(NVGcontext *ctx) const {
+    Vector2i p = Widget::preferred_size(ctx);
+    /* Width comes from the reading pane. Reporting a max-width (600, 424, …)
+     * as preferred locked the split and let the view paint over the list. */
+    p.x() = 0;
+    return p;
 }
 
 void HtmlDocument::relayout() {
@@ -1573,15 +1813,12 @@ void HtmlDocument::set_html(const std::string &html) {
     Style base;
     base.fontSize = 17.0f;
     base.fgColor  = m_text;
-    /* HTML email is designed for a ~600px column (Firefox / most clients). */
-    HtmlBlock *page = make_block(this, FlexDirection::Column, 4);
-    page->set_max_width(600);
-    build_children(page, &out->root->v.document.children, base, B, 0,
+    build_children(this, &out->root->v.document.children, base, B, 0,
                    TextAlignment::Left);
     gumbo_destroy_output(&kGumboDefaultOptions, out);
 
-    if (page->child_count() == 0)
-        new HtmlText(page, Document(), NVGcolor{ { { 0, 0, 0, 0 } } });
+    if (m_children.empty())
+        new HtmlText(this, Document(), NVGcolor{ { { 0, 0, 0, 0 } } });
 #ifdef DEBUG
     if (debug_draw()) {
         fprintf(stderr, "[trace] set_html done %p children=%zu parent=%p css_rules=%zu\n",
@@ -1595,8 +1832,6 @@ void HtmlDocument::set_html(const std::string &html) {
 
 void HtmlDocument::set_plain(const std::string &text) {
     clear();
-    HtmlBlock *page = make_block(this, FlexDirection::Column, 4);
-    page->set_max_width(600);
     Document doc;
     Style normal;
     normal.fontSize = 17.0f;
@@ -1616,15 +1851,13 @@ void HtmlDocument::set_plain(const std::string &text) {
     }
     if (doc.paragraphs.empty())
         doc.addParagraph();
-    new HtmlText(page, std::move(doc), NVGcolor{ { { 0, 0, 0, 0 } } });
+    new HtmlText(this, std::move(doc), NVGcolor{ { { 0, 0, 0, 0 } } });
     relayout();
 }
 
 void HtmlDocument::set_document(Document &&doc) {
     clear();
-    HtmlBlock *page = make_block(this, FlexDirection::Column, 4);
-    page->set_max_width(600);
-    new HtmlText(page, std::move(doc), NVGcolor{ { { 0, 0, 0, 0 } } });
+    new HtmlText(this, std::move(doc), NVGcolor{ { { 0, 0, 0, 0 } } });
     relayout();
 }
 
@@ -1646,7 +1879,7 @@ std::string HtmlDocument::debug_summary() const {
                 for (const Text &r : p->runs) {
                     char rs[160];
                     std::snprintf(rs, sizeof(rs),
-                        " [fg=%.2f,%.2f,%.2f,%.2f bg=%.2f,%.2f,%.2f,%.2f %s%s%s%s sz=%.1f]",
+                        " [fg=%.2f,%.2f,%.2f,%.2f bg=%.2f,%.2f,%.2f,%.2f %s%s%s%s sz=%.1f pad=%.0f,%.0f brd=%.1f]",
                         r.style.fgColor.r, r.style.fgColor.g,
                         r.style.fgColor.b, r.style.fgColor.a,
                         r.style.bgColor.r, r.style.bgColor.g,
@@ -1654,7 +1887,9 @@ std::string HtmlDocument::debug_summary() const {
                         r.style.bold ? "b" : "", r.style.italic ? "i" : "",
                         r.style.underline ? "u" : "",
                         r.style.monospace ? "m" : "",
-                        r.style.fontSize);
+                        r.style.fontSize, r.style.padX, r.style.padY,
+                        r.style.borderWidth);
+                    if (r.style.superscript) t += " sup";
                     t += rs;
                 }
                 t += " | ";
