@@ -48,9 +48,11 @@
 #include "imap_client.h"
 #include "smtp_client.h"
 #include "nmail_socket.h"
+#include "http_fetch.h"
 #include "htmldocument.h"
 #include "saved_email.h"
 #include "gumbo.h"
+#include <memory>
 
 using namespace nanogui;
 
@@ -1723,6 +1725,12 @@ public:
     std::unordered_map<std::string, int>         m_img_tex;        // src -> nvg id
     std::unordered_map<std::string, std::string> m_remote_bytes;   // url -> bytes
     std::unordered_set<std::string>              m_remote_pending;
+    std::unordered_set<std::string>              m_remote_failed;
+    std::unordered_set<std::string>              m_doc_remotes;
+    std::deque<std::string>                      m_fetch_queue;
+    int                                          m_fetch_inflight = 0;
+    static const int                             kMaxInflight = 4;
+    std::shared_ptr<bool>                        m_alive = std::make_shared<bool>(true);
     bool                     m_show_remote_images = false;  // user opt-in
     bool                     m_has_remote_images  = false;  // current msg refs
 
@@ -1777,7 +1785,12 @@ public:
         m_images_btn->set_callback([this]() {
             m_show_remote_images = true;
             m_images_btn->set_enabled(false);
-            render_current();
+            /* Do not re-parse the HTML: bind_loaded_images() re-runs the
+             * resolver, which queues HTTP GETs and leaves placeholders
+             * until each texture arrives. */
+            if (m_view)
+                m_view->bind_loaded_images();
+            update_image_status();
         });
 
         Button *prefs_btn = make_button_tool(FA_COG, "Preferences");
@@ -1901,6 +1914,8 @@ public:
     }
 
     virtual ~MailApp() override {
+        *m_alive = false;
+        clear_image_textures();
         m_worker.stop();
     }
 
@@ -2154,147 +2169,152 @@ public:
         m_img_tex.clear();
     }
 
+    HtmlImageInfo make_image_info(int id) {
+        HtmlImageInfo ri;
+        if (id <= 0)
+            return ri;
+        ri.id = id;
+        int w = 0, h = 0;
+        nvgImageSize(nvg_context(), id, &w, &h);
+        ri.w = (float)w;
+        ri.h = (float)h;
+        return ri;
+    }
+
+    int create_image_texture(const std::string &src, const std::string &bytes) {
+        if (bytes.empty())
+            return 0;
+        int id = nvgCreateImageMem(nvg_context(), NVG_IMAGE_PREMULTIPLIED,
+                                   (unsigned char *)bytes.data(),
+                                   (int)bytes.size());
+        if (id <= 0)
+            return 0;
+        m_img_tex[src] = id;
+        return id;
+    }
+
     /* Resolve an <img> src to an NVG image, creating the texture on first
        use.  Remote URLs load only after the user opts in; a cache miss
        kicks an async fetch and resolves to id 0 (placeholder) this pass. */
     HtmlImageInfo resolve_image(const std::string &src) {
-        HtmlImageInfo ri;
         auto cached = m_img_tex.find(src);
-        if (cached != m_img_tex.end()) {
-            ri.id = cached->second;
-            int w, h;
-            nvgImageSize(nvg_context(), ri.id, &w, &h);
-            ri.w = (float)w; ri.h = (float)h;
-            return ri;
-        }
+        if (cached != m_img_tex.end())
+            return make_image_info(cached->second);
 
-        std::string bytes;
         if (src.rfind("cid:", 0) == 0) {
             std::string cid = src.substr(4);
-            for (const MailImage &img : m_current_message.images)
-                if (img.cid == cid) { bytes = img.data; break; }
-        } else if (src.rfind("http://", 0) == 0 ||
-                   src.rfind("https://", 0) == 0) {
+            for (const MailImage &img : m_current_message.images) {
+                if (img.cid == cid)
+                    return make_image_info(
+                        create_image_texture(src, img.data));
+            }
+            return HtmlImageInfo{};
+        }
+
+        if (src.rfind("http://", 0) == 0 || src.rfind("https://", 0) == 0) {
             m_has_remote_images = true;
-            if (!m_show_remote_images) return ri;
+            m_doc_remotes.insert(src);
+            if (!m_show_remote_images)
+                return HtmlImageInfo{};
             auto it = m_remote_bytes.find(src);
-            if (it != m_remote_bytes.end())
-                bytes = it->second;
-            else {
+            if (it != m_remote_bytes.end()) {
+                int id = create_image_texture(src, it->second);
+                if (id <= 0)
+                    m_remote_failed.insert(src);
+                return make_image_info(id);
+            }
+            if (!m_remote_failed.count(src))
                 queue_remote_fetch(src);
-                return ri;
-            }
+            return HtmlImageInfo{};
         }
-        if (bytes.empty()) return ri;
-
-        int id = nvgCreateImageMem(nvg_context(), NVG_IMAGE_PREMULTIPLIED,
-                                   (unsigned char *)bytes.data(),
-                                   (int)bytes.size());
-        if (id <= 0) return ri;
-        m_img_tex[src] = id;
-        ri.id = id;
-        int w, h;
-        nvgImageSize(nvg_context(), id, &w, &h);
-        ri.w = (float)w; ri.h = (float)h;
-        return ri;
-    }
-
-    /* Minimal blocking HTTP(S) GET; called on a worker thread only. */
-    static bool http_get(const std::string &url, std::string &out) {
-        bool https = url.rfind("https://", 0) == 0;
-        size_t p = url.find("://");
-        if (p == std::string::npos) return false;
-        size_t host_b = p + 3;
-        size_t slash = url.find('/', host_b);
-        std::string hostport = url.substr(host_b, slash == std::string::npos
-                                          ? std::string::npos : slash - host_b);
-        std::string path = (slash == std::string::npos) ? "/" : url.substr(slash);
-        std::string host = hostport;
-        int port = https ? 443 : 80;
-        size_t colon = hostport.rfind(':');
-        if (colon != std::string::npos) {
-            host = hostport.substr(0, colon);
-            port = std::atoi(hostport.substr(colon + 1).c_str());
-            if (port <= 0) return false;
-        }
-
-        char ebuf[256];
-        int fd = nmail_sock_connect(host.c_str(), port, ebuf, sizeof(ebuf));
-        if (fd < 0) return false;
-        if (https && nmail_sock_starttls_host(fd, host.c_str(), ebuf, sizeof(ebuf)) < 0) {
-            nmail_sock_close(fd);
-            return false;
-        }
-        std::string req = "GET " + path + " HTTP/1.0\r\nHost: " + hostport +
-                          "\r\nUser-Agent: nmail\r\nConnection: close\r\n\r\n";
-        if (nmail_sock_send(fd, req.c_str(), (int)req.size()) < 0) {
-            nmail_sock_close(fd);
-            return false;
-        }
-        std::string raw;
-        char buf[16384];
-        for (;;) {
-            int r = nmail_sock_recv(fd, buf, sizeof(buf));
-            if (r <= 0) break;   // close, timeout or error
-            raw.append(buf, (size_t)r);
-        }
-        nmail_sock_close(fd);
-
-        size_t he = raw.find("\r\n\r\n");
-        if (he == std::string::npos) return false;
-        const std::string &head = raw.substr(0, he);
-        size_t sp = head.find(' ');   // "HTTP/1.1 200 ..."
-        if (sp == std::string::npos || sp + 1 >= head.size() ||
-            head[sp + 1] != '2')
-            return false;
-        std::string body = raw.substr(he + 4);
-
-        std::string lhead;
-        for (unsigned char c : head) lhead += (char)std::tolower(c);
-        if (lhead.find("transfer-encoding: chunked") != std::string::npos) {
-            std::string dec;
-            size_t pos = 0;
-            while (pos < body.size()) {
-                size_t eol = body.find("\r\n", pos);
-                if (eol == std::string::npos) break;
-                long n = std::strtol(body.substr(pos, eol - pos).c_str(),
-                                     nullptr, 16);
-                if (n <= 0) break;
-                pos = eol + 2;
-                if (pos + (size_t)n > body.size()) break;
-                dec.append(body, pos, (size_t)n);
-                pos += (size_t)n + 2;
-            }
-            out = std::move(dec);
-        } else {
-            out = std::move(body);
-        }
-        return !out.empty();
+        return HtmlImageInfo{};
     }
 
     void queue_remote_fetch(const std::string &url) {
-        if (m_remote_pending.count(url)) return;
+        if (m_remote_pending.count(url) || m_remote_bytes.count(url) ||
+            m_remote_failed.count(url))
+            return;
         m_remote_pending.insert(url);
-        std::thread([this, url]() {
-            std::string bytes;
-            bool ok = http_get(url, bytes);
-            nanogui::async([this, url, ok, bytes]() {
-                m_remote_pending.erase(url);
-                if (ok) {
-                    m_remote_bytes[url] = bytes;
-                    if (m_has_message) render_current();
-                }
-            });
-            glfwPostEmptyEvent();
-        }).detach();
+        m_fetch_queue.push_back(url);
+        pump_fetches();
+    }
+
+    void pump_fetches() {
+        while (m_fetch_inflight < kMaxInflight && !m_fetch_queue.empty()) {
+            std::string url = m_fetch_queue.front();
+            m_fetch_queue.pop_front();
+            ++m_fetch_inflight;
+            auto alive = m_alive;
+            std::thread([this, url, alive]() {
+                std::string bytes;
+                bool ok = nmail_http_get(url, bytes);
+                nanogui::async([this, url, ok, bytes = std::move(bytes),
+                                alive]() mutable {
+                    if (!alive || !*alive)
+                        return;
+                    on_fetch_done(url, ok, std::move(bytes));
+                });
+                glfwPostEmptyEvent();
+            }).detach();
+        }
+    }
+
+    void on_fetch_done(const std::string &url, bool ok, std::string &&bytes) {
+        --m_fetch_inflight;
+        m_remote_pending.erase(url);
+        if (ok && !bytes.empty()) {
+            m_remote_bytes[url] = std::move(bytes);
+            if (!m_img_tex.count(url)) {
+                int id = create_image_texture(url, m_remote_bytes[url]);
+                if (id <= 0)
+                    m_remote_failed.insert(url);
+            }
+        } else {
+            m_remote_failed.insert(url);
+        }
+
+        if (m_has_message && m_view) {
+            Vector2f sc = m_view_scroll ? m_view_scroll->scroll()
+                                        : Vector2f(0.f, 0.f);
+            m_view->bind_loaded_images();
+            if (m_view_scroll)
+                m_view_scroll->set_scroll(sc.y());
+        }
+        update_image_status();
+        pump_fetches();
+    }
+
+    void update_image_status() {
+        if (m_doc_remotes.empty() || !m_show_remote_images)
+            return;
+        int have = 0, fail = 0;
+        int n = (int)m_doc_remotes.size();
+        for (const auto &u : m_doc_remotes) {
+            if (m_img_tex.count(u))
+                ++have;
+            else if (m_remote_failed.count(u))
+                ++fail;
+        }
+        char buf[256];
+        if (have + fail >= n) {
+            if (fail)
+                std::snprintf(buf, sizeof(buf),
+                              "Images %d/%d (%d failed)", have, n, fail);
+            else
+                std::snprintf(buf, sizeof(buf), "Images %d/%d", have, n);
+        } else {
+            std::snprintf(buf, sizeof(buf), "Loading images %d/%d", have, n);
+        }
+        m_status->set_caption(buf);
     }
 
     /* (Re-)render the current message — on select, body arrival, theme
-       change, and when remote image bytes land. */
+       change.  Image bytes bind in place via bind_loaded_images(). */
     void render_current() {
         if (!m_has_message) return;
         clear_image_textures();
         m_has_remote_images = false;
+        m_doc_remotes.clear();
         const MailMessage &msg = m_current_message;
         if (!msg.html.empty()) {
             /* Rich render of the HTML part (preferred, like other
