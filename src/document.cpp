@@ -680,11 +680,16 @@ float Document::drawParagraph(NVGcontext* ctx, const Paragraph& para,
 
         const float indent     = para.leftIndent +
                                  (isFirstLine ? para.firstLineIndent : 0.0f);
+        /* Only runs that paint a background (CTA pills, code blocks)
+         * reserve pad in the line box.  Inherited TD padding used to
+         * inflate every line and clip the fill drawn around the text. */
         float boxPadX = 0.f, boxPadY = 0.f;
         for (const auto& w : line.words) {
             const Style& s = w.run->style;
-            boxPadX = std::max(boxPadX, s.padX + s.borderWidth);
-            boxPadY = std::max(boxPadY, s.padY + s.borderWidth);
+            if (s.bgColor.a > 0.f) {
+                boxPadX = std::max(boxPadX, s.padX + s.borderWidth);
+                boxPadY = std::max(boxPadY, s.padY + s.borderWidth);
+            }
         }
         const float lineHeight = line.ascent + line.descent + 2.f * boxPadY;
         const float baseline   = y + boxPadY + line.ascent;
@@ -737,7 +742,7 @@ float Document::drawParagraph(NVGcontext* ctx, const Paragraph& para,
 
         if (!line.words.empty()) {
             const Style& fs = line.words.front().run->style;
-            if (fs.bgColor.a > 0 && !layout_only) {
+            if (fs.bgColor.a > 0) {
                 float bgL, bgR;
                 if (fs.monospace && blockWidth[li] > 0.0f) {
                     bgL = drawX;
@@ -751,31 +756,47 @@ float Document::drawParagraph(NVGcontext* ctx, const Paragraph& para,
                 }
                 const float padX = fs.padX > 0.f ? fs.padX : (fs.monospace ? 4.f : 1.f);
                 const float padY = fs.padY > 0.f ? fs.padY : 1.f;
-                const float bgX = bgL - padX;
-                const float bgY = y - padY;
-                const float bgW = (bgR - bgL) + 2.f * padX;
-                const float bgH = lineHeight + 2.f * padY;
+                /* lineHeight already includes 2*boxPadY.  Keep the fill
+                 * inside the line box — HtmlText::measure() lays out at
+                 * (0,0) with layout_only, and the next real paint is the
+                 * fast path.  If we skip capturing here, the gold pill
+                 * never appears. */
+                float bgX, bgY, bgW, bgH;
+                if (fs.monospace) {
+                    bgX = bgL - padX;
+                    bgY = y - padY;
+                    bgW = (bgR - bgL) + 2.f * padX;
+                    bgH = lineHeight + 2.f * padY;
+                } else {
+                    bgX = bgL - padX;
+                    bgY = y;
+                    bgW = (bgR - bgL) + 2.f * padX;
+                    bgH = lineHeight;
+                }
                 float rad = 0.f;
                 if (fs.padX > 4.f)
                     rad = std::min(bgW, bgH) * 0.5f;
-                nvgBeginPath(ctx);
-                nvgFillColor(ctx, fs.bgColor);
-                if (rad > 0.5f)
-                    nvgRoundedRect(ctx, bgX, bgY, bgW, bgH, rad);
-                else
-                    nvgRect(ctx, bgX, bgY, bgW, bgH);
-                nvgFill(ctx);
-                if (fs.borderWidth > 0.f && fs.borderColor.a > 0.f) {
+                if (!layout_only) {
                     nvgBeginPath(ctx);
+                    nvgFillColor(ctx, fs.bgColor);
                     if (rad > 0.5f)
-                        nvgRoundedRect(ctx, bgX + 0.5f, bgY + 0.5f,
-                                       bgW - 1.f, bgH - 1.f,
-                                       std::max(0.f, rad - 0.5f));
+                        nvgRoundedRect(ctx, bgX, bgY, bgW, bgH, rad);
                     else
-                        nvgRect(ctx, bgX + 0.5f, bgY + 0.5f, bgW - 1.f, bgH - 1.f);
-                    nvgStrokeColor(ctx, fs.borderColor);
-                    nvgStrokeWidth(ctx, fs.borderWidth);
-                    nvgStroke(ctx);
+                        nvgRect(ctx, bgX, bgY, bgW, bgH);
+                    nvgFill(ctx);
+                    if (fs.borderWidth > 0.f && fs.borderColor.a > 0.f) {
+                        nvgBeginPath(ctx);
+                        if (rad > 0.5f)
+                            nvgRoundedRect(ctx, bgX + 0.5f, bgY + 0.5f,
+                                           bgW - 1.f, bgH - 1.f,
+                                           std::max(0.f, rad - 0.5f));
+                        else
+                            nvgRect(ctx, bgX + 0.5f, bgY + 0.5f,
+                                    bgW - 1.f, bgH - 1.f);
+                        nvgStrokeColor(ctx, fs.borderColor);
+                        nvgStrokeWidth(ctx, fs.borderWidth);
+                        nvgStroke(ctx);
+                    }
                 }
 
                 if (capture_layout && (fs.monospace || fs.padX > 0.f ||

@@ -202,6 +202,10 @@ void apply_style_attr(const char *css, Style &st,
             continue;
         if (mode == ApplyMode::Important && !important)
             continue;
+        /* Outlook mso-* is not CSS.  mso-border-alt:none must not clear
+         * a real border:1px solid #FCD200 on the same style="" string. */
+        if (key.rfind("mso-", 0) == 0 && key != "mso-hide")
+            continue;
 
         if (key == "color") {
             bool ok = false;
@@ -882,6 +886,19 @@ void apply_css(GumboElement *el, Style &st, TextAlignment &align,
     }
 }
 
+/* padding / border / background are not inherited.  They paint on the
+ * widget (HtmlBlock) or on the inline run that set them.  Copying a
+ * TD's padY onto every descendant run made 63px lines and clipped the
+ * Learn More pill (fill was recorded only on a later paint that the
+ * fast path then skipped). */
+void reset_box_style(Style &st) {
+    st.padX = 0.f;
+    st.padY = 0.f;
+    st.borderWidth = 0.f;
+    st.bgColor = nvgRGBA(0, 0, 0, 0);
+    st.borderColor = nvgRGBA(0, 0, 0, 0);
+}
+
 /* Non-important stylesheet, presentational, non-important inline,
  * then !important stylesheet, then !important inline — so MJML's
  * `.mj-column-per-33 { width:33% !important }` beats inline width:100%. */
@@ -1521,12 +1538,18 @@ void build_children(Widget *container, GumboVector *kids, Style st,
                     if (element_is_hidden(ce, B))
                         continue;
                     Widget *cell = target;
-                    bool ch = false;
-                    TextAlignment ta = element_align(ce, align, ch, B);
                     BoxProps box;
                     element_box(ce, B, box);
                     int h = element_height_px(ce, box);
                     bool paint = B.in_full_width || element_is_full_width(ce, B);
+                    /* Shrink-wrapped chip tables (Learn More): the TD's
+                     * text-align:center is for a content-sized table, not
+                     * a stretched HtmlText across the 67% column. */
+                    TextAlignment ta = align;
+                    if (paint) {
+                        bool ch = false;
+                        ta = element_align(ce, align, ch, B);
+                    }
                     if (paint)
                         cell = wrap_if_bg(target, ce, 2, B);
                     if (cell == target && (h > 1 || box.radius_px > 0.0f ||
@@ -1536,8 +1559,12 @@ void build_children(Widget *container, GumboVector *kids, Style st,
                         cell = sp;
                     }
                     Style cst = st;
-                    apply_cascade(ce, cst, ta, B);
+                    TextAlignment cascade_align = ta;
+                    apply_cascade(ce, cst, cascade_align, B);
+                    if (paint)
+                        ta = cascade_align;
                     cst.superscript = st.superscript;
+                    reset_box_style(cst);
                     if (ce->tag == GUMBO_TAG_TH)
                         cst.bold = true;
                     build_children(cell, &ce->children, cst, B, list_depth, ta);
@@ -1592,6 +1619,7 @@ void build_children(Widget *container, GumboVector *kids, Style st,
                 Style cst = st;
                 apply_cascade(ce, cst, ta, B);
                 cst.superscript = st.superscript;
+                reset_box_style(cst);
                 if (ce->tag == GUMBO_TAG_TH)
                     cst.bold = true;
                 build_children(cell, &ce->children, cst, B, list_depth, ta);
@@ -1689,6 +1717,7 @@ void build_children(Widget *container, GumboVector *kids, Style st,
                 TextAlignment ta = child_align;
                 apply_cascade(el, cst, ta, B);
                 cst.superscript = st.superscript;
+                reset_box_style(cst);
                 build_children(container, &el->children, cst, B, list_depth,
                                ta);
             } else {
@@ -1701,8 +1730,12 @@ void build_children(Widget *container, GumboVector *kids, Style st,
                 HtmlBlock *blk = make_block(host, FlexDirection::Column, 4);
                 blk->m_bg = bg;
                 decorate_block(blk, el, B);
-                build_children(blk, &el->children, st, B, list_depth,
-                               child_align);
+                Style cst = st;
+                TextAlignment ta = child_align;
+                apply_cascade(el, cst, ta, B);
+                cst.superscript = st.superscript;
+                reset_box_style(cst);
+                build_children(blk, &el->children, cst, B, list_depth, ta);
             }
             break;
         }
