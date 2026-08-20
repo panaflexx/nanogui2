@@ -50,8 +50,10 @@ static bool style_equal(const Style& a, const Style& b) {
            a.displayNone == b.displayNone &&
            a.superscript == b.superscript &&
            a.padX == b.padX && a.padY == b.padY &&
+           a.borderWidth == b.borderWidth &&
            std::memcmp(&a.fgColor, &b.fgColor, sizeof(NVGcolor)) == 0 &&
-           std::memcmp(&a.bgColor, &b.bgColor, sizeof(NVGcolor)) == 0;
+           std::memcmp(&a.bgColor, &b.bgColor, sizeof(NVGcolor)) == 0 &&
+           std::memcmp(&a.borderColor, &b.borderColor, sizeof(NVGcolor)) == 0;
 }
 
 size_t Paragraph::split_run_at(size_t col) {
@@ -410,6 +412,19 @@ void Document::draw(NVGcontext* ctx, float originX, float originY) {
             else
                 nvgRect(ctx, rl.mono_bg_x, rl.mono_bg_y, rl.mono_bg_w, rl.mono_bg_h);
             nvgFill(ctx);
+            if (rl.mono_bg_border_w > 0.f && rl.mono_bg_border_color.a > 0.f) {
+                nvgBeginPath(ctx);
+                if (rl.mono_bg_radius > 0.5f)
+                    nvgRoundedRect(ctx, rl.mono_bg_x + 0.5f, rl.mono_bg_y + 0.5f,
+                                   rl.mono_bg_w - 1.f, rl.mono_bg_h - 1.f,
+                                   std::max(0.f, rl.mono_bg_radius - 0.5f));
+                else
+                    nvgRect(ctx, rl.mono_bg_x + 0.5f, rl.mono_bg_y + 0.5f,
+                            rl.mono_bg_w - 1.f, rl.mono_bg_h - 1.f);
+                nvgStrokeColor(ctx, rl.mono_bg_border_color);
+                nvgStrokeWidth(ctx, rl.mono_bg_border_w);
+                nvgStroke(ctx);
+            }
         }
         // Bullet list marker.
         if (rl.bullet) {
@@ -422,7 +437,14 @@ void Document::draw(NVGcontext* ctx, float originX, float originY) {
         for (const WordLayout& wl : rl.words) {
             const Style& st = wl.style;
             applyFont(ctx, st);
-            const float ty = rl.baseline - (st.superscript ? st.fontSize * 0.45f : 0.f);
+            float ty = rl.baseline;
+            if (st.superscript) {
+                float vpad = 0.f;
+                for (const auto& w : rl.words)
+                    vpad = std::max(vpad, w.style.padY + w.style.borderWidth);
+                const float lineAsc = std::max(1.f, rl.baseline - rl.y_top - vpad);
+                ty = rl.baseline - (lineAsc - metricsFor(ctx, st).ascender);
+            }
             /* Padded pills are painted once for the whole run (mono_bg).
              * Per-word fill with padX overlaps neighbours ("Le" / "More"). */
             if (st.bgColor.a > 0 && !st.monospace &&
@@ -658,8 +680,14 @@ float Document::drawParagraph(NVGcontext* ctx, const Paragraph& para,
 
         const float indent     = para.leftIndent +
                                  (isFirstLine ? para.firstLineIndent : 0.0f);
-        const float lineHeight = line.ascent + line.descent;
-        const float baseline   = y + line.ascent;
+        float boxPadX = 0.f, boxPadY = 0.f;
+        for (const auto& w : line.words) {
+            const Style& s = w.run->style;
+            boxPadX = std::max(boxPadX, s.padX + s.borderWidth);
+            boxPadY = std::max(boxPadY, s.padY + s.borderWidth);
+        }
+        const float lineHeight = line.ascent + line.descent + 2.f * boxPadY;
+        const float baseline   = y + boxPadY + line.ascent;
 
         float lineX;
         switch (para.alignment) {
@@ -672,7 +700,7 @@ float Document::drawParagraph(NVGcontext* ctx, const Paragraph& para,
             case TextAlignment::Left:
             case TextAlignment::Justify:
             default:
-                lineX = originX + indent;
+                lineX = originX + indent + boxPadX;
                 break;
         }
 
@@ -737,8 +765,21 @@ float Document::drawParagraph(NVGcontext* ctx, const Paragraph& para,
                 else
                     nvgRect(ctx, bgX, bgY, bgW, bgH);
                 nvgFill(ctx);
+                if (fs.borderWidth > 0.f && fs.borderColor.a > 0.f) {
+                    nvgBeginPath(ctx);
+                    if (rad > 0.5f)
+                        nvgRoundedRect(ctx, bgX + 0.5f, bgY + 0.5f,
+                                       bgW - 1.f, bgH - 1.f,
+                                       std::max(0.f, rad - 0.5f));
+                    else
+                        nvgRect(ctx, bgX + 0.5f, bgY + 0.5f, bgW - 1.f, bgH - 1.f);
+                    nvgStrokeColor(ctx, fs.borderColor);
+                    nvgStrokeWidth(ctx, fs.borderWidth);
+                    nvgStroke(ctx);
+                }
 
-                if (capture_layout && (fs.monospace || fs.padX > 0.f || fs.padY > 0.f)) {
+                if (capture_layout && (fs.monospace || fs.padX > 0.f ||
+                                       fs.padY > 0.f || fs.borderWidth > 0.f)) {
                     rich_line.mono_bg        = true;
                     rich_line.mono_bg_x      = bgX;
                     rich_line.mono_bg_y      = bgY;
@@ -746,6 +787,8 @@ float Document::drawParagraph(NVGcontext* ctx, const Paragraph& para,
                     rich_line.mono_bg_h      = bgH;
                     rich_line.mono_bg_radius  = rad;
                     rich_line.mono_bg_color  = fs.bgColor;
+                    rich_line.mono_bg_border_w = fs.borderWidth;
+                    rich_line.mono_bg_border_color = fs.borderColor;
                 }
             }
         }
@@ -810,7 +853,9 @@ float Document::drawParagraph(NVGcontext* ctx, const Paragraph& para,
 
             if (!layout_only) {
                 nvgFillColor(ctx, st.fgColor);
-                const float ty = baseline - (st.superscript ? st.fontSize * 0.45f : 0.f);
+                float ty = baseline;
+                if (st.superscript)
+                    ty = baseline - (line.ascent - metricsFor(ctx, st).ascender);
                 nvgText(ctx, wx, ty, word.text.c_str(), nullptr);
             }
 

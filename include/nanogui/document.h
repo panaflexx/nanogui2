@@ -40,6 +40,8 @@ struct NANOGUI_EXPORT Style {
     bool     superscript = false; ///< vertical-align: super/top (price cents)
     float    padX = 0.0f;         ///< extra fill padding (CTA pills)
     float    padY = 0.0f;
+    float    borderWidth = 0.0f;  ///< CSS border (Learn More outline)
+    NVGcolor borderColor = NVGcolor{ { { 0.f, 0.f, 0.f, 0.f } } };
 };
 
 // ---------------------------------------------------------------------------
@@ -224,6 +226,8 @@ public:
         float    mono_bg_h     = 0.f;
         float    mono_bg_radius = 0.f;
         NVGcolor mono_bg_color = NVGcolor{ { { 0.f, 0.f, 0.f, 0.f } } };
+        float    mono_bg_border_w = 0.f;
+        NVGcolor mono_bg_border_color = NVGcolor{ { { 0.f, 0.f, 0.f, 0.f } } };
 
         /// Bullet marker for list-item paragraphs (drawn as a filled circle,
         /// font-independent). Replayed on the fast path.

@@ -1373,6 +1373,10 @@ void FlexLayout::perform_layout(NVGcontext *ctx, Widget *widget) const {
             cross_min = child_pref[cross_axis_idx];
         int cross_max = max_s[cross_axis_idx] > 0 ? max_s[cross_axis_idx]
                                                   : available_cross_space;
+        /* Never overflow the container — max-width:600px in a 400px pane
+         * must shrink, or HTML email paints over sibling split panes. */
+        if (available_cross_space > 0)
+            cross_max = std::min(cross_max, available_cross_space);
         cross_size = std::max(cross_min, std::min(cross_size, cross_max));
 
         switch (align) {
