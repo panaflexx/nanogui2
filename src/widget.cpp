@@ -754,6 +754,13 @@ void Widget::draw(NVGcontext* ctx) {
     if (!m_visible)
         return;
 
+    // Live widgets (scroll views, HTML, virtual lists) must not be tessellated
+    // into an ancestor display list: those packets replay at record-time
+    // coordinates and scissor, which shows up as content painting across
+    // sibling panes. draw_live_overlays() paints them in the real frame.
+    if (m_live && nvgIsRecordingDisplayList(ctx))
+        return;
+
     // Apply animation transform for this widget
     auto [anim_active, progress] = get_animation_progress();
 
@@ -784,7 +791,13 @@ void Widget::draw(NVGcontext* ctx) {
             m_parent->perform_layout(ctx);
     }
 
+    int depth0 = nvgStateDepth(ctx);
     nvgSave(ctx);
+    /* Failed nvgSave + nvgRestore pops the *parent* scissor/transform and
+     * paints this subtree all over the window. Skip rather than corrupt. */
+    if (nvgStateDepth(ctx) <= depth0)
+        return;
+
     nvgTranslate(ctx, m_pos.x(), m_pos.y());
 
     if (anim_active) {
@@ -823,8 +836,11 @@ void Widget::draw(NVGcontext* ctx) {
 
     // Draw children (their animations are handled in their own draw calls)
     if (!m_children.empty()) {
+        const int recording = nvgIsRecordingDisplayList(ctx);
         for (auto child : m_children) {
             if (!child->visible())
+                continue;
+            if (recording && child->live())
                 continue;
         #if !defined(NANOGUI_SHOW_WIDGET_BOUNDS)
             nvgSave(ctx);

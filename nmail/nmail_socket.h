@@ -29,6 +29,11 @@ void nmail_sock_abort(int fd);
  * Only works when the build has OpenSSL enabled (HAVE_OPENSSL). */
 int nmail_sock_starttls(int fd, char *errbuf, int errlen);
 
+/* Like nmail_sock_starttls, but send `hostname` as SNI.  Image CDNs
+ * (CloudFront, etc.) reject handshakes without it.  hostname may be NULL. */
+int nmail_sock_starttls_host(int fd, const char *hostname,
+                             char *errbuf, int errlen);
+
 /* Shut down and close the socket, releasing bookkeeping state. */
 void nmail_sock_close(int fd);
 

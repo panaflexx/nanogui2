@@ -123,6 +123,11 @@ static void tls_ctx_init(void) {
 #endif
 
 int nmail_sock_starttls(int fd, char *errbuf, int errlen) {
+    return nmail_sock_starttls_host(fd, NULL, errbuf, errlen);
+}
+
+int nmail_sock_starttls_host(int fd, const char *hostname,
+                             char *errbuf, int errlen) {
 #ifdef HAVE_OPENSSL
     pthread_once(&g_tls_ctx_once, tls_ctx_init);
     if (!g_tls_ctx) {
@@ -140,6 +145,8 @@ int nmail_sock_starttls(int fd, char *errbuf, int errlen) {
         if (ssl) SSL_free(ssl);
         return -1;
     }
+    if (hostname && hostname[0])
+        SSL_set_tlsext_host_name(ssl, hostname);
     SSL_set_connect_state(ssl);
     if (SSL_connect(ssl) != 1) {
         int e = SSL_get_error(ssl, -1);
@@ -153,6 +160,7 @@ int nmail_sock_starttls(int fd, char *errbuf, int errlen) {
     return 0;
 #else
     (void)fd;
+    (void)hostname;
     snprintf(errbuf, (size_t)errlen, "this build has no TLS support");
     return -1;
 #endif

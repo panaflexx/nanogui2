@@ -55,7 +55,11 @@
 #define NVG_INIT_POINTS_SIZE 128
 #define NVG_INIT_PATHS_SIZE 16
 #define NVG_INIT_VERTS_SIZE 256
-#define NVG_MAX_STATES 32
+/* Widget::draw uses 2 saves per nesting level (self + per-child scissor).
+ * A mail HTML tree of nested tables easily exceeds the original 32, and a
+ * failed nvgSave still paired with nvgRestore pops the *parent* scissor /
+ * transform — content then paints across the window. 128 covers deep UI. */
+#define NVG_MAX_STATES 128
 #define NVG_INIT_DL_CALLS_SIZE 64
 #define NVG_INIT_DL_PATHS_SIZE 64
 #define NVG_INIT_DL_VERTS_SIZE 1024
@@ -1316,8 +1320,16 @@ static void nvg__setPaintColor(NVGpaint* p, NVGcolor color)
 // State handling
 void nvgSave(NVGcontext* ctx)
 {
-	if (ctx->nstates >= NVG_MAX_STATES)
+	if (ctx->nstates >= NVG_MAX_STATES) {
+		static int warned = 0;
+		if (!warned) {
+			fprintf(stderr, "nanovg: nvgSave overflow (NVG_MAX_STATES=%d); "
+			        "scissor/transform will leak until nvgBeginFrame\n",
+			        NVG_MAX_STATES);
+			warned = 1;
+		}
 		return;
+	}
 	if (ctx->nstates > 0)
 		memcpy(&ctx->states[ctx->nstates], &ctx->states[ctx->nstates-1], sizeof(NVGstate));
 	ctx->nstates++;
@@ -1452,6 +1464,11 @@ void nvgCurrentTransform(NVGcontext* ctx, float* xform)
 	NVGstate* state = nvg__getState(ctx);
 	if (xform == NULL) return;
 	memcpy(xform, state->xform, sizeof(float)*6);
+}
+
+int nvgStateDepth(NVGcontext* ctx)
+{
+	return ctx->nstates;
 }
 
 void nvgStrokeColor(NVGcontext* ctx, NVGcolor color)

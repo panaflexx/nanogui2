@@ -48,6 +48,8 @@
 #include "imap_client.h"
 #include "smtp_client.h"
 #include "nmail_socket.h"
+#include "htmldocument.h"
+#include "saved_email.h"
 #include "gumbo.h"
 
 using namespace nanogui;
@@ -1631,270 +1633,12 @@ static std::string document_to_html(const Document &doc) {
     return out;
 }
 
-// ---------------------------------------------------------------------------
-// html_to_document — render a text/html part into a Document via Gumbo
-// ---------------------------------------------------------------------------
 
-/* "#rgb" / "#rrggbb" / a few common color names -> NVGcolor. */
-static NVGcolor parse_html_color(const char *s, bool &ok) {
-    ok = true;
-    if (s && s[0] == '#') {
-        unsigned r = 0, g = 0, b = 0;
-        size_t len = strlen(s + 1);
-        if (len == 6 && std::sscanf(s + 1, "%02x%02x%02x", &r, &g, &b) == 3)
-            return nvgRGB(r, g, b);
-        if (len == 3 && std::sscanf(s + 1, "%01x%01x%01x", &r, &g, &b) == 3)
-            return nvgRGB(r * 17, g * 17, b * 17);
-    } else if (s) {
-        std::string l;
-        for (const char *p = s; *p; ++p)
-            l += (char)std::tolower((unsigned char)*p);
-        if (l == "black")  return nvgRGB(0, 0, 0);
-        if (l == "white")  return nvgRGB(255, 255, 255);
-        if (l == "red")    return nvgRGB(200, 30, 30);
-        if (l == "green")  return nvgRGB(30, 140, 50);
-        if (l == "blue")   return nvgRGB(40, 80, 200);
-        if (l == "yellow") return nvgRGB(190, 170, 20);
-        if (l == "orange") return nvgRGB(220, 130, 20);
-        if (l == "purple") return nvgRGB(130, 60, 170);
-        if (l == "gray" || l == "grey") return nvgRGB(128, 128, 128);
-    }
-    ok = false;
-    return nvgRGB(0, 0, 0);
-}
-
-struct ResolvedImage {
-    int   id = 0;          // NVG image id (0 = unresolved)
-    float w  = 0.0f, h = 0.0f;
-};
-
-struct HtmlRender {
-    Document  &doc;
-    Paragraph *cur = nullptr;
-    bool       cur_has_text = false;
-    bool       pre = false;
-    int        list_depth = 0;
-    NVGcolor   accent;
-    NVGcolor   meta;
-    NVGcolor   code_bg;
-    /* Resolve an <img> src to an NVG image (cid: or http:); null or
-       returning id==0 falls back to the alt-text placeholder. */
-    std::function<ResolvedImage(const std::string &src)> img_resolve;
-
-    explicit HtmlRender(Document &d) : doc(d) {}
-
-    /* Current paragraph, creating one on demand. */
-    Paragraph *para() {
-        if (!cur) { cur = doc.addParagraph(); cur_has_text = false; }
-        return cur;
-    }
-    /* End the current block: the next text starts a new paragraph. */
-    void brk() { cur = nullptr; cur_has_text = false; }
-
-    void emit(const std::string &raw, const Style &st) {
-        std::string t;
-        if (pre) {
-            t = raw;
-        } else {
-            bool ws = false;
-            for (char c : raw) {
-                if (std::isspace((unsigned char)c)) {
-                    if (!ws) t += ' ';
-                    ws = true;
-                } else {
-                    t += c;
-                    ws = false;
-                }
-            }
-            /* No leading space at the start of a paragraph. */
-            if (!cur_has_text && !t.empty() && t.front() == ' ')
-                t.erase(0, 1);
-        }
-        if (t.empty()) return;
-        para()->addText(t, st);
-        cur_has_text = true;
-    }
-};
-
-static void html_walk(HtmlRender &R, GumboNode *node, Style st);
-
-static void html_walk_children(HtmlRender &R, GumboVector *children, Style st) {
-    for (unsigned i = 0; i < children->length; ++i)
-        html_walk(R, (GumboNode *)children->data[i], st);
-}
-
-static void html_walk(HtmlRender &R, GumboNode *node, Style st) {
-    if (node->type == GUMBO_NODE_TEXT || node->type == GUMBO_NODE_CDATA) {
-        R.emit(node->v.text.text, st);
-        return;
-    }
-    if (node->type == GUMBO_NODE_WHITESPACE) {
-        R.emit(" ", st);
-        return;
-    }
-    if (node->type == GUMBO_NODE_DOCUMENT) {
-        html_walk_children(R, &node->v.document.children, st);
-        return;
-    }
-    if (node->type != GUMBO_NODE_ELEMENT)
-        return;   // comments, doctypes
-
-    GumboElement *el = &node->v.element;
-    switch (el->tag) {
-    /* Skipped subtrees */
-    case GUMBO_TAG_SCRIPT:
-    case GUMBO_TAG_STYLE:
-    case GUMBO_TAG_HEAD:
-    case GUMBO_TAG_TITLE:
-    case GUMBO_TAG_NOSCRIPT:
-    case GUMBO_TAG_TEMPLATE:
-        return;
-    case GUMBO_TAG_BR:
-        R.brk();
-        return;
-    case GUMBO_TAG_HR:
-        R.brk();
-        R.doc.addParagraph()->isRule = true;
-        return;
-    case GUMBO_TAG_IMG: {
-        GumboAttribute *src = gumbo_get_attribute(&el->attributes, "src");
-        GumboAttribute *alt = gumbo_get_attribute(&el->attributes, "alt");
-        if (src && src->value && src->value[0] && R.img_resolve) {
-            ResolvedImage ri = R.img_resolve(src->value);
-            if (ri.id > 0 && ri.w > 0.0f && ri.h > 0.0f) {
-                R.brk();
-                Paragraph *ip = R.doc.addParagraph();
-                ip->isImage = true;
-                ip->image   = ri.id;
-                ip->image_w = ri.w;
-                ip->image_h = ri.h;
-                R.brk();
-                return;
-            }
-        }
-        if (alt && alt->value && alt->value[0]) {
-            Style ms = st;
-            ms.fgColor = R.meta;
-            R.emit(std::string("[image: ") + alt->value + "]", ms);
-        } else if (src && src->value && src->value[0]) {
-            Style ms = st;
-            ms.fgColor = R.meta;
-            R.emit(std::string("[image: ") + src->value + "]", ms);
-        }
-        return;
-    }
-    default:
-        break;
-    }
-
-    /* Block-level elements: paragraph break before and after. */
-    bool block = false;
-    switch (el->tag) {
-    case GUMBO_TAG_P:      case GUMBO_TAG_DIV:    case GUMBO_TAG_SECTION:
-    case GUMBO_TAG_ARTICLE: case GUMBO_TAG_HEADER: case GUMBO_TAG_FOOTER:
-    case GUMBO_TAG_TABLE:  case GUMBO_TAG_TR:     case GUMBO_TAG_TD:
-    case GUMBO_TAG_TH:     case GUMBO_TAG_UL:     case GUMBO_TAG_OL:
-    case GUMBO_TAG_DL:     case GUMBO_TAG_CENTER: case GUMBO_TAG_MAIN:
-    case GUMBO_TAG_H1:     case GUMBO_TAG_H2:     case GUMBO_TAG_H3:
-    case GUMBO_TAG_H4:     case GUMBO_TAG_H5:     case GUMBO_TAG_H6:
-    case GUMBO_TAG_BLOCKQUOTE: case GUMBO_TAG_PRE: case GUMBO_TAG_LI:
-        block = true;
-        break;
-    default:
-        break;
-    }
-    if (block) R.brk();
-
-    /* Inline style adjustments (combine down the tree). */
-    switch (el->tag) {
-    case GUMBO_TAG_B: case GUMBO_TAG_STRONG:
-        st.bold = true; break;
-    case GUMBO_TAG_I: case GUMBO_TAG_EM: case GUMBO_TAG_CITE:
-        st.italic = true; break;
-    case GUMBO_TAG_U: case GUMBO_TAG_INS:
-        st.underline = true; break;
-    case GUMBO_TAG_CODE: case GUMBO_TAG_TT: case GUMBO_TAG_KBD:
-        st.monospace = true;
-        st.bgColor = R.code_bg;
-        break;
-    case GUMBO_TAG_PRE:
-        st.monospace = true;
-        st.bgColor = R.code_bg;
-        R.pre = true;
-        break;
-    case GUMBO_TAG_A:
-        st.fgColor = R.accent;
-        st.underline = true;
-        break;
-    case GUMBO_TAG_H1: st.bold = true; st.fontSize *= 1.6f;  break;
-    case GUMBO_TAG_H2: st.bold = true; st.fontSize *= 1.4f;  break;
-    case GUMBO_TAG_H3: st.bold = true; st.fontSize *= 1.2f;  break;
-    case GUMBO_TAG_H4: case GUMBO_TAG_H5: case GUMBO_TAG_H6:
-        st.bold = true; st.fontSize *= 1.1f; break;
-    case GUMBO_TAG_BLOCKQUOTE:
-        st.italic = true;
-        st.fgColor = R.meta;
-        break;
-    case GUMBO_TAG_SMALL: st.fontSize *= 0.85f; break;
-    case GUMBO_TAG_BIG:   st.fontSize *= 1.2f;  break;
-    case GUMBO_TAG_UL:
-    case GUMBO_TAG_OL:
-        R.list_depth++;
-        break;
-    case GUMBO_TAG_LI:
-        R.para();
-        R.cur->leftIndent = (float)(R.list_depth * 16);
-        R.emit("\xE2\x80\xA2 ", st);   // "• "
-        break;
-    case GUMBO_TAG_FONT: {
-        GumboAttribute *col = gumbo_get_attribute(&el->attributes, "color");
-        if (col && col->value) {
-            bool ok = false;
-            NVGcolor c = parse_html_color(col->value, ok);
-            if (ok) st.fgColor = c;
-        }
-        break;
-    }
-    default:
-        break;
-    }
-
-    bool pre_save = R.pre;
-    html_walk_children(R, &el->children, st);
-    R.pre = pre_save;
-
-    if (el->tag == GUMBO_TAG_UL || el->tag == GUMBO_TAG_OL)
-        R.list_depth--;
-    if (block) R.brk();
-}
-
-static void html_to_document(Document &doc, const std::string &html,
-                             NVGcolor text_color, NVGcolor meta_color,
-                             const std::function<ResolvedImage(const std::string&)> &img_resolve = nullptr) {
-    /* Light text on dark background -> dark mode colors. */
-    bool dark_text_is_light =
-        (text_color.r + text_color.g + text_color.b) > 1.5f;
-
-    HtmlRender R(doc);
-    R.meta    = meta_color;
-    R.accent  = dark_text_is_light ? nvgRGBA(110, 160, 255, 255)
-                                   : nvgRGBA(10, 80, 220, 255);
-    R.code_bg = dark_text_is_light ? nvgRGBA(50, 52, 62, 255)
-                                   : nvgRGBA(228, 229, 236, 255);
-    R.img_resolve = img_resolve;
-
-    GumboOutput *out = gumbo_parse(html.c_str());
-    Style base;
-    base.fontSize = 17.0f;
-    base.fgColor  = text_color;
-    html_walk(R, out->root, base);
-    gumbo_destroy_output(&kGumboDefaultOptions, out);
-}
-
-/* Render a fetched message into the reading pane document. */
+/* Render a fetched message into a reading-pane Document.  Used for
+ * Markdown and plain-text bodies; text/html bodies go straight to
+ * HtmlDocument::set_html (see render_current). */
 static void render_message(Document &doc, const MailMessage &msg,
-                           NVGcolor text_color, NVGcolor meta_color,
-                           const std::function<ResolvedImage(const std::string&)> &img_resolve = nullptr) {
+                           NVGcolor text_color, NVGcolor meta_color) {
     doc.paragraphs.clear();
 
     Style normal; normal.fontSize = 17.0f; normal.fgColor = text_color;
@@ -1922,10 +1666,7 @@ static void render_message(Document &doc, const MailMessage &msg,
     auto *rule = doc.addParagraph();
     rule->isRule = true;
 
-    if (!msg.html.empty()) {
-        /* Rich render of the HTML part (preferred, like other clients). */
-        html_to_document(doc, msg.html, text_color, meta_color, img_resolve);
-    } else if (msg.body_markdown) {
+    if (msg.body_markdown) {
         /* MailMate-style markup=markdown (or text/markdown): render the
          * plain body as Markdown.  parse_markdown() clears its target, so
          * parse into a scratch document and move the paragraphs over. */
@@ -1957,10 +1698,12 @@ class MailApp : public Screen {
 public:
     FolderView   *m_folder_view = nullptr;
     EmailListView *m_email_list = nullptr;
-    TextEditor   *m_editor      = nullptr;
+    ScrollPanel  *m_view_scroll = nullptr;
+    HtmlDocument *m_view        = nullptr;
     Label        *m_status      = nullptr;
     Button       *m_theme_btn   = nullptr;
     Button       *m_reply_btn   = nullptr;
+    Button       *m_save_btn    = nullptr;
     Button       *m_images_btn  = nullptr;
 
     MailConfig  m_config;
@@ -2022,6 +1765,11 @@ public:
         m_reply_btn = make_button_tool(FA_REPLY, "Reply to this message");
         m_reply_btn->set_enabled(false);
         m_reply_btn->set_callback([this]() { show_compose(); });
+
+        m_save_btn = make_button_tool(FA_SAVE,
+            "Save this email as HTML for nmail_view (Ctrl+S)");
+        m_save_btn->set_enabled(false);
+        m_save_btn->set_callback([this]() { save_current_email(); });
 
         m_images_btn = make_button_tool(FA_IMAGE,
             "Load remote images (off by default to block tracking pixels)");
@@ -2093,12 +1841,15 @@ public:
         sep->set_min_height(1);
         sep->set_height(1);
 
-        m_editor = new TextEditor(right, TextEditor::Mode::RichText);
-        m_editor->set_padding(16);
-        m_editor->set_read_only(true);
+        m_view_scroll = new ScrollPanel(right);
+        m_view_scroll->set_scroll_type(ScrollPanel::ScrollTypes::Vertical);
+        m_view = new HtmlDocument(m_view_scroll);
+        m_view->image_resolver = [this](const std::string &src) {
+            return resolve_image(src);
+        };
         style_editor();
-        m_editor->set_height_flex(SizeMode::Expanding);
-        rflex->set_flex_item(m_editor, FlexLayout::FlexItem(1.0f));
+        m_view_scroll->set_height_flex(SizeMode::Expanding);
+        rflex->set_flex_item(m_view_scroll, FlexLayout::FlexItem(1.0f));
 
         // ---- Status bar ----
         m_status = new Label(window, "Not connected", "sans", 16);
@@ -2163,22 +1914,21 @@ public:
     }
 
     void style_editor() {
-        m_editor->set_background_color(m_dark ? Color(30, 31, 38, 255)
-                                              : Color(250, 250, 252, 255));
-        Style s;
-        s.fgColor = text_color();
-        s.fontSize = 16.f;
-        m_editor->set_default_style(s);
+        m_view->set_background(m_dark ? nvgRGBA(30, 31, 38, 255)
+                                      : nvgRGBA(250, 250, 252, 255));
+        m_view->set_colors(text_color(), meta_color());
     }
 
     void show_welcome() {
-        parse_markdown(*m_editor->document(),
+        Document doc;
+        parse_markdown(doc,
             "# nmail\n\n"
             "Set up your IMAP account in **Preferences** (the gear icon) "
             "to begin.\n\n"
             "Messages and folders are pulled live from the server; "
             "nothing is cached locally.",
             text_color(), 18.0f);
+        m_view->set_document(std::move(doc));
     }
 
     /* Switch light/dark appearance (mirrors example1's apply_theme_mode). */
@@ -2294,6 +2044,7 @@ public:
         m_current_message = msg;
         m_has_message     = true;
         m_reply_btn->set_enabled(true);
+        if (m_save_btn) m_save_btn->set_enabled(true);
         if (m_body_cache.size() > 256) m_body_cache.clear();
         m_body_cache[m_current_folder + ":" + std::to_string(seq)] = msg;
         render_current();
@@ -2318,6 +2069,7 @@ public:
         m_older_inflight = false;
         m_email_list->set_loading_more(false);
         m_reply_btn->set_enabled(false);
+        if (m_save_btn) m_save_btn->set_enabled(false);
 
         /* Serve the last-known list instantly, then refresh from the
          * server in the background. */
@@ -2327,8 +2079,9 @@ public:
             m_summaries      = cached->second;
             apply_filter();
         } else {
-            parse_markdown(*m_editor->document(), "*Loading folder...*",
-                           text_color(), 18.0f);
+            Document doc;
+            parse_markdown(doc, "*Loading folder...*", text_color(), 18.0f);
+            m_view->set_document(std::move(doc));
         }
         redraw();
         m_worker.select_folder(folder);
@@ -2343,12 +2096,16 @@ public:
             m_current_message = cached->second;
             m_has_message     = true;
             m_reply_btn->set_enabled(true);
+            if (m_save_btn) m_save_btn->set_enabled(true);
             render_current();
             return;
         }
         m_loading_seq = d.seq;
-        parse_markdown(*m_editor->document(), "*Loading message...*",
-                       text_color(), 18.0f);
+        {
+            Document doc;
+            parse_markdown(doc, "*Loading message...*", text_color(), 18.0f);
+            m_view->set_document(std::move(doc));
+        }
         redraw();
         m_worker.fetch_body(d.seq);
     }
@@ -2400,8 +2157,8 @@ public:
     /* Resolve an <img> src to an NVG image, creating the texture on first
        use.  Remote URLs load only after the user opts in; a cache miss
        kicks an async fetch and resolves to id 0 (placeholder) this pass. */
-    ResolvedImage resolve_image(const std::string &src) {
-        ResolvedImage ri;
+    HtmlImageInfo resolve_image(const std::string &src) {
+        HtmlImageInfo ri;
         auto cached = m_img_tex.find(src);
         if (cached != m_img_tex.end()) {
             ri.id = cached->second;
@@ -2464,7 +2221,7 @@ public:
         char ebuf[256];
         int fd = nmail_sock_connect(host.c_str(), port, ebuf, sizeof(ebuf));
         if (fd < 0) return false;
-        if (https && nmail_sock_starttls(fd, ebuf, sizeof(ebuf)) < 0) {
+        if (https && nmail_sock_starttls_host(fd, host.c_str(), ebuf, sizeof(ebuf)) < 0) {
             nmail_sock_close(fd);
             return false;
         }
@@ -2538,15 +2295,69 @@ public:
         if (!m_has_message) return;
         clear_image_textures();
         m_has_remote_images = false;
-        render_message(*m_editor->document(), m_current_message,
-                       text_color(), meta_color(),
-                       [this](const std::string &src) {
-                           return resolve_image(src);
-                       });
+        const MailMessage &msg = m_current_message;
+        if (!msg.html.empty()) {
+            /* Rich render of the HTML part (preferred, like other
+             * clients), with the header fields as a small HTML fragment
+             * on top. */
+            std::string h;
+            h += "<p><span style=\"font-size:24px\"><b>" +
+                 html_escape(msg.subject) + "</b></span></p>";
+            h += "<p><b>From: </b>" + html_escape(msg.from) + "</p>";
+            if (!msg.to.empty())
+                h += "<p><b>To: </b>" + html_escape(msg.to) + "</p>";
+            if (!msg.date.empty())
+                h += "<p><b>Date: </b>" + html_escape(msg.date) + "</p>";
+            h += "<hr>";
+            m_view->set_html(h + msg.html);
+            m_has_remote_images = m_view->has_remote_images();
+        } else {
+            Document doc;
+            render_message(doc, msg, text_color(), meta_color());
+            m_view->set_document(std::move(doc));
+        }
         m_images_btn->set_enabled(m_has_remote_images &&
                                   !m_show_remote_images);
-        m_editor->set_caret({0, 0});
+        m_view_scroll->set_scroll(0.0f);
         redraw();
+    }
+
+    void save_current_email() {
+        if (!m_has_message) return;
+        const MailMessage &msg = m_current_message;
+        bool as_html = !msg.html.empty();
+        auto paths = file_dialog(
+            { {"html", "HTML email"}, {"txt", "Plain text"} },
+            true, false, "");
+        if (paths.empty() || paths[0].empty())
+            return;
+        std::string path = paths[0];
+        bool has_ext = path.size() >= 5 &&
+            (path.rfind(".html") == path.size() - 5 ||
+             path.rfind(".htm") == path.size() - 4 ||
+             path.rfind(".txt") == path.size() - 4);
+        if (!has_ext)
+            path += as_html ? ".html" : ".txt";
+
+        SavedEmail e;
+        e.from    = msg.from;
+        e.to      = msg.to;
+        e.subject = msg.subject;
+        e.date    = msg.date;
+        e.html    = msg.html;
+        e.body    = msg.body;
+
+        std::ofstream out(path, std::ios::binary);
+        if (!out) {
+            auto *dlg = new MessageDialog(this, MessageDialog::Type::Warning,
+                "Save failed", "Could not write " + path, "OK", "", false);
+            dlg->center();
+            return;
+        }
+        std::string blob = nmail_serialize_email(e);
+        out.write(blob.data(), (std::streamsize)blob.size());
+        out.close();
+        m_status->set_caption("Saved " + path);
     }
 
     /* ---- Preferences window ---- */
@@ -2856,6 +2667,12 @@ public:
         if (key == GLFW_KEY_R && action == GLFW_PRESS &&
             (modifiers & SYSTEM_COMMAND_MOD)) {
             do_refresh();
+            return true;
+        }
+        // Ctrl/Cmd+S saves the current message as HTML for nmail_view
+        if (key == GLFW_KEY_S && action == GLFW_PRESS &&
+            (modifiers & SYSTEM_COMMAND_MOD)) {
+            save_current_email();
             return true;
         }
         return false;

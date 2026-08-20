@@ -36,6 +36,8 @@ ScrollPanel::ScrollPanel(Widget* parent)
     : WidgetCRTP<ScrollPanel>(parent), m_child_preferred_size(Vector2i(0, 0)),
     m_scroll(0.f, 0.f), m_update_layout(false), m_scroll_type(ScrollTypes::Vertical) {
     DebugName = m_parent->DebugName + ",ScrlPnl";
+    // Inertia and child offset change every frame; never bake this subtree.
+    set_live(true);
     uncache_scroll_ancestors(m_parent);
 }
 
@@ -43,6 +45,7 @@ ScrollPanel::ScrollPanel(Widget* parent, ScrollTypes scroll_type)
     : WidgetCRTP<ScrollPanel>(parent), m_child_preferred_size(Vector2i(0, 0)),
     m_scroll(0.f, 0.f), m_update_layout(false), m_scroll_type(scroll_type) {
     DebugName = m_parent->DebugName + ",ScrlPnl";
+    set_live(true);
     uncache_scroll_ancestors(m_parent);
 }
 
@@ -69,13 +72,15 @@ void ScrollPanel::perform_layout(NVGcontext* ctx) {
     // Update stored preferred size for scrolling calculations
     m_child_preferred_size = constrained_preferred;
 
-    // Determine final child size:
-    // - If child needs more space than available: give it what it needs (enable scrolling)
-    // - If child needs less space than available: let it fill the available space
-    int child_height = constrained_preferred.y() > available.y() ?
-                       constrained_preferred.y() : available.y();
-    int child_width = constrained_preferred.x() > available.x() ?
-                      constrained_preferred.x() : available.x();
+    // Grow the child only along axes that can actually scroll. A vertical-only
+    // panel that adopts the child's unconstrained width lets HTML tables
+    // become window-sized and, if a scissor is lost, paint over sibling panes.
+    int child_height = available.y();
+    int child_width = available.x();
+    if (VScrollable() && constrained_preferred.y() > available.y())
+        child_height = constrained_preferred.y();
+    if (HScrollable() && constrained_preferred.x() > available.x())
+        child_width = constrained_preferred.x();
 
     // Position child for scroll amount
     int offset_x = HScrollable() && constrained_preferred.x() > available.x()
@@ -286,7 +291,8 @@ void ScrollPanel::draw(NVGcontext* ctx) {
     nvgSave(ctx);
     nvgTranslate(ctx, m_pos.x(), m_pos.y());
     nvgIntersectScissor(ctx, 0, 0, (float)m_size.x(), (float)m_size.y());
-    if (child->visible())
+    if (child->visible() &&
+        !(child->live() && nvgIsRecordingDisplayList(ctx)))
         child->draw(ctx);
     nvgRestore(ctx);
 

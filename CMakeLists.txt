@@ -634,7 +634,8 @@ if (NANOGUI_BUILD_EXAMPLES)
   target_include_directories(gumbo PUBLIC ext/gumbo/src)
   set_target_properties(gumbo PROPERTIES POSITION_INDEPENDENT_CODE ON)
 
-  add_executable(nmail         nmail/nmail.cpp nmail/imap_client.cpp nmail/smtp_client.cpp nmail/nmail_socket.c)
+  add_executable(nmail         nmail/nmail.cpp nmail/imap_client.cpp nmail/smtp_client.cpp nmail/nmail_socket.c nmail/htmldocument.cpp)
+  add_executable(nmail_view    nmail/nmail_view.cpp nmail/htmldocument.cpp nmail/nmail_socket.c)
 
   target_link_libraries(example1      nanogui)
   target_link_libraries(example2      nanogui)
@@ -655,12 +656,20 @@ if (NANOGUI_BUILD_EXAMPLES)
   # Output name "nmail" would collide with the nmail/ source directory
   set_target_properties(nmail PROPERTIES
       RUNTIME_OUTPUT_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}/bin)
+  set_target_properties(nmail_view PROPERTIES
+      RUNTIME_OUTPUT_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}/bin)
+  target_include_directories(nmail_view PRIVATE
+      nmail/
+      ${CMAKE_CURRENT_SOURCE_DIR})
   target_link_libraries(nmail         nanogui pthread gumbo)
+  target_link_libraries(nmail_view    nanogui pthread gumbo)
   # STARTTLS / imaps support in nmail_socket.c (guarded by HAVE_OPENSSL)
   find_package(OpenSSL)
   if (OPENSSL_FOUND)
     target_compile_definitions(nmail PRIVATE HAVE_OPENSSL)
     target_link_libraries(nmail OpenSSL::SSL OpenSSL::Crypto)
+    target_compile_definitions(nmail_view PRIVATE HAVE_OPENSSL)
+    target_link_libraries(nmail_view OpenSSL::SSL OpenSSL::Crypto)
   endif()
   target_link_libraries(nanovg-colorfont-atlas nanogui ${NANOGUI_LIBS})
   target_link_libraries(imagestash_test nanogui ${NANOGUI_LIBS})

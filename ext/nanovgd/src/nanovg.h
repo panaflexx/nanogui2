@@ -403,6 +403,9 @@ extern NVG_EXPORT void nvgScale(NVGcontext* ctx, float x, float y);
 // There should be space for 6 floats in the return buffer for the values a-f.
 extern NVG_EXPORT void nvgCurrentTransform(NVGcontext* ctx, float* xform);
 
+/* Debug helper: current state-stack depth (nvgSave/nvgRestore balance). */
+extern NVG_EXPORT int nvgStateDepth(NVGcontext* ctx);
+
 
 // The following functions can be used to make calculations on 2x3 transformation matrices.
 // A 2x3 matrix is represented as float[6].

@@ -100,6 +100,11 @@ public:
     int m_font_sans_regular;
     /// The bold font face (default: ``"sans-bold"`` from ``resources/roboto_bold.ttf``).
     int m_font_sans_bold;
+    /// Italic face: alias of ``"sans"`` (no italic Roboto variant is vendored;
+    /// exists so ``Document::faceForStyle`` never names an unregistered face).
+    int m_font_sans_italic;
+    /// Bold-italic face: alias of ``"sans-bold"`` (see m_font_sans_italic).
+    int m_font_sans_bolditalic;
     /// The icon font face (default: ``"icons"`` from Font Awesome).
     int m_font_icons;
     /// The monospace font face (default: ``"mono"`` from ``resources/inconsolata_regular.ttf``).

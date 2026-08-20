@@ -36,6 +36,10 @@ struct NANOGUI_EXPORT Style {
     bool     italic    = false;
     bool     underline = false;
     bool     monospace = false;
+    bool     displayNone = false; ///< HTML display:none (skip when walking)
+    bool     superscript = false; ///< vertical-align: super/top (price cents)
+    float    padX = 0.0f;         ///< extra fill padding (CTA pills)
+    float    padY = 0.0f;
 };
 
 // ---------------------------------------------------------------------------
@@ -76,6 +80,8 @@ public:
     int               image           = 0;
     float             image_w         = 0.0f;
     float             image_h         = 0.0f;
+    /* Original <img src>, used to bind a texture after an async fetch. */
+    std::string       image_src;
 
     Paragraph() = default;
 
@@ -111,6 +117,14 @@ public:
     float paragraphSpacing = 12.0f;  // gap between paragraphs
     float lineSpacing      = 4.0f;   // extra gap between lines in a paragraph
     bool  debugDraw        = false;  // overlay word/line debug visualisations
+    /// When true, draw()/drawParagraph() run layout only and emit NO paint
+    /// calls (nvgText/rect/stroke are skipped; pure measurement such as
+    /// nvgTextBounds still runs).  Needed because this NanoVG fork records
+    /// paint calls into a frame list — painting outside nvgBeginFrame leaks
+    /// the packets into the next frame at stale coordinates.  Measuring
+    /// widgets (e.g. HtmlDocument's height-for-width probes) set this
+    /// around their probe draw and read last_drawn_height.
+    bool  layout_only      = false;
     mutable float last_drawn_height = 0.0f; ///< Set by draw(); total content height in pixels.
 
     Paragraph* addParagraph();
@@ -208,6 +222,7 @@ public:
         float    mono_bg_y     = 0.f;
         float    mono_bg_w     = 0.f;
         float    mono_bg_h     = 0.f;
+        float    mono_bg_radius = 0.f;
         NVGcolor mono_bg_color = NVGcolor{ { { 0.f, 0.f, 0.f, 0.f } } };
 
         /// Bullet marker for list-item paragraphs (drawn as a filled circle,

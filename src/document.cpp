@@ -47,6 +47,9 @@ static bool style_equal(const Style& a, const Style& b) {
     return a.fontSize == b.fontSize &&
            a.bold == b.bold && a.italic == b.italic &&
            a.underline == b.underline && a.monospace == b.monospace &&
+           a.displayNone == b.displayNone &&
+           a.superscript == b.superscript &&
+           a.padX == b.padX && a.padY == b.padY &&
            std::memcmp(&a.fgColor, &b.fgColor, sizeof(NVGcolor)) == 0 &&
            std::memcmp(&a.bgColor, &b.bgColor, sizeof(NVGcolor)) == 0;
 }
@@ -236,10 +239,24 @@ bool paragraph_is_code(const Paragraph& p) {
 
 } // namespace
 
-/* Draw an NVG image into a rect (used by image block paragraphs). */
+/* Draw an NVG image into a rect (used by image block paragraphs).
+ * id <= 0 is a loading placeholder so layout can reserve space before
+ * the texture arrives. */
 static void draw_image_block(NVGcontext* ctx, int image,
                              float x, float y, float w, float h) {
-    if (image <= 0 || w <= 0.0f || h <= 0.0f) return;
+    if (w <= 0.0f || h <= 0.0f) return;
+    if (image <= 0) {
+        nvgBeginPath(ctx);
+        nvgRect(ctx, x, y, w, h);
+        nvgFillColor(ctx, nvgRGBA(128, 128, 136, 40));
+        nvgFill(ctx);
+        nvgBeginPath(ctx);
+        nvgRect(ctx, x + 0.5f, y + 0.5f, w - 1.0f, h - 1.0f);
+        nvgStrokeColor(ctx, nvgRGBA(128, 128, 136, 90));
+        nvgStrokeWidth(ctx, 1.0f);
+        nvgStroke(ctx);
+        return;
+    }
     NVGpaint p = nvgImagePattern(ctx, x, y, w, h, 0.0f, image, 1.0f);
     nvgBeginPath(ctx);
     nvgRect(ctx, x, y, w, h);
@@ -255,6 +272,7 @@ void Document::draw(NVGcontext* ctx, float originX, float originY) {
     nvgTextAlign(ctx, NVG_ALIGN_LEFT | NVG_ALIGN_BASELINE);
 
     const bool need_layout =
+        layout_only ||
         m_layout_dirty ||
         m_laid_content_width != contentWidth ||
         m_laid_origin_x != originX ||
@@ -300,7 +318,8 @@ void Document::draw(NVGcontext* ctx, float originX, float originY) {
                 img_line.words.push_back(std::move(iw));
                 m_rich_layout.push_back(std::move(img_line));
 
-                draw_image_block(ctx, para->image, originX, iy, dw, dh);
+                if (!layout_only)
+                    draw_image_block(ctx, para->image, originX, iy, dw, dh);
                 y = iy + dh + pad;
             } else if (para->isRule) {
                 float pad = paragraphSpacing * 0.5f;
@@ -326,12 +345,14 @@ void Document::draw(NVGcontext* ctx, float originX, float originY) {
                 rule_line.words.push_back(std::move(rw));
                 m_rich_layout.push_back(std::move(rule_line));
 
-                nvgBeginPath(ctx);
-                nvgMoveTo(ctx, originX, ry);
-                nvgLineTo(ctx, originX + contentWidth * 0.5f, ry);
-                nvgStrokeColor(ctx, para->ruleColor);
-                nvgStrokeWidth(ctx, para->ruleThickness);
-                nvgStroke(ctx);
+                if (!layout_only) {
+                    nvgBeginPath(ctx);
+                    nvgMoveTo(ctx, originX, ry);
+                    nvgLineTo(ctx, originX + contentWidth * 0.5f, ry);
+                    nvgStrokeColor(ctx, para->ruleColor);
+                    nvgStrokeWidth(ctx, para->ruleThickness);
+                    nvgStroke(ctx);
+                }
                 y = ry + pad;
             } else {
                 y = drawParagraph(ctx, *para, originX, y, pi);
@@ -383,7 +404,11 @@ void Document::draw(NVGcontext* ctx, float originX, float originY) {
         if (rl.mono_bg && rl.mono_bg_color.a > 0) {
             nvgBeginPath(ctx);
             nvgFillColor(ctx, rl.mono_bg_color);
-            nvgRect(ctx, rl.mono_bg_x, rl.mono_bg_y, rl.mono_bg_w, rl.mono_bg_h);
+            if (rl.mono_bg_radius > 0.5f)
+                nvgRoundedRect(ctx, rl.mono_bg_x, rl.mono_bg_y,
+                               rl.mono_bg_w, rl.mono_bg_h, rl.mono_bg_radius);
+            else
+                nvgRect(ctx, rl.mono_bg_x, rl.mono_bg_y, rl.mono_bg_w, rl.mono_bg_h);
             nvgFill(ctx);
         }
         // Bullet list marker.
@@ -397,7 +422,11 @@ void Document::draw(NVGcontext* ctx, float originX, float originY) {
         for (const WordLayout& wl : rl.words) {
             const Style& st = wl.style;
             applyFont(ctx, st);
-            if (st.bgColor.a > 0 && !st.monospace) {
+            const float ty = rl.baseline - (st.superscript ? st.fontSize * 0.45f : 0.f);
+            /* Padded pills are painted once for the whole run (mono_bg).
+             * Per-word fill with padX overlaps neighbours ("Le" / "More"). */
+            if (st.bgColor.a > 0 && !st.monospace &&
+                st.padX <= 0.f && st.padY <= 0.f) {
                 nvgBeginPath(ctx);
                 nvgFillColor(ctx, st.bgColor);
                 nvgRect(ctx,
@@ -408,7 +437,7 @@ void Document::draw(NVGcontext* ctx, float originX, float originY) {
                 nvgFill(ctx);
             }
             nvgFillColor(ctx, st.fgColor);
-            nvgText(ctx, wl.x, rl.baseline, wl.text.c_str(), nullptr);
+            nvgText(ctx, wl.x, ty, wl.text.c_str(), nullptr);
             if (st.underline) {
                 const float ux0 = wl.x + wl.leftBearing;
                 const float ux1 = wl.x + wl.visualRight;
@@ -452,12 +481,14 @@ float Document::drawParagraph(NVGcontext* ctx, const Paragraph& para,
             bg_y = startY - 1;
             bg_w = spaceWidthFor(ctx, es) + 2 * pad;
             bg_h = lineHeight + 6;
-            nvgBeginPath(ctx);
-            nvgFillColor(ctx, es.bgColor);
-            nvgRect(ctx, bg_x, bg_y, bg_w, bg_h);
-            nvgFill(ctx);
+            if (!layout_only) {
+                nvgBeginPath(ctx);
+                nvgFillColor(ctx, es.bgColor);
+                nvgRect(ctx, bg_x, bg_y, bg_w, bg_h);
+                nvgFill(ctx);
+            }
         }
-        if (para.isBullet) {
+        if (para.isBullet && !layout_only) {
             const float br  = std::max(1.5f, lineHeight * 0.10f);
             const float bcx = originX + para.leftIndent - br * 3.0f;
             const float bcy = baseline - m.ascender * 0.35f;
@@ -678,7 +709,7 @@ float Document::drawParagraph(NVGcontext* ctx, const Paragraph& para,
 
         if (!line.words.empty()) {
             const Style& fs = line.words.front().run->style;
-            if (fs.bgColor.a > 0) {
+            if (fs.bgColor.a > 0 && !layout_only) {
                 float bgL, bgR;
                 if (fs.monospace && blockWidth[li] > 0.0f) {
                     bgL = drawX;
@@ -690,31 +721,37 @@ float Document::drawParagraph(NVGcontext* ctx, const Paragraph& para,
                     const float wbX = lineX + (line.advanceWidth - wb.advance);
                     bgR = wbX + wb.visualRight;
                 }
-                const float pad = 4.0f;
-                const float bgX = bgL - pad;
-                const float bgY = y - 1;
-                const float bgW = (bgR - bgL) + 2 * pad;
-                const float bgH = lineHeight + 6;
+                const float padX = fs.padX > 0.f ? fs.padX : (fs.monospace ? 4.f : 1.f);
+                const float padY = fs.padY > 0.f ? fs.padY : 1.f;
+                const float bgX = bgL - padX;
+                const float bgY = y - padY;
+                const float bgW = (bgR - bgL) + 2.f * padX;
+                const float bgH = lineHeight + 2.f * padY;
+                float rad = 0.f;
+                if (fs.padX > 4.f)
+                    rad = std::min(bgW, bgH) * 0.5f;
                 nvgBeginPath(ctx);
                 nvgFillColor(ctx, fs.bgColor);
-                nvgRect(ctx, bgX, bgY, bgW, bgH);
+                if (rad > 0.5f)
+                    nvgRoundedRect(ctx, bgX, bgY, bgW, bgH, rad);
+                else
+                    nvgRect(ctx, bgX, bgY, bgW, bgH);
                 nvgFill(ctx);
 
-                // Cache mono block bg for fast-path replay. Per-word non-mono
-                // backgrounds are re-derived from WordLayout on the fast path.
-                if (capture_layout && fs.monospace) {
-                    rich_line.mono_bg       = true;
-                    rich_line.mono_bg_x     = bgX;
-                    rich_line.mono_bg_y     = bgY;
-                    rich_line.mono_bg_w     = bgW;
-                    rich_line.mono_bg_h     = bgH;
-                    rich_line.mono_bg_color = fs.bgColor;
+                if (capture_layout && (fs.monospace || fs.padX > 0.f || fs.padY > 0.f)) {
+                    rich_line.mono_bg        = true;
+                    rich_line.mono_bg_x      = bgX;
+                    rich_line.mono_bg_y      = bgY;
+                    rich_line.mono_bg_w      = bgW;
+                    rich_line.mono_bg_h      = bgH;
+                    rich_line.mono_bg_radius  = rad;
+                    rich_line.mono_bg_color  = fs.bgColor;
                 }
             }
         }
 
         // Bullet list marker: a small filled circle left of the first line.
-        if (isFirstLine && para.isBullet) {
+        if (isFirstLine && para.isBullet && !layout_only) {
             const float br = std::max(1.5f, lineHeight * 0.10f);
             const float bcx = originX + indent - br * 3.0f;
             const float bcy = baseline - line.ascent * 0.35f;
@@ -759,7 +796,8 @@ float Document::drawParagraph(NVGcontext* ctx, const Paragraph& para,
                 rich_line.words.push_back(std::move(wl));
             }
 
-            if (st.bgColor.a > 0 && !st.monospace) {
+            if (st.bgColor.a > 0 && !st.monospace &&
+                st.padX <= 0.f && st.padY <= 0.f && !layout_only) {
                 nvgBeginPath(ctx);
                 nvgFillColor(ctx, st.bgColor);
                 nvgRect(ctx,
@@ -770,10 +808,13 @@ float Document::drawParagraph(NVGcontext* ctx, const Paragraph& para,
                 nvgFill(ctx);
             }
 
-            nvgFillColor(ctx, st.fgColor);
-            nvgText(ctx, wx, baseline, word.text.c_str(), nullptr);
+            if (!layout_only) {
+                nvgFillColor(ctx, st.fgColor);
+                const float ty = baseline - (st.superscript ? st.fontSize * 0.45f : 0.f);
+                nvgText(ctx, wx, ty, word.text.c_str(), nullptr);
+            }
 
-            if (st.underline) {
+            if (st.underline && !layout_only) {
                 const float ux0 = wx + word.leftBearing;
                 const float ux1 = wx + word.visualRight;
                 const float uy  = baseline + std::max(1.0f, st.fontSize * 0.08f);

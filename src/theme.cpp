@@ -336,6 +336,14 @@ void Theme::load_fonts(NVGcontext *ctx) {
                                            roboto_regular_ttf_size, 0);
     m_font_sans_bold = nvgCreateFontMem(ctx, "sans-bold", (uint8_t *) roboto_bold_ttf,
                                         roboto_bold_ttf_size, 0);
+    /* Document::faceForStyle references "sans-italic" / "sans-bolditalic".
+     * No italic Roboto variant is vendored, so alias them to the upright
+     * faces — italic text must at least be VISIBLE (an unknown face name
+     * makes fontstash silently skip the glyphs). */
+    m_font_sans_italic = nvgCreateFontMem(ctx, "sans-italic", (uint8_t *) roboto_regular_ttf,
+                                          roboto_regular_ttf_size, 0);
+    m_font_sans_bolditalic = nvgCreateFontMem(ctx, "sans-bolditalic", (uint8_t *) roboto_bold_ttf,
+                                              roboto_bold_ttf_size, 0);
     m_font_icons = nvgCreateFontMem(ctx, "icons", (uint8_t *) fontawesome_solid_ttf,
                                     fontawesome_solid_ttf_size, 0);
     m_font_mono_regular = nvgCreateFontMem(ctx, "mono", (uint8_t *) inconsolata_regular_ttf,
@@ -344,6 +352,7 @@ void Theme::load_fonts(NVGcontext *ctx) {
     nvgSetEmojiFont(ctx, "emoji");
 
     if (m_font_sans_regular == -1 || m_font_sans_bold == -1 ||
+        m_font_sans_italic == -1 || m_font_sans_bolditalic == -1 ||
         m_font_icons == -1 || m_font_mono_regular == -1 ||
         m_font_emoji == -1)
         throw std::runtime_error("Could not load fonts!");
