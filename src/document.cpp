@@ -401,15 +401,16 @@ void Document::draw(NVGcontext* ctx, float originX, float originY) {
                  * form one code block (they serialize as a single fenced
                  * ``` block), and consecutive bullet items form one list —
                  * keep their lines contiguous instead of inserting
-                 * paragraph spacing. */
-                bool tight = false;
+                 * paragraph spacing.  Never add the gap after the last
+                 * paragraph — that 12px of empty tail packed an icon+"1"
+                 * toward the top of Instagram's notification pill. */
                 if (pi + 1 < paragraphs.size()) {
                     const Paragraph& next = *paragraphs[pi + 1];
-                    tight = (paragraph_is_code(*para) &&
-                             paragraph_is_code(next)) ||
-                            (para->isBullet && next.isBullet);
+                    bool tight = (paragraph_is_code(*para) &&
+                                  paragraph_is_code(next)) ||
+                                 (para->isBullet && next.isBullet);
+                    y += tight ? 0.0f : paragraphSpacing;
                 }
-                y += tight ? 0.0f : paragraphSpacing;
             }
         }
         last_drawn_height = y - originY;

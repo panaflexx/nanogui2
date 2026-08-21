@@ -166,6 +166,16 @@ struct BoxProps {
      * "center this as a column" hint (see build_children). */
     bool  table_cell    = false;
     bool  center        = false;  /* margin: auto / align=center wrapper */
+    /* CSS padding on the box (not inherited onto text runs).  Applied as
+     * FlexLayout per-axis padding so a chip like Instagram's notification
+     * pill (`padding: 8px 16px`) actually insets the heart+"1". */
+    float pad_x         = 0.0f;
+    float pad_y         = 0.0f;
+    /* display:inline-flex / inline-block / inline — shrink-to-content
+     * instead of stretching as a block. */
+    bool  inline_flex   = false;
+    /* vertical-align:middle on a flex/painted box — center children. */
+    bool  align_middle  = false;
     /* CSS `background-image:url(...)` on a plain <div> — common in
      * marketing/notification email (Meta digests use it for every real
      * photo, never <img src>).  Resolved and painted like an <img>. */
@@ -310,6 +320,9 @@ void apply_style_attr(const char *css, Style &st,
                 st.displayNone = false;
             if (box && val == "table-cell")
                 box->table_cell = true;
+            if (box && (val == "inline-flex" || val == "inline-block" ||
+                        val == "inline"))
+                box->inline_flex = true;
         } else if (key == "mso-hide") {
             if (val == "all")
                 st.displayNone = true;
@@ -325,6 +338,8 @@ void apply_style_attr(const char *css, Style &st,
                 st.superscript = true;
             else if (val == "baseline" || val == "middle" || val == "bottom")
                 st.superscript = false;
+            if (box && (val == "middle" || val == "center"))
+                box->align_middle = true;
         } else if (key == "padding" || key == "padding-left" ||
                    key == "padding-right" || key == "padding-top" ||
                    key == "padding-bottom") {
@@ -338,15 +353,21 @@ void apply_style_attr(const char *css, Style &st,
             if (sp2 != std::string::npos) b = b.substr(0, sp2);
             if (parse_css_len(a, px, pct) && pct == 0.0f) {
                 if (key == "padding" || key == "padding-top" ||
-                    key == "padding-bottom")
+                    key == "padding-bottom") {
                     st.padY = std::max(st.padY, px);
+                    if (box) box->pad_y = std::max(box->pad_y, px);
+                }
                 if (key == "padding" || key == "padding-left" ||
-                    key == "padding-right")
+                    key == "padding-right") {
                     st.padX = std::max(st.padX, px);
+                    if (box) box->pad_x = std::max(box->pad_x, px);
+                }
             }
             if (key == "padding" && b != a &&
-                parse_css_len(b, px, pct) && pct == 0.0f)
+                parse_css_len(b, px, pct) && pct == 0.0f) {
                 st.padX = std::max(st.padX, px);
+                if (box) box->pad_x = std::max(box->pad_x, px);
+            }
         } else if (box && (key == "width" || key == "max-width" ||
                            key == "height" || key == "max-height")) {
             float px = 0, pct = 0;
@@ -502,23 +523,22 @@ public:
     }
 
     virtual Vector2i preferred_size(NVGcontext *ctx) const override {
-        int w = m_size.x() > 0 ? m_size.x()
-              : (parent() && parent()->size().x() > 0 ? parent()->size().x()
-                                                      : 600);
+        /* Cap at the parent, not at our last laid-out m_size: using
+         * m_size ratchets a shrink-wrapped chip (heart+"1") down until
+         * the icon and text wrap onto two lines. */
+        int cap = (parent() && parent()->size().x() > 10)
+                      ? parent()->size().x() : 600;
         HtmlText *self = const_cast<HtmlText *>(this);
-        self->measure(ctx, w);
-        /* Width is normally assigned by the container (stretch in column
-         * flow, grow/shrink in table rows), so report a shrink-to-fit
-         * ("max-content") width capped at `w` rather than the wrapped
-         * width itself: a short run (a notification-count "pill") gets
-         * its true natural size — needed for AlignItems::Center to
-         * center it instead of collapsing it to 0 — while a long
-         * paragraph still reports at most `w`, so it can never inflate
-         * an ancestor past the viewport. measure_natural_width() is a
-         * pure measurement pass; it doesn't touch the layout cache that
-         * measure() just populated for the real draw. */
         int natural = ctx ? (int)std::ceil(self->m_doc.measure_natural_width(ctx)) : 0;
-        return Vector2i(std::min(natural, w), std::max(m_measured_h, 1));
+        /* A couple of pixels of slack: laying out at exactly the measured
+         * max-content width wraps an icon+"1" onto two lines (advance of
+         * the two glyphs can exceed the summed natural width by a hair). */
+        if (natural > 0)
+            natural += 4;
+        int w = std::min(std::max(natural, 10), cap);
+        self->measure(ctx, w);
+        return Vector2i(std::min(std::max(natural, 1), cap),
+                        std::max(m_measured_h, 1));
     }
 
     /* Lay out at width w without painting (Document::layout_only suppresses
@@ -1632,6 +1652,29 @@ int cell_px_width(GumboElement *el, const Builder &B) {
     return -1;
 }
 
+/* A row whose extra cells are empty shims with no pixel width (Meta's
+ * notification pill: `<td>heart 1</td><td></td><td></td>`).  Treated as
+ * a 3-column flex row those empty cells still consume `gap`, so the
+ * icon+"1" pack to the left of a too-wide chip.  Flatten to a column
+ * instead — but keep a real [20px | content | 20px] spacer row. */
+bool row_collapses_to_column(GumboElement *tr, const Builder &B) {
+    int content = 0, wide_empty = 0;
+    for (unsigned i = 0; i < tr->children.length; ++i) {
+        GumboNode *cn = (GumboNode *)tr->children.data[i];
+        if (cn->type != GUMBO_NODE_ELEMENT) continue;
+        GumboElement *ce = &cn->v.element;
+        if (ce->tag != GUMBO_TAG_TD && ce->tag != GUMBO_TAG_TH)
+            continue;
+        if (cell_is_empty(ce)) {
+            if (cell_px_width(ce, B) > 0)
+                wide_empty++;
+        } else {
+            content++;
+        }
+    }
+    return content <= 1 && wide_empty == 0;
+}
+
 void decorate_block(HtmlBlock *b, GumboElement *el, const Builder &B) {
     BoxProps box;
     element_box(el, B, box);
@@ -1648,9 +1691,23 @@ void decorate_block(HtmlBlock *b, GumboElement *el, const Builder &B) {
     int h = element_height_px(el, box);
     if (h > 1)
         b->set_min_height(h);
-    if (h >= 24 && b->m_bg.a > 0.0f) {
-        if (auto *fl = dynamic_cast<FlexLayout *>(b->layout()))
+    if (auto *fl = dynamic_cast<FlexLayout *>(b->layout())) {
+        /* reset_box_style() strips padding from descendant runs; this is
+         * where CSS padding actually insets the widget's children. */
+        if (box.pad_x > 0.5f || box.pad_y > 0.5f)
+            fl->set_padding((int)std::lround(box.pad_x),
+                            (int)std::lround(box.pad_y));
+        /* Instagram's notification chip is `display:inline-flex;
+         * vertical-align:middle; text-align:center` — a painted pill
+         * whose heart+"1" must sit in the geometric middle, not at
+         * flex-start (top-left) of the padding box. */
+        if (box.inline_flex || (box.align_middle && b->m_bg.a > 0.0f)) {
+            fl->set_align_items(AlignItems::Center);
             fl->set_justify_content(JustifyContent::Center);
+            fl->set_gap(0);
+        } else if (h >= 24 && b->m_bg.a > 0.0f) {
+            fl->set_justify_content(JustifyContent::Center);
+        }
     }
     if (!box.bg_image_url.empty()) {
         /* Unlike an inline <img>, the box's own size comes from CSS
@@ -1843,7 +1900,7 @@ void build_children(Widget *container, GumboVector *kids, Style st,
             break;
         }
         case GUMBO_TAG_TR: {
-            if (count_row_cells(el) <= 1 && container_is_column(container)) {
+            if (row_collapses_to_column(el, B) && container_is_column(container)) {
                 Widget *target = wrap_if_bg(container, el, 2, B);
                 for (unsigned j = 0; j < el->children.length; ++j) {
                     GumboNode *cn = (GumboNode *)el->children.data[j];
@@ -2044,6 +2101,7 @@ void build_children(Widget *container, GumboVector *kids, Style st,
                           ? (int)box.max_width_px : 0;
             if (bg.a <= 0.0f && !align_changed && cap <= 0 &&
                 box.radius_px <= 0.0f && !box.center &&
+                !box.inline_flex && box.pad_x <= 0.5f && box.pad_y <= 0.5f &&
                 box.bg_image_url.empty()) {
                 Style cst = st;
                 TextAlignment ta = child_align;
@@ -2054,7 +2112,16 @@ void build_children(Widget *container, GumboVector *kids, Style st,
                                ta);
             } else {
                 Widget *host = container;
-                if (cap > 0) {
+                /* Shrink-wrap inline-flex chips (the notification pill)
+                 * and max-width columns so they don't stretch full-width
+                 * with the icon sitting at the top-left of a red bar. */
+                bool shrink = box.inline_flex ||
+                              (box.center && box.width_px > 0.0f &&
+                               box.width_pct < 99.0f);
+                bool parent_centers = false;
+                if (auto *pfl = dynamic_cast<FlexLayout *>(container->layout()))
+                    parent_centers = pfl->align_items() == AlignItems::Center;
+                if ((cap > 0 || shrink) && !parent_centers) {
                     HtmlBlock *outer = make_block(container, FlexDirection::Column,
                                                   0, AlignItems::Center);
                     host = outer;
@@ -2255,6 +2322,12 @@ std::string HtmlDocument::debug_summary() const {
                       d * 2, "", w->position().x(), w->position().y(),
                       w->size().x(), w->size().y());
         out += line;
+        if (auto *hb = dynamic_cast<const HtmlBlock *>(w)) {
+            char extra[96];
+            std::snprintf(extra, sizeof(extra), "  [bg.a=%.2f r=%.0f]",
+                          hb->m_bg.a, hb->m_radius);
+            out += extra;
+        }
         if (auto *ht = dynamic_cast<const HtmlText *>(w)) {
             std::string t;
             for (const auto &p : ht->m_doc.paragraphs) {

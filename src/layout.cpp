@@ -1082,11 +1082,11 @@ FlexLayout::FlexLayout(FlexDirection direction, JustifyContent justify_content,
                       AlignItems align_items, int margin, int gap)
     : m_direction(direction), m_justify_content(justify_content),
       m_align_items(align_items), m_flex_wrap(FlexWrap::NoWrap),
-      m_margin(margin), m_gap(gap) {
+      m_margin(margin), m_padding_x(0), m_padding_y(0), m_gap(gap) {
 }
 
 Vector2i FlexLayout::preferred_size(NVGcontext *ctx, const Widget *widget) const {
-    Vector2i size(2 * m_margin);
+    Vector2i size(2 * total_pad_x(), 2 * total_pad_y());
 
     int y_offset = 0;
     const Window *window = dynamic_cast<const Window*>(widget);
@@ -1187,9 +1187,11 @@ void FlexLayout::perform_layout(NVGcontext *ctx, Widget *widget) const {
 
     int main_axis_idx = main_axis();
     int cross_axis_idx = cross_axis();
+    const int inset_main = pad_main();
+    const int inset_cross = pad_cross();
 
-    int available_main_space = container_size[main_axis_idx] - 2 * m_margin;
-    int available_cross_space = container_size[cross_axis_idx] - 2 * m_margin;
+    int available_main_space = container_size[main_axis_idx] - 2 * inset_main;
+    int available_cross_space = container_size[cross_axis_idx] - 2 * inset_cross;
 
     std::vector<int> base_sizes;
     std::vector<int> final_sizes;
@@ -1274,7 +1276,7 @@ void FlexLayout::perform_layout(NVGcontext *ctx, Widget *widget) const {
     }
 
     std::vector<int> positions;
-    int current_pos = m_margin;
+    int current_pos = inset_main;
 
     switch (m_justify_content) {
         case JustifyContent::FlexStart:
@@ -1285,7 +1287,7 @@ void FlexLayout::perform_layout(NVGcontext *ctx, Widget *widget) const {
             break;
         case JustifyContent::FlexEnd: {
             int total_used = std::accumulate(final_sizes.begin(), final_sizes.end(), 0) + total_gaps;
-            current_pos = available_main_space + m_margin - total_used;
+            current_pos = available_main_space + inset_main - total_used;
             for (size_t i = 0; i < visible_children.size(); ++i) {
                 positions.push_back(current_pos);
                 current_pos += final_sizes[i] + (i < visible_children.size() - 1 ? m_gap : 0);
@@ -1294,7 +1296,7 @@ void FlexLayout::perform_layout(NVGcontext *ctx, Widget *widget) const {
         }
         case JustifyContent::Center: {
             int total_used = std::accumulate(final_sizes.begin(), final_sizes.end(), 0) + total_gaps;
-            current_pos = m_margin + (available_main_space - total_used) / 2;
+            current_pos = inset_main + (available_main_space - total_used) / 2;
             for (size_t i = 0; i < visible_children.size(); ++i) {
                 positions.push_back(current_pos);
                 current_pos += final_sizes[i] + (i < visible_children.size() - 1 ? m_gap : 0);
@@ -1303,11 +1305,11 @@ void FlexLayout::perform_layout(NVGcontext *ctx, Widget *widget) const {
         }
         case JustifyContent::SpaceBetween: {
             if (visible_children.size() == 1) {
-                positions.push_back(m_margin);
+                positions.push_back(inset_main);
             } else {
                 int total_item_size = std::accumulate(final_sizes.begin(), final_sizes.end(), 0);
                 int space_between = (available_main_space - total_item_size) / ((int)visible_children.size() - 1);
-                current_pos = m_margin;
+                current_pos = inset_main;
                 for (size_t i = 0; i < visible_children.size(); ++i) {
                     positions.push_back(current_pos);
                     current_pos += final_sizes[i] + space_between;
@@ -1318,7 +1320,7 @@ void FlexLayout::perform_layout(NVGcontext *ctx, Widget *widget) const {
         case JustifyContent::SpaceAround: {
             int total_item_size = std::accumulate(final_sizes.begin(), final_sizes.end(), 0);
             int space_around = (available_main_space - total_item_size) / (2 * (int)visible_children.size());
-            current_pos = m_margin + space_around;
+            current_pos = inset_main + space_around;
             for (size_t i = 0; i < visible_children.size(); ++i) {
                 positions.push_back(current_pos);
                 current_pos += final_sizes[i] + 2 * space_around;
@@ -1328,7 +1330,7 @@ void FlexLayout::perform_layout(NVGcontext *ctx, Widget *widget) const {
         case JustifyContent::SpaceEvenly: {
             int total_item_size = std::accumulate(final_sizes.begin(), final_sizes.end(), 0);
             int space_evenly = (available_main_space - total_item_size) / ((int)visible_children.size() + 1);
-            current_pos = m_margin + space_evenly;
+            current_pos = inset_main + space_evenly;
             for (size_t i = 0; i < visible_children.size(); ++i) {
                 positions.push_back(current_pos);
                 current_pos += final_sizes[i] + space_evenly;
@@ -1381,15 +1383,15 @@ void FlexLayout::perform_layout(NVGcontext *ctx, Widget *widget) const {
 
         switch (align) {
             case AlignItems::FlexStart:
-                child_pos[cross_axis_idx] = m_margin;
+                child_pos[cross_axis_idx] = inset_cross;
                 child_size[cross_axis_idx] = cross_size;
                 break;
             case AlignItems::FlexEnd:
-                child_pos[cross_axis_idx] = container_size[cross_axis_idx] - cross_size - m_margin;
+                child_pos[cross_axis_idx] = container_size[cross_axis_idx] - cross_size - inset_cross;
                 child_size[cross_axis_idx] = cross_size;
                 break;
             case AlignItems::Center:
-                child_pos[cross_axis_idx] = m_margin + (available_cross_space - cross_size) / 2;
+                child_pos[cross_axis_idx] = inset_cross + (available_cross_space - cross_size) / 2;
                 child_size[cross_axis_idx] = cross_size;
                 break;
             case AlignItems::Stretch: {
@@ -1397,13 +1399,13 @@ void FlexLayout::perform_layout(NVGcontext *ctx, Widget *widget) const {
                 int floor = min_s[cross_axis_idx] > 0 ? min_s[cross_axis_idx] : 0;
                 int ceil  = max_s[cross_axis_idx] > 0 ? max_s[cross_axis_idx]
                                                       : available_cross_space;
-                child_pos[cross_axis_idx] = m_margin;
+                child_pos[cross_axis_idx] = inset_cross;
                 child_size[cross_axis_idx] =
                     std::max(floor, std::min(available_cross_space, ceil));
                 break;
             }
             case AlignItems::Baseline:
-                child_pos[cross_axis_idx] = m_margin;
+                child_pos[cross_axis_idx] = inset_cross;
                 child_size[cross_axis_idx] = cross_size;
                 break;
         }

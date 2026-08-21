@@ -629,6 +629,13 @@ public:
     /// Set the margin
     void set_margin(int margin) { m_margin = margin; }
 
+    /// Per-axis inner padding, added to `margin` on that axis.
+    /// CSS `padding: 8px 16px` maps to padding_y=8, padding_x=16.
+    int padding_x() const { return m_padding_x; }
+    int padding_y() const { return m_padding_y; }
+    void set_padding(int pad_x, int pad_y) { m_padding_x = pad_x; m_padding_y = pad_y; }
+    void set_padding(int pad) { m_padding_x = m_padding_y = pad; }
+
     /// Get the gap between items
     int gap() const { return m_gap; }
     /// Set the gap between items
@@ -664,12 +671,19 @@ protected:
     /// Get cross axis index
     int cross_axis() const { return is_row_direction() ? 1 : 0; }
 
+    int total_pad_x() const { return m_margin + m_padding_x; }
+    int total_pad_y() const { return m_margin + m_padding_y; }
+    int pad_main() const { return is_row_direction() ? total_pad_x() : total_pad_y(); }
+    int pad_cross() const { return is_row_direction() ? total_pad_y() : total_pad_x(); }
+
 protected:
     FlexDirection m_direction;
     JustifyContent m_justify_content;
     AlignItems m_align_items;
     FlexWrap m_flex_wrap;
     int m_margin;
+    int m_padding_x = 0;
+    int m_padding_y = 0;
     int m_gap;
     std::unordered_map<const Widget*, FlexItem> m_flex_items;
 };
