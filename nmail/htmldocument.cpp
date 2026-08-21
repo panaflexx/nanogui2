@@ -176,6 +176,8 @@ struct BoxProps {
     bool  inline_flex   = false;
     /* vertical-align:middle on a flex/painted box — center children. */
     bool  align_middle  = false;
+    /* float:left — email nav bars (PennyMac header-menu LIs). */
+    bool  float_left    = false;
     /* CSS `background-image:url(...)` on a plain <div> — common in
      * marketing/notification email (Meta digests use it for every real
      * photo, never <img src>).  Resolved and painted like an <img>. */
@@ -340,6 +342,8 @@ void apply_style_attr(const char *css, Style &st,
                 st.superscript = false;
             if (box && (val == "middle" || val == "center"))
                 box->align_middle = true;
+        } else if (key == "float" && box) {
+            box->float_left = (val == "left");
         } else if (key == "padding" || key == "padding-left" ||
                    key == "padding-right" || key == "padding-top" ||
                    key == "padding-bottom") {
@@ -713,6 +717,11 @@ struct Builder {
     /* Nested <table> without width=100% shrinks to content (CTA chips).
      * Flattened 1-cell TDs must not stretch a bgcolor across the column. */
     bool          in_full_width = true;
+    /* Column flex-grow weights for the current table, taken from the first
+     * multi-cell row (HTML width="N%" or CSS width:N%).  Later rows reuse
+     * them so a Benchmark-style grid lines up instead of each <tr> sizing
+     * itself from that row's text. Nested tables save/restore this. */
+    std::vector<float> table_col_grow;
 };
 
 const char *attr(GumboElement *el, const char *name) {
@@ -853,6 +862,12 @@ CssMedia parse_css_media(const std::string &q) {
      * mobile layout) while the matching min-width query — which carries
      * the real desktop column widths — gets skipped instead. */
     constexpr float kAssumedViewportPx = 660.0f;
+    /* Hardware device width, not the pane.  PennyMac's
+     * `@media (max-device-width: 768px) { #main_container { width:375px } }`
+     * must not match here — Firefox on a PC ignores it, and applying it
+     * locked the whole letter to 375px while inner 600px wrappers
+     * overflowed (negative x).  Probe the longer keys first. */
+    constexpr float kAssumedDevicePx = 1280.0f;
     auto media_px = [&](const char *key) -> float {
         size_t p = l.find(key);
         if (p == std::string::npos) return -1.0f;
@@ -863,6 +878,12 @@ CssMedia parse_css_media(const std::string &q) {
         float n = std::strtof(l.c_str() + p, &end);
         return (end == l.c_str() + p) ? -1.0f : n;
     };
+    float maxdw = media_px("max-device-width");
+    if (maxdw > 0.0f && maxdw < kAssumedDevicePx)
+        return CssMedia::Skip;
+    float mindw = media_px("min-device-width");
+    if (mindw > kAssumedDevicePx)
+        return CssMedia::Skip;
     float maxw = media_px("max-width");
     if (maxw > 0.0f && maxw < kAssumedViewportPx)
         return CssMedia::Skip;
@@ -1095,6 +1116,27 @@ float flex_column_pct(GumboElement *el, const Builder &B) {
     return 0.0f;
 }
 
+/* PennyMac-style header nav: <ul><li style="float:left; width:N%">.
+ * Two or more floated or %-width items belong on one row, not as a
+ * vertical bullet list. */
+bool list_is_nav_row(GumboElement *ul, const Builder &B) {
+    int n = 0, side = 0;
+    for (unsigned i = 0; i < ul->children.length; ++i) {
+        GumboNode *cn = (GumboNode *)ul->children.data[i];
+        if (cn->type != GUMBO_NODE_ELEMENT) continue;
+        if (cn->v.element.tag != GUMBO_TAG_LI) continue;
+        Style dummy;
+        TextAlignment a = TextAlignment::Left;
+        BoxProps box;
+        apply_cascade(&cn->v.element, dummy, a, B, &box);
+        if (dummy.displayNone) continue;
+        ++n;
+        if (box.float_left || (box.width_pct > 0.0f && box.width_pct < 99.0f))
+            ++side;
+    }
+    return n >= 2 && side >= 2;
+}
+
 /* Marketing emails commonly ship each image twice: an Outlook-only copy
  * inside a plain "<!--[if mso]>...<![endif]-->" comment (invisible to
  * every real HTML parser, since a standard comment ends at the first
@@ -1246,6 +1288,7 @@ bool is_container_tag(GumboTag t) {
     case GUMBO_TAG_TFOOT:   case GUMBO_TAG_TR:      case GUMBO_TAG_TD:
     case GUMBO_TAG_TH:      case GUMBO_TAG_CAPTION:
     case GUMBO_TAG_HTML:    case GUMBO_TAG_BODY:
+    case GUMBO_TAG_UL:      case GUMBO_TAG_OL:
         return true;
     default:
         return false;
@@ -1652,6 +1695,26 @@ int cell_px_width(GumboElement *el, const Builder &B) {
     return -1;
 }
 
+/* Percentage width of a cell from width="N%" or CSS width:N%.  0 if the
+ * cell is auto/px.  Values >= 99% are treated as "just fill the row"
+ * rather than a column weight (same cutoff as the grow assignment). */
+float cell_width_pct(GumboElement *el, const Builder &B) {
+    const char *w = attr(el, "width");
+    if (w && w[0]) {
+        std::string v = trim_lower(w);
+        if (!v.empty() && v.back() == '%') {
+            float pct = strtof(v.c_str(), nullptr);
+            if (pct > 0.0f && pct < 99.0f)
+                return pct;
+        }
+    }
+    BoxProps box;
+    element_box(el, B, box);
+    if (box.width_pct > 0.0f && box.width_pct < 99.0f)
+        return box.width_pct;
+    return 0.0f;
+}
+
 /* A row whose extra cells are empty shims with no pixel width (Meta's
  * notification pill: `<td>heart 1</td><td></td><td></td>`).  Treated as
  * a 3-column flex row those empty cells still consume `gap`, so the
@@ -1865,8 +1928,12 @@ void build_children(Widget *container, GumboVector *kids, Style st,
         case GUMBO_TAG_THEAD:
         case GUMBO_TAG_TFOOT: {
             bool save_fw = B.in_full_width;
-            if (tag == GUMBO_TAG_TABLE)
+            std::vector<float> save_cols;
+            if (tag == GUMBO_TAG_TABLE) {
                 B.in_full_width = element_is_full_width(el, B);
+                save_cols = B.table_col_grow;
+                B.table_col_grow.clear();
+            }
             Widget *target = container;
             if (tag == GUMBO_TAG_TABLE) {
                 BoxProps box;
@@ -1897,6 +1964,8 @@ void build_children(Widget *container, GumboVector *kids, Style st,
             }
             build_children(target, &el->children, st, B, list_depth, align);
             B.in_full_width = save_fw;
+            if (tag == GUMBO_TAG_TABLE)
+                B.table_col_grow = std::move(save_cols);
             break;
         }
         case GUMBO_TAG_TR: {
@@ -1944,17 +2013,9 @@ void build_children(Widget *container, GumboVector *kids, Style st,
                 }
                 break;
             }
-            bool has_px = false;
-            for (unsigned j = 0; j < el->children.length; ++j) {
-                GumboNode *cn = (GumboNode *)el->children.data[j];
-                if (cn->type != GUMBO_NODE_ELEMENT) continue;
-                GumboTag ct = cn->v.element.tag;
-                if (ct != GUMBO_TAG_TD && ct != GUMBO_TAG_TH) continue;
-                if (cell_px_width(&cn->v.element, B) > 0)
-                    has_px = true;
-            }
-            HtmlBlock *row = make_block(container, FlexDirection::Row,
-                                        has_px ? 0 : 8);
+            /* cellspacing=0 tables (the email default) pack cells flush;
+             * an 8px flex gap made Benchmark columns drift per-row. */
+            HtmlBlock *row = make_block(container, FlexDirection::Row, 0);
             row->m_bg = block_background(el, B);
             float explicit_sum = 0.0f;
             int auto_cells = 0;
@@ -1967,17 +2028,17 @@ void build_children(Widget *container, GumboVector *kids, Style st,
                     continue;
                 if (cell_is_empty(&cn->v.element))
                     continue;
-                const char *w = attr(&cn->v.element, "width");
-                std::string ws = w ? trim_lower(w) : "";
-                if (!ws.empty() && ws.back() == '%' && strtof(ws.c_str(), nullptr) > 0.f
-                    && strtof(ws.c_str(), nullptr) < 99.f)
-                    explicit_sum += strtof(ws.c_str(), nullptr);
+                float pct = cell_width_pct(&cn->v.element, B);
+                if (pct > 0.0f)
+                    explicit_sum += pct;
                 else
                     auto_cells++;
             }
             float auto_grow = auto_cells > 0
                 ? std::max(100.0f - explicit_sum, 5.0f) / (float)auto_cells
                 : 1.0f;
+            std::vector<float> row_grows;
+            int col_i = 0;
             for (unsigned j = 0; j < el->children.length; ++j) {
                 GumboNode *cn = (GumboNode *)el->children.data[j];
                 if (cn->type != GUMBO_NODE_ELEMENT) continue;
@@ -2008,7 +2069,9 @@ void build_children(Widget *container, GumboVector *kids, Style st,
                  * width to the row/table's bottom-up preferred size,
                  * e.g. when an ancestor shrink-wraps via
                  * AlignItems::Center (see GUMBO_TAG_TABLE's
-                 * center_shrink). */
+                 * center_shrink). Full-width tables use basis 0 so
+                 * grow (including a column template from the header)
+                 * owns the width and every row's columns line up. */
                 int basis = -1;
                 if (px > 0) {
                     grow = 0.0f;
@@ -2022,18 +2085,24 @@ void build_children(Widget *container, GumboVector *kids, Style st,
                     basis = 0;
                     cell->set_max_width(0);
                 } else {
-                    const char *w = attr(ce, "width");
-                    std::string ws = w ? trim_lower(w) : "";
-                    if (!ws.empty() && ws.back() == '%' &&
-                        strtof(ws.c_str(), nullptr) > 0.f &&
-                        strtof(ws.c_str(), nullptr) < 99.f)
-                        grow = strtof(ws.c_str(), nullptr);
+                    float pct = cell_width_pct(ce, B);
+                    if (pct > 0.0f)
+                        grow = pct;
                     else if (const char *cs = attr(ce, "colspan"))
                         grow = auto_grow * (float)std::max(atoi(cs), 1);
+                    if (!B.table_col_grow.empty() &&
+                        col_i < (int)B.table_col_grow.size())
+                        grow = B.table_col_grow[col_i];
+                    if (B.in_full_width)
+                        basis = 0;
                 }
+                row_grows.push_back(grow);
+                col_i++;
                 if (auto *fl = dynamic_cast<FlexLayout *>(row->layout()))
                     fl->set_flex_item(cell, FlexLayout::FlexItem(grow, shrink, basis));
             }
+            if (B.table_col_grow.empty() && row_grows.size() >= 2)
+                B.table_col_grow = std::move(row_grows);
             break;
         }
         case GUMBO_TAG_TD:
@@ -2055,6 +2124,43 @@ void build_children(Widget *container, GumboVector *kids, Style st,
                 build_children(cell, &el->children, cst, B, list_depth, align);
                 if (auto *fl = dynamic_cast<FlexLayout *>(container->layout()))
                     fl->set_flex_item(cell, FlexLayout::FlexItem(cell_grow(el), 1.0f, 0));
+            }
+            break;
+        }
+        case GUMBO_TAG_UL:
+        case GUMBO_TAG_OL: {
+            if (list_is_nav_row(el, B)) {
+                HtmlBlock *row = make_block(container, FlexDirection::Row, 0);
+                for (unsigned j = 0; j < el->children.length; ++j) {
+                    GumboNode *cn = (GumboNode *)el->children.data[j];
+                    if (cn->type != GUMBO_NODE_ELEMENT) continue;
+                    GumboElement *ce = &cn->v.element;
+                    if (ce->tag != GUMBO_TAG_LI) continue;
+                    if (element_is_hidden(ce, B)) continue;
+                    HtmlBlock *cell = make_block(row, FlexDirection::Column, 0,
+                                                 AlignItems::Center);
+                    decorate_block(cell, ce, B);
+                    bool ch = false;
+                    TextAlignment ta = element_align(ce, align, ch, B);
+                    Style cst = st;
+                    apply_cascade(ce, cst, ta, B);
+                    cst.superscript = st.superscript;
+                    reset_box_style(cst);
+                    build_children(cell, &ce->children, cst, B, 0, ta);
+                    float grow = flex_column_pct(ce, B);
+                    if (grow <= 0.0f) grow = 1.0f;
+                    int basis = B.in_full_width ? 0 : -1;
+                    if (auto *fl = dynamic_cast<FlexLayout *>(row->layout()))
+                        fl->set_flex_item(cell,
+                                          FlexLayout::FlexItem(grow, 1.0f, basis));
+                }
+            } else {
+                Flow listF;
+                listF.align = align;
+                walk_inline(node, st, listF, B, list_depth);
+                if (listF.has_content())
+                    new HtmlText(container, std::move(listF.doc),
+                                 NVGcolor{ { { 0, 0, 0, 0 } } });
             }
             break;
         }
@@ -2114,14 +2220,17 @@ void build_children(Widget *container, GumboVector *kids, Style st,
                 Widget *host = container;
                 /* Shrink-wrap inline-flex chips (the notification pill)
                  * and max-width columns so they don't stretch full-width
-                 * with the icon sitting at the top-left of a red bar. */
+                 * with the icon sitting at the top-left of a red bar.
+                 * max-width alone is a ceiling (PennyMac .header-menu is
+                 * 610px inside a 600px column) — only margin:auto is a
+                 * "center me as a page column" hint. */
                 bool shrink = box.inline_flex ||
                               (box.center && box.width_px > 0.0f &&
                                box.width_pct < 99.0f);
                 bool parent_centers = false;
                 if (auto *pfl = dynamic_cast<FlexLayout *>(container->layout()))
                     parent_centers = pfl->align_items() == AlignItems::Center;
-                if ((cap > 0 || shrink) && !parent_centers) {
+                if (((cap > 0 && box.center) || shrink) && !parent_centers) {
                     HtmlBlock *outer = make_block(container, FlexDirection::Column,
                                                   0, AlignItems::Center);
                     host = outer;
