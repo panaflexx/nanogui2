@@ -53,6 +53,25 @@ public:
     std::string content;
     Style       style;
 
+    /* Inline image (an icon sitting next to text, e.g. a notification
+     * "pill") instead of a text run.  When `isImageRun` is set, `content`
+     * is ignored for measurement/painting and the run behaves as a
+     * single "word" of size image_w x image_h, bottom-aligned to the
+     * line's baseline.  `image` is the resolved NVG texture id and is
+     * frequently 0 (not loaded yet) — `isImageRun` is what marks this as
+     * an image slot; it does NOT mean the texture is ready (mirrors
+     * Paragraph::isImage, which is likewise independent of `image`'s
+     * value so an unresolved photo still reserves its layout box and
+     * draws a placeholder). A block-level standalone image should still
+     * use Paragraph::isImage instead — that gets its own line and can be
+     * center/right-aligned as a whole; this is for content that must
+     * stay in the surrounding text flow. */
+    bool        isImageRun = false;
+    int         image      = 0;
+    float       image_w    = 0.0f;
+    float       image_h    = 0.0f;
+    std::string image_src;  ///< original <img src>, for async texture rebind
+
     Text() = default;
     Text(std::string text, const Style& s = Style{})
         : content(std::move(text)), style(s) {}
@@ -147,6 +166,15 @@ public:
     /// the text block. Behaves the same as the renderer in
     /// nanovg-colorfont-atlas.cpp.
     void       draw(NVGcontext* ctx, float originX, float originY);
+
+    /// Widest hard-broken line if the text were never soft-wrapped (CSS
+    /// "max-content" width): the sum of word advances + inter-word
+    /// spacing between explicit '\n's, maxed across paragraphs.  Image
+    /// paragraphs contribute their own width.  Pure measurement — reads
+    /// paragraphs/runs and the word/space caches, touches no layout
+    /// state (contentWidth, m_rich_layout, ...), so it's safe to call
+    /// from preferred_size() without disturbing a real draw()'s cache.
+    float      measure_natural_width(NVGcontext* ctx);
 
     // -------------------------------------------------------------------
     // Lower-level helpers exposed so editor widgets can do their own

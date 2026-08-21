@@ -431,6 +431,18 @@ struct Flow {
     /* End the current block: the next text starts a new paragraph. */
     void brk() { cur = nullptr; cur_has_text = false; }
 
+    /* Inline image run (a small icon next to text) — see Text::image. */
+    void emitImage(int image, float w, float h, std::string src) {
+        Text t;
+        t.isImageRun = true;
+        t.image      = image;  // resolved id; commonly 0 (not loaded yet)
+        t.image_w    = w;
+        t.image_h    = h;
+        t.image_src  = std::move(src);
+        para()->addText(t);
+        cur_has_text = true;
+    }
+
     void emit(const std::string &raw, const Style &st) {
         std::string t;
         if (pre) {
@@ -461,10 +473,13 @@ struct Flow {
         for (const auto &p : doc.paragraphs) {
             if (p->isRule || p->isImage)
                 return true;
-            for (const Text &r : p->runs)
+            for (const Text &r : p->runs) {
+                if (r.isImageRun)
+                    return true;
                 for (char c : r.content)
                     if (!std::isspace((unsigned char)c))
                         return true;
+            }
         }
         return false;
     }
@@ -490,12 +505,20 @@ public:
         int w = m_size.x() > 0 ? m_size.x()
               : (parent() && parent()->size().x() > 0 ? parent()->size().x()
                                                       : 600);
-        const_cast<HtmlText *>(this)->measure(ctx, w);
-        /* Width is always assigned by the container (stretch in column
-         * flow, grow/shrink in table rows) — report 0 so the bottom-up
-         * preferred-width pass can never inflate the view past the
-         * viewport. */
-        return Vector2i(0, std::max(m_measured_h, 1));
+        HtmlText *self = const_cast<HtmlText *>(this);
+        self->measure(ctx, w);
+        /* Width is normally assigned by the container (stretch in column
+         * flow, grow/shrink in table rows), so report a shrink-to-fit
+         * ("max-content") width capped at `w` rather than the wrapped
+         * width itself: a short run (a notification-count "pill") gets
+         * its true natural size — needed for AlignItems::Center to
+         * center it instead of collapsing it to 0 — while a long
+         * paragraph still reports at most `w`, so it can never inflate
+         * an ancestor past the viewport. measure_natural_width() is a
+         * pure measurement pass; it doesn't touch the layout cache that
+         * measure() just populated for the real draw. */
+        int natural = ctx ? (int)std::ceil(self->m_doc.measure_natural_width(ctx)) : 0;
+        return Vector2i(std::min(natural, w), std::max(m_measured_h, 1));
     }
 
     /* Lay out at width w without painting (Document::layout_only suppresses
@@ -1292,6 +1315,23 @@ void walk_inline(GumboNode *node, Style st, Flow &F, Builder &B,
             float pw = 0.0f, ph = 0.0f;
             size_html_image(el, B, ri, pw, ph, hint_w, hint_h);
 
+            /* A small icon (a heart/chevron next to text, e.g. a
+             * notification-count "pill") stays inline instead of forcing
+             * a block break — otherwise it and its adjacent text land on
+             * separate lines.  Anything bigger is presumed to be real
+             * content (a photo, an avatar, a banner) and keeps its own
+             * block, centered/aligned like a standalone paragraph. An
+             * unresolved image with no explicit width/height falls back
+             * to size_html_image's 160x100 default, which is well past
+             * the threshold — deliberately: we can't yet tell whether
+             * it's a small icon, so block is the safe assumption. */
+            constexpr float kInlineIconMaxPx = 32.0f;
+            if (pw > 0.0f && ph > 0.0f &&
+                pw <= kInlineIconMaxPx && ph <= kInlineIconMaxPx) {
+                F.emitImage(ri.id, pw, ph, std::move(s));
+                return;
+            }
+
             F.brk();
             Paragraph *ip = F.doc.addParagraph();
             ip->isImage   = true;
@@ -1470,6 +1510,65 @@ int count_row_cells(GumboElement *tr) {
             ++n;
     }
     return n;
+}
+
+/* True if a cell has no element children and no non-whitespace text —
+ * an Outlook/table-shim spacer <td></td>.  These must not compete for
+ * an equal share of auto_grow: a content cell sitting next to two empty
+ * ones (a common "icon | spacer | spacer" pattern) would otherwise get
+ * squeezed to a third of the row instead of its own natural size. */
+bool cell_is_empty(GumboElement *ce) {
+    for (unsigned i = 0; i < ce->children.length; ++i) {
+        GumboNode *cn = (GumboNode *)ce->children.data[i];
+        if (cn->type == GUMBO_NODE_ELEMENT)
+            return false;
+        if (cn->type == GUMBO_NODE_TEXT) {
+            for (const char *p = cn->v.text.text; *p; ++p)
+                if (!std::isspace((unsigned char)*p))
+                    return false;
+        }
+    }
+    return true;
+}
+
+/* True if `el`'s HTML `width=` attribute explicitly asks for shrink-to-
+ * content sizing: a fixed pixel value, or the literal "auto".  This is
+ * the author's own signal that the table isn't meant to stretch — e.g.
+ * a `width="342px"` avatar wrapper or a `width="auto"` notification
+ * "pill" — as opposed to a table with no width attribute at all, which
+ * usually holds flowing paragraph text that needs the row's full width
+ * to wrap (HtmlText reports 0 preferred width and relies on being
+ * *stretched*, so shrink-wrapping it via AlignItems::Center would
+ * collapse it to nothing). */
+bool has_explicit_shrink_width(GumboElement *el) {
+    const char *w = attr(el, "width");
+    if (!w || !w[0])
+        return false;
+    std::string v = trim_lower(w);
+    return v.back() != '%' && v != "100";  // bare "100" means 100%, not 100px
+}
+
+/* True if any <tr> belonging to THIS table (not a nested <table>, which
+ * has its own independent layout context — e.g. the pill's tiny inner
+ * icon+"1" table) has more than one real cell: a column grid (a photo
+ * row, a caption's own layout table) whose cells are sized by
+ * proportional flex-grow at *layout* time, not by summing children
+ * bottom-up.  Their reported preferred size is near zero (grow-based
+ * cells carry flex-basis 0), so shrink-wrapping the table via
+ * AlignItems::Center — fine for a single-column table like an avatar or
+ * a notification "pill" — collapses a grid to a sliver. */
+bool table_has_multicell_row(GumboNode *node, bool is_root = true) {
+    if (node->type != GUMBO_NODE_ELEMENT)
+        return false;
+    GumboElement *el = &node->v.element;
+    if (!is_root && el->tag == GUMBO_TAG_TABLE)
+        return false;
+    if (el->tag == GUMBO_TAG_TR && count_row_cells(el) > 1)
+        return true;
+    for (unsigned i = 0; i < el->children.length; ++i)
+        if (table_has_multicell_row((GumboNode *)el->children.data[i], false))
+            return true;
+    return false;
 }
 
 bool container_is_column(const Widget *w) {
@@ -1719,8 +1818,15 @@ void build_children(Widget *container, GumboVector *kids, Style st,
                 bool cap = box.max_width_px > 80.0f && box.max_width_px < 4000.0f;
                 /* Email convention: max-width:600px (even with width:100%)
                  * is a centered column, not a shrink-wrapped align=center
-                 * cell — that path collapsed Amazon's 33/67 rows. */
-                if (cap) {
+                 * cell — that path collapsed Amazon's 33/67 rows.
+                 * `margin:auto` plus an explicit non-% width= is the
+                 * other common centering idiom (a lone avatar, a
+                 * notification "pill") — shrink-wrap and center it too,
+                 * unless it's actually a column grid in disguise. */
+                bool center_shrink = !cap && box.center &&
+                                     has_explicit_shrink_width(el) &&
+                                     !table_has_multicell_row(node);
+                if (cap || center_shrink) {
                     HtmlBlock *outer = make_block(container, FlexDirection::Column,
                                                   0, AlignItems::Center);
                     target = outer;
@@ -1802,6 +1908,8 @@ void build_children(Widget *container, GumboVector *kids, Style st,
                 if (ct != GUMBO_TAG_TD && ct != GUMBO_TAG_TH) continue;
                 if (cell_px_width(&cn->v.element, B) >= 0)
                     continue;
+                if (cell_is_empty(&cn->v.element))
+                    continue;
                 const char *w = attr(&cn->v.element, "width");
                 std::string ws = w ? trim_lower(w) : "";
                 if (!ws.empty() && ws.back() == '%' && strtof(ws.c_str(), nullptr) > 0.f
@@ -1836,14 +1944,22 @@ void build_children(Widget *container, GumboVector *kids, Style st,
                 int px = cell_px_width(ce, B);
                 float grow = auto_grow;
                 float shrink = 1.0f;
-                int basis = 0;
+                /* -1 ("auto"): FlexLayout::preferred_size() falls back to
+                 * the cell's own clamped preferred size when basis < 0,
+                 * vs. reporting a literal 0px — needed so a real (grow-
+                 * distributed) content cell still contributes its true
+                 * width to the row/table's bottom-up preferred size,
+                 * e.g. when an ancestor shrink-wraps via
+                 * AlignItems::Center (see GUMBO_TAG_TABLE's
+                 * center_shrink). */
+                int basis = -1;
                 if (px > 0) {
                     grow = 0.0f;
                     shrink = 0.0f;
                     basis = px;
                     cell->set_min_width(px);
                     cell->set_max_width(px);
-                } else if (px == 0) {
+                } else if (px == 0 || cell_is_empty(ce)) {
                     grow = 0.0f;
                     shrink = 0.0f;
                     basis = 0;
@@ -2010,22 +2126,33 @@ int HtmlDocument::bind_loaded_images() {
         if (auto *ht = dynamic_cast<HtmlText *>(w)) {
             bool dirty = false;
             for (auto &p : ht->m_doc.paragraphs) {
-                if (!p->isImage || p->image > 0 || p->image_src.empty())
-                    continue;
-                HtmlImageInfo ri = image_resolver(p->image_src);
-                if (ri.id <= 0)
-                    continue;
-                p->image = ri.id;
-                /* Keep the HTML/CSS layout box (max-width:148px etc.).
-                 * Only correct aspect from the decoded bitmap. */
-                if (p->image_w > 0.0f && ri.w > 0.0f && ri.h > 0.0f)
-                    p->image_h = p->image_w * (ri.h / ri.w);
-                else if (ri.w > 0.0f && ri.h > 0.0f) {
-                    p->image_w = ri.w;
-                    p->image_h = ri.h;
+                if (p->isImage && p->image <= 0 && !p->image_src.empty()) {
+                    HtmlImageInfo ri = image_resolver(p->image_src);
+                    if (ri.id > 0) {
+                        p->image = ri.id;
+                        /* Keep the HTML/CSS layout box (max-width:148px
+                         * etc.). Only correct aspect from the decoded
+                         * bitmap. */
+                        if (p->image_w > 0.0f && ri.w > 0.0f && ri.h > 0.0f)
+                            p->image_h = p->image_w * (ri.h / ri.w);
+                        else if (ri.w > 0.0f && ri.h > 0.0f) {
+                            p->image_w = ri.w;
+                            p->image_h = ri.h;
+                        }
+                        dirty = true;
+                        ++n;
+                    }
                 }
-                dirty = true;
-                ++n;
+                for (Text &run : p->runs) {
+                    if (run.image > 0 || run.image_src.empty())
+                        continue;
+                    HtmlImageInfo ri = image_resolver(run.image_src);
+                    if (ri.id <= 0)
+                        continue;
+                    run.image = ri.id;
+                    dirty = true;
+                    ++n;
+                }
             }
             if (dirty) {
                 ht->m_doc.markLayoutDirty();

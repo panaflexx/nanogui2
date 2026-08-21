@@ -241,6 +241,45 @@ bool paragraph_is_code(const Paragraph& p) {
 
 } // namespace
 
+float Document::measure_natural_width(NVGcontext* ctx) {
+    float maxw = 0.0f;
+    for (const auto& para : paragraphs) {
+        if (para->isImage) {
+            maxw = std::max(maxw, para->image_w);
+            continue;
+        }
+        float lineW = 0.0f;
+        bool firstWord = true;
+        for (const Text& run : para->runs) {
+            if (run.isImageRun) {
+                lineW += run.image_w;
+                firstWord = false;
+                continue;
+            }
+            const float sp = run.style.monospace ? 0.0f : spaceWidthFor(ctx, run.style);
+            bool firstPiece = true;
+            forEachLine(run.content, [&](std::string_view piece) {
+                if (!firstPiece) {
+                    maxw = std::max(maxw, lineW);
+                    lineW = 0.0f;
+                    firstWord = true;
+                }
+                firstPiece = false;
+                forEachWord(piece, [&](std::string_view word) {
+                    float adv, lb, vr;
+                    measureWord(ctx, run.style, word.data(),
+                                word.data() + word.size(), adv, lb, vr);
+                    if (!firstWord) lineW += sp;
+                    firstWord = false;
+                    lineW += adv;
+                });
+            });
+        }
+        maxw = std::max(maxw, lineW);
+    }
+    return maxw;
+}
+
 /* Draw an NVG image into a rect (used by image block paragraphs).
  * id <= 0 is a loading placeholder so layout can reserve space before
  * the texture arrives. */
@@ -435,6 +474,16 @@ void Document::draw(NVGcontext* ctx, float originX, float originY) {
         }
 
         for (const WordLayout& wl : rl.words) {
+            /* wl.image may legitimately be 0 (not loaded yet) — the
+             * "\x01IMAGE" sentinel text (set at capture time, see below)
+             * is what marks this word as an image slot, mirroring the
+             * whole-line block-image sentinel a few lines up. */
+            if (wl.text == "\x01IMAGE") {
+                draw_image_block(ctx, wl.image, wl.x,
+                                 rl.baseline - wl.style.fontSize,
+                                 wl.advance, wl.style.fontSize);
+                continue;
+            }
             const Style& st = wl.style;
             applyFont(ctx, st);
             float ty = rl.baseline;
@@ -598,13 +647,26 @@ float Document::drawParagraph(NVGcontext* ctx, const Paragraph& para,
         current.words.push_back(std::move(w));
         current.advanceWidth += advance;
 
-        const VMetrics m = metricsFor(ctx, run.style);
-        current.ascent  = std::max(current.ascent, m.ascender);
-        current.descent = std::max(current.descent, -m.descender);
+        if (run.isImageRun) {
+            /* Bottom-align to baseline (CSS default vertical-align for
+             * inline <img>): the image needs `image_h` of ascent and no
+             * descent, not the surrounding text's font metrics. */
+            current.ascent = std::max(current.ascent, run.image_h);
+        } else {
+            const VMetrics m = metricsFor(ctx, run.style);
+            current.ascent  = std::max(current.ascent, m.ascender);
+            current.descent = std::max(current.descent, -m.descender);
+        }
     };
 
     size_t run_byte_base = 0;
     for (const Text& run : para.runs) {
+        if (run.isImageRun) {
+            pushWord(run, std::string_view(), run.image_w, 0.0f, run.image_w,
+                     run_byte_base, run_byte_base);
+            run_byte_base += run.content.size();
+            continue;
+        }
         bool firstPiece = true;
         forEachLine(run.content, [&](std::string_view piece) {
             if (!firstPiece) flushLine(true);
@@ -846,6 +908,25 @@ float Document::drawParagraph(NVGcontext* ctx, const Paragraph& para,
             if (justify && wi + 1 == line.words.size())
                 wx = rightEdge - word.visualRight;
 
+            if (word.run->isImageRun) {
+                const float ih = word.run->image_h;
+                if (capture_layout) {
+                    WordLayout wl;
+                    wl.byte_start     = word.byte_start;
+                    wl.byte_end       = word.byte_end;
+                    wl.x              = wx;
+                    wl.advance        = word.advance;
+                    wl.image          = word.run->image;
+                    wl.style          = st;
+                    wl.style.fontSize = ih; // piggy-back height, like the
+                                            // block-image/rule sentinels
+                    wl.text           = "\x01IMAGE";
+                    rich_line.words.push_back(std::move(wl));
+                }
+                if (!layout_only)
+                    draw_image_block(ctx, word.run->image, wx, baseline - ih,
+                                     word.advance, ih);
+            } else {
             // Capture word position + draw data for cheap re-paint
             if (capture_layout) {
                 WordLayout wl;
@@ -902,6 +983,7 @@ float Document::drawParagraph(NVGcontext* ctx, const Paragraph& para,
                         word.visualRight - word.leftBearing,
                         metricsFor(ctx, st).lineh);
                 nvgStroke(ctx);
+            }
             }
 
             if (!(justify && wi + 1 == line.words.size())) {
