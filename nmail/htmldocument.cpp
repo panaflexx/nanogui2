@@ -87,12 +87,37 @@ NVGcolor parse_html_color(const char *s, bool &ok) {
         std::string l;
         for (const char *p = s; *p; ++p)
             l += (char)std::tolower((unsigned char)*p);
-        /* "rgb(12, 34, 56)" */
+        /* "rgb(12, 34, 56)" / "rgba(12, 34, 56, 0.5)" — whitespace after
+         * each comma is optional and inconsistent in the wild, so walk
+         * the number list instead of matching a fixed sscanf pattern
+         * (which silently dropped every rgba() as "unknown": "rgba"
+         * matches the old rfind("rgb",0)==0 check, but its 3-argument
+         * sscanf pattern can never match the trailing alpha). */
         if (l.rfind("rgb", 0) == 0) {
-            unsigned r = 0, g = 0, b = 0;
-            if (std::sscanf(l.c_str(), "rgb(%u,%u,%u)", &r, &g, &b) == 3 ||
-                std::sscanf(l.c_str(), "rgb(%u, %u, %u)", &r, &g, &b) == 3)
-                return nvgRGB(r, g, b);
+            bool has_alpha = l.rfind("rgba", 0) == 0;
+            size_t p = l.find('(');
+            if (p != std::string::npos) {
+                float comp[4] = { 0, 0, 0, 255 };
+                int n = 0;
+                size_t i = p + 1;
+                while (i < l.size() && n < 4) {
+                    while (i < l.size() && (l[i] == ' ' || l[i] == ','))
+                        ++i;
+                    char *end = nullptr;
+                    float v = std::strtof(l.c_str() + i, &end);
+                    if (end == l.c_str() + i)
+                        break;
+                    comp[n++] = v;
+                    i = end - l.c_str();
+                }
+                if (n >= 3) {
+                    float a = has_alpha && n >= 4
+                                  ? std::clamp(comp[3], 0.0f, 1.0f) * 255.0f
+                                  : 255.0f;
+                    return nvgRGBA((unsigned char)comp[0], (unsigned char)comp[1],
+                                   (unsigned char)comp[2], (unsigned char)a);
+                }
+            }
         }
         if (l == "black")  return nvgRGB(0, 0, 0);
         if (l == "white")  return nvgRGB(255, 255, 255);
@@ -116,6 +141,14 @@ std::string trim_lower(const std::string &in) {
     return out;
 }
 
+/* Whitespace-trim without lower-casing — image URLs are case-sensitive,
+ * unlike every other CSS value apply_style_attr() deals with. */
+std::string trim(const std::string &in) {
+    size_t b = in.find_first_not_of(" \t\r\n");
+    size_t e = in.find_last_not_of(" \t\r\n");
+    return (b == std::string::npos) ? "" : in.substr(b, e - b + 1);
+}
+
 enum class ApplyMode { All, NonImportant, Important };
 
 /* Block/replaced-element metrics from CSS + style="" (not typography). */
@@ -126,8 +159,17 @@ struct BoxProps {
     float max_height_px = 0.0f;
     float height_px     = 0.0f;
     float radius_px     = 0.0f;
-    bool  inline_block  = false;
+    /* display:table-cell (CSS-table email layout, e.g. Unlayer's .u-col):
+     * siblings sharing a table-cell parent are side-by-side columns even
+     * though their width is often px, not the % that MJML uses.  Also
+     * marks max_width_px as a per-cell fallback bound rather than a
+     * "center this as a column" hint (see build_children). */
+    bool  table_cell    = false;
     bool  center        = false;  /* margin: auto / align=center wrapper */
+    /* CSS `background-image:url(...)` on a plain <div> — common in
+     * marketing/notification email (Meta digests use it for every real
+     * photo, never <img src>).  Resolved and painted like an <img>. */
+    std::string bg_image_url;
 };
 
 /* font-size value: Npx / Npt / Nem / N% (em and % are relative to the
@@ -219,6 +261,24 @@ void apply_style_attr(const char *css, Style &st,
             bool ok = false;
             NVGcolor c = parse_html_color(col.c_str(), ok);
             if (ok) st.bgColor = c;
+        } else if (key == "background-image" && box) {
+            /* val is lower-cased; re-slice the original declaration so the
+             * URL keeps its case (image hosts are case-sensitive). */
+            std::string raw = trim(decl.substr(colon + 1));
+            size_t up = raw.find("url(");
+            if (up != std::string::npos) {
+                size_t ustart = up + 4;
+                size_t uend = raw.find(')', ustart);
+                if (uend != std::string::npos) {
+                    std::string url = trim(raw.substr(ustart, uend - ustart));
+                    if (!url.empty() && (url.front() == '\'' || url.front() == '"'))
+                        url.erase(url.begin());
+                    if (!url.empty() && (url.back() == '\'' || url.back() == '"'))
+                        url.pop_back();
+                    if (!url.empty())
+                        box->bg_image_url = url;
+                }
+            }
         } else if (key == "font-size") {
             apply_font_size(val, st.fontSize);
         } else if (key == "font-weight") {
@@ -248,8 +308,8 @@ void apply_style_attr(const char *css, Style &st,
                 st.displayNone = true;
             else
                 st.displayNone = false;
-            if (box && (val == "inline-block" || val == "inline"))
-                box->inline_block = true;
+            if (box && val == "table-cell")
+                box->table_cell = true;
         } else if (key == "mso-hide") {
             if (val == "all")
                 st.displayNone = true;
@@ -494,6 +554,13 @@ class HtmlBlock : public Widget {
 public:
     NVGcolor m_bg = NVGcolor{ { { 0.f, 0.f, 0.f, 0.f } } };
     float    m_radius = 0.0f;
+    /* CSS background-image (see BoxProps::bg_image_url).  m_bg_image is
+     * an nvg image handle, 0 until resolved; m_bg_image_src lets
+     * HtmlDocument::bind_loaded_images() re-resolve it once bytes land. */
+    int         m_bg_image   = 0;
+    float       m_bg_image_w = 0.0f;
+    float       m_bg_image_h = 0.0f;
+    std::string m_bg_image_src;
 
     explicit HtmlBlock(Widget *parent) : Widget(parent) { set_live(true); }
 
@@ -522,19 +589,40 @@ public:
             if (nvgStateDepth(ctx) <= depth0)
                 return;
         }
-        if (m_bg.a > 0.0f) {
+        if (m_bg.a > 0.0f || m_bg_image > 0) {
             float x = (float)m_pos.x(), y = (float)m_pos.y();
             float w = (float)m_size.x(), h = (float)m_size.y();
             float rad = m_radius;
             if (rad > 0.5f)
                 rad = std::min(rad, std::min(w, h) * 0.5f);
-            nvgBeginPath(ctx);
-            if (rad > 0.5f)
-                nvgRoundedRect(ctx, x, y, w, h, rad);
-            else
-                nvgRect(ctx, x, y, w, h);
-            nvgFillColor(ctx, m_bg);
-            nvgFill(ctx);
+            if (m_bg.a > 0.0f) {
+                nvgBeginPath(ctx);
+                if (rad > 0.5f)
+                    nvgRoundedRect(ctx, x, y, w, h, rad);
+                else
+                    nvgRect(ctx, x, y, w, h);
+                nvgFillColor(ctx, m_bg);
+                nvgFill(ctx);
+            }
+            if (m_bg_image > 0 && w > 0.0f && h > 0.0f) {
+                /* CSS background-size:cover: uniform scale so the image
+                 * fills the box on both axes, centered and cropped. */
+                float iw = m_bg_image_w > 0.0f ? m_bg_image_w : w;
+                float ih = m_bg_image_h > 0.0f ? m_bg_image_h : h;
+                float scale = std::max(w / iw, h / ih);
+                float dw = iw * scale, dh = ih * scale;
+                float ox = x + (w - dw) * 0.5f;
+                float oy = y + (h - dh) * 0.5f;
+                NVGpaint paint = nvgImagePattern(ctx, ox, oy, dw, dh, 0.0f,
+                                                  m_bg_image, 1.0f);
+                nvgBeginPath(ctx);
+                if (rad > 0.5f)
+                    nvgRoundedRect(ctx, x, y, w, h, rad);
+                else
+                    nvgRect(ctx, x, y, w, h);
+                nvgFillPaint(ctx, paint);
+                nvgFill(ctx);
+            }
         }
         if (shifted)
             nvgTranslate(ctx, (float)m_pos.x(), (float)m_pos.y());
@@ -714,8 +802,14 @@ CssMedia parse_css_media(const std::string &q) {
         if (l.find("dark") != std::string::npos)  return CssMedia::Dark;
         if (l.find("light") != std::string::npos) return CssMedia::Light;
     }
-    /* Email pane is a desktop-width reader (~600px+), matching Firefox
-     * at the default window — skip phone-only max-width queries. */
+    /* Email pane is treated as a desktop-width reader, matching Firefox
+     * at a normal window size — skip phone-only breakpoints.  Real
+     * templates commonly use 600/620/640/650 as their "mobile" cutoff
+     * (not just 480), so the assumed viewport needs headroom past 600
+     * or their max-width query stays applied (forcing single-column
+     * mobile layout) while the matching min-width query — which carries
+     * the real desktop column widths — gets skipped instead. */
+    constexpr float kAssumedViewportPx = 660.0f;
     auto media_px = [&](const char *key) -> float {
         size_t p = l.find(key);
         if (p == std::string::npos) return -1.0f;
@@ -727,10 +821,10 @@ CssMedia parse_css_media(const std::string &q) {
         return (end == l.c_str() + p) ? -1.0f : n;
     };
     float maxw = media_px("max-width");
-    if (maxw > 0.0f && maxw < 600.0f)
+    if (maxw > 0.0f && maxw < kAssumedViewportPx)
         return CssMedia::Skip;
     float minw = media_px("min-width");
-    if (minw > 600.0f)
+    if (minw > kAssumedViewportPx)
         return CssMedia::Skip;
     return CssMedia::Any;
 }
@@ -926,8 +1020,16 @@ void apply_cascade(GumboElement *el, Style &st, TextAlignment &align,
     }
 }
 
-/* MJML `.mj-column-per-33` (and CSS width:N% < 100) — sibling columns
- * sit in one row, like Firefox at desktop width. */
+/* Column weight for grouping consecutive siblings into one flex row, or
+ * 0 if `el` isn't a column at all:
+ *  - MJML/CSS `width:N%` with N<100 — weight is the percentage.
+ *  - `.mj-column-per-NN` class — weight is NN.
+ *  - `display:table-cell` (CSS-table email layout, e.g. Unlayer's
+ *    `.u-col-*`) — weight is the cascaded pixel width, which is usually
+ *    set !important by a `@media (min-width:...)` block and can exceed
+ *    99, unlike the percentage cases above.  A missing width still
+ *    counts as a column (equal share) since the display alone is a
+ *    deliberate side-by-side signal. */
 float flex_column_pct(GumboElement *el, const Builder &B) {
     BoxProps box;
     Style dummy;
@@ -935,6 +1037,8 @@ float flex_column_pct(GumboElement *el, const Builder &B) {
     apply_cascade(el, dummy, a, B, &box);
     if (box.width_pct > 0.0f && box.width_pct < 99.0f)
         return box.width_pct;
+    if (box.table_cell)
+        return box.width_px > 0.0f ? box.width_px : 1.0f;
     const char *cls = attr(el, "class");
     if (cls) {
         std::string s = trim_lower(cls);
@@ -948,8 +1052,67 @@ float flex_column_pct(GumboElement *el, const Builder &B) {
     return 0.0f;
 }
 
+/* Marketing emails commonly ship each image twice: an Outlook-only copy
+ * inside a plain "<!--[if mso]>...<![endif]-->" comment (invisible to
+ * every real HTML parser, since a standard comment ends at the first
+ * "-->") carrying real width/height, paired with a "downlevel-revealed"
+ * "<!--[if !mso]><!-->...<!--<![endif]-->" wrapper around the <img> that
+ * actually renders — whose own width/height rely on `height:auto` plus
+ * the browser fetching the image to learn its natural size.  Mining the
+ * mso-only copy's attributes as a size hint lets layout reserve the
+ * right space before (or without) fetching the real bytes. */
+bool mso_comment_img_size(const std::string &comment, float &w, float &h) {
+    if (comment.find("mso") == std::string::npos)
+        return false;
+    size_t img = comment.find("<img");
+    if (img == std::string::npos)
+        return false;
+    size_t tag_end = comment.find('>', img);
+    std::string tag = comment.substr(img, (tag_end == std::string::npos
+                                            ? comment.size() : tag_end) - img);
+    auto find_num = [&](const char *key) -> float {
+        size_t p = tag.find(key);
+        if (p == std::string::npos) return 0.0f;
+        p += std::strlen(key);
+        while (p < tag.size() && (tag[p] == '"' || tag[p] == '\''))
+            ++p;
+        return strtof(tag.c_str() + p, nullptr);
+    };
+    w = find_num("width=");
+    h = find_num("height=");
+    return w > 0.0f && h > 0.0f;
+}
+
+/* Scan the (few) siblings immediately before `node` for the mso-only
+ * comment described above.  The downlevel-reveal trick puts an empty
+ * "[if !mso]><!" comment directly before the real <img>, so the actual
+ * "[if mso]" comment sits one step further back. */
+bool mso_size_hint(GumboNode *node, float &w, float &h) {
+    GumboNode *parent = node->parent;
+    if (!parent || parent->type != GUMBO_NODE_ELEMENT)
+        return false;
+    GumboVector *kids = &parent->v.element.children;
+    size_t idx = node->index_within_parent;
+    for (size_t back = 1; back <= 3 && back <= idx; ++back) {
+        GumboNode *sib = (GumboNode *)kids->data[idx - back];
+        if (sib->type == GUMBO_NODE_WHITESPACE)
+            continue;
+        if (sib->type != GUMBO_NODE_COMMENT)
+            break;
+        if (mso_comment_img_size(sib->v.text.text, w, h))
+            return true;
+    }
+    return false;
+}
+
+/* hint_w/hint_h: intrinsic size mined from a paired Outlook-only
+ * "[if mso]" comment (see mso_comment_img_size) when the real <img> only
+ * gives a width and leans on `height:auto` + the browser's own fetch to
+ * learn the rest.  Used only as a last resort, below the real attributes
+ * and any loaded pixels. */
 void size_html_image(GumboElement *el, const Builder &B,
-                     const HtmlImageInfo &ri, float &pw, float &ph) {
+                     const HtmlImageInfo &ri, float &pw, float &ph,
+                     float hint_w = 0.0f, float hint_h = 0.0f) {
     BoxProps box;
     Style dummy;
     TextAlignment a = TextAlignment::Left;
@@ -967,6 +1130,8 @@ void size_html_image(GumboElement *el, const Builder &B,
         aspect = ri.h / ri.w;
     else if (aw > 0.0f && ah > 0.0f)
         aspect = ah / aw;
+    else if (hint_w > 0.0f && hint_h > 0.0f)
+        aspect = hint_h / hint_w;
 
     float maxw = box.max_width_px;
     float maxh = box.max_height_px;
@@ -987,6 +1152,13 @@ void size_html_image(GumboElement *el, const Builder &B,
         if (ri.w > 0.0f && ri.h > 0.0f) {
             aw = ri.w;
             ah = ri.h;
+            if (aw > 600.0f) {
+                ah *= 600.0f / aw;
+                aw = 600.0f;
+            }
+        } else if (hint_w > 0.0f && hint_h > 0.0f) {
+            aw = hint_w;
+            ah = hint_h;
             if (aw > 600.0f) {
                 ah *= 600.0f / aw;
                 aw = 600.0f;
@@ -1050,6 +1222,26 @@ bool is_skipped_tag(GumboTag t) {
     }
 }
 
+/* `<a>` is normally inline (a run of styled/underlined text handled by
+ * walk_inline), but HTML5 also allows it to wrap block content — email
+ * templates use exactly that to make a whole photo tile clickable
+ * (`<a href=..><div style="width:...;background-image:..."></div></a>`).
+ * walk_inline has no Widget to hang a box on, so a div nested that way
+ * would silently lose its size/background and get flattened into the
+ * surrounding text flow (only its own inline children survive).  Detect
+ * that shape so build_children can route it like a <div> instead. */
+bool element_has_block_child(GumboElement *el) {
+    for (unsigned i = 0; i < el->children.length; ++i) {
+        GumboNode *cn = (GumboNode *)el->children.data[i];
+        if (cn->type != GUMBO_NODE_ELEMENT)
+            continue;
+        GumboTag ct = cn->v.element.tag;
+        if (is_container_tag(ct) && !is_skipped_tag(ct))
+            return true;
+    }
+    return false;
+}
+
 void walk_inline(GumboNode *node, Style st, Flow &F, Builder &B,
                  int list_depth) {
     if (node->type == GUMBO_NODE_TEXT || node->type == GUMBO_NODE_CDATA) {
@@ -1095,8 +1287,10 @@ void walk_inline(GumboNode *node, Style st, Flow &F, Builder &B,
             if (B.view->image_resolver)
                 ri = B.view->image_resolver(src);
 
+            float hint_w = 0.0f, hint_h = 0.0f;
+            mso_size_hint(node, hint_w, hint_h);
             float pw = 0.0f, ph = 0.0f;
-            size_html_image(el, B, ri, pw, ph);
+            size_html_image(el, B, ri, pw, ph, hint_w, hint_h);
 
             F.brk();
             Paragraph *ip = F.doc.addParagraph();
@@ -1359,6 +1553,21 @@ void decorate_block(HtmlBlock *b, GumboElement *el, const Builder &B) {
         if (auto *fl = dynamic_cast<FlexLayout *>(b->layout()))
             fl->set_justify_content(JustifyContent::Center);
     }
+    if (!box.bg_image_url.empty()) {
+        /* Unlike an inline <img>, the box's own size comes from CSS
+         * width/height (already applied above) — the image is fit into
+         * it via draw()'s cover-scale, not the other way around. */
+        b->m_bg_image_src = box.bg_image_url;
+        if (box.bg_image_url.rfind("http://", 0) == 0 ||
+            box.bg_image_url.rfind("https://", 0) == 0)
+            B.view->note_remote_image();
+        if (B.view->image_resolver) {
+            HtmlImageInfo ri = B.view->image_resolver(box.bg_image_url);
+            b->m_bg_image   = ri.id;
+            b->m_bg_image_w = ri.w;
+            b->m_bg_image_h = ri.h;
+        }
+    }
 }
 
 /* Only introduce a widget when the element actually paints a background.
@@ -1429,8 +1638,9 @@ void build_children(Widget *container, GumboVector *kids, Style st,
         }
         GumboElement *el = &node->v.element;
         GumboTag tag = el->tag;
+        bool block_anchor = tag == GUMBO_TAG_A && element_has_block_child(el);
 
-        if (!is_container_tag(tag) || is_skipped_tag(tag)) {
+        if ((!is_container_tag(tag) || is_skipped_tag(tag)) && !block_anchor) {
             walk_inline(node, st, F, B, list_depth);
             continue;
         }
@@ -1448,7 +1658,7 @@ void build_children(Widget *container, GumboVector *kids, Style st,
             tag != GUMBO_TAG_TH && tag != GUMBO_TAG_HTML &&
             tag != GUMBO_TAG_BODY) {
             float pct0 = flex_column_pct(el, B);
-            if (pct0 > 0.0f && pct0 < 99.0f) {
+            if (pct0 > 0.0f) {
                 std::vector<GumboElement *> cols;
                 cols.push_back(el);
                 unsigned k = i + 1;
@@ -1469,7 +1679,7 @@ void build_children(Widget *container, GumboVector *kids, Style st,
                     if (!is_container_tag(e2->tag))
                         break;
                     float p2 = flex_column_pct(e2, B);
-                    if (p2 <= 0.0f || p2 >= 99.0f)
+                    if (p2 <= 0.0f)
                         break;
                     cols.push_back(e2);
                     ++k;
@@ -1709,10 +1919,16 @@ void build_children(Widget *container, GumboVector *kids, Style st,
             NVGcolor bg = block_background(el, B);
             BoxProps box;
             element_box(el, B, box);
-            int cap = (box.max_width_px > 80.0f && box.max_width_px < 4000.0f)
+            /* A lone (ungrouped) table-cell's max-width is a fallback
+             * bound, not a "center me as a column" hint — see BoxProps.
+             * table_cell.  Using it here shrank single-column email rows
+             * (e.g. a hero image row) down to their cell's mobile bound. */
+            int cap = (!box.table_cell && box.max_width_px > 80.0f &&
+                       box.max_width_px < 4000.0f)
                           ? (int)box.max_width_px : 0;
             if (bg.a <= 0.0f && !align_changed && cap <= 0 &&
-                box.radius_px <= 0.0f && !box.center) {
+                box.radius_px <= 0.0f && !box.center &&
+                box.bg_image_url.empty()) {
                 Style cst = st;
                 TextAlignment ta = child_align;
                 apply_cascade(el, cst, ta, B);
@@ -1814,6 +2030,16 @@ int HtmlDocument::bind_loaded_images() {
             if (dirty) {
                 ht->m_doc.markLayoutDirty();
                 ht->m_measured_w = -1;
+            }
+        } else if (auto *hb = dynamic_cast<HtmlBlock *>(w)) {
+            if (hb->m_bg_image <= 0 && !hb->m_bg_image_src.empty()) {
+                HtmlImageInfo ri = image_resolver(hb->m_bg_image_src);
+                if (ri.id > 0) {
+                    hb->m_bg_image   = ri.id;
+                    hb->m_bg_image_w = ri.w;
+                    hb->m_bg_image_h = ri.h;
+                    ++n;
+                }
             }
         }
         for (Widget *c : w->children())
