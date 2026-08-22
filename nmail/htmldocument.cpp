@@ -22,6 +22,8 @@
 #include <cstring>
 #include <functional>
 #include <typeinfo>
+#include <unordered_map>
+#include <unordered_set>
 #include <vector>
 
 using namespace nanogui;
@@ -232,12 +234,14 @@ struct BoxProps {
     std::string bg_image_url;
 };
 
+static inline bool css_finite(float v) { return std::isfinite(v) && std::fabs(v) < 1e6f; }
+
 static void apply_line_height(const std::string &v, float &lh, float fontSize) {
     std::string t = trim_lower(v);
     if (t.empty() || t == "normal") { lh = 0.f; return; }
     char *end = nullptr;
     float n = std::strtof(t.c_str(), &end);
-    if (end == t.c_str()) return;
+    if (end == t.c_str() || !css_finite(n)) return;
     std::string unit = trim_lower(end);
     if (unit.empty()) { // unitless — factor of font-size
         if (n > 0.05f && n < 5.f) lh = fontSize * n;
@@ -258,7 +262,7 @@ static void apply_line_height(const std::string &v, float &lh, float fontSize) {
 void apply_font_size(const std::string &v, float &size) {
     char *end = nullptr;
     float n = std::strtof(v.c_str(), &end);
-    if (end == v.c_str() || n <= 0.0f)
+    if (end == v.c_str() || n <= 0.0f || !css_finite(n))
         return;
     std::string unit = trim_lower(end);
     if (unit == "pt")      size = n * (96.0f / 72.0f);
@@ -276,8 +280,9 @@ bool parse_css_len(const std::string &val, float &px, float &pct) {
         return false;
     char *end = nullptr;
     float n = std::strtof(val.c_str(), &end);
-    if (end == val.c_str())
+    if (end == val.c_str() || !css_finite(n))
         return false;
+    if (std::fabs(n) > 1e6f) return false;
     std::string unit = trim_lower(end);
     if (unit == "%") {
         pct = n;
@@ -488,15 +493,15 @@ void apply_style_attr(const char *css, Style &st,
                     st.borderWidth = 0.0f;
                 continue;
             }
-            std::string rest = val;
-            while (!rest.empty()) {
-                while (!rest.empty() && std::isspace((unsigned char)rest[0]))
-                    rest.erase(0, 1);
-                if (rest.empty()) break;
-                size_t sp = rest.find_first_of(" \t");
-                std::string tok = (sp == std::string::npos) ? rest
-                                  : rest.substr(0, sp);
-                rest = (sp == std::string::npos) ? "" : rest.substr(sp);
+            size_t rp = 0;
+            while (rp < val.size()) {
+                while (rp < val.size() && std::isspace((unsigned char)val[rp]))
+                    ++rp;
+                if (rp >= val.size()) break;
+                size_t sp = val.find_first_of(" \t", rp);
+                std::string tok = val.substr(rp, sp == std::string::npos
+                                                  ? std::string::npos : sp - rp);
+                rp = (sp == std::string::npos) ? val.size() : sp + 1;
                 if (tok == "solid" || tok == "dashed" || tok == "dotted" ||
                     tok == "double" || tok == "groove" || tok == "ridge")
                     continue;
@@ -836,6 +841,15 @@ struct CssRule {
 
 struct Stylesheet {
     std::vector<CssRule> rules;
+    // Rule bucket index — built once per set_html to avoid O(rules) scan per element.
+    mutable std::vector<const CssRule*> universal;
+    mutable std::unordered_map<std::string, std::vector<const CssRule*>> by_id;
+    mutable std::unordered_map<std::string, std::vector<const CssRule*>> by_class;
+    mutable std::unordered_map<std::string, std::vector<const CssRule*>> by_tag;
+    mutable std::unordered_map<std::string, std::vector<const CssRule*>> by_ancestor_class;
+    mutable std::unordered_map<std::string, std::vector<const CssRule*>> by_ancestor_tag;
+    mutable bool indexed = false;
+    void build_index() const;
 };
 
 struct Builder {
@@ -1106,11 +1120,36 @@ void parse_css_rules(const std::string &s, size_t &i, size_t end,
     }
 }
 
+void Stylesheet::build_index() const {
+    if (indexed) return;
+    indexed = true;
+    universal.clear(); by_id.clear(); by_class.clear();
+    by_tag.clear(); by_ancestor_class.clear(); by_ancestor_tag.clear();
+    for (const auto &r : rules) {
+        bool placed = false;
+        if (!r.sel.id.empty()) { by_id[r.sel.id].push_back(&r); placed = true; }
+        for (auto &cl : r.sel.classes) { by_class[cl].push_back(&r); placed = true; }
+        if (!r.sel.tag.empty()) { by_tag[r.sel.tag].push_back(&r); placed = true; }
+        // If no primary key, it is universal or ancestor-only — bucket under ancestor for filtering
+        if (!placed) {
+            if (!r.sel.ancestor_class.empty()) by_ancestor_class[r.sel.ancestor_class].push_back(&r);
+            else if (!r.sel.ancestor_tag.empty()) by_ancestor_tag[r.sel.ancestor_tag].push_back(&r);
+            else universal.push_back(&r);
+        } else {
+            // Rules with a primary key plus an ancestor selector also need ancestor index
+            if (!r.sel.ancestor_class.empty()) by_ancestor_class[r.sel.ancestor_class].push_back(&r);
+            if (!r.sel.ancestor_tag.empty()) by_ancestor_tag[r.sel.ancestor_tag].push_back(&r);
+        }
+    }
+}
+
 void parse_stylesheet(const std::string &css, Stylesheet &ss) {
     std::string s = strip_css_comments(css);
     size_t i = 0;
     int order = 0;
+    ss.indexed = false;
     parse_css_rules(s, i, s.size(), CssMedia::Any, ss, order);
+    ss.build_index();
 }
 
 std::string elem_tag_name(GumboElement *el) {
@@ -1135,18 +1174,51 @@ std::vector<std::string> elem_classes(GumboElement *el) {
     return out;
 }
 
-bool css_sel_matches(const CssSel &sel, GumboElement *el, GumboNode *node) {
-    if (!sel.tag.empty() && sel.tag != elem_tag_name(el))
-        return false;
-    if (!sel.id.empty()) {
-        const char *id = attr(el, "id");
-        if (!id || trim_lower(id) != sel.id)
-            return false;
+// Per-set_html memo: avoids 400k allocs (100 rules × 500 elements) when
+// css_sel_matches called from apply_cascade for every node.
+struct ElemMemo {
+    std::string tag; // lower
+    std::string id;  // lower, empty if none
+    std::vector<std::string> classes;
+    bool has = false;
+};
+static thread_local std::unordered_map<GumboElement*, ElemMemo> g_elem_memo;
+
+static const ElemMemo &elem_memo(GumboElement *el) {
+    auto it = g_elem_memo.find(el);
+    if (it != g_elem_memo.end()) return it->second;
+    ElemMemo m;
+    const char *n = gumbo_normalized_tagname(el->tag);
+    m.tag = (n && *n) ? trim_lower(n) : std::string{};
+    const char *cid = attr(el, "id");
+    m.id = cid ? trim_lower(cid) : std::string{};
+    const char *c = attr(el, "class");
+    if (c) {
+        std::string s = trim_lower(c);
+        size_t i2 = 0;
+        while (i2 < s.size()) {
+            while (i2 < s.size() && std::isspace((unsigned char)s[i2])) ++i2;
+            size_t j = i2;
+            while (j < s.size() && !std::isspace((unsigned char)s[j])) ++j;
+            if (j > i2) m.classes.push_back(s.substr(i2, j - i2));
+            i2 = j;
+        }
     }
+    m.has = true;
+    auto pr = g_elem_memo.emplace(el, std::move(m));
+    return pr.first->second;
+}
+static inline void elem_memo_clear() { g_elem_memo.clear(); }
+
+bool css_sel_matches(const CssSel &sel, GumboElement *el, GumboNode *node) {
+    const ElemMemo &m = elem_memo(el);
+    if (!sel.tag.empty() && sel.tag != m.tag)
+        return false;
+    if (!sel.id.empty() && sel.id != m.id)
+        return false;
     if (!sel.classes.empty()) {
-        auto have = elem_classes(el);
         for (const auto &need : sel.classes) {
-            if (std::find(have.begin(), have.end(), need) == have.end())
+            if (std::find(m.classes.begin(), m.classes.end(), need) == m.classes.end())
                 return false;
         }
     }
@@ -1156,15 +1228,15 @@ bool css_sel_matches(const CssSel &sel, GumboElement *el, GumboNode *node) {
             if (p->type != GUMBO_NODE_ELEMENT) continue;
             GumboElement *pe = &p->v.element;
             if (!sel.ancestor_class.empty()) {
-                auto have = elem_classes(pe);
-                if (std::find(have.begin(), have.end(), sel.ancestor_class)
-                        != have.end()) {
+                const ElemMemo &pm = elem_memo(pe);
+                if (std::find(pm.classes.begin(), pm.classes.end(), sel.ancestor_class)
+                        != pm.classes.end()) {
                     ok = true;
                     break;
                 }
             }
             if (!sel.ancestor_tag.empty() &&
-                elem_tag_name(pe) == sel.ancestor_tag) {
+                elem_memo(pe).tag == sel.ancestor_tag) {
                 ok = true;
                 break;
             }
@@ -1178,14 +1250,60 @@ bool css_sel_matches(const CssSel &sel, GumboElement *el, GumboNode *node) {
 void apply_css(GumboElement *el, Style &st, TextAlignment &align,
                const Stylesheet &sheet, bool dark, BoxProps *box,
                ApplyMode mode, GumboNode *node = nullptr) {
+    if (!sheet.indexed) sheet.build_index();
     struct Hit { int spec, order; const CssRule *r; };
     std::vector<Hit> hits;
-    for (const auto &r : sheet.rules) {
-        if (r.media == CssMedia::Skip) continue;
-        if (r.media == CssMedia::Dark && !dark) continue;
-        if (r.media == CssMedia::Light && dark) continue;
-        if (!css_sel_matches(r.sel, el, node)) continue;
-        hits.push_back({ r.sel.spec, r.order, &r });
+    hits.reserve(8);
+    const ElemMemo &mm = elem_memo(el);
+    // Fast-path: collect bucketed candidates and dedup via sort+unique (no hash).
+    std::vector<const CssRule*> cand;
+    cand.reserve(32);
+    auto add_bucket = [&](const std::vector<const CssRule*> &b){
+        cand.insert(cand.end(), b.begin(), b.end());
+    };
+    if (!mm.id.empty()) { auto it = sheet.by_id.find(mm.id); if (it!=sheet.by_id.end()) add_bucket(it->second); }
+    for (auto &cl : mm.classes) { auto it = sheet.by_class.find(cl); if (it!=sheet.by_class.end()) add_bucket(it->second); }
+    if (!mm.tag.empty()) { auto it = sheet.by_tag.find(mm.tag); if (it!=sheet.by_tag.end()) add_bucket(it->second); }
+    add_bucket(sheet.universal);
+    // by_ancestor_* duplicates are already in by_class/tag buckets above — no extra union.
+    if (!cand.empty()) {
+        std::sort(cand.begin(), cand.end());
+        cand.erase(std::unique(cand.begin(), cand.end()), cand.end());
+        for (const CssRule *rp : cand) {
+            const auto &r = *rp;
+            if (r.media == CssMedia::Skip) continue;
+            if (r.media == CssMedia::Dark && !dark) continue;
+            if (r.media == CssMedia::Light && dark) continue;
+            // For rules that were only ancestor-keyed (should be in universal already)
+            // css_sel_matches does the ancestor walk; low cost now that cand is small.
+            if (!css_sel_matches(r.sel, el, node)) continue;
+            hits.push_back({ r.sel.spec, r.order, &r });
+        }
+    }
+    // Rescue ancestor-only rules that were solely under by_ancestor_* and not yet seen.
+    // They are genuinely universal w.r.t the leaf (e.g. ".ancestor .leaf" where leaf has
+    // no id/class/tag match). Probe those buckets directly on miss.
+    if (hits.empty() && cand.size() < sheet.rules.size()) {
+        auto probe_ancestor = [&](const auto &map){
+            for (auto &kv : map) {
+                for (auto *rp : kv.second) {
+                    if (std::binary_search(cand.begin(), cand.end(), rp)) continue;
+                    const auto &r=*rp;
+                    if (r.media==CssMedia::Skip) continue;
+                    if (r.media==CssMedia::Dark && !dark) continue;
+                    if (r.media==CssMedia::Light && dark) continue;
+                    if (!css_sel_matches(r.sel, el, node)) continue;
+                    hits.push_back({r.sel.spec, r.order, &r});
+                    cand.push_back(rp); // mark seen for second map
+                }
+            }
+        };
+        // Sort cand first so binary_search above is valid; if we added, keep sorted invariant cheap
+        // (size small, just sort again before second probe)
+        if (!cand.empty()) std::sort(cand.begin(), cand.end());
+        probe_ancestor(sheet.by_ancestor_class);
+        if (!cand.empty()) std::sort(cand.begin(), cand.end());
+        probe_ancestor(sheet.by_ancestor_tag);
     }
     std::sort(hits.begin(), hits.end(), [](const Hit &a, const Hit &b) {
         if (a.spec != b.spec) return a.spec < b.spec;
@@ -1264,12 +1382,11 @@ float flex_column_pct(GumboElement *el, const Builder &B) {
             size_t q = s.find("u-col-");
             if (q != std::string::npos) {
                 std::string tail = s.substr(q + 6);
-                // take leading "25p33" / "20" chars
                 std::string num;
                 for (char c : tail) { if (std::isdigit((unsigned char)c) || c=='p' || c=='.') num+=c; else break; }
                 for (char &c : num) if (c=='p') c='.';
-                float v = strtof(num.c_str(), nullptr);
-                if (v > 0.f && v < 200.f) return v;
+                char *e=nullptr; float v=strtof(num.c_str(), &e);
+                if (e!=num.c_str() && css_finite(v) && v > 0.f && v < 200.f) return v;
             }
         }
         return 1.0f;
@@ -1289,8 +1406,8 @@ float flex_column_pct(GumboElement *el, const Builder &B) {
             std::string num;
             for (char c : tail) { if (std::isdigit((unsigned char)c) || c=='p' || c=='.') num+=c; else break; }
             for (char &c : num) if (c=='p') c='.';
-            float v = strtof(num.c_str(), nullptr);
-            if (v > 0.f) return v;
+            char *e=nullptr; float v=strtof(num.c_str(), &e);
+            if (e!=num.c_str() && css_finite(v) && v > 0.f) return v;
         }
     }
     return 0.0f;
@@ -1347,7 +1464,10 @@ bool mso_comment_img_size(const std::string &comment, float &w, float &h) {
         p += std::strlen(key);
         while (p < tag.size() && (tag[p] == '"' || tag[p] == '\''))
             ++p;
-        return strtof(tag.c_str() + p, nullptr);
+        char *e = nullptr;
+        float v = strtof(tag.c_str() + p, &e);
+        if (e == tag.c_str() + p || !css_finite(v) || v <= 0.f || v > 5000.f) return 0.f;
+        return v;
     };
     w = find_num("width=");
     h = find_num("height=");
@@ -1391,8 +1511,14 @@ void size_html_image(GumboElement *el, const Builder &B,
 
     const char *wattr = attr(el, "width");
     const char *hattr = attr(el, "height");
-    float aw = wattr ? strtof(wattr, nullptr) : 0.0f;
-    float ah = hattr ? strtof(hattr, nullptr) : 0.0f;
+    auto safe_parse = [](const char *s)->float{
+        if(!s||!*s) return 0.f;
+        char *e=nullptr; float v=strtof(s,&e);
+        if(e==s || !css_finite(v) || v<0.f || v>5000.f) return 0.f;
+        return v;
+    };
+    float aw = safe_parse(wattr);
+    float ah = safe_parse(hattr);
     if (box.width_px > 0.0f)  aw = box.width_px;
     if (box.height_px > 0.0f) ah = box.height_px;
 
@@ -1886,9 +2012,8 @@ int element_height_px(GumboElement *el, const BoxProps &box) {
         return (int)box.height_px;
     const char *h = attr(el, "height");
     if (h && h[0]) {
-        int n = (int)strtof(h, nullptr);
-        if (n > 1)
-            return n;
+        char *e=nullptr; float fv=strtof(h, &e);
+        if (e!=h && css_finite(fv) && fv > 1.f) return (int)fv;
     }
     return 0;
 }
@@ -1899,9 +2024,8 @@ int cell_px_width(GumboElement *el, const Builder &B) {
     if (w && w[0]) {
         std::string v = trim_lower(w);
         if (!v.empty() && v.back() != '%') {
-            int n = (int)strtof(v.c_str(), nullptr);
-            if (n >= 0 && n < 2000)
-                return n;
+            char *e=nullptr; float fv=strtof(v.c_str(), &e);
+            if (e!=v.c_str() && css_finite(fv) && fv >= 0.f && fv < 2000.f) return (int)fv;
         }
         return -1;
     }
@@ -1920,8 +2044,8 @@ float cell_width_pct(GumboElement *el, const Builder &B) {
     if (w && w[0]) {
         std::string v = trim_lower(w);
         if (!v.empty() && v.back() == '%') {
-            float pct = strtof(v.c_str(), nullptr);
-            if (pct > 0.0f && pct < 99.0f)
+            char *e=nullptr; float pct=strtof(v.c_str(), &e);
+            if (e!=v.c_str() && css_finite(pct) && pct > 0.0f && pct < 99.0f)
                 return pct;
         }
     }
@@ -2533,7 +2657,8 @@ int HtmlDocument::bind_loaded_images() {
     if (!image_resolver)
         return 0;
     int n = 0;
-    std::function<void(Widget *)> walk = [&](Widget *w) {
+    std::function<void(Widget *,int)> walk = [&](Widget *w, int depth) {
+        if (depth > 80) return;
         if (auto *ht = dynamic_cast<HtmlText *>(w)) {
             bool dirty = false;
             for (auto &p : ht->m_doc.paragraphs) {
@@ -2582,9 +2707,9 @@ int HtmlDocument::bind_loaded_images() {
             }
         }
         for (Widget *c : w->children())
-            walk(c);
+            walk(c, depth+1);
     };
-    walk(this);
+    walk(this, 0);
     if (n > 0)
         relayout();
     return n;
@@ -2612,8 +2737,10 @@ void HtmlDocument::set_html(const std::string &html) {
     Style base;
     base.fontSize = 17.0f;
     base.fgColor  = m_text;
+    g_elem_memo.clear(); // memo scoped to this set_html build
     build_children(this, &out->root->v.document.children, base, B, 0,
                    TextAlignment::Left);
+    g_elem_memo.clear();
     gumbo_destroy_output(&kGumboDefaultOptions, out);
 
     if (m_children.empty())

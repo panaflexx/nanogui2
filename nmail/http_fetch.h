@@ -118,22 +118,28 @@ inline bool nmail_http_get_once(const std::string &url, std::string &out,
     if (status <= 0)
         return false;
 
-    std::string lhead;
-    lhead.reserve(head.size());
-    for (unsigned char c : head)
-        lhead += (char)std::tolower(c);
-
-    auto loc_at = lhead.find("\nlocation:");
+    // Case-insensitive header search without copying/lowercasing the whole block.
+    auto ci_find = [&](const char *needle, size_t from = 0) -> size_t {
+        size_t nl = std::strlen(needle);
+        if (nl == 0 || nl > head.size() || from > head.size()) return std::string::npos;
+        for (size_t i = from; i + nl <= head.size(); ++i) {
+            bool ok = true;
+            for (size_t k = 0; k < nl; ++k)
+                if (std::tolower((unsigned char)head[i+k]) != (unsigned char)needle[k]) { ok=false; break; }
+            if (ok) return i;
+        }
+        return std::string::npos;
+    };
+    auto loc_at = ci_find("\nlocation:");
     if (loc_at != std::string::npos) {
         size_t vs = loc_at + 10;
-        while (vs < lhead.size() && (lhead[vs] == ' ' || lhead[vs] == '\t'))
+        while (vs < head.size() && (head[vs] == ' ' || head[vs] == '\t'))
             ++vs;
-        size_t ve = lhead.find('\r', vs);
+        size_t ve = head.find('\r', vs);
         if (ve == std::string::npos)
-            ve = lhead.find('\n', vs);
+            ve = head.find('\n', vs);
         if (ve == std::string::npos)
-            ve = lhead.size();
-        /* Location value is case-sensitive; slice the original header. */
+            ve = head.size();
         location = head.substr(vs, ve - vs);
         while (!location.empty() &&
                (location.back() == ' ' || location.back() == '\t'))
@@ -141,7 +147,8 @@ inline bool nmail_http_get_once(const std::string &url, std::string &out,
     }
 
     std::string body = raw.substr(he + 4);
-    if (lhead.find("transfer-encoding: chunked") != std::string::npos) {
+    size_t te = ci_find("transfer-encoding:");
+    if (te != std::string::npos && ci_find("chunked", te) != std::string::npos) {
         std::string dec;
         size_t pos = 0;
         while (pos < body.size()) {
