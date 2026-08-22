@@ -140,6 +140,9 @@ public:
     std::function<void(const std::string &,
                        const std::vector<MailSummary> &)>       cb_older;
     std::function<void(int, const MailMessage &)>               cb_body;
+    /* Background prefetch: folder + seq + full message + derived preview. */
+    std::function<void(const std::string &, int,
+                       const MailMessage &, const std::string &)> cb_prefetched;
     std::function<void(const std::string &,
                        const std::string &)>                    cb_error;
     std::function<void(const std::string &)>                    cb_status;
@@ -169,9 +172,36 @@ public:
     void select_folder(const std::string &name) { post(Type::Select, name); }
     void fetch_body(int seq)                    { post(Type::FetchBody, "", seq); }
     void fetch_older()                          { post(Type::FetchOlder); }
+    void ensure_visible_cached(const std::string &folder,
+                               const std::vector<int> &visible_seqs) {
+        if (visible_seqs.empty() || folder.empty()) return;
+        bool need_post = false;
+        {
+            std::lock_guard<std::mutex> lock(m_mutex);
+            if (folder != m_prefetch_folder) return;
+            if (folder != m_selected_folder) return;
+            for (auto it = visible_seqs.rbegin(); it != visible_seqs.rend(); ++it) {
+                int s = *it;
+                bool inflight = false;
+                for (auto &c : m_queue)
+                    if (c.type == Type::Prefetch && c.seq == s && c.folder == folder) { inflight = true; break; }
+                if (inflight) continue;
+                auto qit = std::find(m_prefetch_queue.begin(), m_prefetch_queue.end(), s);
+                if (qit != m_prefetch_queue.end()) {
+                    m_prefetch_queue.erase(qit);
+                    m_prefetch_queue.push_front(s);
+                } else if (!m_prefetch_queued.count(s)) {
+                    m_prefetch_queue.push_front(s);
+                    m_prefetch_queued.insert(s);
+                }
+            }
+            need_post = !m_prefetch_queue.empty();
+        }
+        if (need_post) schedule_next_prefetch();
+    }
 
 private:
-    enum class Type { Connect, Refresh, Select, FetchBody, FetchOlder };
+    enum class Type { Connect, Refresh, Select, FetchBody, FetchOlder, Prefetch };
     struct Cmd {
         Type type;
         std::string folder;
@@ -247,6 +277,10 @@ private:
     }
 
     void do_select(const std::string &folder) {
+        {
+            std::lock_guard<std::mutex> lock(m_mutex);
+            cancel_prefetch_locked();
+        }
         report_status("Fetching " + folder + "...");
         std::string err;
         int exists = 0;
@@ -278,6 +312,19 @@ private:
         deliver([this, folder, summaries]() {
             if (cb_summaries) cb_summaries(folder, summaries);
         });
+        // Seed a low-priority backlog with the first 25 (newest first).
+        // Further visible rows get enqueued on demand via ensure_visible_cached().
+        {
+            std::lock_guard<std::mutex> lock(m_mutex);
+            m_prefetch_folder = folder;
+            m_prefetch_queue.clear();
+            m_prefetch_queued.clear();
+            for (size_t i = 0; i < summaries.size() && i < 25; ++i) {
+                m_prefetch_queue.push_back(summaries[i].seq);
+                m_prefetch_queued.insert(summaries[i].seq);
+            }
+        }
+        schedule_next_prefetch();
     }
 
     /* Fetch the next older page: the 150 messages just below the oldest
@@ -303,6 +350,76 @@ private:
         deliver([this, folder, summaries]() {
             if (cb_older) cb_older(folder, summaries);
         });
+    }
+
+    void cancel_prefetch_locked() {
+        m_prefetch_folder.clear();
+        m_prefetch_queue.clear();
+        m_prefetch_queued.clear();
+        m_queue.erase(std::remove_if(m_queue.begin(), m_queue.end(),
+            [](const Cmd &c){ return c.type == Type::Prefetch; }), m_queue.end());
+    }
+
+    bool already_prefetch_queued_locked(int seq, const std::string &folder) const {
+        if (m_prefetch_queued.count(seq)) return true;
+        for (auto &c : m_queue)
+            if (c.type == Type::Prefetch && c.seq == seq && c.folder == folder) return true;
+        return false;
+    }
+
+    void schedule_next_prefetch() {
+        std::string folder; int seq = 0;
+        {
+            std::lock_guard<std::mutex> lock(m_mutex);
+            if (m_prefetch_queue.empty()) return;
+            if (!m_selected_folder.empty() && m_selected_folder != m_prefetch_folder)
+                return;
+            folder = m_prefetch_folder;
+            seq = m_prefetch_queue.front();
+            for (auto &c : m_queue)
+                if (c.type == Type::Prefetch && c.seq == seq && c.folder == folder) return;
+        }
+        post(Type::Prefetch, folder, seq);
+    }
+
+
+
+    void do_prefetch(const Cmd &cmd) {
+        {
+            std::lock_guard<std::mutex> lock(m_mutex);
+            bool has_priority = false;
+            for (auto &c : m_queue) if (c.type != Type::Prefetch) { has_priority = true; break; }
+            if (has_priority) {
+                m_queue.push_back(cmd);
+                return;
+            }
+            if (cmd.folder != m_prefetch_folder) return;
+            if (cmd.folder != m_selected_folder) return;
+        }
+        if (!m_imap.is_open()) {
+            std::lock_guard<std::mutex> lock(m_mutex);
+            if (!m_prefetch_queue.empty() && m_prefetch_queue.front() == cmd.seq) {
+                m_prefetch_queue.pop_front(); m_prefetch_queued.erase(cmd.seq);
+            }
+            return;
+        }
+        MailMessage msg; std::string err;
+        bool ok = m_imap.fetch_message(cmd.seq, msg, err);
+        {
+            std::lock_guard<std::mutex> lock(m_mutex);
+            if (!m_prefetch_queue.empty() && m_prefetch_queue.front() == cmd.seq) {
+                m_prefetch_queue.pop_front(); m_prefetch_queued.erase(cmd.seq);
+            } else {
+                auto qit = std::find(m_prefetch_queue.begin(), m_prefetch_queue.end(), cmd.seq);
+                if (qit != m_prefetch_queue.end()) { m_prefetch_queue.erase(qit); m_prefetch_queued.erase(cmd.seq); }
+            }
+        }
+        if (!ok) { schedule_next_prefetch(); return; }
+        std::string preview = message_preview(msg);
+        deliver([this, folder = cmd.folder, seq = cmd.seq, msg, preview]() {
+            if (cb_prefetched) cb_prefetched(folder, seq, msg, preview);
+        });
+        schedule_next_prefetch();
     }
 
     void run() {
@@ -369,6 +486,9 @@ private:
                 }
                 do_fetch_older();
                 break;
+            case Type::Prefetch:
+                do_prefetch(cmd);
+                break;
             }
         }
     }
@@ -384,6 +504,10 @@ private:
     /* Oldest sequence number currently shown in m_selected_folder
        (0 = nothing loaded).  Drives "load older" paging. */
     int                     m_first_loaded = 0;
+    // background prefetch backlog (low priority, viewport-aware)
+    std::string             m_prefetch_folder;
+    std::deque<int>         m_prefetch_queue;
+    std::unordered_set<int> m_prefetch_queued;
 };
 
 // ---------------------------------------------------------------------------
@@ -783,12 +907,8 @@ public:
     float max_scroll() const { return std::max(0.0f, total_h() - (float)m_size.y()); }
 
     /* ---- events ---- */
-    virtual bool scroll_event(const Vector2i &, const Vector2f &rel) override {
-        // Add a velocity impulse; clamp so rapid flicking can't go infinite
-        m_vel = std::clamp(m_vel - rel.y() * row_h() * 4.0f, -3500.0f, 3500.0f);
-        screen()->redraw();
-        return true;
-    }
+    std::function<void()> on_viewport_changed; // MailApp hooks scroll/paging prefetch
+    void notify_viewport() { if (on_viewport_changed) on_viewport_changed(); }
 
     virtual bool mouse_motion_event(const Vector2i &p, const Vector2i &,
                                     int, int) override {
@@ -841,6 +961,14 @@ public:
                               0.0f, max_scroll());
         m_vel = 0.0f;
         screen()->redraw();
+        notify_viewport();
+        return true;
+    }
+
+    virtual bool scroll_event(const Vector2i &, const Vector2f &rel) override {
+        m_vel = std::clamp(m_vel - rel.y() * row_h() * 4.0f, -3500.0f, 3500.0f);
+        screen()->redraw();
+        notify_viewport();
         return true;
     }
 
@@ -860,21 +988,23 @@ public:
                 if (m_on_select) m_on_select(m_selected, m_emails[m_selected]);
                 screen()->redraw();
             }
+            notify_viewport();
             return true;
         }
         if (key == GLFW_KEY_PAGE_DOWN || key == GLFW_KEY_PAGE_UP) {
             float page = (float)m_size.y();
             m_vel = (key == GLFW_KEY_PAGE_DOWN ? 1.0f : -1.0f) * page * 6.0f;
             screen()->redraw();
+            notify_viewport();
             return true;
         }
         if (key == GLFW_KEY_HOME) {
             m_scroll = 0.0f;  m_vel = 0.0f;
-            screen()->redraw();  return true;
+            screen()->redraw(); notify_viewport(); return true;
         }
         if (key == GLFW_KEY_END) {
             m_scroll = max_scroll();  m_vel = 0.0f;
-            screen()->redraw();  return true;
+            screen()->redraw(); notify_viewport(); return true;
         }
         if (key == GLFW_KEY_ENTER || key == GLFW_KEY_KP_ENTER) {
             if (m_selected >= 0 && m_selected < n)
@@ -947,6 +1077,34 @@ public:
 
         draw_scrollbar(ctx);  // drawn on top, no clip
     }
+
+    /* Update the preview text for an already-listed row in place. */
+    void update_preview(int seq, const std::string &preview) {
+        for (auto &e : m_emails) {
+            if (e.seq == seq && e.preview != preview) {
+                e.preview = preview;
+                screen()->redraw();
+                break;
+            }
+        }
+    }
+
+    // viewport helpers — used by MailApp to prioritize prefetch
+    std::pair<int,int> visible_range() const {
+        if (m_emails.empty() || m_size.y() <= 0) return {0,0};
+        int first = std::max(0, (int)(m_scroll / row_h()));
+        int last  = std::min((int)m_emails.size(), (int)((m_scroll + (float)m_size.y()) / row_h()) + 2);
+        return {first, last};
+    }
+    std::vector<int> visible_seqs(int pad = 6) const {
+        auto [first,last] = visible_range();
+        int a = std::max(0, first - pad);
+        int b = std::min((int)m_emails.size(), last + pad);
+        std::vector<int> out; out.reserve(b-a);
+        for (int i=a;i<b;++i) out.push_back(m_emails[i].seq);
+        return out;
+    }
+    const std::vector<EmailData>& emails() const { return m_emails; }
 
     /* ---- data ---- */
     void set_emails(std::vector<EmailData> emails) {
@@ -1849,6 +2007,21 @@ public:
         m_email_list->set_min_width(280);
         m_email_list->set_font_size(26);
         m_email_list->set_on_hit_bottom([this]() { maybe_fetch_older(); });
+        m_email_list->on_viewport_changed = [this]() {
+            if (m_current_folder.empty() || !m_email_list) return;
+            // debounce: only throttle with a flag — draw() already limits rate
+            static double last = 0; double now = glfwGetTime();
+            if (now - last < 0.15 && m_email_list->visible_seqs().size() < 30) return;
+            last = now;
+            // skip prefetch for rows already cached
+            auto seqs = m_email_list->visible_seqs(6);
+            std::vector<int> need; need.reserve(seqs.size());
+            for (int s : seqs) {
+                if (m_body_cache.find(m_current_folder + ":" + std::to_string(s)) != m_body_cache.end()) continue;
+                need.push_back(s);
+            }
+            if (!need.empty()) m_worker.ensure_visible_cached(m_current_folder, need);
+        };
 
         // ---- Right: message area ----
         Widget *right = new Widget(inner_split);
@@ -1899,6 +2072,11 @@ public:
         };
         m_worker.cb_body = [this](int seq, const MailMessage &msg) {
             on_body(seq, msg);
+        };
+        m_worker.cb_prefetched = [this](const std::string &folder, int seq,
+                                        const MailMessage &msg,
+                                        const std::string &preview) {
+            on_prefetched(folder, seq, msg, preview);
         };
         m_worker.cb_error = [this](const std::string &title,
                                    const std::string &msg) {
@@ -2009,6 +2187,18 @@ public:
         m_older_inflight = false;
         m_email_list->set_loading_more(false);
         apply_filter();
+        // after layout, kick viewport prefetch so rows actually on screen win
+        redraw();
+        nanogui::async([this, folder]() {
+            if (folder != m_current_folder || !m_email_list) return;
+            auto seqs = m_email_list->visible_seqs(6);
+            std::vector<int> need; need.reserve(seqs.size());
+            for (int s : seqs)
+                if (m_body_cache.find(folder + ":" + std::to_string(s)) == m_body_cache.end())
+                    need.push_back(s);
+            if (!need.empty()) m_worker.ensure_visible_cached(folder, need);
+        });
+        glfwPostEmptyEvent();
     }
 
     /* Ask the worker for the next older page when the list hits bottom. */
@@ -2032,6 +2222,12 @@ public:
 
         m_summaries.insert(m_summaries.end(), sums.begin(), sums.end());
         m_summary_cache[folder] = m_summaries;
+        // make newly paged-in older rows eligible for viewport prefetch too
+        {
+            std::vector<int> seqs; seqs.reserve(sums.size());
+            for (auto &s : sums) seqs.push_back(s.seq);
+            m_worker.ensure_visible_cached(folder, seqs);
+        }
 
         /* Append only the rows passing the active filter; unlike
            apply_filter() this leaves scroll position and selection alone. */
@@ -2062,7 +2258,24 @@ public:
     }
 
     void on_body(int seq, const MailMessage &msg) {
-        if (seq != m_loading_seq) return;   // stale fetch
+        // Always enrich the preview + cache, even if this wasn't the
+        // foreground fetch — background prefetches land here too when
+        // the user happens to be looking at that message.
+        std::string preview = message_preview(msg);
+        if (!preview.empty()) {
+            for (auto &s : m_summaries)
+                if (s.seq == seq && s.preview != preview) { s.preview = preview; break; }
+            auto it = m_summary_cache.find(m_current_folder);
+            if (it != m_summary_cache.end())
+                for (auto &s : it->second)
+                    if (s.seq == seq && s.preview != preview) { s.preview = preview; break; }
+            if (m_email_list) m_email_list->update_preview(seq, preview);
+        }
+        if (m_body_cache.size() > 256) m_body_cache.clear();
+        // every full fetch is cacheable; on_prefetched also caches, so this
+        // is idempotent — just keep the freshest copy
+        m_body_cache[m_current_folder + ":" + std::to_string(seq)] = msg;
+        if (seq != m_loading_seq) return;   // not the foreground fetch
         if (m_pending_seq >= 0 && seq != m_pending_seq)
             return;   // still scrubbing a different message
         m_loading_seq = -1;
@@ -2071,9 +2284,28 @@ public:
         m_rendered_seq    = seq;
         m_reply_btn->set_enabled(true);
         if (m_save_btn) m_save_btn->set_enabled(true);
-        if (m_body_cache.size() > 256) m_body_cache.clear();
-        m_body_cache[m_current_folder + ":" + std::to_string(seq)] = msg;
         render_current();
+    }
+
+    void on_prefetched(const std::string &folder, int seq,
+                       const MailMessage &msg, const std::string &preview) {
+        if (m_body_cache.size() > 256) m_body_cache.clear();
+        m_body_cache[folder + ":" + std::to_string(seq)] = msg;
+        if (folder != m_current_folder) return;
+        // only enrich empty/thin previews — never clobber a real one with
+        // a shorter derived snippet from a failed decode edge case
+        bool enriched = false;
+        for (auto &s : m_summaries) {
+            if (s.seq != seq) continue;
+            if (preview.size() > s.preview.size()) { s.preview = preview; enriched = true; }
+            break;
+        }
+        auto it = m_summary_cache.find(folder);
+        if (it != m_summary_cache.end())
+            for (auto &s : it->second)
+                if (s.seq == seq && preview.size() > s.preview.size()) { s.preview = preview; break; }
+        if (enriched && m_email_list && preview.size() > 0)
+            m_email_list->update_preview(seq, preview);
     }
 
     void on_worker_error(const std::string &title, const std::string &msg) {
@@ -2115,13 +2347,26 @@ public:
         m_worker.select_folder(folder);
     }
 
-    void on_email_selected(int /*idx*/, const EmailData &d) {
+    void on_email_selected(int idx, const EmailData &d) {
         /* List highlight already moved.  Do not parse HTML or FETCH on
          * every GLFW_REPEAT — wait until this seq sits still. */
         if (d.seq == m_pending_seq)
             return;
         if (d.seq == m_rendered_seq && m_pending_seq < 0)
             return;
+        // speculatively prioritize neighbors of the selection — the user is
+        // walking the list sequentially, so ±6 around idx are most likely next.
+        if (m_email_list && idx >= 0) {
+            std::vector<int> around; around.reserve(13);
+            auto &rows = m_email_list->emails();
+            for (int i = std::max(0, idx-6); i <= std::min((int)rows.size()-1, idx+6); ++i) {
+                int s = rows[i].seq;
+                if (s == d.seq) continue;
+                if (m_body_cache.find(m_current_folder + ":" + std::to_string(s)) != m_body_cache.end()) continue;
+                around.push_back(s);
+            }
+            if (!around.empty()) m_worker.ensure_visible_cached(m_current_folder, around);
+        }
         m_loading_seq = -1;   // drop in-flight body for a previous seq
         const bool switched = (d.seq != m_rendered_seq);
         m_pending_seq       = d.seq;

@@ -103,12 +103,15 @@ void mainloop(float refresh, bool show_fps) {
             }
         #endif
 
-        /* Run async functions */ {
+        /* Run async functions — swap out so callbacks can re-enqueue
+           via nanogui::async() without dead-locking m_async_mutex. */
+        std::vector<std::function<void()>> funcs;
+        {
             std::lock_guard<std::mutex> guard(m_async_mutex);
-            for (auto &f : m_async_functions)
-                f();
-            m_async_functions.clear();
+            funcs.swap(m_async_functions);
         }
+        for (auto &f : funcs)
+            f();
         for(auto kv : __nanogui_screens)
             kv.second->do_widget_cleanup();
 

@@ -48,6 +48,10 @@ struct MailMessage {
     std::vector<MailImage> images;   // inline image/* parts (for cid: srcs)
 };
 
+/* Derive a collapsed preview snippet (<=160 chars) from a fully fetched
+ * message — prefers the plain body, falls back to stripped HTML. */
+std::string message_preview(const MailMessage &msg);
+
 class ImapClient {
 public:
     ImapClient() = default;

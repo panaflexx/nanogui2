@@ -782,6 +782,31 @@ static std::string sanitize_preview(const std::string &text) {
     return trim(out);
 }
 
+std::string message_preview(const MailMessage &msg) {
+    std::string src;
+    if (!msg.body.empty())
+        src = msg.body;
+    else if (!msg.html.empty())
+        src = html_to_text_preview(msg.html);
+    else
+        return "";
+    // collapse whitespace + trim, cap 160 (same as sanitize_preview tail)
+    std::string out;
+    out.reserve(src.size());
+    bool ws = true;
+    for (unsigned char c : src) {
+        if (std::isspace(c)) {
+            if (!ws) out += ' ';
+            ws = true;
+        } else {
+            out += (char)c;
+            ws = false;
+        }
+        if (out.size() >= 160) break;
+    }
+    return trim(out);
+}
+
 // ---------------------------------------------------------------------------
 // ImapClient — connection and transport
 // ---------------------------------------------------------------------------
