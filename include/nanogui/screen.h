@@ -343,6 +343,9 @@ protected:
     bool m_stencil_buffer;
     bool m_float_buffer;
     bool m_redraw;
+    /* Root layout deferred from resize_event so a burst of GLFW configure
+     * events collapses to one perform_layout + draw in draw_all(). */
+    bool m_resize_layout_pending = false;
     std::unordered_set<Widget*> m_active_animations;
 
 #if defined(_DEBUG) || !defined(NDEBUG)

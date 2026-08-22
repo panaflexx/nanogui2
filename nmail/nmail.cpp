@@ -1720,6 +1720,14 @@ public:
     bool                     m_older_inflight = false;  // fetch_older posted
     MailMessage              m_current_message;
     bool                     m_has_message = false;
+    /* Preview is not built on GLFW_REPEAT: the list highlight moves
+     * immediately, HTML parse / IMAP FETCH wait until the selected seq
+     * has been idle for kPreviewSettleSec. */
+    int                      m_pending_seq = -1;
+    int                      m_rendered_seq = -1;
+    double                   m_preview_settle_at = 0.0;
+    EmailData                m_pending_email;
+    static constexpr double  kPreviewSettleSec = 0.10;
 
     /* ---- inline/remote images in the reading pane ---- */
     std::unordered_map<std::string, int>         m_img_tex;        // src -> nvg id
@@ -2055,9 +2063,12 @@ public:
 
     void on_body(int seq, const MailMessage &msg) {
         if (seq != m_loading_seq) return;   // stale fetch
+        if (m_pending_seq >= 0 && seq != m_pending_seq)
+            return;   // still scrubbing a different message
         m_loading_seq = -1;
         m_current_message = msg;
         m_has_message     = true;
+        m_rendered_seq    = seq;
         m_reply_btn->set_enabled(true);
         if (m_save_btn) m_save_btn->set_enabled(true);
         if (m_body_cache.size() > 256) m_body_cache.clear();
@@ -2080,6 +2091,8 @@ public:
         if (folder == m_current_folder) return;
         m_email_list->set_emails({});
         m_loading_seq  = -1;
+        m_pending_seq  = -1;
+        m_rendered_seq = -1;
         m_has_message  = false;
         m_older_inflight = false;
         m_email_list->set_loading_more(false);
@@ -2103,26 +2116,85 @@ public:
     }
 
     void on_email_selected(int /*idx*/, const EmailData &d) {
-        /* Cached bodies render instantly, no network round-trip. */
+        /* List highlight already moved.  Do not parse HTML or FETCH on
+         * every GLFW_REPEAT — wait until this seq sits still. */
+        if (d.seq == m_pending_seq)
+            return;
+        if (d.seq == m_rendered_seq && m_pending_seq < 0)
+            return;
+        m_loading_seq = -1;   // drop in-flight body for a previous seq
+        const bool switched = (d.seq != m_rendered_seq);
+        m_pending_seq       = d.seq;
+        m_pending_email     = d;
+        m_preview_settle_at = glfwGetTime() + kPreviewSettleSec;
+        if (switched)
+            show_preview_stub(d);
+        redraw();
+    }
+
+    void show_preview_stub(const EmailData &d) {
+        Document doc;
+        Style title; title.fontSize = 24.f; title.bold = true;
+        title.fgColor = text_color();
+        Style meta;  meta.fontSize = 16.f; meta.fgColor = meta_color();
+        Style body;  body.fontSize = 16.f; body.fgColor = text_color();
+        doc.addParagraph()->addText(d.subject.empty() ? "(no subject)"
+                                                      : d.subject, title);
+        auto *from = doc.addParagraph();
+        from->addText(d.sender, meta);
+        if (!d.date.empty()) {
+            auto *dt = doc.addParagraph();
+            dt->addText(d.date, meta);
+        }
+        auto *rule = doc.addParagraph();
+        rule->isRule = true;
+        if (!d.preview.empty())
+            doc.addParagraph()->addText(d.preview, body);
+        m_view->set_document(std::move(doc));
+        m_has_message = false;
+        m_reply_btn->set_enabled(false);
+        if (m_save_btn) m_save_btn->set_enabled(false);
+        m_view_scroll->set_scroll(0.0f);
+    }
+
+    void commit_pending_preview() {
+        if (m_pending_seq < 0)
+            return;
+        const EmailData d = m_pending_email;
+        const int seq = m_pending_seq;
+        m_pending_seq = -1;
         auto cached = m_body_cache.find(m_current_folder + ":" +
-                                        std::to_string(d.seq));
+                                        std::to_string(seq));
         if (cached != m_body_cache.end()) {
             m_loading_seq     = -1;
             m_current_message = cached->second;
             m_has_message     = true;
+            m_rendered_seq    = seq;
             m_reply_btn->set_enabled(true);
             if (m_save_btn) m_save_btn->set_enabled(true);
             render_current();
             return;
         }
-        m_loading_seq = d.seq;
+        m_loading_seq = seq;
         {
             Document doc;
             parse_markdown(doc, "*Loading message...*", text_color(), 18.0f);
             m_view->set_document(std::move(doc));
         }
+        m_worker.fetch_body(seq);
         redraw();
-        m_worker.fetch_body(d.seq);
+    }
+
+    void pump_preview() {
+        if (m_pending_seq < 0)
+            return;
+        if (glfwGetTime() < m_preview_settle_at) {
+            /* Need another frame after the settle deadline; WaitEvents
+             * would otherwise sleep until the next key. */
+            redraw();
+            return;
+        }
+        commit_pending_preview();
     }
 
     void do_refresh() {
@@ -2699,6 +2771,7 @@ public:
     }
 
     virtual void draw(NVGcontext *ctx) override {
+        pump_preview();
         // Background gradient
         nvgSave(ctx);
         nvgBeginPath(ctx);

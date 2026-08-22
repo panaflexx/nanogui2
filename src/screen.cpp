@@ -862,6 +862,15 @@ void Screen::draw_all() {
     if (m_redraw) {
         m_redraw = false;
 
+        if (m_resize_layout_pending && m_nvg_context) {
+            m_resize_layout_pending = false;
+            for (Widget *child : m_children) {
+                Window *w = dynamic_cast<Window *>(child);
+                if (w && w->is_root())
+                    w->perform_layout(m_nvg_context);
+            }
+        }
+
 #if defined(_DEBUG) || !defined(NDEBUG)
         auto _t0 = std::chrono::high_resolution_clock::now();
 #endif
@@ -1191,17 +1200,18 @@ bool Screen::resize_event(const Vector2i& size) {
     // Keep root content windows pinned to the full client area.
     for (Widget *child : m_children) {
         Window *w = dynamic_cast<Window *>(child);
-        if (w && w->is_root()) {
+        if (w && w->is_root())
             w->sync_root_geometry();
-            if (m_nvg_context)
-                w->perform_layout(m_nvg_context);
-        }
     }
 
     if (m_resize_callback)
         m_resize_callback(size);
-    m_redraw = true;
-    draw_all();
+    /* Do not perform_layout or draw_all here: Wayland/X11 fire a burst of
+     * configure events per drag, and a full HTML reflow+swap on each one
+     * stalls the event loop.  Geometry is updated; layout+draw run once
+     * from draw_all() after the queue is drained. */
+    m_resize_layout_pending = true;
+    redraw();
     return true;
 }
 

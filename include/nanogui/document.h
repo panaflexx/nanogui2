@@ -216,6 +216,10 @@ public:
     /// True if layout must be rebuilt before drawing or hit-testing.
     bool               layoutDirty() const { return m_layout_dirty; }
 
+    /// Shift the cached rich layout by (dx, dy) without re-measuring.
+    /// Used when only the draw origin moved (widget x,y), not wrap width.
+    void               translate_rich_layout(float dx, float dy);
+
     // -----------------------------------------------------------------------
     // Rich-text layout cache: populated during draw(); used by TextEditor for
     // caret / selection rendering and mouse / keyboard hit-testing.

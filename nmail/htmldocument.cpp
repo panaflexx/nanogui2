@@ -520,6 +520,7 @@ public:
     NVGcolor m_bg;
     int      m_measured_h = 0;
     int      m_measured_w = -1;
+    int      m_natural_w  = -1;  // cached max-content width
 
     HtmlText(Widget *parent, Document &&doc, NVGcolor bg)
         : Widget(parent), m_doc(std::move(doc)), m_bg(bg) {
@@ -530,18 +531,35 @@ public:
         /* Cap at the parent, not at our last laid-out m_size: using
          * m_size ratchets a shrink-wrapped chip (heart+"1") down until
          * the icon and text wrap onto two lines. */
-        int cap = (parent() && parent()->size().x() > 10)
-                      ? parent()->size().x() : 600;
+        int parent_w = (parent() && parent()->size().x() > 10)
+                           ? parent()->size().x() : 0;
+        int cap = parent_w > 0 ? parent_w : 600;
         HtmlText *self = const_cast<HtmlText *>(this);
-        int natural = ctx ? (int)std::ceil(self->m_doc.measure_natural_width(ctx)) : 0;
-        /* A couple of pixels of slack: laying out at exactly the measured
-         * max-content width wraps an icon+"1" onto two lines (advance of
-         * the two glyphs can exceed the summed natural width by a hair). */
-        if (natural > 0)
-            natural += 4;
-        int w = std::min(std::max(natural, 10), cap);
+        /* Returning 0 for stretched leaves collapsed Amazon's 50/50
+         * wish-list grid: those cells sit under AlignItems::Center
+         * (max-width + margin:auto) and need a real max-content width
+         * so the row doesn't shrink to padding. Cache it so resize
+         * does not re-run nvgTextBounds on every leaf. */
+        if (self->m_natural_w < 0) {
+            int n = ctx ? (int)std::ceil(self->m_doc.measure_natural_width(ctx)) : 0;
+            if (n > 0)
+                n += 4;
+            self->m_natural_w = std::max(n, 1);
+        }
+        bool stretch_col = false;
+        if (parent()) {
+            if (auto *fl = dynamic_cast<const FlexLayout *>(parent()->layout())) {
+                FlexDirection d = fl->direction();
+                stretch_col = (d == FlexDirection::Column ||
+                               d == FlexDirection::ColumnReverse) &&
+                              fl->align_items() == AlignItems::Stretch;
+            }
+        }
+        int w = (stretch_col && parent_w > 0)
+                    ? cap
+                    : std::min(std::max(self->m_natural_w, 10), cap);
         self->measure(ctx, w);
-        return Vector2i(std::min(std::max(natural, 1), cap),
+        return Vector2i(std::min(self->m_natural_w, cap),
                         std::max(m_measured_h, 1));
     }
 
@@ -2333,6 +2351,7 @@ int HtmlDocument::bind_loaded_images() {
             if (dirty) {
                 ht->m_doc.markLayoutDirty();
                 ht->m_measured_w = -1;
+                ht->m_natural_w  = -1;
             }
         } else if (auto *hb = dynamic_cast<HtmlBlock *>(w)) {
             if (hb->m_bg_image <= 0 && !hb->m_bg_image_src.empty()) {

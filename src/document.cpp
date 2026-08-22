@@ -309,6 +309,27 @@ static void draw_image_block(NVGcontext* ctx, int image,
 // Top-level draw
 // ---------------------------------------------------------------------------
 
+void Document::translate_rich_layout(float dx, float dy) {
+    if (dx == 0.f && dy == 0.f)
+        return;
+    for (RichLine& rl : m_rich_layout) {
+        rl.y_top    += dy;
+        rl.y_bottom += dy;
+        rl.baseline += dy;
+        rl.x_start  += dx;
+        rl.mono_bg_x += dx;
+        rl.mono_bg_y += dy;
+        rl.bullet_cx += dx;
+        rl.bullet_cy += dy;
+        for (WordLayout& w : rl.words)
+            w.x += dx;
+    }
+    m_layout_origin_x += dx;
+    m_layout_origin_y += dy;
+    m_laid_origin_x   += dx;
+    m_laid_origin_y   += dy;
+}
+
 void Document::draw(NVGcontext* ctx, float originX, float originY) {
     nvgTextAlign(ctx, NVG_ALIGN_LEFT | NVG_ALIGN_BASELINE);
 
@@ -316,8 +337,6 @@ void Document::draw(NVGcontext* ctx, float originX, float originY) {
         layout_only ||
         m_layout_dirty ||
         m_laid_content_width != contentWidth ||
-        m_laid_origin_x != originX ||
-        m_laid_origin_y != originY ||
         m_rich_layout.empty();
 
     if (need_layout) {
@@ -422,7 +441,16 @@ void Document::draw(NVGcontext* ctx, float originX, float originY) {
         return;
     }
 
-    // ---- Fast path: content/width/origin unchanged (selection drag, hover).
+    /* Origin-only change: the wrap is still valid.  HtmlText measures at
+     * (0,0) then paints at the widget position — translating the cache
+     * is the compositor-style path, not a reflow. */
+    if (originX != m_laid_origin_x || originY != m_laid_origin_y)
+        translate_rich_layout(originX - m_laid_origin_x,
+                              originY - m_laid_origin_y);
+
+    last_drawn_height = m_laid_height;
+
+    // ---- Fast path: content/width unchanged (selection drag, hover, move).
     // Replay from the layout cache — no nvgTextBounds reflow.
     for (const RichLine& rl : m_rich_layout) {
         if (rl.words.size() == 1 && rl.words[0].text == "\x01IMAGE") {
