@@ -35,9 +35,15 @@ struct NANOGUI_EXPORT Style {
     bool     bold      = false;
     bool     italic    = false;
     bool     underline = false;
+    bool     strike    = false;   ///< line-through (sale prices, <s>/<strike>)
+    bool     allCaps   = false;   ///< text-transform:uppercase (CTA LEARN MORE)
     bool     monospace = false;
     bool     displayNone = false; ///< HTML display:none (skip when walking)
     bool     superscript = false; ///< vertical-align: super/top (price cents)
+    bool     verticalMiddle = false; ///< vertical-align:middle — center in line box
+    float    lineHeight = 0.0f;   ///< 0 = normal (font metrics), otherwise absolute px
+    float    letterSpacing = 0.0f;///< extra px between glyphs (CTA tracking)
+    float    opacity = 1.0f;      ///< 0..1 mul for fg/bg (CSS opacity)
     float    padX = 0.0f;         ///< extra fill padding (CTA pills)
     float    padY = 0.0f;
     float    borderWidth = 0.0f;  ///< CSS border (Learn More outline)

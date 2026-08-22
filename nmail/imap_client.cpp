@@ -1,8 +1,8 @@
 /*
  * imap_client.cpp — minimal blocking IMAP4rev1 client for nmail.
  *
- * Plain-text IMAP only (no SSL).  Everything is pulled from the server on
- * demand; nothing is cached here.
+ * Auto-reconnects on idle timeout / server BYE: credentials + selected
+ * mailbox are sticky and run() retries once after a silent LOGIN+SELECT.
  */
 #include "imap_client.h"
 #include "nmail_socket.h"
@@ -825,6 +825,84 @@ void ImapClient::close() {
         m_fd = -1;
     }
     m_rbuf.clear();
+    m_selected_folder.clear();
+}
+
+bool ImapClient::is_connection_error(const std::string &err) {
+    std::string l = to_lower(err);
+    if (l.find("connection") != std::string::npos) return true;
+    if (l.find("timed out") != std::string::npos)  return true;
+    if (l.find("closed") != std::string::npos)     return true;
+    if (l.find("lost") != std::string::npos)       return true;
+    if (l.find("bye") != std::string::npos)        return true;
+    return false;
+}
+
+bool ImapClient::reconnect(std::string &err) {
+    if (m_host.empty() || m_user.empty()) {
+        err = "no saved credentials for reconnect";
+        return false;
+    }
+    std::string saved_folder = m_selected_folder;
+    // Must not call open() which would clear m_selected_folder we want to save.
+    std::string e;
+    {
+        // open() closes + resets state; stash folder first then re-select.
+        close();
+        m_caps.clear();
+        char ebuf[512] = {0};
+        m_fd = nmail_sock_connect(m_host.c_str(), m_port, ebuf, sizeof(ebuf));
+        if (m_fd < 0) { e = ebuf; err = e; return false; }
+        if (m_port == 993) {
+            if (nmail_sock_starttls(m_fd, ebuf, sizeof(ebuf)) < 0) {
+                err = ebuf; close(); return false;
+            }
+        }
+        std::string greeting;
+        if (!read_logical_line(greeting, e)) { close(); err = e; return false; }
+        if (!starts_with(greeting, "* OK") && !starts_with(greeting, "* PREAUTH")) {
+            err = "server did not offer IMAP service: " + greeting; close(); return false;
+        }
+        auto read_caps = [&]() {
+            m_caps.clear();
+            std::vector<std::string> un;
+            std::string cap_err;
+            if (run_once("CAPABILITY", un, cap_err)) {
+                for (const std::string &line : un) {
+                    if (!starts_with(line, "* CAPABILITY")) continue;
+                    std::istringstream iss(line.substr(12));
+                    std::string tok;
+                    while (iss >> tok) { for (char &c : tok) c = (char)std::toupper((unsigned char)c); m_caps.insert(tok); }
+                }
+            }
+        };
+        read_caps();
+        if (m_port != 993 && m_caps.count("LOGINDISABLED") && m_caps.count("STARTTLS")) {
+            std::vector<std::string> un; std::string tls_err;
+            if (!run_once("STARTTLS", un, tls_err)) { err = "server requires TLS but refused STARTTLS: " + tls_err; close(); return false; }
+            if (nmail_sock_starttls(m_fd, ebuf, sizeof(ebuf)) < 0) { err = ebuf; close(); return false; }
+            read_caps();
+        }
+        if (!starts_with(greeting, "* PREAUTH")) {
+            if (!authenticate(m_user, m_pass, e)) { close(); err = e; return false; }
+        }
+    }
+    if (!saved_folder.empty()) {
+        std::vector<std::string> un; std::string se;
+        if (run_once("SELECT " + quote(saved_folder), un, se))
+            m_selected_folder = saved_folder;
+    }
+    err.clear();
+    return true;
+}
+
+bool ImapClient::ensure_selected(const std::string &folder, std::string &err) {
+    if (folder.empty()) return true;
+    if (m_selected_folder == folder) return true;
+    int exists = 0;
+    if (!select_folder(folder, exists, err)) return false;
+    m_selected_folder = folder;
+    return true;
 }
 
 std::string ImapClient::quote(const std::string &s) {
@@ -911,6 +989,13 @@ bool ImapClient::wait_tagged(const std::string &tag,
     for (;;) {
         std::string line;
         if (!read_logical_line(line, err)) return false;
+        // Server-initiated BYE (idle timeout) — treat as connection loss
+        // so the caller can reconnect rather than surfacing "BYE" as a
+        // command failure.
+        if (starts_with(line, "* BYE")) {
+            err = "connection to the server was lost (" + line + ")";
+            return false;
+        }
         if (starts_with(line, tag + " ")) {
             std::string rest = line.substr(tag.size() + 1);
             if (starts_with(rest, "OK")) return true;
@@ -921,8 +1006,8 @@ bool ImapClient::wait_tagged(const std::string &tag,
     }
 }
 
-bool ImapClient::run(const std::string &cmd,
-                     std::vector<std::string> &untagged, std::string &err) {
+bool ImapClient::run_once(const std::string &cmd,
+                          std::vector<std::string> &untagged, std::string &err) {
     untagged.clear();
     std::string tag = send_with_tag(cmd);
     if (tag.empty()) {
@@ -930,6 +1015,21 @@ bool ImapClient::run(const std::string &cmd,
         return false;
     }
     return wait_tagged(tag, untagged, err);
+}
+
+bool ImapClient::run(const std::string &cmd,
+                     std::vector<std::string> &untagged, std::string &err) {
+    std::string err1;
+    if (run_once(cmd, untagged, err1)) return true;
+    if (!is_connection_error(err1)) { err = err1; return false; }
+    std::string re_err;
+    if (!reconnect(re_err)) {
+        err = err1 + " (reconnect failed: " + re_err + ")";
+        return false;
+    }
+    untagged.clear();
+    if (!run_once(cmd, untagged, err)) return false;
+    return true;
 }
 
 // ---------------------------------------------------------------------------
@@ -1008,7 +1108,7 @@ bool ImapClient::authenticate(const std::string &user,
     if (!m_caps.count("LOGINDISABLED")) {
         std::vector<std::string> un;
         std::string e;
-        if (run("LOGIN " + quote(user) + " " + quote(pass), un, e))
+        if (run_once("LOGIN " + quote(user) + " " + quote(pass), un, e))
             return true;
         last_err = "LOGIN: " + e;
     }
@@ -1043,6 +1143,7 @@ bool ImapClient::open(const std::string &host, int port,
                       std::string &err) {
     close();
     m_caps.clear();
+    m_selected_folder.clear();
     char ebuf[512] = {0};
     m_fd = nmail_sock_connect(host.c_str(), port, ebuf, sizeof(ebuf));
     if (m_fd < 0) { err = ebuf; return false; }
@@ -1069,7 +1170,7 @@ bool ImapClient::open(const std::string &host, int port,
         m_caps.clear();
         std::vector<std::string> un;
         std::string cap_err;
-        if (run("CAPABILITY", un, cap_err)) {
+        if (run_once("CAPABILITY", un, cap_err)) {
             for (const std::string &line : un) {
                 if (!starts_with(line, "* CAPABILITY")) continue;
                 std::istringstream iss(line.substr(12));
@@ -1089,7 +1190,7 @@ bool ImapClient::open(const std::string &host, int port,
         m_caps.count("STARTTLS")) {
         std::vector<std::string> un;
         std::string tls_err;
-        if (!run("STARTTLS", un, tls_err)) {
+        if (!run_once("STARTTLS", un, tls_err)) {
             err = "server requires TLS but refused STARTTLS: " + tls_err;
             close();
             return false;
@@ -1103,13 +1204,18 @@ bool ImapClient::open(const std::string &host, int port,
     }
 
     /* PREAUTH means the connection is already authenticated. */
-    if (starts_with(greeting, "* PREAUTH"))
+    if (starts_with(greeting, "* PREAUTH")) {
+        m_host = host; m_port = port; m_user = user; m_pass = pass;
+        m_selected_folder.clear();
         return true;
+    }
 
     if (!authenticate(user, pass, err)) {
         close();
         return false;
     }
+    m_host = host; m_port = port; m_user = user; m_pass = pass;
+    m_selected_folder.clear();
     return true;
 }
 
@@ -1188,6 +1294,7 @@ bool ImapClient::select_folder(const std::string &name, int &exists,
             line.find(" EXISTS") != std::string::npos)
             exists = std::atoi(line.c_str() + 1);
     }
+    m_selected_folder = name;
     return true;
 }
 

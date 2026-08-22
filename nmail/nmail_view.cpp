@@ -33,6 +33,8 @@
 #include <deque>
 #include <unordered_map>
 #include <unordered_set>
+#define STB_IMAGE_WRITE_IMPLEMENTATION
+#include "../ext/glfw/deps/stb_image_write.h"
 
 using namespace nanogui;
 
@@ -66,6 +68,9 @@ public:
 
         Button *open_btn = make_btn(FA_FOLDER_OPEN, "Open HTML email (Ctrl+O)");
         open_btn->set_callback([this]() { open_dialog(); });
+
+        Button *save_btn = make_btn(FA_CAMERA, "Save to PNG (Ctrl+S)");
+        save_btn->set_callback([this]() { save_dialog(); });
 
         m_theme_btn = make_btn(FA_SUN, "Toggle light/dark (Ctrl+T)");
         m_theme_btn->set_callback([this]() {
@@ -218,6 +223,10 @@ public:
             open_dialog();
             return true;
         }
+        if (key == GLFW_KEY_S && (modifiers & SYSTEM_COMMAND_MOD)) {
+            save_dialog();
+            return true;
+        }
         if (key == GLFW_KEY_T && (modifiers & SYSTEM_COMMAND_MOD)) {
             apply_theme(m_dark ? ThemeMode::Light : ThemeMode::Dark);
             return true;
@@ -234,6 +243,97 @@ public:
         nvgFill(ctx);
         nvgRestore(ctx);
         Screen::draw(ctx);
+        maybe_save_pending();
+    }
+
+    bool has_pending_images() const {
+        return !m_remote_pending.empty() || m_fetch_inflight > 0;
+    }
+
+    bool save_png(const std::string &path) {
+        std::string out = path;
+        if (out.size() < 4 || out.substr(out.size()-4) != ".png")
+            out += ".png";
+        // Ensure layout reflects any just-bound images; auto-size to document
+        for (int k=0;k<2;++k) { perform_layout(); }
+        int dh = m_view ? m_view->size().y() : 0;
+        int needH = std::min(8000, std::max(size().y(), dh + 120));
+        if (needH != size().y()) {
+            set_size(Vector2i(size().x(), needH));
+            for (int k=0;k<2;++k) { perform_layout(); draw_all(); }
+        } else {
+            draw_all();
+        }
+        int W = size().x(), H = size().y();
+        std::vector<unsigned char> buf((size_t)W * (size_t)H * 4);
+        draw_setup();
+        draw_contents();
+        draw_widgets();
+        glReadPixels(0, 0, W, H, GL_RGBA, GL_UNSIGNED_BYTE, buf.data());
+        stbi_flip_vertically_on_write(1);
+        int ok = stbi_write_png(out.c_str(), W, H, 4, buf.data(), W*4);
+        if (ok) {
+            m_status->set_caption("Saved " + out);
+            printf("Saved PNG %s %dx%d\n", out.c_str(), W, H);
+        } else {
+            m_status->set_caption("Failed to save " + out);
+            fprintf(stderr, "stbi_write_png failed for %s\n", out.c_str());
+        }
+        return ok != 0;
+    }
+
+    void save_dialog() {
+        auto paths = file_dialog({{"png", "PNG image"}}, true, false, "");
+        if (paths.empty() || paths[0].empty()) return;
+        std::string p = paths[0];
+        if (has_pending_images()) {
+            m_pending_save_path = p;
+            m_status->set_caption("Waiting for " + std::to_string(m_remote_pending.size() + m_fetch_inflight) + " image(s)… will save to " + p);
+            // also arm timeout: if images stall, save anyway after 30s
+            m_pending_save_deadline = glfwGetTime() + 30.0;
+            return;
+        }
+        save_png(p);
+    }
+
+    void set_screenshot_path(const std::string &p) {
+        m_screenshot_path = p;
+        m_screenshot_deadline = glfwGetTime() + 30.0;
+        m_screenshot_done = false;
+        if (!p.empty()) m_status->set_caption("Screenshot pending: " + p);
+    }
+
+    void maybe_save_pending() {
+        double now = glfwGetTime();
+        // CLI --screenshot path: save after images settle, then exit mainloop
+        if (!m_screenshot_path.empty() && !m_screenshot_done) {
+            bool pending = has_pending_images();
+            bool timeout = m_screenshot_deadline > 0 && now >= m_screenshot_deadline;
+            // grace: once pending clears, wait 250ms for final relayout
+            if (!pending || timeout) {
+                if (!pending) {
+                    if (m_screenshot_grace < 0) m_screenshot_grace = now + 0.25;
+                    if (now < m_screenshot_grace && !timeout) return;
+                }
+                m_screenshot_done = true;
+                bool ok = save_png(m_screenshot_path);
+                printf("screenshot %s %s\n", ok ? "saved" : "FAILED", m_screenshot_path.c_str());
+                // exit after one more frame so status is visible if interactive
+                nanogui::async([this]() { nanogui::leave(); glfwPostEmptyEvent(); });
+                glfwPostEmptyEvent();
+            }
+        }
+        // toolbar Save button deferred save
+        if (!m_pending_save_path.empty()) {
+            bool pending = has_pending_images();
+            bool timeout = m_pending_save_deadline > 0 && now >= m_pending_save_deadline;
+            if (!pending || timeout) {
+                std::string p = m_pending_save_path;
+                m_pending_save_path.clear();
+                m_pending_save_deadline = 0;
+                save_png(p);
+            }
+        }
     }
 
 private:
@@ -461,7 +561,9 @@ private:
     }
 
     ScrollPanel  *m_scroll = nullptr;
+public:
     HtmlDocument *m_view   = nullptr;
+private:
     Label        *m_title  = nullptr;
     Label        *m_status = nullptr;
     Button       *m_theme_btn = nullptr;
@@ -469,6 +571,13 @@ private:
     std::string   m_path;
     std::string   m_last_raw;
     SavedEmail    m_last;
+    // Save PNG (toolbar Ctrl+S or --screenshot)
+    std::string   m_pending_save_path;
+    double        m_pending_save_deadline = 0;
+    std::string   m_screenshot_path;
+    double        m_screenshot_deadline = 0;
+    double        m_screenshot_grace = -1;
+    bool          m_screenshot_done = false;
 
     std::shared_ptr<bool> m_alive = std::make_shared<bool>(true);
     std::unordered_map<std::string, int>         m_img_tex;
@@ -481,14 +590,90 @@ private:
 };
 
 int main(int argc, char **argv) {
+    // nmail_view [html] [--dump] [--gold path] [--screenshot out.png]
+    // --screenshot opens, waits for remote images (or 30s), saves PNG, exits.
+    // --dump legacy raw dump retained; --screenshot is the new image path API.
+    bool dump = false; std::string gold;
+    std::string screenshot;
+    std::string path;
+    for (int i=1;i<argc;++i) {
+        std::string a=argv[i];
+        if (a=="--dump") dump=true;
+        else if (a=="--screenshot" && i+1<argc) screenshot=argv[++i];
+        else if (a=="--gold" && i+1<argc) gold=argv[++i];
+        else if (!a.empty() && a[0]!='-') path=a;
+    }
+    if (!screenshot.empty()) {
+        // --screenshot supersedes --dump: interactive window that auto-saves+exits
+        signal(SIGPIPE, SIG_IGN);
+        nanogui::init();
+        {
+            // Resolve path relative to screenshot flag order: first positional
+            std::string p = path;
+            if (p.empty()) { for(int i=1;i<argc;++i){ std::string a=argv[i]; if(!a.empty()&&a[0]!='-'&&a.find(".html")!=std::string::npos){ p=a; break; }} }
+            ref<MailViewApp> app = new MailViewApp(p);
+            app->dec_ref();
+            app->set_visible(true);
+            for(int k=0;k<4;++k){ app->perform_layout(); app->draw_all(); }
+            if (!gold.empty() && gold.find("dark")!=std::string::npos) app->apply_theme(ThemeMode::Dark);
+            app->set_screenshot_path(screenshot);
+            app->draw_all();
+            nanogui::mainloop(-1);
+        }
+        nanogui::shutdown(); return 0;
+    }
+    if (dump) {
+        signal(SIGPIPE, SIG_IGN);
+        nanogui::init();
+        // Size screen to fit full document + toolbar/status, capped.
+        // This lets dump capture full email, not just 800px viewport.
+        ref<MailViewApp> app = new MailViewApp(path);
+        app->dec_ref();
+        app->set_visible(true);
+        // Allow measuring without viewport clip: resize screen to document height.
+        for(int k=0;k<4;++k){ app->perform_layout(); app->draw_all(); }
+        if (!gold.empty() && gold.find("dark")!=std::string::npos) app->apply_theme(ThemeMode::Dark);
+        for(int k=0;k<3;++k){ app->perform_layout(); app->draw_all(); }
+        // Auto-size to document height for full dump (cap 6000)
+        if (auto *v = app->m_view) {
+            int dh = v->size().y();
+            int needH = std::min(6000, std::max(800, dh + 120));
+            if (needH > app->size().y()) {
+                app->set_size(Vector2i(app->size().x(), needH));
+                for(int k=0;k<2;++k){ app->perform_layout(); app->draw_all(); }
+            }
+        }
+        if (auto *v = app->m_view) printf("%s", v->debug_summary().c_str());
+        app->draw_all();
+        {
+            app->draw_setup(); app->draw_contents(); app->draw_widgets();
+            int W = app->size().x(), H = app->size().y();
+            std::vector<unsigned char> buf(W*H*4);
+            glReadPixels(0,0,W,H,GL_RGBA,GL_UNSIGNED_BYTE, buf.data());
+            const char *out="/tmp/nmail_view_dump.raw";
+            FILE*f=fopen(out,"wb"); if(f){ fwrite(buf.data(),1,buf.size(),f); fclose(f); printf("dumped %s %dx%d\n",out,W,H); }
+            if(!gold.empty()) printf("gold: %s (manual diff: compare %s vs gold)\n", gold.c_str(), out);
+            // also write per-input named copy
+            if (!path.empty()) {
+                std::string base = path; size_t sl=base.rfind('/'); if(sl!=std::string::npos) base=base.substr(sl+1); size_t dot=base.rfind('.'); if(dot!=std::string::npos) base=base.substr(0,dot);
+                char named[256]; snprintf(named,sizeof(named),"/tmp/nmail_%s_dump.raw", base.c_str());
+                FILE*g=fopen(named,"wb"); if(g){ fwrite(buf.data(),1,buf.size(),g); fclose(g); printf("dumped %s\n",named); }
+            }
+        }
+        printf("SURVIVED dump\n");
+        nanogui::shutdown(); return 0;
+    }
     try {
         signal(SIGPIPE, SIG_IGN);
         nanogui::init();
         {
-            std::string path;
-            if (argc > 1)
-                path = argv[1];
-            ref<MailViewApp> app = new MailViewApp(path);
+            std::string p2;
+            if (argc > 1) p2 = argv[1];
+            // --dump already handled above; interactive path filters flags
+            if (!p2.empty() && p2.rfind("--",0)==0) p2.clear();
+            // prefer positional path from dump-parse
+            if (!path.empty()) p2 = path;
+            ref<MailViewApp> app = new MailViewApp(p2);
             app->dec_ref();
             app->set_visible(true);
             app->draw_all();

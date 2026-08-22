@@ -49,6 +49,12 @@ static bool style_equal(const Style& a, const Style& b) {
            a.underline == b.underline && a.monospace == b.monospace &&
            a.displayNone == b.displayNone &&
            a.superscript == b.superscript &&
+           a.verticalMiddle == b.verticalMiddle &&
+           a.strike == b.strike &&
+           a.allCaps == b.allCaps &&
+           a.lineHeight == b.lineHeight &&
+           a.letterSpacing == b.letterSpacing &&
+           a.opacity == b.opacity &&
            a.padX == b.padX && a.padY == b.padY &&
            a.borderWidth == b.borderWidth &&
            std::memcmp(&a.fgColor, &b.fgColor, sizeof(NVGcolor)) == 0 &&
@@ -349,7 +355,7 @@ void Document::draw(NVGcontext* ctx, float originX, float originY) {
         for (size_t pi = 0; pi < paragraphs.size(); ++pi) {
             auto& para = paragraphs[pi];
             if (para->isImage) {
-                float pad = paragraphSpacing * 0.5f;
+                float pad = 0.0f;
                 /* Fit to the content width, preserve aspect ratio. */
                 float scale = (para->image_w > contentWidth && para->image_w > 0.f)
                               ? contentWidth / para->image_w : 1.0f;
@@ -416,18 +422,15 @@ void Document::draw(NVGcontext* ctx, float originX, float originY) {
                 y = ry + pad;
             } else {
                 y = drawParagraph(ctx, *para, originX, y, pi);
-                /* Tight spacing: consecutive fully-monospace paragraphs
-                 * form one code block (they serialize as a single fenced
-                 * ``` block), and consecutive bullet items form one list —
-                 * keep their lines contiguous instead of inserting
-                 * paragraph spacing.  Never add the gap after the last
-                 * paragraph — that 12px of empty tail packed an icon+"1"
-                 * toward the top of Instagram's notification pill. */
                 if (pi + 1 < paragraphs.size()) {
                     const Paragraph& next = *paragraphs[pi + 1];
                     bool tight = (paragraph_is_code(*para) &&
                                   paragraph_is_code(next)) ||
-                                 (para->isBullet && next.isBullet);
+                                 (para->isBullet && next.isBullet) ||
+                                 // Single-image -> short-text is a captioned image, not two paragraphs.
+                                 (para->isImage && next.runs.size()==1 && next.runs[0].content.size()<80) ||
+                                 // Empty spacer paragraph between rows (common in Madeleine's table gaps)
+                                 (next.runs.empty() || (next.runs.size()==1 && next.runs[0].content.size()==0));
                     y += tight ? 0.0f : paragraphSpacing;
                 }
             }
@@ -508,9 +511,20 @@ void Document::draw(NVGcontext* ctx, float originX, float originY) {
              * is what marks this word as an image slot, mirroring the
              * whole-line block-image sentinel a few lines up. */
             if (wl.text == "\x01IMAGE") {
-                draw_image_block(ctx, wl.image, wl.x,
-                                 rl.baseline - wl.style.fontSize,
-                                 wl.advance, wl.style.fontSize);
+                float ih = wl.style.fontSize;
+                float imgY = rl.baseline - ih;
+                // Mirror the layout-time centering: small icons on mixed lines sit
+                // on the text midline, not the baseline.
+                bool mixed = false; for (auto &ww : rl.words) if (ww.text != "\x01IMAGE") { mixed = true; break; }
+                if ((wl.style.verticalMiddle || (mixed && ih <= 48.f)) && ih > 0.f) {
+                    // find a text style to get ascender for midline
+                    const Style *ts = nullptr; for (auto &ww : rl.words) if (ww.text != "\x01IMAGE") { ts = &ww.style; break; }
+                    float asc = ts ? metricsFor(ctx, *ts).ascender : ih * 0.7f;
+                    float textMid = rl.baseline - asc * 0.35f;
+                    imgY = textMid - ih * 0.5f;
+                }
+                draw_image_block(ctx, wl.image, wl.x, imgY,
+                                 wl.advance, ih);
                 continue;
             }
             const Style& st = wl.style;
@@ -522,6 +536,15 @@ void Document::draw(NVGcontext* ctx, float originX, float originY) {
                     vpad = std::max(vpad, w.style.padY + w.style.borderWidth);
                 const float lineAsc = std::max(1.f, rl.baseline - rl.y_top - vpad);
                 ty = rl.baseline - (lineAsc - metricsFor(ctx, st).ascender);
+            } else if (st.verticalMiddle) {
+                float lineH = rl.y_bottom - rl.y_top - 4.f; // approx; matches y+lineHeight+spacing
+                // Use stored lineHeight if available via baseline offset
+                float vpad = 0.f; for (auto &w : rl.words) vpad = std::max(vpad, w.style.padY + w.style.borderWidth);
+                float fontH = metricsFor(ctx, st).lineh > 1.f ? metricsFor(ctx, st).lineh : (metricsFor(ctx, st).ascender - metricsFor(ctx, st).descender);
+                // If explicit lineHeight drove the layout, rl.y_bottom - rl.y_top encodes it
+                float centered = rl.y_top + vpad + (lineH - fontH) * 0.5f + metricsFor(ctx, st).ascender;
+                // Only apply if it moves up (centering), not down
+                if (centered < ty) ty = centered;
             }
             /* Padded pills are painted once for the whole run (mono_bg).
              * Per-word fill with padX overlaps neighbours ("Le" / "More"). */
@@ -660,9 +683,14 @@ float Document::drawParagraph(NVGcontext* ctx, const Paragraph& para,
         const float indent = lineIndent();
         const float avail  = contentWidth - indent;
 
+        float lsExtra = 0.f;
+        if (run.style.letterSpacing != 0.f && !run.isImageRun && text.size()>1) {
+            lsExtra = run.style.letterSpacing * (float)(text.size() - 1);
+        }
+        float effAdv = advance + lsExtra;
         const float needed = current.words.empty()
-                             ? advance
-                             : current.advanceWidth + (sep ? sp : 0.0f) + advance;
+                             ? effAdv
+                             : current.advanceWidth + (sep ? sp : 0.0f) + effAdv;
         if (!current.words.empty() && needed > avail)
             flushLine(false);
 
@@ -673,8 +701,9 @@ float Document::drawParagraph(NVGcontext* ctx, const Paragraph& para,
         }
 
         Word w{ &run, std::string(text), advance, leftBearing, visualRight, bstart, bend, spaceBefore };
+        w.advance = effAdv; // store letter-spaced advance
         current.words.push_back(std::move(w));
-        current.advanceWidth += advance;
+        current.advanceWidth += effAdv;
 
         if (run.isImageRun) {
             /* Bottom-align to baseline (CSS default vertical-align for
@@ -775,15 +804,31 @@ float Document::drawParagraph(NVGcontext* ctx, const Paragraph& para,
          * reserve pad in the line box.  Inherited TD padding used to
          * inflate every line and clip the fill drawn around the text. */
         float boxPadX = 0.f, boxPadY = 0.f;
+        float lineHeightOverride = 0.f;
+        bool hasMiddle = false;
         for (const auto& w : line.words) {
             const Style& s = w.run->style;
             if (s.bgColor.a > 0.f) {
                 boxPadX = std::max(boxPadX, s.padX + s.borderWidth);
                 boxPadY = std::max(boxPadY, s.padY + s.borderWidth);
             }
+            if (s.lineHeight > 0.f) lineHeightOverride = std::max(lineHeightOverride, s.lineHeight);
+            if (s.verticalMiddle) hasMiddle = true;
         }
-        const float lineHeight = line.ascent + line.descent + 2.f * boxPadY;
-        const float baseline   = y + boxPadY + line.ascent;
+        float lineHeight = line.ascent + line.descent + 2.f * boxPadY;
+        if (lineHeightOverride > lineHeight) lineHeight = lineHeightOverride;
+        float baseline = y + boxPadY + line.ascent;
+        // If line-height > metrics or vertical-align:middle on a mixed line
+        // (pill icon + text), center the baseline in the line box so the
+        // pill fill and icon sit on the same midline.  Superscript keeps its
+        // existing raised-ty path and is excluded.
+        bool needsCenter = (lineHeightOverride > line.ascent + line.descent + 1e-3f) || hasMiddle;
+        // If the line contains an isImageRun, force middle so heart+"1" align.
+        if (!needsCenter) for (auto &w : line.words) if (w.run->isImageRun) { needsCenter = true; break; }
+        if (needsCenter && !line.words.empty()) {
+            bool hasSuper = false; for (auto &w : line.words) if (w.run->style.superscript) hasSuper = true;
+            if (!hasSuper) baseline = y + (lineHeight - (line.ascent + line.descent)) * 0.5f + line.ascent;
+        }
 
         float lineX;
         switch (para.alignment) {
@@ -939,6 +984,15 @@ float Document::drawParagraph(NVGcontext* ctx, const Paragraph& para,
 
             if (word.run->isImageRun) {
                 const float ih = word.run->image_h;
+                // Center small icons with text's midline when mixed; otherwise bottom-align.
+                float imgY = baseline - ih;
+                bool mixedLine = false; for (auto &ww : line.words) if (!ww.run->isImageRun) { mixedLine = true; break; }
+                bool useMiddle = st.verticalMiddle || (mixedLine && ih <= 48.f);
+                if (useMiddle) {
+                    // align icon's vertical center with text's x-height center
+                    float textMid = baseline - metricsFor(ctx, st).ascender * 0.35f;
+                    imgY = textMid - ih * 0.5f;
+                }
                 if (capture_layout) {
                     WordLayout wl;
                     wl.byte_start     = word.byte_start;
@@ -953,7 +1007,7 @@ float Document::drawParagraph(NVGcontext* ctx, const Paragraph& para,
                     rich_line.words.push_back(std::move(wl));
                 }
                 if (!layout_only)
-                    draw_image_block(ctx, word.run->image, wx, baseline - ih,
+                    draw_image_block(ctx, word.run->image, wx, imgY,
                                      word.advance, ih);
             } else {
             // Capture word position + draw data for cheap re-paint
@@ -983,10 +1037,18 @@ float Document::drawParagraph(NVGcontext* ctx, const Paragraph& para,
             }
 
             if (!layout_only) {
-                nvgFillColor(ctx, st.fgColor);
+                NVGcolor fg = st.fgColor;
+                fg.a = (unsigned char)std::lround((float)fg.a * std::clamp(st.opacity, 0.f, 1.f));
+                nvgFillColor(ctx, fg);
                 float ty = baseline;
                 if (st.superscript)
                     ty = baseline - (line.ascent - metricsFor(ctx, st).ascender);
+                else if (st.verticalMiddle) {
+                    // center text's cap-height in the line box
+                    float fontH = metricsFor(ctx, st).lineh > 1.f ? metricsFor(ctx, st).lineh : (metricsFor(ctx, st).ascender - metricsFor(ctx, st).descender);
+                    float centered = y + (lineHeight - fontH) * 0.5f + metricsFor(ctx, st).ascender;
+                    if (centered < baseline) ty = centered;
+                }
                 nvgText(ctx, wx, ty, word.text.c_str(), nullptr);
             }
 
@@ -999,6 +1061,17 @@ float Document::drawParagraph(NVGcontext* ctx, const Paragraph& para,
                 nvgStrokeWidth(ctx, std::max(1.0f, st.fontSize * 0.05f));
                 nvgMoveTo(ctx, ux0, uy);
                 nvgLineTo(ctx, ux1, uy);
+                nvgStroke(ctx);
+            }
+            if (st.strike && !layout_only) {
+                const float sx0 = wx + word.leftBearing;
+                const float sx1 = wx + word.visualRight;
+                const float sy  = baseline - metricsFor(ctx, st).ascender * 0.35f;
+                nvgBeginPath(ctx);
+                nvgStrokeColor(ctx, st.fgColor);
+                nvgStrokeWidth(ctx, std::max(1.0f, st.fontSize * 0.06f));
+                nvgMoveTo(ctx, sx0, sy);
+                nvgLineTo(ctx, sx1, sy);
                 nvgStroke(ctx);
             }
 

@@ -170,7 +170,12 @@ public:
     void connect()                              { post(Type::Connect); }
     void refresh()                              { post(Type::Refresh); }
     void select_folder(const std::string &name) { post(Type::Select, name); }
-    void fetch_body(int seq)                    { post(Type::FetchBody, "", seq); }
+    void fetch_body(int seq) {
+        std::string folder;
+        { std::lock_guard<std::mutex> l(m_mutex); folder = m_selected_folder; }
+        post(Type::FetchBody, folder, seq);
+    }
+    void fetch_body(const std::string &folder, int seq) { post(Type::FetchBody, folder, seq); }
     void fetch_older()                          { post(Type::FetchOlder); }
     void ensure_visible_cached(const std::string &folder,
                                const std::vector<int> &visible_seqs) {
@@ -397,11 +402,17 @@ private:
             if (cmd.folder != m_selected_folder) return;
         }
         if (!m_imap.is_open()) {
-            std::lock_guard<std::mutex> lock(m_mutex);
-            if (!m_prefetch_queue.empty() && m_prefetch_queue.front() == cmd.seq) {
-                m_prefetch_queue.pop_front(); m_prefetch_queued.erase(cmd.seq);
+            std::string re; m_imap.reconnect(re);
+            if (!m_imap.is_open()) {
+                std::lock_guard<std::mutex> lock(m_mutex);
+                if (!m_prefetch_queue.empty() && m_prefetch_queue.front() == cmd.seq) {
+                    m_prefetch_queue.pop_front(); m_prefetch_queued.erase(cmd.seq);
+                }
+                return;
             }
-            return;
+        }
+        if (!cmd.folder.empty() && m_imap.selected_folder() != cmd.folder) {
+            std::string se; m_imap.ensure_selected(cmd.folder, se);
         }
         MailMessage msg; std::string err;
         bool ok = m_imap.fetch_message(cmd.seq, msg, err);
@@ -465,11 +476,48 @@ private:
                                  "Set up the server in Preferences first.");
                     break;
                 }
+                // Preserve the folder the FETCH belongs to across a silent
+                // reconnect (selected_folder may reset briefly).
+                std::string want_folder = cmd.folder.empty() ? m_selected_folder : cmd.folder;
+                if (!want_folder.empty() && m_imap.selected_folder() != want_folder) {
+                    std::string se;
+                    if (!m_imap.ensure_selected(want_folder, se)) {
+                        if (!ImapClient::is_connection_error(se)) {
+                            report_error("Could not open folder", se);
+                            break;
+                        }
+                        std::string re;
+                        if (!m_imap.reconnect(re)) {
+                            report_error("Connection lost", re);
+                            break;
+                        }
+                        if (!m_imap.ensure_selected(want_folder, se)) {
+                            report_error("Could not open folder", se);
+                            break;
+                        }
+                    }
+                }
                 report_status("Fetching message...");
                 MailMessage msg;
                 std::string err;
                 if (!m_imap.fetch_message(cmd.seq, msg, err)) {
+                    if (ImapClient::is_connection_error(err)) {
+                        std::string re;
+                        if (m_imap.reconnect(re)) {
+                            if (!want_folder.empty())
+                                m_imap.ensure_selected(want_folder, re);
+                            err.clear();
+                            if (m_imap.fetch_message(cmd.seq, msg, err)) {
+                                report_status("Ready (reconnected)");
+                                deliver([this, seq = cmd.seq, msg]() {
+                                    if (cb_body) cb_body(seq, msg);
+                                });
+                                break;
+                            }
+                        }
+                    }
                     report_error("Could not fetch message", err);
+                    report_status("Ready");
                     break;
                 }
                 report_status("Ready");
@@ -2402,6 +2450,33 @@ public:
         m_view_scroll->set_scroll(0.0f);
     }
 
+    // Build a stub doc that appends a subtle "Loading…" row to the same
+    // header/preview content that show_preview_stub shows, so the user
+    // still sees what they selected while the FETCH is in flight.
+    void show_preview_stub_with_loading(const EmailData &d) {
+        Document doc;
+        Style title; title.fontSize = 24.f; title.bold = true;
+        title.fgColor = text_color();
+        Style meta;  meta.fontSize = 16.f; meta.fgColor = meta_color();
+        Style body;  body.fontSize = 16.f; body.fgColor = text_color();
+        Style loading; loading.fontSize = 14.f; loading.italic = true;
+        loading.fgColor = meta_color();
+        doc.addParagraph()->addText(d.subject.empty() ? "(no subject)"
+                                                      : d.subject, title);
+        auto *from = doc.addParagraph(); from->addText(d.sender, meta);
+        if (!d.date.empty()) { auto *dt = doc.addParagraph(); dt->addText(d.date, meta); }
+        auto *rule = doc.addParagraph(); rule->isRule = true;
+        if (!d.preview.empty()) doc.addParagraph()->addText(d.preview, body);
+        auto *rule2 = doc.addParagraph(); rule2->isRule = true;
+        doc.addParagraph()->addText("Loading message\u2026", loading);
+        m_view->set_document(std::move(doc));
+        m_has_message = false;
+        m_reply_btn->set_enabled(false);
+        if (m_save_btn) m_save_btn->set_enabled(false);
+        // Keep scroll at top — the stub is the loading view, not a separate page.
+        m_view_scroll->set_scroll(0.0f);
+    }
+
     void commit_pending_preview() {
         if (m_pending_seq < 0)
             return;
@@ -2421,11 +2496,7 @@ public:
             return;
         }
         m_loading_seq = seq;
-        {
-            Document doc;
-            parse_markdown(doc, "*Loading message...*", text_color(), 18.0f);
-            m_view->set_document(std::move(doc));
-        }
+        show_preview_stub_with_loading(d);
         m_worker.fetch_body(seq);
         redraw();
     }

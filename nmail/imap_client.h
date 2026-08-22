@@ -1,9 +1,8 @@
 /*
  * imap_client.h — minimal blocking IMAP4rev1 client for nmail.
  *
- * Designed to be driven from a single worker thread; every method blocks
- * until the server answers (or the socket times out).  No caching: each
- * call goes back to the server.
+ * Auto-reconnects after an idle timeout: credentials and selected mailbox
+ * are sticky and run() will LOGIN+SELECT once on connection loss.
  */
 #ifndef IMAP_CLIENT_H
 #define IMAP_CLIENT_H
@@ -77,6 +76,10 @@ public:
 
     void close();
     bool is_open() const { return m_fd >= 0; }
+    const std::string &selected_folder() const { return m_selected_folder; }
+    bool reconnect(std::string &err);
+    static bool is_connection_error(const std::string &err);
+    bool ensure_selected(const std::string &folder, std::string &err);
 
     /* Wake a recv() blocked in another thread (used when shutting down).
      * Does not touch any other state, so it is safe to call concurrently
@@ -88,11 +91,22 @@ private:
     int m_tag = 0;
     std::string m_rbuf;        // pending bytes from the socket
     std::set<std::string> m_caps;  // server capabilities (uppercase)
+    // Credentials from the last successful open(), kept to allow a
+    // silent reconnect after an idle timeout / server BYE.
+    std::string m_host;
+    int         m_port = 0;
+    std::string m_user;
+    std::string m_pass;
+    std::string m_selected_folder; // last successfully SELECTed mailbox
 
     /* Send a tagged command, collect untagged responses until the tagged
-     * completion.  Returns false on NO/BAD or I/O error (err explains). */
+     * completion.  Returns false on NO/BAD or I/O error (err explains).
+     * The public run() will attempt one silent reconnect on connection
+     * loss and retry the command once. */
     bool run(const std::string &cmd, std::vector<std::string> &untagged,
              std::string &err);
+    bool run_once(const std::string &cmd, std::vector<std::string> &untagged,
+                  std::string &err);
 
     /* Lower-level command plumbing (used by multi-step AUTHENTICATE). */
     std::string send_with_tag(const std::string &cmd);

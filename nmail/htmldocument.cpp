@@ -74,13 +74,35 @@ inline void trace_draw(const char *, const Widget *, const char * = nullptr) {}
 // ---------------------------------------------------------------------------
 // Color parsing: "#rgb" / "#rrggbb" / "rgb(r,g,b)" / common color names.
 // ---------------------------------------------------------------------------
+static inline float hue2rgb(float p, float q, float t) {
+    if (t < 0.f) t += 1.f;
+    if (t > 1.f) t -= 1.f;
+    if (t < 1.f/6.f) return p + (q - p) * 6.f * t;
+    if (t < 1.f/2.f) return q;
+    if (t < 2.f/3.f) return p + (q - p) * (2.f/3.f - t) * 6.f;
+    return p;
+}
+static NVGcolor hsl_to_rgb(float h, float s, float l) {
+    h = std::fmod(h, 360.f); if (h < 0) h += 360.f; h /= 360.f;
+    s = std::clamp(s, 0.f, 1.f); l = std::clamp(l, 0.f, 1.f);
+    if (s == 0.f) { unsigned v = (unsigned)std::lround(l * 255.f); return nvgRGB(v, v, v); }
+    float q = l < 0.5f ? l * (1.f + s) : l + s - l * s;
+    float p = 2.f * l - q;
+    float r = hue2rgb(p, q, h + 1.f/3.f), g = hue2rgb(p, q, h), b = hue2rgb(p, q, h - 1.f/3.f);
+    return nvgRGB((unsigned)std::lround(r*255.f), (unsigned)std::lround(g*255.f), (unsigned)std::lround(b*255.f));
+}
+
 NVGcolor parse_html_color(const char *s, bool &ok) {
     ok = true;
     if (s && s[0] == '#') {
-        unsigned r = 0, g = 0, b = 0;
+        unsigned r = 0, g = 0, b = 0, a = 255;
         size_t len = strlen(s + 1);
+        if (len == 8 && std::sscanf(s + 1, "%02x%02x%02x%02x", &r, &g, &b, &a) == 4)
+            return nvgRGBA(r, g, b, a);
         if (len == 6 && std::sscanf(s + 1, "%02x%02x%02x", &r, &g, &b) == 3)
             return nvgRGB(r, g, b);
+        if (len == 4 && std::sscanf(s + 1, "%01x%01x%01x%01x", &r, &g, &b, &a) == 4)
+            return nvgRGBA(r * 17, g * 17, b * 17, a * 17);
         if (len == 3 && std::sscanf(s + 1, "%01x%01x%01x", &r, &g, &b) == 3)
             return nvgRGB(r * 17, g * 17, b * 17);
     } else if (s) {
@@ -119,6 +141,32 @@ NVGcolor parse_html_color(const char *s, bool &ok) {
                 }
             }
         }
+        if (l.rfind("hsl", 0) == 0) {
+            size_t p = l.find('(');
+            if (p != std::string::npos) {
+                bool has_alpha = l.rfind("hsla", 0) == 0;
+                float comp[4] = {0,0,0,1}; int n=0; size_t i=p+1;
+                while (i < l.size() && n < 4) {
+                    while (i < l.size() && (l[i]==' '||l[i]==','||l[i]=='%')) ++i;
+                    if (i >= l.size() || l[i]==')') break;
+                    char *end=nullptr;
+                    float v=strtof(l.c_str()+i,&end);
+                    if (end==l.c_str()+i) break;
+                    comp[n++]=v;
+                    i=end-l.c_str();
+                    // consume trailing % for s/l
+                    while (i < l.size() && l[i]==' ') ++i;
+                    if (i < l.size() && l[i]=='%') ++i;
+                }
+                if (n >= 3) {
+                    NVGcolor c = hsl_to_rgb(comp[0], comp[1]/100.f, comp[2]/100.f);
+                    if (has_alpha && n>=4) c.a = std::clamp(comp[3],0.f,1.f);
+                    return c;
+                }
+            }
+        }
+        if (l == "transparent") { ok=true; return nvgRGBA(0,0,0,0); }
+        if (l == "currentcolor") { ok=false; return nvgRGB(0,0,0); }
         if (l == "black")  return nvgRGB(0, 0, 0);
         if (l == "white")  return nvgRGB(255, 255, 255);
         if (l == "red")    return nvgRGB(200, 30, 30);
@@ -183,6 +231,27 @@ struct BoxProps {
      * photo, never <img src>).  Resolved and painted like an <img>. */
     std::string bg_image_url;
 };
+
+static void apply_line_height(const std::string &v, float &lh, float fontSize) {
+    std::string t = trim_lower(v);
+    if (t.empty() || t == "normal") { lh = 0.f; return; }
+    char *end = nullptr;
+    float n = std::strtof(t.c_str(), &end);
+    if (end == t.c_str()) return;
+    std::string unit = trim_lower(end);
+    if (unit.empty()) { // unitless — factor of font-size
+        if (n > 0.05f && n < 5.f) lh = fontSize * n;
+        else if (n >= 5.f) lh = n;
+    } else if (unit == "px" || unit == "pt") {
+        if (unit == "pt") n *= (96.f/72.f);
+        lh = std::max(n, 1.f);
+    } else if (unit == "em") {
+        lh = std::max(fontSize * n, 1.f);
+    } else if (unit == "%") {
+        lh = std::max(fontSize * (n/100.f), 1.f);
+    }
+    lh = std::min(lh, 200.f);
+}
 
 /* font-size value: Npx / Npt / Nem / N% (em and % are relative to the
  * inherited size). */
@@ -266,13 +335,19 @@ void apply_style_attr(const char *css, Style &st,
             NVGcolor c = parse_html_color(val.c_str(), ok);
             if (ok) st.fgColor = c;
         } else if (key == "background-color" || key == "background") {
-            /* Shorthand: take a leading color and ignore the rest. */
-            std::string col = val;
-            size_t sp = col.find_first_of(" \t");
-            if (sp != std::string::npos) col = col.substr(0, sp);
-            bool ok = false;
-            NVGcolor c = parse_html_color(col.c_str(), ok);
-            if (ok) st.bgColor = c;
+            // Shorthand may be "#fff url(...) center/cover no-repeat" — scan tokens
+            // for the first color; url(...) is handled by background-image branch.
+            // Split on whitespace but keep url(...) as one token.
+            std::string lower = val;
+            // token scan: words separated by whitespace, url(...) kept intact
+            std::vector<std::string> toks;
+            { size_t p=0; while(p<lower.size()){ while(p<lower.size() && std::isspace((unsigned char)lower[p])) ++p; if(p>=lower.size()) break; if(lower.compare(p,4,"url(")==0){ size_t q=lower.find(')',p); if(q==std::string::npos) q=lower.size()-1; toks.push_back(lower.substr(p,q-p+1)); p=q+1; } else { size_t q=lower.find_first_of(" \t",p); toks.push_back(lower.substr(p,q==std::string::npos?std::string::npos:q-p)); if(q==std::string::npos) break; p=q; } } }
+            for (auto &tok : toks) {
+                if (tok.rfind("url(",0)==0) continue;
+                if (tok=="no-repeat"||tok=="repeat"||tok=="repeat-x"||tok=="repeat-y"||tok=="cover"||tok=="contain"||tok=="center"||tok=="left"||tok=="right"||tok=="top"||tok=="bottom"||tok.rfind("center/",0)==0) continue;
+                bool ok=false; NVGcolor c=parse_html_color(tok.c_str(), ok);
+                if (ok) { st.bgColor=c; break; }
+            }
         } else if (key == "background-image" && box) {
             /* val is lower-cased; re-slice the original declaration so the
              * URL keeps its case (image hosts are case-sensitive). */
@@ -305,10 +380,11 @@ void apply_style_attr(const char *css, Style &st,
                 st.italic = false;
         } else if (key == "text-decoration" ||
                    key == "text-decoration-line") {
-            if (val.find("none") != std::string::npos)
-                st.underline = false;
-            else if (val.find("underline") != std::string::npos)
-                st.underline = true;
+            if (val.find("none") != std::string::npos) { st.underline = false; st.strike = false; }
+            else {
+                if (val.find("underline") != std::string::npos) st.underline = true;
+                if (val.find("line-through") != std::string::npos) st.strike = true;
+            }
         } else if (key == "font-family") {
             if (val.find("mono") != std::string::npos ||
                 val.find("courier") != std::string::npos ||
@@ -333,13 +409,21 @@ void apply_style_attr(const char *css, Style &st,
             else if (val == "right")  { align = TextAlignment::Right;   has_align = true; }
             else if (val == "justify"){ align = TextAlignment::Justify; has_align = true; }
             else if (val == "left")   { align = TextAlignment::Left;    has_align = true; }
+        } else if (key == "line-height") {
+            apply_line_height(val, st.lineHeight, st.fontSize);
         } else if (key == "vertical-align") {
             /* "top" on a TD is table layout, not superscript.  Inline
              * spans (price cents) still set it via walk_inline. */
-            if (val == "super")
+            if (val == "super") {
                 st.superscript = true;
-            else if (val == "baseline" || val == "middle" || val == "bottom")
+                st.verticalMiddle = false;
+            } else if (val == "baseline" || val == "bottom" || val == "top") {
                 st.superscript = false;
+                st.verticalMiddle = false;
+            } else if (val == "middle" || val == "center") {
+                st.superscript = false;
+                st.verticalMiddle = true;
+            }
             if (box && (val == "middle" || val == "center"))
                 box->align_middle = true;
         } else if (key == "float" && box) {
@@ -347,30 +431,38 @@ void apply_style_attr(const char *css, Style &st,
         } else if (key == "padding" || key == "padding-left" ||
                    key == "padding-right" || key == "padding-top" ||
                    key == "padding-bottom") {
-            /* "6px 16px" → padY, padX.  Single value applies to both. */
-            float px = 0, pct = 0;
-            size_t sp = val.find_first_of(" \t");
-            std::string a = (sp == std::string::npos) ? val : val.substr(0, sp);
-            std::string b = (sp == std::string::npos) ? val
-                            : trim_lower(val.substr(sp));
-            size_t sp2 = b.find_first_of(" \t");
-            if (sp2 != std::string::npos) b = b.substr(0, sp2);
-            if (parse_css_len(a, px, pct) && pct == 0.0f) {
-                if (key == "padding" || key == "padding-top" ||
-                    key == "padding-bottom") {
-                    st.padY = std::max(st.padY, px);
-                    if (box) box->pad_y = std::max(box->pad_y, px);
+            // Full 1..4 shorthand: "a [b [c [d]]]" → top/right/bottom/left
+            auto expand_padding = [&](std::string &top, std::string &right, std::string &bottom, std::string &left) {
+                std::vector<std::string> tok;
+                size_t p = 0; while (p < val.size()) { while (p < val.size() && std::isspace((unsigned char)val[p])) ++p; if (p>=val.size()) break; size_t q = val.find_first_of(" \t", p); tok.push_back(val.substr(p, q==std::string::npos?std::string::npos:q-p)); if (q==std::string::npos) break; p = q; }
+                if (tok.empty()) return false;
+                if (tok.size()==1) { top=right=bottom=left=tok[0]; }
+                else if (tok.size()==2) { top=bottom=tok[0]; right=left=tok[1]; }
+                else if (tok.size()==3) { top=tok[0]; right=left=tok[1]; bottom=tok[2]; }
+                else { top=tok[0]; right=tok[1]; bottom=tok[2]; left=tok[3]; }
+                return true;
+            };
+            if (key == "padding") {
+                std::string top,right,bottom,left;
+                if (!expand_padding(top,right,bottom,left)) { /* empty */ }
+                else {
+
+                    // Apply: top/bottom affect padY, left/right affect padX
+                    float py = 0.f, pxv = 0.f;
+                    float px1=0,pct1=0, px2=0,pct2=0;
+                    if (parse_css_len(top, px1,pct1) && pct1==0.f) py = std::max(py, px1);
+                    if (parse_css_len(bottom, px1,pct1) && pct1==0.f) py = std::max(py, px1);
+                    if (parse_css_len(left, px2,pct2) && pct2==0.f) pxv = std::max(pxv, px2);
+                    if (parse_css_len(right, px2,pct2) && pct2==0.f) pxv = std::max(pxv, px2);
+                    if (py > 0.f) { st.padY = std::max(st.padY, py); if (box) box->pad_y = std::max(box->pad_y, py); }
+                    if (pxv > 0.f) { st.padX = std::max(st.padX, pxv); if (box) box->pad_x = std::max(box->pad_x, pxv); }
                 }
-                if (key == "padding" || key == "padding-left" ||
-                    key == "padding-right") {
-                    st.padX = std::max(st.padX, px);
-                    if (box) box->pad_x = std::max(box->pad_x, px);
-                }
-            }
-            if (key == "padding" && b != a &&
-                parse_css_len(b, px, pct) && pct == 0.0f) {
-                st.padX = std::max(st.padX, px);
-                if (box) box->pad_x = std::max(box->pad_x, px);
+            } else {
+                // single side
+                float px=0,pct=0;
+                if (!parse_css_len(val, px, pct) || pct!=0.f) { /* ignore */ }
+                else if (key == "padding-top" || key == "padding-bottom") { st.padY = std::max(st.padY, px); if (box) box->pad_y = std::max(box->pad_y, px); }
+                else { st.padX = std::max(st.padX, px); if (box) box->pad_x = std::max(box->pad_x, px); }
             }
         } else if (box && (key == "width" || key == "max-width" ||
                            key == "height" || key == "max-height")) {
@@ -425,8 +517,26 @@ void apply_style_attr(const char *css, Style &st,
             float px = 0, pct = 0;
             size_t sp = val.find_first_of(" \t");
             std::string a = (sp == std::string::npos) ? val : val.substr(0, sp);
-            if (parse_css_len(a, px, pct) && pct == 0.0f)
-                box->radius_px = px;
+            if (parse_css_len(a, px, pct)) {
+                if (pct > 0.f) {
+                    // "50%" / "999px" pill: defer — decorate_block clamps to min(w,h)/2.
+                    // Store a sentinel large value that always wins the clamp.
+                    box->radius_px = 9999.f;
+                } else if (px > 0.f)
+                    box->radius_px = px;
+            }
+        } else if (key == "letter-spacing") {
+            float px=0,pct=0;
+            if (parse_css_len(val, px, pct) && pct==0.f) st.letterSpacing = std::max(st.letterSpacing, px);
+        } else if (key == "text-transform") {
+            if (val.find("uppercase") != std::string::npos) st.allCaps = true;
+            else if (val.find("none") != std::string::npos) st.allCaps = false;
+        } else if (key == "opacity") {
+            char *end=nullptr; float v=strtof(val.c_str(), &end);
+            if (end != val.c_str()) st.opacity = std::clamp(v, 0.f, 1.f);
+        } else if (key == "white-space") {
+            // Only respect nowrap for now; normal/pre handled by Flow::pre elsewhere
+            if (val == "nowrap") { /* handled at layout: treat as no-wrap hint */ }
         } else if (box && (key == "margin" || key == "margin-left" ||
                            key == "margin-right")) {
             if (val.find("auto") != std::string::npos)
@@ -488,6 +598,9 @@ struct Flow {
                 t.erase(0, 1);
         }
         if (t.empty()) return;
+        if (st.allCaps) {
+            for (char &c : t) c = (char)std::toupper((unsigned char)c);
+        }
         para()->addText(t, st);
         cur_has_text = true;
     }
@@ -806,28 +919,50 @@ void css_skip_ws(const std::string &s, size_t &i, size_t end) {
     while (i < end && std::isspace((unsigned char)s[i])) ++i;
 }
 
+static std::string strip_pseudo(const std::string &s) {
+    // Drop trailing :hover/:first-child etc. and [attr] — keep base before them.
+    size_t c = s.find('[');
+    size_t p = s.find(':');
+    size_t cut = std::min(c==std::string::npos? s.size():c, p==std::string::npos? s.size():p);
+    return trim_lower(s.substr(0, cut));
+}
+
 bool parse_simple_selector(const std::string &raw, CssSel &out) {
     std::string s = trim_lower(raw);
     if (s.empty()) return false;
-    /* One descendant step: ".st-LinkTextBlock a" */
-    size_t sp = s.find_first_of(" \t");
-    if (sp != std::string::npos && s.find_first_of(">+~[:") == std::string::npos) {
-        std::string anc = trim_lower(s.substr(0, sp));
-        std::string rest = trim_lower(s.substr(sp));
-        if (rest.find_first_of(" \t") != std::string::npos)
-            return false;
-        CssSel a, b;
-        if (!parse_simple_selector(anc, a) || !parse_simple_selector(rest, b))
-            return false;
-        out = b;
-        if (!a.classes.empty())
-            out.ancestor_class = a.classes[0];
-        else if (!a.tag.empty())
-            out.ancestor_tag = a.tag;
-        else
-            return false;
-        out.spec += 10;
-        return true;
+    // Strip trailing pseudo/attr bracket remainder if present
+    // Do per-token so "a[x-apple-data-detectors]" -> "a"
+    // Split descendant chain "table td a" -> last token is target
+    // Collect ancestor tokens (before last space) as disjunctive must-have-set
+    // We keep only first ancestor class/tag (compat) but accept multi-depth via loose check.
+    // Normalize "a > b" -> "a b", commas already split upstream
+    { std::string t; for (char c: s) t += (c=='>'||c=='+'||c=='~')?' ':c; s=t; }
+    // remove bracket and pseudo tails per token
+    { std::vector<std::string> toks; size_t p=0; while(p<s.size()){ while(p<s.size()&&std::isspace((unsigned char)s[p])) ++p; if(p>=s.size()) break; size_t q=s.find_first_of(" \t",p); std::string tok=s.substr(p,q==std::string::npos?std::string::npos:q-p); std::string base=strip_pseudo(tok); // keep base tag/class/id part
+            // but keep class/id inside [] stripped tok: e.g. ".foo" stays, "a[href]" -> "a"
+            // For "*", keep empty tag.
+            toks.push_back(base.empty()? std::string():base); if(q==std::string::npos) break; p=q; }
+        if (toks.empty()) return false;
+        if (toks.size()>=2) {
+            // ancestor exists — try to parse ancestor's last token's class/tag
+            std::string anc = toks[toks.size()-2];
+            std::string rest = toks.back();
+            if (rest.empty()) return false;
+            CssSel a, b;
+            // For multi-depth, stitch ancestor as the immediate previous; deeper ancestors are treated as disjunctive
+            // but we only store one — matches "table td a" if any parent has class/tag of anc
+            // Parse each token as simple (tag + .class/.#id)
+            auto parseTok = [&](const std::string &tok, CssSel &o)->bool{
+                o=CssSel{}; if(tok.empty()) return false; size_t i=0; if(tok[0]!='.'&&tok[0]!='#'){ size_t j=i; while(j<tok.size()&&(std::isalnum((unsigned char)tok[j])||tok[j]=='-'||tok[j]=='_')) ++j; o.tag=tok.substr(0,j); if(o.tag=="*") o.tag.clear(); i=j; } while(i<tok.size()){ if(tok[i]=='.'||tok[i]=='#'){ char k=tok[i++]; size_t j=i; while(j<tok.size()&&(std::isalnum((unsigned char)tok[j])||tok[j]=='-'||tok[j]=='_')) ++j; if(j==i) return false; std::string id=tok.substr(i,j-i); if(k=='.') o.classes.push_back(id); else o.id=id; i=j; } else return false; } if(o.tag.empty()&&o.id.empty()&&o.classes.empty()) return false; o.spec=(o.id.empty()?0:100)+(int)o.classes.size()*10+(o.tag.empty()?0:1); return true; };
+            if (!parseTok(anc,a) || !parseTok(rest,b)) return false;
+            out=b;
+            if (!a.classes.empty()) out.ancestor_class=a.classes[0];
+            else if (!a.tag.empty()) out.ancestor_tag=a.tag;
+            else if (!a.id.empty()) out.ancestor_class=a.id; else return false;
+            out.spec+=10; return true;
+        } else {
+            s = toks[0];
+        }
     }
     if (s.find_first_of(" >+~[:") != std::string::npos)
         return false;
@@ -1119,8 +1254,26 @@ float flex_column_pct(GumboElement *el, const Builder &B) {
     apply_cascade(el, dummy, a, B, &box);
     if (box.width_pct > 0.0f && box.width_pct < 99.0f)
         return box.width_pct;
-    if (box.table_cell)
-        return box.width_px > 0.0f ? box.width_px : 1.0f;
+    if (box.table_cell) {
+        if (box.width_px > 0.0f) return box.width_px;
+        // Unlayer: class "u-col-20" / "u-col-28" / "u-col-32" encodes % weight.
+        // Also "u-col-25p33" -> 25.33 . Use it as weight so MENU/CATERING/ABOUT/LOCATIONS split 20/28/20/32.
+        const char *cls = attr(el, "class");
+        if (cls) {
+            std::string s = trim_lower(cls);
+            size_t q = s.find("u-col-");
+            if (q != std::string::npos) {
+                std::string tail = s.substr(q + 6);
+                // take leading "25p33" / "20" chars
+                std::string num;
+                for (char c : tail) { if (std::isdigit((unsigned char)c) || c=='p' || c=='.') num+=c; else break; }
+                for (char &c : num) if (c=='p') c='.';
+                float v = strtof(num.c_str(), nullptr);
+                if (v > 0.f && v < 200.f) return v;
+            }
+        }
+        return 1.0f;
+    }
     const char *cls = attr(el, "class");
     if (cls) {
         std::string s = trim_lower(cls);
@@ -1130,13 +1283,23 @@ float flex_column_pct(GumboElement *el, const Builder &B) {
             if (n > 0 && n < 100)
                 return (float)n;
         }
+        size_t q = s.find("u-col-");
+        if (q != std::string::npos) {
+            std::string tail = s.substr(q + 6);
+            std::string num;
+            for (char c : tail) { if (std::isdigit((unsigned char)c) || c=='p' || c=='.') num+=c; else break; }
+            for (char &c : num) if (c=='p') c='.';
+            float v = strtof(num.c_str(), nullptr);
+            if (v > 0.f) return v;
+        }
     }
     return 0.0f;
 }
 
 /* PennyMac-style header nav: <ul><li style="float:left; width:N%">.
  * Two or more floated or %-width items belong on one row, not as a
- * vertical bullet list. */
+ * vertical bullet list.  Also suppress bullets for nav rows so tiny
+ * header links don't get stray bullets. */
 bool list_is_nav_row(GumboElement *ul, const Builder &B) {
     int n = 0, side = 0;
     for (unsigned i = 0; i < ul->children.length; ++i) {
@@ -1148,12 +1311,17 @@ bool list_is_nav_row(GumboElement *ul, const Builder &B) {
         BoxProps box;
         apply_cascade(&cn->v.element, dummy, a, B, &box);
         if (dummy.displayNone) continue;
-        ++n;
         if (box.float_left || (box.width_pct > 0.0f && box.width_pct < 99.0f))
             ++side;
+        ++n;
     }
-    return n >= 2 && side >= 2;
+    if (n >= 2 && side >= 2) return true;
+    return n >= 2 && side >= 1 && n <= 6;
 }
+
+// Unused helper kept for reference; tight spacing now handled in Document::draw
+// (image→short text / empty paragraph).  HtmlDocument root gap is 0 — inter-row
+// spacing comes from per-row v-container-padding paddings only.
 
 /* Marketing emails commonly ship each image twice: an Outlook-only copy
  * inside a plain "<!--[if mso]>...<![endif]-->" comment (invisible to
@@ -1283,14 +1451,15 @@ bool element_is_hidden(GumboElement *el, const Builder &B) {
 }
 
 void build_children(Widget *container, GumboVector *kids, Style st,
-                    Builder &B, int list_depth, TextAlignment align);
+                    Builder &B, int list_depth, TextAlignment align, int depth=0);
 void walk_inline(GumboNode *node, Style st, Flow &F, Builder &B,
-                 int list_depth);
+                 int list_depth, int depth=0);
 
 void walk_inline_children(GumboVector *kids, Style st, Flow &F, Builder &B,
-                          int list_depth) {
+                          int list_depth, int depth) {
+    if (depth > 80) return;
     for (unsigned i = 0; i < kids->length; ++i)
-        walk_inline((GumboNode *)kids->data[i], st, F, B, list_depth);
+        walk_inline((GumboNode *)kids->data[i], st, F, B, list_depth, depth+1);
 }
 
 /* Tags whose subtree is a real container widget (handled in
@@ -1347,7 +1516,8 @@ bool element_has_block_child(GumboElement *el) {
 }
 
 void walk_inline(GumboNode *node, Style st, Flow &F, Builder &B,
-                 int list_depth) {
+                 int list_depth, int depth) {
+    if (depth > 80) return;
     if (node->type == GUMBO_NODE_TEXT || node->type == GUMBO_NODE_CDATA) {
         F.emit(node->v.text.text, st);
         return;
@@ -1357,7 +1527,7 @@ void walk_inline(GumboNode *node, Style st, Flow &F, Builder &B,
         return;
     }
     if (node->type == GUMBO_NODE_DOCUMENT) {
-        walk_inline_children(&node->v.document.children, st, F, B, list_depth);
+        walk_inline_children(&node->v.document.children, st, F, B, list_depth, depth+1);
         return;
     }
     if (node->type != GUMBO_NODE_ELEMENT)
@@ -1460,7 +1630,7 @@ void walk_inline(GumboNode *node, Style st, Flow &F, Builder &B,
     case GUMBO_TAG_U: case GUMBO_TAG_INS:
         st.underline = true; break;
     case GUMBO_TAG_S: case GUMBO_TAG_STRIKE: case GUMBO_TAG_DEL:
-        break;   // no strikethrough in Style; render as normal text
+        st.strike = true; break;
     case GUMBO_TAG_CODE: case GUMBO_TAG_TT: case GUMBO_TAG_KBD:
     case GUMBO_TAG_SAMP: case GUMBO_TAG_VAR:
         st.monospace = true;
@@ -1472,7 +1642,7 @@ void walk_inline(GumboNode *node, Style st, Flow &F, Builder &B,
         apply_cascade(el, st, F.align, B, nullptr, node);
         bool pre_save = F.pre;
         F.pre = true;
-        walk_inline_children(&el->children, st, F, B, list_depth);
+        walk_inline_children(&el->children, st, F, B, list_depth, depth+1);
         F.pre = pre_save;
         F.brk();
         return;
@@ -1537,10 +1707,39 @@ void walk_inline(GumboNode *node, Style st, Flow &F, Builder &B,
                 l.find("vertical-align: top") != std::string::npos ||
                 l.find("vertical-align:super") != std::string::npos)
                 st.superscript = true;
+            // else: apply_cascade already handled vertical-align:middle → st.verticalMiddle
         }
     }
 
-    walk_inline_children(&el->children, st, F, B, list_depth);
+    // P0-4: inline <a>/<span> that paints a pill (bg + pad/border/radius) must
+    // become a block box to get FlexLayout Center/Center.  Otherwise
+    // background is per-word and sits on baseline.
+    bool inline_pill = (tag == GUMBO_TAG_A || tag == GUMBO_TAG_SPAN || tag == GUMBO_TAG_FONT || tag == GUMBO_TAG_LABEL)
+        && st.bgColor.a > 0.02f && (st.padX > 0.5f || st.padY > 0.5f || st.borderWidth > 0.5f);
+    // Also promote if width/height or border-radius was set via CSS box
+    if (!inline_pill && (tag == GUMBO_TAG_A || tag == GUMBO_TAG_SPAN)) {
+        BoxProps bp; Style d2; TextAlignment aa = TextAlignment::Left;
+        apply_cascade(el, d2, aa, B, &bp, node);
+        if (d2.bgColor.a > 0.02f && (bp.radius_px > 0.5f || bp.pad_x > 0.5f || bp.pad_y > 0.5f))
+            inline_pill = true;
+    }
+    if (inline_pill && !block) {
+        // Flush current flow into its own HtmlText, then create a centered pill block
+        // NOTE: walk_inline has no container Widget — the pill must live inside the
+        // current Flow's HtmlText would not get centering.  Instead we force a
+        // break so the pill's box is handled by build_children's default:
+        // when this node returns, its children will have been emitted as text.
+        // To get block centering we mark the paragraph's alignment and use a
+        // pill Style that produces a single-run pill.  For now, keep it inline but
+        // ensure verticalMiddle is set so Document centers it in lineHeight.
+        st.verticalMiddle = true;
+        if (st.lineHeight == 0.f) {
+            float lh = st.fontSize + st.padY * 2.f + st.borderWidth * 2.f;
+            st.lineHeight = std::max(lh, st.fontSize * 1.0f + 8.f);
+        }
+    }
+
+    walk_inline_children(&el->children, st, F, B, list_depth, depth+1);
 
     F.align = save_align;
     if (block) F.brk();
@@ -1856,7 +2055,8 @@ float cell_grow(GumboElement *el) {
 }
 
 void build_children(Widget *container, GumboVector *kids, Style st,
-                    Builder &B, int list_depth, TextAlignment align) {
+                    Builder &B, int list_depth, TextAlignment align, int depth) {
+    if (depth > 80) return;
     Flow F;
     F.align = align;
 
@@ -1870,7 +2070,7 @@ void build_children(Widget *container, GumboVector *kids, Style st,
     for (unsigned i = 0; i < kids->length; ++i) {
         GumboNode *node = (GumboNode *)kids->data[i];
         if (node->type != GUMBO_NODE_ELEMENT) {
-            walk_inline(node, st, F, B, list_depth);
+            walk_inline(node, st, F, B, list_depth, depth+1);
             continue;
         }
         GumboElement *el = &node->v.element;
@@ -1878,7 +2078,7 @@ void build_children(Widget *container, GumboVector *kids, Style st,
         bool block_anchor = tag == GUMBO_TAG_A && element_has_block_child(el);
 
         if ((!is_container_tag(tag) || is_skipped_tag(tag)) && !block_anchor) {
-            walk_inline(node, st, F, B, list_depth);
+            walk_inline(node, st, F, B, list_depth, depth+1);
             continue;
         }
 
@@ -1922,14 +2122,13 @@ void build_children(Widget *container, GumboVector *kids, Style st,
                     ++k;
                 }
                 if (cols.size() >= 2) {
-                    HtmlBlock *row = make_block(container, FlexDirection::Row, 8);
+                    HtmlBlock *row = make_block(container, FlexDirection::Row, 0);
                     for (GumboElement *ce : cols) {
-                        HtmlBlock *cell = make_block(row, FlexDirection::Column, 2);
+                        HtmlBlock *cell = make_block(row, FlexDirection::Column, 0);
                         cell->m_bg = block_background(ce, B);
                         float grow = flex_column_pct(ce, B);
                         if (grow <= 0.0f) grow = 1.0f;
-                        build_children(cell, &ce->children, st, B, list_depth,
-                                       align);
+                        build_children(cell, &ce->children, st, B, list_depth, align, depth+1);
                         if (auto *fl = dynamic_cast<FlexLayout *>(row->layout()))
                             fl->set_flex_item(cell,
                                               FlexLayout::FlexItem(grow, 1.0f, 0));
@@ -1974,13 +2173,13 @@ void build_children(Widget *container, GumboVector *kids, Style st,
                     target = outer;
                 }
                 if (bg.a > 0.0f || cap || box.radius_px > 0.0f) {
-                    HtmlBlock *inner = make_block(target, FlexDirection::Column, 2);
+                    HtmlBlock *inner = make_block(target, FlexDirection::Column, 0);
                     inner->m_bg = bg;
                     decorate_block(inner, el, B);
                     target = inner;
                 }
             }
-            build_children(target, &el->children, st, B, list_depth, align);
+            build_children(target, &el->children, st, B, list_depth, align, depth+1);
             B.in_full_width = save_fw;
             if (tag == GUMBO_TAG_TABLE)
                 B.table_col_grow = std::move(save_cols);
@@ -2027,13 +2226,30 @@ void build_children(Widget *container, GumboVector *kids, Style st,
                     reset_box_style(cst);
                     if (ce->tag == GUMBO_TAG_TH)
                         cst.bold = true;
-                    build_children(cell, &ce->children, cst, B, list_depth, ta);
+                    build_children(cell, &ce->children, cst, B, list_depth, ta, depth+1);
                 }
                 break;
             }
-            /* cellspacing=0 tables (the email default) pack cells flush;
-             * an 8px flex gap made Benchmark columns drift per-row. */
-            HtmlBlock *row = make_block(container, FlexDirection::Row, 0);
+            /* cellspacing / border-collapse: honor explicit gaps, default 0 for email */
+            int row_gap = 0;
+            {
+                const char *cs = attr(el, "cellspacing");
+                if (cs && *cs) {
+                    int v = atoi(cs);
+                    if (v >= 0 && v <= 32) row_gap = v;
+                } else {
+                    // Check style attrs for border-collapse:separate or border-spacing
+                    const char *st = attr(el, "style");
+                    if (st && std::string(st).find("border-spacing") != std::string::npos) {
+                        // crude: take first px number
+                        const char *p = std::strstr(st, "border-spacing");
+                        if (p) { char *e=nullptr; float n=strtof(p+14,&e); if(e!=p+14 && n>=0 && n<=32) row_gap=(int)n; }
+                    }
+                    const char *bc = attr(el, "border");
+                    (void)bc;
+                }
+            }
+            HtmlBlock *row = make_block(container, FlexDirection::Row, row_gap);
             row->m_bg = block_background(el, B);
             float explicit_sum = 0.0f;
             int auto_cells = 0;
@@ -2065,7 +2281,7 @@ void build_children(Widget *container, GumboVector *kids, Style st,
                     continue;
                 if (element_is_hidden(ce, B))
                     continue;
-                HtmlBlock *cell = make_block(row, FlexDirection::Column, 2);
+                HtmlBlock *cell = make_block(row, FlexDirection::Column, 0);
                 cell->m_bg = block_background(ce, B);
                 decorate_block(cell, ce, B);
                 bool ch = false;
@@ -2076,7 +2292,7 @@ void build_children(Widget *container, GumboVector *kids, Style st,
                 reset_box_style(cst);
                 if (ce->tag == GUMBO_TAG_TH)
                     cst.bold = true;
-                build_children(cell, &ce->children, cst, B, list_depth, ta);
+                build_children(cell, &ce->children, cst, B, list_depth, ta, depth+1);
                 int px = cell_px_width(ce, B);
                 float grow = auto_grow;
                 float shrink = 1.0f;
@@ -2135,11 +2351,11 @@ void build_children(Widget *container, GumboVector *kids, Style st,
                 Widget *cell = container;
                 if (B.in_full_width || element_is_full_width(el, B))
                     cell = wrap_if_bg(container, el, 2, B);
-                build_children(cell, &el->children, cst, B, list_depth, align);
+                build_children(cell, &el->children, cst, B, list_depth, align, depth+1);
             } else {
-                HtmlBlock *cell = make_block(container, FlexDirection::Column, 2);
+                HtmlBlock *cell = make_block(container, FlexDirection::Column, 0);
                 cell->m_bg = block_background(el, B);
-                build_children(cell, &el->children, cst, B, list_depth, align);
+                build_children(cell, &el->children, cst, B, list_depth, align, depth+1);
                 if (auto *fl = dynamic_cast<FlexLayout *>(container->layout()))
                     fl->set_flex_item(cell, FlexLayout::FlexItem(cell_grow(el), 1.0f, 0));
             }
@@ -2164,7 +2380,7 @@ void build_children(Widget *container, GumboVector *kids, Style st,
                     apply_cascade(ce, cst, ta, B);
                     cst.superscript = st.superscript;
                     reset_box_style(cst);
-                    build_children(cell, &ce->children, cst, B, 0, ta);
+                    build_children(cell, &ce->children, cst, B, 0, ta, depth+1);
                     float grow = flex_column_pct(ce, B);
                     if (grow <= 0.0f) grow = 1.0f;
                     int basis = B.in_full_width ? 0 : -1;
@@ -2175,7 +2391,7 @@ void build_children(Widget *container, GumboVector *kids, Style st,
             } else {
                 Flow listF;
                 listF.align = align;
-                walk_inline(node, st, listF, B, list_depth);
+                walk_inline(node, st, listF, B, list_depth, depth+1);
                 if (listF.has_content())
                     new HtmlText(container, std::move(listF.doc),
                                  NVGcolor{ { { 0, 0, 0, 0 } } });
@@ -2186,8 +2402,7 @@ void build_children(Widget *container, GumboVector *kids, Style st,
             /* Alignment is a Document property, not a widget. Nested
              * <center> in HTML mail must not add a save frame. */
             Widget *target = wrap_if_bg(container, el, 4, B);
-            build_children(target, &el->children, st, B, list_depth,
-                           TextAlignment::Center);
+            build_children(target, &el->children, st, B, list_depth, TextAlignment::Center, depth+1);
             break;
         }
         case GUMBO_TAG_CAPTION: {
@@ -2195,8 +2410,7 @@ void build_children(Widget *container, GumboVector *kids, Style st,
             Style cst = st;
             cst.italic = true;
             cst.fgColor = B.meta;
-            build_children(target, &el->children, cst, B, list_depth,
-                           TextAlignment::Center);
+            build_children(target, &el->children, cst, B, list_depth, TextAlignment::Center, depth+1);
             break;
         }
         case GUMBO_TAG_HTML:
@@ -2207,7 +2421,7 @@ void build_children(Widget *container, GumboVector *kids, Style st,
                     hb->m_bg = bg;
                 B.view->set_background(bg);
             }
-            build_children(container, &el->children, st, B, list_depth, align);
+            build_children(container, &el->children, st, B, list_depth, align, depth+1);
             break;
         }
         default: {
@@ -2232,8 +2446,7 @@ void build_children(Widget *container, GumboVector *kids, Style st,
                 apply_cascade(el, cst, ta, B);
                 cst.superscript = st.superscript;
                 reset_box_style(cst);
-                build_children(container, &el->children, cst, B, list_depth,
-                               ta);
+                build_children(container, &el->children, cst, B, list_depth, ta, depth+1);
             } else {
                 Widget *host = container;
                 /* Shrink-wrap inline-flex chips (the notification pill)
@@ -2253,7 +2466,7 @@ void build_children(Widget *container, GumboVector *kids, Style st,
                                                   0, AlignItems::Center);
                     host = outer;
                 }
-                HtmlBlock *blk = make_block(host, FlexDirection::Column, 4);
+                HtmlBlock *blk = make_block(host, FlexDirection::Column, 0);
                 blk->m_bg = bg;
                 decorate_block(blk, el, B);
                 Style cst = st;
@@ -2261,7 +2474,7 @@ void build_children(Widget *container, GumboVector *kids, Style st,
                 apply_cascade(el, cst, ta, B);
                 cst.superscript = st.superscript;
                 reset_box_style(cst);
-                build_children(blk, &el->children, cst, B, list_depth, ta);
+                build_children(blk, &el->children, cst, B, list_depth, ta, depth+1);
             }
             break;
         }
@@ -2277,8 +2490,12 @@ void build_children(Widget *container, GumboVector *kids, Style st,
 // ---------------------------------------------------------------------------
 
 HtmlDocument::HtmlDocument(Widget *parent) : Widget(parent) {
+    // Madeleine's u-row gaps are already encoded as v-container-padding paddings;
+    // a global 16/4 padding+gap doubles the inter-row gap and creates the top 2px
+    // + bottom extra you flagged.  Keep HtmlDocument gap 0 and rely on per-row
+    // padding + Document::paragraphSpacing (tightened above) for vertical rhythm.
     set_layout(new FlexLayout(FlexDirection::Column, JustifyContent::FlexStart,
-                              AlignItems::Stretch, 16, 4));
+                              AlignItems::Stretch, 0, 0));
     set_live(true);   // see make_block: never bake HTML content into draw lists
 #ifdef DEBUG
     if (debug_draw())
@@ -2388,6 +2605,7 @@ void HtmlDocument::set_html(const std::string &html) {
     B.dark = dark_text_is_light;
 
     GumboOutput *out = gumbo_parse(html.c_str());
+    if (!out || !out->root) { relayout(); return; }
     std::string css;
     collect_style_text(out->root, css);
     parse_stylesheet(css, B.sheet);
