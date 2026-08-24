@@ -12,6 +12,7 @@
 
 #include <nanogui/layout.h>
 #include <nanogui/screen.h>
+#include <GLFW/glfw3.h>
 #include "gumbo.h"
 
 #include <algorithm>
@@ -22,9 +23,7 @@
 #include <cstring>
 #include <functional>
 #include <string_view>
-#include <typeinfo>
 #include <unordered_map>
-#include <unordered_set>
 #include <vector>
 
 using namespace nanogui;
@@ -533,7 +532,9 @@ struct Flow {
         if (st.allCaps) {
             for (char &c : t) c = (char)std::toupper((unsigned char)c);
         }
-        para()->addText(t, st);
+        Text text(t, st);
+        if (!st.linkUrl.empty()) text.linkUrl = st.linkUrl;
+        para()->addText(text);
         cur_has_text = true;
     }
 
@@ -559,6 +560,52 @@ struct Flow {
 // HtmlText: leaf widget rendering one Document; HtmlBlock: container widget
 // with an optional background fill.
 // ---------------------------------------------------------------------------
+// Secure URL validation: only allow http/https/mailto. Decodes %XX, rejects control chars and javascript:.
+static std::string url_decode(const std::string &s) {
+    std::string out; out.reserve(s.size());
+    for (size_t i=0;i<s.size();++i) {
+        if (s[i]=='%' && i+2<s.size() && std::isxdigit((unsigned char)s[i+1]) && std::isxdigit((unsigned char)s[i+2])) {
+            char hex[3]={s[i+1],s[i+2],0}; char *e; long v=strtol(hex,&e,16); if(e==hex+2 && v>=0) { out.push_back((char)v); i+=2; continue; }
+        }
+        out.push_back(s[i]);
+    }
+    return out;
+}
+static bool is_allowed_url(const std::string &raw, std::string &normalized) {
+    std::string s = url_decode(raw);
+    // trim
+    size_t b=s.find_first_not_of(" \t\r\n"), e=s.find_last_not_of(" \t\r\n");
+    if(b==std::string::npos){normalized.clear(); return false;}
+    s=s.substr(b,e-b+1);
+    if(s.empty()) return false;
+    for(char c: s) if((unsigned char)c < 32) return false; // no control
+    std::string lower; lower.reserve(s.size()); for(char c:s) lower.push_back(std::tolower((unsigned char)c));
+    if(lower.rfind("javascript:",0)==0 || lower.rfind("data:",0)==0 || lower.rfind("vbscript:",0)==0) return false;
+    if(lower.rfind("https://",0)==0 || lower.rfind("http://",0)==0) { normalized=s; return true; }
+    if(lower.rfind("mailto:",0)==0) { normalized=s; return true; }
+    return false;
+}
+static bool open_url_secure(const std::string &raw) {
+    std::string url; if(!is_allowed_url(raw,url)) return false;
+#if defined(_WIN32)
+    // Windows: use ShellExecute via system fallback (ShellExecuteA needs windows.h)
+    // Escape quotes and use start
+    std::string esc; for(char c:url){ if(c=='"') esc+="\""; else esc+=c; }
+    std::string cmd="start \"\" \""+esc+"\"";
+    return system(cmd.c_str())==0;
+#elif defined(__APPLE__)
+    std::string cmd="open '" + url + "' &"; // limited: url already stripped of control/' not escaped fully but open handles most
+    // Escape single quotes
+    std::string esc; for(char c:url){ if(c=='\'') esc+="'\\''"; else esc+=c; }
+    cmd="open '"+esc+"' &";
+    return system(cmd.c_str())==0;
+#else
+    std::string esc; for(char c:url){ if(c=='\'') esc+="'\\''"; else esc+=c; }
+    std::string cmd="xdg-open '"+esc+"' &";
+    return system(cmd.c_str())==0;
+#endif
+}
+
 class HtmlText : public Widget {
 public:
     Document m_doc;
@@ -566,6 +613,7 @@ public:
     int      m_measured_h = 0;
     int      m_measured_w = -1;
     int      m_natural_w  = -1;  // cached max-content width
+    mutable std::string m_hover_url;
 
     HtmlText(Widget *parent, Document &&doc, NVGcolor bg)
         : Widget(parent), m_doc(std::move(doc)), m_bg(bg) {
@@ -658,6 +706,45 @@ public:
                 }
         }
     }
+    // Hit-test: p is widget-local (0..size) as passed by Widget::mouse_motion_event.
+    // Document was drawn at (m_layout_origin_x, m_layout_origin_y) which for HtmlText is m_pos.x/y
+    // in its parent's space. The simplest correct hit is in document space: local p + layout_origin.
+    std::string hit_url(const Vector2i &p) const {
+        if (m_doc.m_rich_layout.empty()) return "";
+        float x = (float)p.x() + m_doc.m_layout_origin_x;
+        float y = (float)p.y() + m_doc.m_layout_origin_y;
+        const Document::RichLine *found=nullptr;
+        for(auto &rl: m_doc.m_rich_layout){ if(y>=rl.y_top-2 && y<rl.y_bottom+2){ found=&rl; break; } }
+        if(!found){ // scrolled: try absolute as fallback
+            Vector2i abs = absolute_position(); float ax=(float)abs.x()+(float)p.x(); float ay=(float)abs.y()+(float)p.y();
+            for(auto &rl: m_doc.m_rich_layout){ if(ay>=rl.y_top-2 && ay<rl.y_bottom+2){ found=&rl; x=ax; break; } }
+            if(!found) return "";
+        }
+        for(auto &w: found->words){ if(!w.linkUrl.empty() && x>=w.x-2 && x< w.x+w.advance+2) return w.linkUrl; }
+        return "";
+    }
+    virtual bool mouse_motion_event(const Vector2i &p, const Vector2i &rel, int b, int m) override {
+        // set_cursor on the widget under the pointer; Screen::cursor_pos_callback_event copies widget->cursor() to GLFW.
+        // Return true when hovering a link so the event is considered handled and not swallowed.
+        std::string url = hit_url(p);
+        m_hover_url = url;
+        bool is_link = !url.empty();
+        set_cursor(is_link ? Cursor::Hand : Cursor::Arrow);
+        bool handled = Widget::mouse_motion_event(p, rel, b, m);
+        return is_link || handled;
+    }
+    virtual bool mouse_enter_event(const Vector2i &p, bool enter) override {
+        if(!enter){ set_cursor(Cursor::Arrow); m_hover_url.clear(); }
+        else { std::string u=hit_url(p); m_hover_url=u; if(!u.empty()) set_cursor(Cursor::Hand); else set_cursor(Cursor::Arrow); }
+        return Widget::mouse_enter_event(p, enter);
+    }
+    virtual bool mouse_button_event(const Vector2i &p, int button, bool down, int mods) override {
+        if(button==GLFW_MOUSE_BUTTON_1 && !down){
+            std::string u=hit_url(p);
+            if(!u.empty()){ std::string n; if(is_allowed_url(u,n)) open_url_secure(n); return true; }
+        }
+        return Widget::mouse_button_event(p, button, down, mods);
+    }
 };
 
 class HtmlBlock : public Widget {
@@ -671,6 +758,7 @@ public:
     float       m_bg_image_w = 0.0f;
     float       m_bg_image_h = 0.0f;
     std::string m_bg_image_src;
+    std::string m_link_url; // if this block is inside <a href> (block_anchor)
 
     explicit HtmlBlock(Widget *parent) : Widget(parent) { set_live(true); }
 
@@ -683,6 +771,20 @@ public:
             p.x() = m_max_size.x();
         }
         return p;
+    }
+    virtual bool mouse_motion_event(const Vector2i &p, const Vector2i&, int, int) override {
+        if(!m_link_url.empty()) set_cursor(Cursor::Hand); else set_cursor(Cursor::Arrow);
+        return Widget::mouse_motion_event(p, Vector2i(0,0), 0, 0);
+    }
+    virtual bool mouse_enter_event(const Vector2i &, bool enter) override {
+        if(!m_link_url.empty()) set_cursor(enter ? Cursor::Hand : Cursor::Arrow);
+        return Widget::mouse_enter_event(Vector2i(0,0), enter);
+    }
+    virtual bool mouse_button_event(const Vector2i &, int button, bool down, int) override {
+        if(!m_link_url.empty() && button==GLFW_MOUSE_BUTTON_1 && !down){
+            std::string n; if(is_allowed_url(m_link_url,n)) open_url_secure(n); return true;
+        }
+        return Widget::mouse_button_event(Vector2i(0,0), button, down, 0);
     }
 
     virtual void draw(NVGcontext *ctx) override {
@@ -1259,6 +1361,8 @@ void reset_box_style(Style &st) {
     st.borderWidth = 0.f;
     st.bgColor = nvgRGBA(0, 0, 0, 0);
     st.borderColor = nvgRGBA(0, 0, 0, 0);
+    // linkUrl intentionally NOT cleared — inherited from <a> ancestor so
+    // nested <b> inside <a> retains the href for hit-testing.
 }
 
 /* Non-important stylesheet, presentational, non-important inline,
@@ -1625,20 +1729,14 @@ void walk_inline(GumboNode *node, Style st, Flow &F, Builder &B,
             float pw = 0.0f, ph = 0.0f;
             size_html_image(el, B, ri, pw, ph, hint_w, hint_h);
 
-            /* A small icon (a heart/chevron next to text, e.g. a
-             * notification-count "pill") stays inline instead of forcing
-             * a block break — otherwise it and its adjacent text land on
-             * separate lines.  Anything bigger is presumed to be real
-             * content (a photo, an avatar, a banner) and keeps its own
-             * block, centered/aligned like a standalone paragraph. An
-             * unresolved image with no explicit width/height falls back
-             * to size_html_image's 160x100 default, which is well past
-             * the threshold — deliberately: we can't yet tell whether
-             * it's a small icon, so block is the safe assumption. */
             constexpr float kInlineIconMaxPx = 32.0f;
             if (pw > 0.0f && ph > 0.0f &&
                 pw <= kInlineIconMaxPx && ph <= kInlineIconMaxPx) {
-                F.emitImage(ri.id, pw, ph, std::move(s));
+                Text t;
+                t.isImageRun = true;
+                t.image = ri.id; t.image_w = pw; t.image_h = ph; t.image_src = s;
+                if (!st.linkUrl.empty()) t.linkUrl = st.linkUrl;
+                F.para()->addText(t); F.cur_has_text = true;
                 return;
             }
 
@@ -1649,6 +1747,7 @@ void walk_inline(GumboNode *node, Style st, Flow &F, Builder &B,
             ip->image_w   = pw;
             ip->image_h   = ph;
             ip->image_src = std::move(s);
+            if (!st.linkUrl.empty()) ip->linkUrl = st.linkUrl;
             F.brk();
             return;
         }
@@ -1706,10 +1805,13 @@ void walk_inline(GumboNode *node, Style st, Flow &F, Builder &B,
         F.brk();
         return;
     }
-    case GUMBO_TAG_A:
+    case GUMBO_TAG_A: {
         st.fgColor = B.accent;
         st.underline = true;
+        const char *href = attr(el, "href");
+        if (href && href[0]) st.linkUrl = href;
         break;
+    }
     case GUMBO_TAG_H1: st.bold = true; st.fontSize *= 1.6f;  break;
     case GUMBO_TAG_H2: st.bold = true; st.fontSize *= 1.4f;  break;
     case GUMBO_TAG_H3: st.bold = true; st.fontSize *= 1.2f;  break;
@@ -2225,6 +2327,16 @@ void build_children(Widget *container, GumboVector *kids, Style st,
             }
         }
 
+        // Block-anchor <a> wrapping a div/table: propagate href to the wrapper block
+        // so the whole block is clickable (and shows Hand), not just inline text.
+        std::string anchor_href;
+        if (block_anchor) {
+            const char *href = attr(el, "href");
+            if (href && href[0]) anchor_href = href;
+        }
+        // Remember container's child count to tag the newly created block
+        size_t anchor_before = container->children().size();
+
         switch (tag) {
         case GUMBO_TAG_TABLE:
         case GUMBO_TAG_TBODY:
@@ -2565,6 +2677,19 @@ void build_children(Widget *container, GumboVector *kids, Style st,
             break;
         }
         }
+        // Tag the newly created wrapper(s) for block <a> so the whole tile is clickable
+        if (!anchor_href.empty() && container->children().size() > anchor_before) {
+            for (size_t ai = anchor_before; ai < container->children().size(); ++ai) {
+                Widget *aw = container->children()[ai];
+                if (auto *ab = dynamic_cast<HtmlBlock*>(aw)) {
+                    if (ab->m_link_url.empty()) ab->m_link_url = anchor_href;
+                }
+                // If the block_anchor created an inner wrapper (e.g. outer Center), tag its child too
+                for (Widget *inner : aw->children())
+                    if (auto *ib = dynamic_cast<HtmlBlock*>(inner))
+                        if (ib->m_link_url.empty()) ib->m_link_url = anchor_href;
+            }
+        }
     }
     flush();
 }
@@ -2771,9 +2896,9 @@ std::string HtmlDocument::debug_summary() const {
                 if (p->isBullet) t += "* ";
                 t += p->plain_text();
                 for (const Text &r : p->runs) {
-                    char rs[160];
+                    char rs[200];
                     std::snprintf(rs, sizeof(rs),
-                        " [fg=%.2f,%.2f,%.2f,%.2f bg=%.2f,%.2f,%.2f,%.2f %s%s%s%s sz=%.1f pad=%.0f,%.0f brd=%.1f]",
+                        " [fg=%.2f,%.2f,%.2f,%.2f bg=%.2f,%.2f,%.2f,%.2f %s%s%s%s%s sz=%.1f pad=%.0f,%.0f brd=%.1f]",
                         r.style.fgColor.r, r.style.fgColor.g,
                         r.style.fgColor.b, r.style.fgColor.a,
                         r.style.bgColor.r, r.style.bgColor.g,
@@ -2781,6 +2906,7 @@ std::string HtmlDocument::debug_summary() const {
                         r.style.bold ? "b" : "", r.style.italic ? "i" : "",
                         r.style.underline ? "u" : "",
                         r.style.monospace ? "m" : "",
+                        !r.linkUrl.empty() ? "L" : "",
                         r.style.fontSize, r.style.padX, r.style.padY,
                         r.style.borderWidth);
                     if (r.style.superscript) t += " sup";

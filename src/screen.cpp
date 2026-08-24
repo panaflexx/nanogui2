@@ -1245,13 +1245,21 @@ void Screen::cursor_pos_callback_event(double x, double y) {
                 glfwSetCursor(m_glfw_window, m_cursors[(int)m_cursor]);
             }
         } else {
-			ret = m_drag_widget->mouse_drag_event(
-				p - m_drag_widget->parent()->absolute_position(), p - m_mouse_pos,
-				m_mouse_state, m_modifiers);
+            ret = m_drag_widget->mouse_drag_event(
+                p - m_drag_widget->parent()->absolute_position(), p - m_mouse_pos,
+                m_mouse_state, m_modifiers);
         }
 
         if (!ret)
             ret = mouse_motion_event(p, p - m_mouse_pos, m_mouse_state, m_modifiers);
+        // After dispatch HtmlText may have set Hand; refresh GLFW cursor if it changed.
+        if (!m_drag_active) {
+            Widget* widget2 = find_widget(p);
+            if (widget2 != nullptr && widget2->cursor() != m_cursor) {
+                m_cursor = widget2->cursor();
+                glfwSetCursor(m_glfw_window, m_cursors[(int)m_cursor]);
+            }
+        }
 
         m_mouse_pos = p;
         m_redraw |= ret;

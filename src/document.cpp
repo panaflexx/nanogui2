@@ -58,6 +58,7 @@ static bool style_equal(const Style& a, const Style& b) {
            a.opacity == b.opacity &&
            a.padX == b.padX && a.padY == b.padY &&
            a.borderWidth == b.borderWidth &&
+           a.linkUrl == b.linkUrl &&
            std::memcmp(&a.fgColor, &b.fgColor, sizeof(NVGcolor)) == 0 &&
            std::memcmp(&a.bgColor, &b.bgColor, sizeof(NVGcolor)) == 0 &&
            std::memcmp(&a.borderColor, &b.borderColor, sizeof(NVGcolor)) == 0;
@@ -382,6 +383,7 @@ void Document::draw(NVGcontext* ctx, float originX, float originY) {
                 iw.style.fontSize = dh;             // draw height (piggy-back)
                 iw.image      = para->image;
                 iw.text       = "\x01IMAGE";
+                iw.linkUrl    = para->linkUrl;
                 img_line.words.push_back(std::move(iw));
                 m_rich_layout.push_back(std::move(img_line));
 
@@ -1023,6 +1025,8 @@ float Document::drawParagraph(NVGcontext* ctx, const Paragraph& para,
                 wl.visualRight  = word.visualRight;
                 wl.style        = st;
                 wl.text         = word.text;
+                wl.linkUrl      = word.run->linkUrl;
+                if (wl.linkUrl.empty()) wl.linkUrl = st.linkUrl;
                 rich_line.words.push_back(std::move(wl));
             }
 

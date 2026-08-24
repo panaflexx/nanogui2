@@ -51,6 +51,7 @@ struct NANOGUI_EXPORT Style {
     float    borderWidth = 0.0f;  ///< CSS border (Learn More outline)
     NVGcolor borderColor = NVGcolor{ { { 0.f, 0.f, 0.f, 0.f } } };
     WhiteSpace whiteSpace = WhiteSpace::Normal;
+    std::string linkUrl;  ///< href for <a> links (empty if not a link)
 };
 
 // ---------------------------------------------------------------------------
@@ -61,6 +62,7 @@ class NANOGUI_EXPORT Text {
 public:
     std::string content;
     Style       style;
+    std::string linkUrl;  ///< href for <a> links (empty if not a link)
 
     /* Inline image (an icon sitting next to text, e.g. a notification
      * "pill") instead of a text run.  When `isImageRun` is set, `content`
@@ -112,6 +114,7 @@ public:
     float             image_h         = 0.0f;
     /* Original <img src>, used to bind a texture after an async fetch. */
     std::string       image_src;
+    std::string       linkUrl;  ///< href if this image block is inside <a>
 
     Paragraph() = default;
 
@@ -245,6 +248,7 @@ public:
         Style  style;        ///< style snapshot for cheap re-draw without re-layout
         std::string text;    ///< word / glyph cluster text
         int    image = 0;    ///< NVG image id for "\x01IMAGE" sentinel words
+        std::string linkUrl; ///< href for link words (empty if not a link)
     };
 
     /// Geometry of one visual line (possibly a soft-wrapped portion of a paragraph).
