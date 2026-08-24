@@ -1401,3 +1401,75 @@ bool ImapClient::fetch_message(int seq, MailMessage &msg, std::string &err) {
     msg.body_markdown = plain_markdown && !plain.empty();
     return true;
 }
+
+bool ImapClient::move_message(int seq, const std::string &dest_folder,
+                              std::string &err) {
+    if (dest_folder.empty()) { err = "no destination folder"; return false; }
+    const std::string dest_q = quote(dest_folder);
+    const std::string seq_s  = std::to_string(seq);
+
+    // Prefer IMAP MOVE (RFC 6851) when the server advertises it.
+    if (m_caps.count("MOVE")) {
+        std::vector<std::string> un;
+        if (run("MOVE " + seq_s + " " + dest_q, un, err))
+            return true;
+        std::string low = to_lower(err);
+        // If the destination does not exist and the server hints TRYCREATE,
+        // create it and retry the MOVE once.
+        if (low.find("[trycreate]") != std::string::npos) {
+            std::vector<std::string> cu; std::string ce;
+            if (run("CREATE " + dest_q, cu, ce)) {
+                err.clear();
+                std::vector<std::string> un2;
+                if (run("MOVE " + seq_s + " " + dest_q, un2, err))
+                    return true;
+            }
+        }
+        // If the server genuinely rejected MOVE (not just unknown command),
+        // surface the error instead of silently falling back to COPY.
+        std::string le = to_lower(err);
+        bool unknown = le.find("unknown") != std::string::npos ||
+                       le.find("invalid") != std::string::npos ||
+                       le.find("bad") != std::string::npos;
+        if (!unknown)
+            return false;
+        err.clear(); // fall through to COPY fallback
+    }
+
+    // COPY + STORE \Deleted + EXPUNGE fallback (works on any IMAP4rev1 server).
+    {
+        std::vector<std::string> un; std::string copy_err;
+        if (!run("COPY " + seq_s + " " + dest_q, un, copy_err)) {
+            std::string low = to_lower(copy_err);
+            if (low.find("[trycreate]") != std::string::npos) {
+                std::vector<std::string> cu; std::string ce;
+                if (run("CREATE " + dest_q, cu, ce)) {
+                    copy_err.clear();
+                    if (!run("COPY " + seq_s + " " + dest_q, un, copy_err)) {
+                        err = copy_err; return false;
+                    }
+                } else {
+                    err = copy_err; return false;
+                }
+            } else {
+                err = copy_err; return false;
+            }
+        }
+    }
+    {
+        std::vector<std::string> un; std::string e2;
+        if (!run("STORE " + seq_s + " +FLAGS (\\Deleted)", un, e2)) {
+            err = e2; return false;
+        }
+    }
+    {
+        std::vector<std::string> un; std::string e3;
+        if (!run("EXPUNGE", un, e3)) {
+            err = e3; return false;
+        }
+        // Expunge resequences the mailbox; SELECT state remains valid but
+        // callers should refresh summaries afterwards.
+    }
+    err.clear();
+    return true;
+}

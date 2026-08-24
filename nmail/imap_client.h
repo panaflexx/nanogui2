@@ -74,6 +74,14 @@ public:
     /* FETCH the full raw message and extract a readable plain-text body. */
     bool fetch_message(int seq, MailMessage &msg, std::string &err);
 
+    /* Move a single message (by sequence number) to another folder.
+     * Tries IMAP MOVE when advertised, otherwise falls back to
+     * COPY + STORE +FLAGS \Deleted + EXPUNGE.  Creates the
+     * destination folder on TRYCREATE.  Caller must have the source
+     * folder SELECTed. */
+    bool move_message(int seq, const std::string &dest_folder,
+                      std::string &err);
+
     void close();
     bool is_open() const { return m_fd >= 0; }
     const std::string &selected_folder() const { return m_selected_folder; }

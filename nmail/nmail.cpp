@@ -146,6 +146,8 @@ public:
     std::function<void(const std::string &,
                        const std::string &)>                    cb_error;
     std::function<void(const std::string &)>                    cb_status;
+    std::function<void(const std::string &, int,
+                       const std::string &)>                    cb_moved;
 
     void set_config(const MailConfig &c) {
         std::lock_guard<std::mutex> lock(m_mutex);
@@ -177,6 +179,10 @@ public:
     }
     void fetch_body(const std::string &folder, int seq) { post(Type::FetchBody, folder, seq); }
     void fetch_older()                          { post(Type::FetchOlder); }
+    void move_message(const std::string &folder, int seq,
+                      const std::string &dest_folder) {
+        post(Type::Move, folder, seq, dest_folder);
+    }
     void ensure_visible_cached(const std::string &folder,
                                const std::vector<int> &visible_seqs) {
         if (visible_seqs.empty() || folder.empty()) return;
@@ -206,17 +212,19 @@ public:
     }
 
 private:
-    enum class Type { Connect, Refresh, Select, FetchBody, FetchOlder, Prefetch };
+    enum class Type { Connect, Refresh, Select, FetchBody, FetchOlder, Prefetch, Move };
     struct Cmd {
         Type type;
         std::string folder;
         int seq = 0;
+        std::string dest_folder; // for Move
     };
 
-    void post(Type t, const std::string &folder = "", int seq = 0) {
+    void post(Type t, const std::string &folder = "", int seq = 0,
+              const std::string &dest = "") {
         {
             std::lock_guard<std::mutex> lock(m_mutex);
-            m_queue.push_back({t, folder, seq});
+            m_queue.push_back({t, folder, seq, dest});
         }
         m_cv.notify_one();
     }
@@ -363,6 +371,89 @@ private:
         m_prefetch_queued.clear();
         m_queue.erase(std::remove_if(m_queue.begin(), m_queue.end(),
             [](const Cmd &c){ return c.type == Type::Prefetch; }), m_queue.end());
+    }
+
+    bool do_move(const Cmd &cmd) {
+        std::string folder = cmd.folder;
+        int seq = cmd.seq;
+        std::string dest = cmd.dest_folder;
+        if (folder.empty() || dest.empty() || seq <= 0)
+            return false;
+        if (!m_imap.is_open()) {
+            report_error("Not connected",
+                         "Set up the server in Preferences first.");
+            return false;
+        }
+        // If user switched folders while this was queued, still operate on
+        // the original source folder.
+        if (!folder.empty() && m_imap.selected_folder() != folder) {
+            std::string se;
+            if (!m_imap.ensure_selected(folder, se)) {
+                if (!ImapClient::is_connection_error(se)) {
+                    report_error("Could not open folder", se);
+                    return false;
+                }
+                std::string re;
+                if (!m_imap.reconnect(re) || !m_imap.ensure_selected(folder, se)) {
+                    report_error("Connection lost", re.empty() ? se : re);
+                    return false;
+                }
+            }
+        }
+        {
+            std::lock_guard<std::mutex> lock(m_mutex);
+            m_selected_folder = folder;
+            // Remove the moving message from any pending prefetch work.
+            m_prefetch_queue.erase(
+                std::remove(m_prefetch_queue.begin(), m_prefetch_queue.end(), seq),
+                m_prefetch_queue.end());
+            m_prefetch_queued.erase(seq);
+            m_queue.erase(std::remove_if(m_queue.begin(), m_queue.end(),
+                [&](const Cmd &c){ return c.type == Type::Prefetch && c.seq == seq && c.folder == folder; }),
+                m_queue.end());
+        }
+        report_status("Moving message to " + dest + "...");
+        std::string err;
+        bool ok = m_imap.move_message(seq, dest, err);
+        if (!ok && ImapClient::is_connection_error(err)) {
+            std::string re;
+            if (m_imap.reconnect(re)) {
+                std::string se;
+                m_imap.ensure_selected(folder, se);
+                err.clear();
+                ok = m_imap.move_message(seq, dest, err);
+            }
+        }
+        if (!ok) {
+            report_error("Could not move message", err);
+            report_status("Ready");
+            return false;
+        }
+        // Invalidate body/prefetch caches for this folder — sequence numbers
+        // shift after EXPUNGE, so any stale seq->body mapping is wrong.
+        {
+            std::lock_guard<std::mutex> lock(m_mutex);
+            cancel_prefetch_locked();
+        }
+        report_status("Moved to " + dest);
+        deliver([this, folder, seq, dest]() {
+            if (cb_moved) cb_moved(folder, seq, dest);
+        });
+        // Refresh the source folder's summaries so the UI gets corrected
+        // sequence numbers (MOVE/COPY+EXPUNGE resequences the mailbox).
+        {
+            std::string se; int exists = 0;
+            if (m_imap.select_folder(folder, exists, se)) {
+                m_selected_folder = folder;
+                m_first_loaded = 0;
+                do_fetch_summaries(folder, exists);
+            } else {
+                // Refresh failed — still delivered cb_moved so the row can be
+                // removed locally; next explicit refresh will fix seqs.
+                report_status("Ready");
+            }
+        }
+        return true;
     }
 
     bool already_prefetch_queued_locked(int seq, const std::string &folder) const {
@@ -536,6 +627,9 @@ private:
                 break;
             case Type::Prefetch:
                 do_prefetch(cmd);
+                break;
+            case Type::Move:
+                do_move(cmd);
                 break;
             }
         }
@@ -1187,6 +1281,42 @@ public:
 
     /* ---- appearance ---- */
     void set_dark(bool dark) { m_dark = dark; screen()->redraw(); }
+
+    int selected_index() const { return m_selected; }
+    int selected_seq() const {
+        if (m_selected >= 0 && m_selected < (int)m_emails.size())
+            return m_emails[m_selected].seq;
+        return -1;
+    }
+    const EmailData* selected_data() const {
+        if (m_selected >= 0 && m_selected < (int)m_emails.size())
+            return &m_emails[m_selected];
+        return nullptr;
+    }
+    // Remove a row by seq, preserving scroll. Returns true if removed.
+    bool remove_seq(int seq) {
+        for (int i = 0; i < (int)m_emails.size(); ++i) {
+            if (m_emails[i].seq != seq) continue;
+            m_emails.erase(m_emails.begin() + i);
+            if (m_selected == i) {
+                if (i < (int)m_emails.size())
+                    m_selected = i;
+                else
+                    m_selected = (int)m_emails.size() - 1;
+                m_hovered = -1;
+            } else if (m_selected > i) {
+                --m_selected;
+                if (m_hovered > i) --m_hovered;
+            } else if (m_hovered > i) {
+                --m_hovered;
+            }
+            m_scroll = std::clamp(m_scroll, 0.0f, max_scroll());
+            if (screen()) screen()->redraw();
+            return true;
+        }
+        return false;
+    }
+    void clear_selection() { m_selected = -1; m_hovered = -1; if (screen()) screen()->redraw(); }
 
 private:
     /* ---- scrollbar geometry ---- */
@@ -1913,6 +2043,8 @@ public:
     Button       *m_reply_btn   = nullptr;
     Button       *m_save_btn    = nullptr;
     Button       *m_images_btn  = nullptr;
+    Button       *m_trash_btn   = nullptr;
+    Button       *m_junk_btn    = nullptr;
 
     MailConfig  m_config;
     MailWorker  m_worker;
@@ -1951,6 +2083,125 @@ public:
     /* Session-only caches; dropped on Refresh or reconnect. */
     std::map<std::string, std::vector<MailSummary>> m_summary_cache;
     std::map<std::string, MailMessage>              m_body_cache;
+    std::vector<MailFolder> m_folders;
+    bool m_move_inflight = false;
+
+    // helpers for Trash/Junk moves
+    std::string resolve_dest_folder(const std::string &kind) const {
+        auto lower = [](std::string s) {
+            for (char &c : s) c = (char)std::tolower((unsigned char)c);
+            return s;
+        };
+        if (m_folders.empty()) return kind;
+        std::string want = lower(kind);
+        // exact leaf match first
+        for (const auto &f : m_folders) {
+            std::string low = lower(f.name);
+            size_t p = low.find_last_of("/.");
+            std::string leaf = (p == std::string::npos) ? low : low.substr(p + 1);
+            if (leaf == want) return f.name;
+        }
+        std::vector<std::string> keys;
+        if (want == "trash") keys = {"trash","deleted","deleted messages","bin"};
+        else if (want == "junk") keys = {"junk","spam","junk email","bulk mail"};
+        else keys = {want};
+        for (const std::string &k : keys) {
+            for (const auto &f : m_folders) {
+                std::string low = lower(f.name);
+                size_t p = low.find_last_of("/.");
+                std::string leaf = (p == std::string::npos) ? low : low.substr(p + 1);
+                if (leaf.find(k) != std::string::npos) return f.name;
+                if (low.find(k) != std::string::npos) return f.name;
+            }
+        }
+        return kind;
+    }
+    void update_move_buttons() {
+        bool has_sel = m_email_list && m_email_list->selected_seq() != -1
+                       && !m_current_folder.empty() && !m_move_inflight;
+        auto lower = [](std::string s) {
+            for (char &c : s) c = (char)std::tolower((unsigned char)c);
+            return s;
+        };
+        std::string curLow = lower(m_current_folder);
+        std::string trashDest = has_sel ? resolve_dest_folder("Trash") : "";
+        std::string junkDest  = has_sel ? resolve_dest_folder("Junk") : "";
+        bool trashSame = has_sel && lower(trashDest) == curLow;
+        bool junkSame  = has_sel && lower(junkDest) == curLow;
+        if (m_trash_btn) m_trash_btn->set_enabled(has_sel && !trashSame);
+        if (m_junk_btn)  m_junk_btn->set_enabled(has_sel && !junkSame);
+        // keep tooltips reflecting resolved destination
+        if (m_trash_btn) m_trash_btn->set_tooltip(has_sel && !trashDest.empty()
+            ? "Move to " + trashDest + " (Delete)" : "Move to Trash (Delete)");
+        if (m_junk_btn)  m_junk_btn->set_tooltip(has_sel && !junkDest.empty()
+            ? "Move to " + junkDest : "Move to Junk / Spam");
+    }
+    void move_selected_to(const std::string &kind) {
+        if (m_move_inflight) return;
+        if (!m_email_list) return;
+        int seq = m_email_list->selected_seq();
+        if (seq <= 0) { if (m_status) m_status->set_caption("No message selected"); return; }
+        if (m_current_folder.empty()) return;
+        std::string dest = resolve_dest_folder(kind);
+        if (dest.empty()) { if (m_status) m_status->set_caption("No " + kind + " folder found"); return; }
+        auto lower = [](std::string s){ for(char &c:s) c=(char)std::tolower((unsigned char)c); return s; };
+        if (lower(dest) == lower(m_current_folder)) {
+            m_status->set_caption("Already in " + dest);
+            return;
+        }
+        m_move_inflight = true;
+        update_move_buttons();
+        m_status->set_caption("Moving to " + dest + "...");
+        m_worker.move_message(m_current_folder, seq, dest);
+    }
+    void on_moved(const std::string &folder, int seq, const std::string &dest) {
+        m_move_inflight = false;
+        auto remove_from_vec = [&](std::vector<MailSummary> &vec){
+            vec.erase(std::remove_if(vec.begin(), vec.end(),
+                [&](const MailSummary &s){ return s.seq == seq; }), vec.end());
+        };
+        remove_from_vec(m_summaries);
+        auto it = m_summary_cache.find(folder);
+        if (it != m_summary_cache.end()) remove_from_vec(it->second);
+        // body caches use seq numbers, which shift after EXPUNGE -> drop all for folder
+        std::vector<std::string> drop;
+        for (auto &kv : m_body_cache)
+            if (kv.first.rfind(folder + ":", 0) == 0) drop.push_back(kv.first);
+        for (auto &k : drop) m_body_cache.erase(k);
+        if (m_rendered_seq == seq) {
+            m_has_message = false;
+            m_rendered_seq = -1;
+            m_reply_btn->set_enabled(false);
+            if (m_save_btn) m_save_btn->set_enabled(false);
+            m_images_btn->set_enabled(false);
+            Document doc;
+            parse_markdown(doc, "*Message moved to " + dest + "*", text_color(), 18.f);
+            m_view->set_document(std::move(doc));
+            m_view_scroll->set_scroll(0.0f);
+        }
+        if (m_loading_seq == seq) m_loading_seq = -1;
+        if (m_pending_seq == seq) { m_pending_seq = -1; m_preview_settle_at = 0; }
+        bool removed = false;
+        if (m_email_list) removed = m_email_list->remove_seq(seq);
+        if (removed && m_email_list) {
+            const EmailData* nd = m_email_list->selected_data();
+            if (nd) {
+                int nidx = m_email_list->selected_index();
+                on_email_selected(nidx, *nd);
+            }
+        }
+        if (m_email_list && m_email_list->emails().empty()) {
+            m_has_message = false;
+            m_rendered_seq = -1;
+            m_pending_seq = -1;
+            Document doc;
+            parse_markdown(doc, "*No messages*", text_color(), 18.f);
+            m_view->set_document(std::move(doc));
+        }
+        m_status->set_caption("Moved to " + dest);
+        update_move_buttons();
+        redraw();
+    }
 
     MailApp() : Screen(Vector2i(1100, 700), "nmail") {
         inc_ref();
@@ -2006,6 +2257,14 @@ public:
                 m_view->bind_loaded_images();
             update_image_status();
         });
+
+        m_trash_btn = make_button_tool(FA_TRASH, "Move to Trash (Delete)");
+        m_trash_btn->set_enabled(false);
+        m_trash_btn->set_callback([this]() { move_selected_to("Trash"); });
+
+        m_junk_btn = make_button_tool(FA_MAIL_BULK, "Move to Junk / Spam");
+        m_junk_btn->set_enabled(false);
+        m_junk_btn->set_callback([this]() { move_selected_to("Junk"); });
 
         Button *prefs_btn = make_button_tool(FA_COG, "Preferences");
         prefs_btn->set_callback([this]() { show_preferences(); });
@@ -2133,6 +2392,10 @@ public:
         m_worker.cb_status = [this](const std::string &msg) {
             m_status->set_caption(msg);
         };
+        m_worker.cb_moved = [this](const std::string &folder, int seq,
+                                   const std::string &dest) {
+            on_moved(folder, seq, dest);
+        };
         m_worker.start();
 
         // ---- Load saved account, or ask for it ----
@@ -2205,9 +2468,12 @@ public:
     /* ---- GUI-side handlers ---- */
 
     void on_folders(const std::vector<MailFolder> &folders) {
+        m_folders = folders;
+        m_move_inflight = false;
         /* Fresh connection / explicit refresh: drop all cached state. */
         m_summary_cache.clear();
         m_body_cache.clear();
+        update_move_buttons();
 
         std::string account = m_config.username.empty()
             ? m_config.host
@@ -2233,8 +2499,10 @@ public:
         m_summaries      = sums;
         m_summary_cache[folder] = sums;
         m_older_inflight = false;
+        m_move_inflight = false;
         m_email_list->set_loading_more(false);
         apply_filter();
+        update_move_buttons();
         // after layout, kick viewport prefetch so rows actually on screen win
         redraw();
         nanogui::async([this, folder]() {
@@ -2358,7 +2626,9 @@ public:
 
     void on_worker_error(const std::string &title, const std::string &msg) {
         m_older_inflight = false;
+        m_move_inflight = false;
         if (m_email_list) m_email_list->set_loading_more(false);
+        update_move_buttons();
         auto *dlg = new MessageDialog(this, MessageDialog::Type::Warning,
                                       title, msg, "OK", "", false);
         dlg->center();
@@ -2375,9 +2645,11 @@ public:
         m_rendered_seq = -1;
         m_has_message  = false;
         m_older_inflight = false;
+        m_move_inflight = false;
         m_email_list->set_loading_more(false);
         m_reply_btn->set_enabled(false);
         if (m_save_btn) m_save_btn->set_enabled(false);
+        update_move_buttons();
 
         /* Serve the last-known list instantly, then refresh from the
          * server in the background. */
@@ -2396,6 +2668,7 @@ public:
     }
 
     void on_email_selected(int idx, const EmailData &d) {
+        update_move_buttons();
         /* List highlight already moved.  Do not parse HTML or FETCH on
          * every GLFW_REPEAT — wait until this seq sits still. */
         if (d.seq == m_pending_seq)
@@ -2426,23 +2699,27 @@ public:
     }
 
     void show_preview_stub(const EmailData &d) {
+        // Keep header/body styling identical to render_message() so the
+        // preview does not visually jump when the full message arrives.
         Document doc;
-        Style title; title.fontSize = 24.f; title.bold = true;
-        title.fgColor = text_color();
-        Style meta;  meta.fontSize = 16.f; meta.fgColor = meta_color();
-        Style body;  body.fontSize = 16.f; body.fgColor = text_color();
+        Style normal; normal.fontSize = 17.0f; normal.fgColor = text_color();
+        Style bold   = normal; bold.bold = true;
+        Style subj   = normal; subj.fontSize = 24.0f; subj.bold = true;
+        Style meta   = normal; meta.fgColor = meta_color();
         doc.addParagraph()->addText(d.subject.empty() ? "(no subject)"
-                                                      : d.subject, title);
-        auto *from = doc.addParagraph();
-        from->addText(d.sender, meta);
+                                                      : d.subject, subj);
+        auto *pf = doc.addParagraph();
+        pf->addText("From: ", bold);
+        pf->addText(d.sender, normal);
         if (!d.date.empty()) {
-            auto *dt = doc.addParagraph();
-            dt->addText(d.date, meta);
+            auto *pd = doc.addParagraph();
+            pd->addText("Date: ", bold);
+            pd->addText(d.date, meta);
         }
         auto *rule = doc.addParagraph();
         rule->isRule = true;
         if (!d.preview.empty())
-            doc.addParagraph()->addText(d.preview, body);
+            doc.addParagraph()->addText(d.preview, normal);
         m_view->set_document(std::move(doc));
         m_has_message = false;
         m_reply_btn->set_enabled(false);
@@ -2455,18 +2732,24 @@ public:
     // still sees what they selected while the FETCH is in flight.
     void show_preview_stub_with_loading(const EmailData &d) {
         Document doc;
-        Style title; title.fontSize = 24.f; title.bold = true;
-        title.fgColor = text_color();
-        Style meta;  meta.fontSize = 16.f; meta.fgColor = meta_color();
-        Style body;  body.fontSize = 16.f; body.fgColor = text_color();
-        Style loading; loading.fontSize = 14.f; loading.italic = true;
-        loading.fgColor = meta_color();
+        Style normal; normal.fontSize = 17.0f; normal.fgColor = text_color();
+        Style bold   = normal; bold.bold = true;
+        Style subj   = normal; subj.fontSize = 24.0f; subj.bold = true;
+        Style meta   = normal; meta.fgColor = meta_color();
+        Style loading = meta; loading.italic = true;
+        loading.fontSize = 14.0f;
         doc.addParagraph()->addText(d.subject.empty() ? "(no subject)"
-                                                      : d.subject, title);
-        auto *from = doc.addParagraph(); from->addText(d.sender, meta);
-        if (!d.date.empty()) { auto *dt = doc.addParagraph(); dt->addText(d.date, meta); }
+                                                      : d.subject, subj);
+        auto *pf = doc.addParagraph();
+        pf->addText("From: ", bold);
+        pf->addText(d.sender, normal);
+        if (!d.date.empty()) {
+            auto *pd = doc.addParagraph();
+            pd->addText("Date: ", bold);
+            pd->addText(d.date, meta);
+        }
         auto *rule = doc.addParagraph(); rule->isRule = true;
-        if (!d.preview.empty()) doc.addParagraph()->addText(d.preview, body);
+        if (!d.preview.empty()) doc.addParagraph()->addText(d.preview, normal);
         auto *rule2 = doc.addParagraph(); rule2->isRule = true;
         doc.addParagraph()->addText("Loading message\u2026", loading);
         m_view->set_document(std::move(doc));
@@ -2547,6 +2830,7 @@ public:
             rows.push_back(d);
         }
         m_email_list->set_emails(std::move(rows));
+        update_move_buttons();
     }
 
     /* ---- inline / remote images in the reading pane ---- */
