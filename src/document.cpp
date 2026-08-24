@@ -52,6 +52,7 @@ static bool style_equal(const Style& a, const Style& b) {
            a.verticalMiddle == b.verticalMiddle &&
            a.strike == b.strike &&
            a.allCaps == b.allCaps &&
+           a.whiteSpace == b.whiteSpace &&
            a.lineHeight == b.lineHeight &&
            a.letterSpacing == b.letterSpacing &&
            a.opacity == b.opacity &&
@@ -688,10 +689,11 @@ float Document::drawParagraph(NVGcontext* ctx, const Paragraph& para,
             lsExtra = run.style.letterSpacing * (float)(text.size() - 1);
         }
         float effAdv = advance + lsExtra;
+        bool noWrap = (run.style.whiteSpace == WhiteSpace::Nowrap);
         const float needed = current.words.empty()
                              ? effAdv
                              : current.advanceWidth + (sep ? sp : 0.0f) + effAdv;
-        if (!current.words.empty() && needed > avail)
+        if (!noWrap && !current.words.empty() && needed > avail)
             flushLine(false);
 
         bool spaceBefore = false;

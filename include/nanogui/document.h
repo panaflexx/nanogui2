@@ -28,6 +28,8 @@ NAMESPACE_BEGIN(nanogui)
 
 enum class TextAlignment { Left, Center, Right, Justify };
 
+enum class WhiteSpace { Normal, Nowrap, Pre, PreWrap };
+
 struct NANOGUI_EXPORT Style {
     float    fontSize  = 18.0f;
     NVGcolor fgColor   = NVGcolor{ { { 0.f, 0.f, 0.f, 1.f } } };
@@ -48,6 +50,7 @@ struct NANOGUI_EXPORT Style {
     float    padY = 0.0f;
     float    borderWidth = 0.0f;  ///< CSS border (Learn More outline)
     NVGcolor borderColor = NVGcolor{ { { 0.f, 0.f, 0.f, 0.f } } };
+    WhiteSpace whiteSpace = WhiteSpace::Normal;
 };
 
 // ---------------------------------------------------------------------------
