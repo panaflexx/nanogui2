@@ -439,20 +439,10 @@ private:
         deliver([this, folder, seq, dest]() {
             if (cb_moved) cb_moved(folder, seq, dest);
         });
-        // Refresh the source folder's summaries so the UI gets corrected
-        // sequence numbers (MOVE/COPY+EXPUNGE resequences the mailbox).
-        {
-            std::string se; int exists = 0;
-            if (m_imap.select_folder(folder, exists, se)) {
-                m_selected_folder = folder;
-                m_first_loaded = 0;
-                do_fetch_summaries(folder, exists);
-            } else {
-                // Refresh failed — still delivered cb_moved so the row can be
-                // removed locally; next explicit refresh will fix seqs.
-                report_status("Ready");
-            }
-        }
+        // Keep scroll/position: do NOT re-SELECT the folder. The GUI
+        // removes the row locally and adjusts remaining seq numbers
+        // (EXPUNGE resequences). Next explicit Refresh will fully
+        // reconcile with the server.
         return true;
     }
 
@@ -1293,11 +1283,16 @@ public:
             return &m_emails[m_selected];
         return nullptr;
     }
-    // Remove a row by seq, preserving scroll. Returns true if removed.
+    // Remove a row by seq, preserving scroll position and viewport.
+    // Selects the message below the deleted one, or the last if at end.
+    // IMAP sequence numbers shift after EXPUNGE, so remaining seqs > deleted
+    // are decremented to stay in sync without a full refresh.
     bool remove_seq(int seq) {
         for (int i = 0; i < (int)m_emails.size(); ++i) {
             if (m_emails[i].seq != seq) continue;
             m_emails.erase(m_emails.begin() + i);
+            for (auto &e : m_emails)
+                if (e.seq > seq) --e.seq;
             if (m_selected == i) {
                 if (i < (int)m_emails.size())
                     m_selected = i;
@@ -2085,6 +2080,8 @@ public:
     std::map<std::string, MailMessage>              m_body_cache;
     std::vector<MailFolder> m_folders;
     bool m_move_inflight = false;
+    std::string m_status_base;
+    std::string m_hover_url;
 
     // helpers for Trash/Junk moves
     std::string resolve_dest_folder(const std::string &kind) const {
@@ -2116,6 +2113,69 @@ public:
         }
         return kind;
     }
+    static std::string link_domain(const std::string &url) {
+        std::string s = url;
+        // trim whitespace
+        size_t b = s.find_first_not_of(" \t\r\n");
+        size_t e = s.find_last_not_of(" \t\r\n");
+        if (b == std::string::npos) return "";
+        s = s.substr(b, e - b + 1);
+        std::string low; low.reserve(s.size());
+        for (char c : s) low.push_back((char)std::tolower((unsigned char)c));
+        std::string host;
+        if (low.rfind("http://", 0) == 0) host = s.substr(7);
+        else if (low.rfind("https://", 0) == 0) host = s.substr(8);
+        else if (low.rfind("mailto:", 0) == 0) {
+            size_t at = s.find('@');
+            if (at != std::string::npos) {
+                size_t end = s.find_first_of(" ?#", at);
+                host = s.substr(at + 1, end == std::string::npos ? std::string::npos : end - at - 1);
+                // strip trailing > etc
+                while (!host.empty() && (host.back() == '>' || host.back() == '"' || host.back() == '\'')) host.pop_back();
+                if (host.rfind("www.", 0) == 0) host = host.substr(4);
+                return host;
+            }
+            return s.substr(7);
+        } else {
+            // unknown scheme - return as-is up to slash
+            host = s;
+        }
+        // strip userinfo if present
+        size_t at = host.rfind('@');
+        if (at != std::string::npos) host = host.substr(at + 1);
+        // cut at / ? #
+        size_t end = host.find_first_of("/?#");
+        if (end != std::string::npos) host = host.substr(0, end);
+        // strip port
+        size_t colon = host.find(':');
+        if (colon != std::string::npos) host = host.substr(0, colon);
+        if (host.rfind("www.", 0) == 0) host = host.substr(4);
+        return host;
+    }
+    void set_status(const std::string &s) {
+        m_status_base = s;
+        if (m_hover_url.empty() && m_status) m_status->set_caption(s);
+    }
+    void handle_link_hover(const std::string &url) {
+        if (url.empty()) {
+            m_hover_url.clear();
+            if (m_status) m_status->set_caption(m_status_base.empty() ? "Ready" : m_status_base);
+            return;
+        }
+        std::string low; low.reserve(url.size());
+        for (char c : url) low.push_back((char)std::tolower((unsigned char)c));
+        bool is_http = (low.rfind("http://", 0) == 0 || low.rfind("https://", 0) == 0);
+        if (!is_http) {
+            // non-HTTP links (e.g. mailto) keep normal status; don't show hover
+            m_hover_url.clear();
+            if (m_status) m_status->set_caption(m_status_base.empty() ? "Ready" : m_status_base);
+            return;
+        }
+        std::string dom = link_domain(url);
+        if (dom.empty()) dom = url;
+        m_hover_url = url;
+        if (m_status) m_status->set_caption("Open link to " + dom);
+    }
     void update_move_buttons() {
         bool has_sel = m_email_list && m_email_list->selected_seq() != -1
                        && !m_current_folder.empty() && !m_move_inflight;
@@ -2140,18 +2200,18 @@ public:
         if (m_move_inflight) return;
         if (!m_email_list) return;
         int seq = m_email_list->selected_seq();
-        if (seq <= 0) { if (m_status) m_status->set_caption("No message selected"); return; }
+        if (seq <= 0) { set_status("No message selected"); return; }
         if (m_current_folder.empty()) return;
         std::string dest = resolve_dest_folder(kind);
-        if (dest.empty()) { if (m_status) m_status->set_caption("No " + kind + " folder found"); return; }
+        if (dest.empty()) { set_status("No " + kind + " folder found"); return; }
         auto lower = [](std::string s){ for(char &c:s) c=(char)std::tolower((unsigned char)c); return s; };
         if (lower(dest) == lower(m_current_folder)) {
-            m_status->set_caption("Already in " + dest);
+            set_status("Already in " + dest);
             return;
         }
         m_move_inflight = true;
         update_move_buttons();
-        m_status->set_caption("Moving to " + dest + "...");
+        set_status("Moving to " + dest + "...");
         m_worker.move_message(m_current_folder, seq, dest);
     }
     void on_moved(const std::string &folder, int seq, const std::string &dest) {
@@ -2161,8 +2221,14 @@ public:
                 [&](const MailSummary &s){ return s.seq == seq; }), vec.end());
         };
         remove_from_vec(m_summaries);
+        for (auto &s : m_summaries)
+            if (s.seq > seq) --s.seq;
         auto it = m_summary_cache.find(folder);
-        if (it != m_summary_cache.end()) remove_from_vec(it->second);
+        if (it != m_summary_cache.end()) {
+            remove_from_vec(it->second);
+            for (auto &s : it->second)
+                if (s.seq > seq) --s.seq;
+        }
         // body caches use seq numbers, which shift after EXPUNGE -> drop all for folder
         std::vector<std::string> drop;
         for (auto &kv : m_body_cache)
@@ -2178,9 +2244,13 @@ public:
             parse_markdown(doc, "*Message moved to " + dest + "*", text_color(), 18.f);
             m_view->set_document(std::move(doc));
             m_view_scroll->set_scroll(0.0f);
+        } else if (m_rendered_seq > seq) {
+            --m_rendered_seq;
         }
         if (m_loading_seq == seq) m_loading_seq = -1;
+        else if (m_loading_seq > seq) --m_loading_seq;
         if (m_pending_seq == seq) { m_pending_seq = -1; m_preview_settle_at = 0; }
+        else if (m_pending_seq > seq) { --m_pending_seq; --m_pending_email.seq; }
         bool removed = false;
         if (m_email_list) removed = m_email_list->remove_seq(seq);
         if (removed && m_email_list) {
@@ -2198,7 +2268,7 @@ public:
             parse_markdown(doc, "*No messages*", text_color(), 18.f);
             m_view->set_document(std::move(doc));
         }
-        m_status->set_caption("Moved to " + dest);
+        set_status("Moved to " + dest);
         update_move_buttons();
         redraw();
     }
@@ -2348,6 +2418,9 @@ public:
         m_view->image_resolver = [this](const std::string &src) {
             return resolve_image(src);
         };
+        m_view->on_link_hover = [this](const std::string &url) {
+            handle_link_hover(url);
+        };
         style_editor();
         m_view_scroll->set_height_flex(SizeMode::Expanding);
         rflex->set_flex_item(m_view_scroll, FlexLayout::FlexItem(1.0f));
@@ -2357,6 +2430,7 @@ public:
         m_status->set_min_height(26);
         m_status->set_height(26);
         m_status->set_height_flex(SizeMode::Fixed);
+        m_status_base = "Not connected";
 
         split->set_drag_position(0.22f);
         inner_split->set_drag_position(0.38f);
@@ -2390,7 +2464,7 @@ public:
             on_worker_error(title, msg);
         };
         m_worker.cb_status = [this](const std::string &msg) {
-            m_status->set_caption(msg);
+            set_status(msg);
         };
         m_worker.cb_moved = [this](const std::string &folder, int seq,
                                    const std::string &dest) {
@@ -2526,7 +2600,7 @@ public:
         if (oldest <= 1) return;               // already at the first message
         m_older_inflight = true;
         m_email_list->set_loading_more(true);
-        m_status->set_caption("Loading older messages...");
+        set_status("Loading older messages...");
         m_worker.fetch_older();
     }
 
@@ -2567,7 +2641,7 @@ public:
             rows.push_back(d);
         }
         m_email_list->append_emails(std::move(rows));
-        m_status->set_caption(folder + ": showing " +
+        set_status(folder + ": showing " +
                               std::to_string(m_summaries.size()) +
                               " messages");
         redraw();
@@ -2977,7 +3051,7 @@ public:
         } else {
             std::snprintf(buf, sizeof(buf), "Loading images %d/%d", have, n);
         }
-        m_status->set_caption(buf);
+        set_status(buf);
     }
 
     /* (Re-)render the current message — on select, body arrival, theme
@@ -3049,7 +3123,7 @@ public:
         std::string blob = nmail_serialize_email(e);
         out.write(blob.data(), (std::streamsize)blob.size());
         out.close();
-        m_status->set_caption("Saved " + path);
+        set_status("Saved " + path);
     }
 
     /* ---- Preferences window ---- */
@@ -3320,7 +3394,7 @@ public:
         std::string from = m_config.username;
         std::string irt  = m_current_message.message_id;
 
-        m_status->set_caption("Sending reply...");
+        set_status("Sending reply...");
         std::thread([this, win, send_btn, sc, from, to, subject, body,
                      irt, format]() {
             SmtpClient smtp;
@@ -3330,10 +3404,10 @@ public:
             nanogui::async(std::function<void()>(
                 [this, win, send_btn, ok, err]() {
                     if (ok) {
-                        m_status->set_caption("Reply sent");
+                        set_status("Reply sent");
                         win->dispose();
                     } else {
-                        m_status->set_caption("Send failed");
+                        set_status("Send failed");
                         send_btn->set_enabled(true);
                         auto *dlg = new MessageDialog(this,
                             MessageDialog::Type::Warning,

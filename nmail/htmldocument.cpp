@@ -723,6 +723,10 @@ public:
         for(auto &w: found->words){ if(!w.linkUrl.empty() && x>=w.x-2 && x< w.x+w.advance+2) return w.linkUrl; }
         return "";
     }
+    void notify_hover(const std::string &url) {
+        for (Widget *pp = parent(); pp; pp = pp->parent())
+            if (auto *hd = dynamic_cast<HtmlDocument *>(pp)) { hd->set_hover_url(url); break; }
+    }
     virtual bool mouse_motion_event(const Vector2i &p, const Vector2i &rel, int b, int m) override {
         // set_cursor on the widget under the pointer; Screen::cursor_pos_callback_event copies widget->cursor() to GLFW.
         // Return true when hovering a link so the event is considered handled and not swallowed.
@@ -730,12 +734,13 @@ public:
         m_hover_url = url;
         bool is_link = !url.empty();
         set_cursor(is_link ? Cursor::Hand : Cursor::Arrow);
+        notify_hover(url);
         bool handled = Widget::mouse_motion_event(p, rel, b, m);
         return is_link || handled;
     }
     virtual bool mouse_enter_event(const Vector2i &p, bool enter) override {
-        if(!enter){ set_cursor(Cursor::Arrow); m_hover_url.clear(); }
-        else { std::string u=hit_url(p); m_hover_url=u; if(!u.empty()) set_cursor(Cursor::Hand); else set_cursor(Cursor::Arrow); }
+        if(!enter){ set_cursor(Cursor::Arrow); m_hover_url.clear(); notify_hover(""); }
+        else { std::string u=hit_url(p); m_hover_url=u; if(!u.empty()) set_cursor(Cursor::Hand); else set_cursor(Cursor::Arrow); notify_hover(u); }
         return Widget::mouse_enter_event(p, enter);
     }
     virtual bool mouse_button_event(const Vector2i &p, int button, bool down, int mods) override {
@@ -772,12 +777,18 @@ public:
         }
         return p;
     }
+    void notify_hover_block(const std::string &url) {
+        for (Widget *pp = parent(); pp; pp = pp->parent())
+            if (auto *hd = dynamic_cast<HtmlDocument *>(pp)) { hd->set_hover_url(url); break; }
+    }
     virtual bool mouse_motion_event(const Vector2i &p, const Vector2i&, int, int) override {
-        if(!m_link_url.empty()) set_cursor(Cursor::Hand); else set_cursor(Cursor::Arrow);
+        if(!m_link_url.empty()) { set_cursor(Cursor::Hand); notify_hover_block(m_link_url); }
+        else { set_cursor(Cursor::Arrow); notify_hover_block(""); }
         return Widget::mouse_motion_event(p, Vector2i(0,0), 0, 0);
     }
     virtual bool mouse_enter_event(const Vector2i &, bool enter) override {
-        if(!m_link_url.empty()) set_cursor(enter ? Cursor::Hand : Cursor::Arrow);
+        if(!m_link_url.empty()) { set_cursor(enter ? Cursor::Hand : Cursor::Arrow); notify_hover_block(enter ? m_link_url : ""); }
+        else { set_cursor(Cursor::Arrow); if(!enter) notify_hover_block(""); else notify_hover_block(""); }
         return Widget::mouse_enter_event(Vector2i(0,0), enter);
     }
     virtual bool mouse_button_event(const Vector2i &, int button, bool down, int) override {
@@ -2714,7 +2725,17 @@ HtmlDocument::HtmlDocument(Widget *parent) : Widget(parent) {
 #endif
 }
 
+void HtmlDocument::set_hover_url(const std::string &url) {
+    if (m_last_hover_url == url) return;
+    m_last_hover_url = url;
+    if (on_link_hover) on_link_hover(url);
+}
+bool HtmlDocument::mouse_enter_event(const Vector2i &p, bool enter) {
+    if (!enter) set_hover_url("");
+    return Widget::mouse_enter_event(p, enter);
+}
 void HtmlDocument::clear() {
+    set_hover_url("");
 #ifdef DEBUG
     if (debug_draw())
         fprintf(stderr, "[trace] HtmlDocument::clear %p children=%zu\n",

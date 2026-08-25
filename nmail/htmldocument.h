@@ -56,6 +56,12 @@ public:
      * Returns how many images were newly bound. */
     int bind_loaded_images();
 
+    /* Called by HtmlText/HtmlBlock when the hovered link changes.
+     * url == "" means the pointer left any link. */
+    void set_hover_url(const std::string &url);
+    std::function<void(const std::string &url)> on_link_hover;
+
+    virtual bool mouse_enter_event(const nanogui::Vector2i &p, bool enter) override;
     virtual void draw(NVGcontext *ctx) override;
     virtual nanogui::Vector2i preferred_size(NVGcontext *ctx) const override;
 
@@ -77,4 +83,5 @@ private:
     NVGcolor m_bg   = NVGcolor{ { { 0.f, 0.f, 0.f, 0.f } } };
     bool     m_has_remote = false;
     bool     m_reflow_pending = false;
+    std::string m_last_hover_url;
 };
