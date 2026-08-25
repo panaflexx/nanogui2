@@ -262,6 +262,12 @@ Screen::Screen(const Vector2i& size, const std::string& caption, bool resizable,
 #else
     m_float_buffer = false;
 #endif
+#if defined(__APPLE__)
+    // macOS live-resize: avoid Cocoa clearing the NSView to black while the
+    // GLFW window is being dragged (CoreAnimation fills before next display).
+    // Needs to be set BEFORE glfwCreateWindow creates the NSWindow.
+    glfwWindowHint(GLFW_COCOA_GRAPHICS_SWITCHING, GLFW_FALSE);
+#endif
 
     glfwWindowHint(GLFW_VISIBLE, GL_FALSE);
     glfwWindowHint(GLFW_RESIZABLE, resizable ? GL_TRUE : GL_FALSE);
@@ -450,6 +456,67 @@ Screen::Screen(const Vector2i& size, const std::string& caption, bool resizable,
             s->resize_callback_event(width, height);
         }
     );
+#if defined(__APPLE__)
+    /* macOS: live-resize drags the GLFW window while Cocoa runs a nested
+       modal NSRunLoop — the nanogui mainloop's glfwWaitEvents is blocked.
+       Two things make the contents go black:
+         1) CoreAnimation clears the NSView to black before the next draw.
+         2) glfwWaitEvents is not pumping, so resize_callback_event is never
+            reached and no draw occurs until the drag ends (framebuffer/size
+            also lag behind).
+       Fix: GLFW can install an NSWindow live-resize delegate that fires
+       GLFW's windowRefresh path synchronously from inside the modal loop.
+       Re-layout + repaint immediately, macOS-only. Linux is untouched. */
+    glfwSetWindowContentScaleCallback(m_glfw_window,
+        [](GLFWwindow* w, float, float) {
+            auto it = __nanogui_screens.find(w);
+            if (it == __nanogui_screens.end())
+                return;
+            Screen* s = it->second;
+            if (!s->m_process_events)
+                return;
+            /* Retina drag to a different scale — sync size from scratch. */
+            s->resize_callback_event(0, 0);
+#if defined(NANOGUI_USE_OPENGL) || defined(NANOGUI_USE_GLES)
+            glfwMakeContextCurrent(w);
+#endif
+            s->draw_all();
+        }
+    );
+    glfwSetWindowRefreshCallback(m_glfw_window,
+        [](GLFWwindow* w) {
+            auto it = __nanogui_screens.find(w);
+            if (it == __nanogui_screens.end())
+                return;
+            Screen* s = it->second;
+            if (!s->m_process_events)
+                return;
+#if defined(NANOGUI_USE_OPENGL) || defined(NANOGUI_USE_GLES)
+            glfwMakeContextCurrent(w);
+#endif
+            s->draw_all();
+        }
+    );
+    // In-window live drag (GLFW ≥ 3.4): called every live-resize step on
+    // macOS when the window delegate is bridged, before framebuffer callback.
+    // Forces layout+draw so the view tracks the frame, instead of clearing.
+    glfwSetWindowSizeCallback(m_glfw_window,
+        [](GLFWwindow* w, int ww, int wh) {
+            auto it = __nanogui_screens.find(w);
+            if (it == __nanogui_screens.end())
+                return;
+            Screen* s = it->second;
+            if (!s->m_process_events)
+                return;
+            // Sync framebuffer even though size callback only gives window size.
+            s->resize_callback_event(ww, wh);
+#if defined(NANOGUI_USE_OPENGL) || defined(NANOGUI_USE_GLES)
+            glfwMakeContextCurrent(w);
+#endif
+            s->draw_all();
+        }
+    );
+#endif
 
     // notify when the screen has lost focus (e.g. application switch)
     glfwSetWindowFocusCallback(m_glfw_window,
