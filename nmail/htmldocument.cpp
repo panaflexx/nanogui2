@@ -25,6 +25,11 @@
 #include <string_view>
 #include <unordered_map>
 #include <vector>
+#include <fcntl.h> // open() for /dev/null redirect in open_url_secure child
+#include <errno.h>
+#ifndef _WIN32
+#include <unistd.h>
+#endif
 
 using namespace nanogui;
 
@@ -586,23 +591,35 @@ static bool is_allowed_url(const std::string &raw, std::string &normalized) {
     return false;
 }
 static bool open_url_secure(const std::string &raw) {
-    std::string url; if(!is_allowed_url(raw,url)) return false;
+    std::string url;
+    if (!is_allowed_url(raw, url)) return false;
 #if defined(_WIN32)
-    // Windows: use ShellExecute via system fallback (ShellExecuteA needs windows.h)
-    // Escape quotes and use start
-    std::string esc; for(char c:url){ if(c=='"') esc+="\""; else esc+=c; }
+    std::string esc;
+    for(char c:url){ if(c=='"') esc+="\\\""; else esc+=c; }
     std::string cmd="start \"\" \""+esc+"\"";
     return system(cmd.c_str())==0;
-#elif defined(__APPLE__)
-    std::string cmd="open '" + url + "' &"; // limited: url already stripped of control/' not escaped fully but open handles most
-    // Escape single quotes
-    std::string esc; for(char c:url){ if(c=='\'') esc+="'\\''"; else esc+=c; }
-    cmd="open '"+esc+"' &";
-    return system(cmd.c_str())==0;
 #else
-    std::string esc; for(char c:url){ if(c=='\'') esc+="'\\''"; else esc+=c; }
-    std::string cmd="xdg-open '"+esc+"' &";
-    return system(cmd.c_str())==0;
+    pid_t pid = fork();
+    if (pid == 0) {
+        setsid();
+        int fd = open("/dev/null", O_RDWR);
+        if (fd >= 0) { dup2(fd, 0); dup2(fd, 1); dup2(fd, 2); if (fd>2) close(fd); }
+#if defined(__APPLE__)
+        execlp("open", "open", url.c_str(), (char*)nullptr);
+#else
+        execlp("xdg-open", "xdg-open", url.c_str(), (char*)nullptr);
+        execlp("gio", "gio", "open", url.c_str(), (char*)nullptr);
+        execlp("sensible-browser", "sensible-browser", url.c_str(), (char*)nullptr);
+        execlp("x-www-browser", "x-www-browser", url.c_str(), (char*)nullptr);
+#endif
+        _exit(127);
+    }
+    if (pid > 0) {
+        fprintf(stderr, "[nmail] open_url_secure: forked pid=%d for url=%s\n", (int)pid, url.c_str());
+        fflush(stderr);
+        return true;
+    }
+    return false;
 #endif
 }
 
@@ -746,7 +763,9 @@ public:
     virtual bool mouse_button_event(const Vector2i &p, int button, bool down, int mods) override {
         if(button==GLFW_MOUSE_BUTTON_1 && !down){
             std::string u=hit_url(p);
-            if(!u.empty()){ std::string n; if(is_allowed_url(u,n)) open_url_secure(n); return true; }
+            if(!u.empty()){
+                std::string n; if(is_allowed_url(u,n)){ open_url_secure(n); return true; }
+            }
         }
         return Widget::mouse_button_event(p, button, down, mods);
     }
@@ -791,11 +810,17 @@ public:
         else { set_cursor(Cursor::Arrow); if(!enter) notify_hover_block(""); else notify_hover_block(""); }
         return Widget::mouse_enter_event(Vector2i(0,0), enter);
     }
-    virtual bool mouse_button_event(const Vector2i &, int button, bool down, int) override {
-        if(!m_link_url.empty() && button==GLFW_MOUSE_BUTTON_1 && !down){
-            std::string n; if(is_allowed_url(m_link_url,n)) open_url_secure(n); return true;
+    virtual bool mouse_button_event(const Vector2i &p, int button, bool down, int mods) override {
+        for (auto it = m_children.rbegin(); it != m_children.rend(); ++it) {
+            Widget *child = *it;
+            if (child->visible() && child->contains(p - m_pos)) {
+                if (child->mouse_button_event(p - m_pos, button, down, mods)) return true;
+            }
         }
-        return Widget::mouse_button_event(Vector2i(0,0), button, down, 0);
+        if(!m_link_url.empty() && button==GLFW_MOUSE_BUTTON_1 && !down){
+            std::string n; if(is_allowed_url(m_link_url,n)){ open_url_secure(n); return true; }
+        }
+        return false;
     }
 
     virtual void draw(NVGcontext *ctx) override {
