@@ -14,6 +14,7 @@
 #include <nanogui/nanogui.h>
 #include <nanogui/opengl.h>
 #include <nanogui/scrollpanel.h>
+#include <nanogui/zoomscrollpanel.h>
 #include <nanogui/split.h>
 #include <nanogui/layout.h>
 #include <nanogui/icons.h>
@@ -2031,7 +2032,7 @@ class MailApp : public Screen {
 public:
     FolderView   *m_folder_view = nullptr;
     EmailListView *m_email_list = nullptr;
-    ScrollPanel  *m_view_scroll = nullptr;
+    ZoomScrollPanel *m_view_scroll = nullptr;
     HtmlDocument *m_view        = nullptr;
     Label        *m_status      = nullptr;
     Button       *m_theme_btn   = nullptr;
@@ -2412,8 +2413,10 @@ public:
         sep->set_min_height(1);
         sep->set_height(1);
 
-        m_view_scroll = new ScrollPanel(right);
-        m_view_scroll->set_scroll_type(ScrollPanel::ScrollTypes::Vertical);
+        m_view_scroll = new ZoomScrollPanel(right, ZoomScrollPanel::ScrollTypes::Both);
+        m_view_scroll->set_reflow_on_zoom(false);
+        m_view_scroll->set_zoom_range(0.5, 3.0);
+        m_view_scroll->set_zoom_enabled(true);
         m_view = new HtmlDocument(m_view_scroll);
         m_view->image_resolver = [this](const std::string &src) {
             return resolve_image(src);
@@ -3440,6 +3443,24 @@ public:
             (modifiers & SYSTEM_COMMAND_MOD)) {
             save_current_email();
             return true;
+        }
+        // Ctrl/Cmd +/-/0 zoom (20% per step, visual via ZoomScrollPanel, not reflow)
+        if ((modifiers & SYSTEM_COMMAND_MOD) && action == GLFW_PRESS && m_view_scroll) {
+            Vector2i anchor = Vector2i(m_view_scroll->width()/2, m_view_scroll->height()/2);
+            if (key == GLFW_KEY_EQUAL || key == GLFW_KEY_KP_ADD) {
+                m_view_scroll->zoom_by(1.2, anchor);
+                char buf[64]; std::snprintf(buf, sizeof(buf), "Zoom %.0f%%", m_view_scroll->zoom()*100.0);
+                set_status(buf); redraw(); return true;
+            }
+            if (key == GLFW_KEY_MINUS || key == GLFW_KEY_KP_SUBTRACT) {
+                m_view_scroll->zoom_by(1.0/1.2, anchor);
+                char buf[64]; std::snprintf(buf, sizeof(buf), "Zoom %.0f%%", m_view_scroll->zoom()*100.0);
+                set_status(buf); redraw(); return true;
+            }
+            if (key == GLFW_KEY_0 || key == GLFW_KEY_KP_0) {
+                m_view_scroll->reset_view();
+                set_status("Zoom 100%"); redraw(); return true;
+            }
         }
         return false;
     }

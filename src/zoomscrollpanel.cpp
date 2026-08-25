@@ -32,6 +32,12 @@ namespace {
 ZoomScrollPanel::ZoomScrollPanel(Widget* parent)
     : ZoomScrollPanel(parent, ScrollTypes::Both) { }
 
+namespace {
+void uncache_zoom_ancestors(Widget* w) {
+    for (; w; w = w->parent()) if (w->cached()) w->set_cached(false);
+}
+}
+
 ZoomScrollPanel::ZoomScrollPanel(Widget* parent, ScrollTypes scroll_type)
     : Widget(parent),
       m_child_preferred_size(0, 0),
@@ -48,6 +54,8 @@ ZoomScrollPanel::ZoomScrollPanel(Widget* parent, ScrollTypes scroll_type)
       m_scroll_type(scroll_type)
 {
     DebugName = m_parent ? (m_parent->DebugName + ",ZmScrlPnl") : std::string("ZmScrlPnl");
+    set_live(true);
+    uncache_zoom_ancestors(m_parent);
 }
 
 /* ------------------------------------------------------------------ */
@@ -78,17 +86,15 @@ bool ZoomScrollPanel::over_hbar(const Vector2i& p) const {
 void ZoomScrollPanel::clamp_state() {
     m_zoom = std::clamp(m_zoom, m_zoom_min, m_zoom_max);
     Vector2d e = effective_child_size();
-
-    // X clamp
+    // X clamp — in no-reflow email mode keep H offset left-pinned
     if (e.x() <= m_size.x()) {
-        // Center horizontally if the child is smaller than the viewport.
-        m_pan_offset.x() = (m_size.x() - e.x()) * 0.5;
+        if (!m_reflow_on_zoom) m_pan_offset.x() = 0.0;
+        else                   m_pan_offset.x() = (m_size.x() - e.x()) * 0.5;
     } else {
-        double lo = (double)m_size.x() - e.x();   // most negative
+        double lo = (double)m_size.x() - e.x();
         double hi = 0.0;
         m_pan_offset.x() = std::clamp(m_pan_offset.x(), lo, hi);
     }
-    // Y clamp
     if (e.y() <= m_size.y()) {
         m_pan_offset.y() = (m_size.y() - e.y()) * 0.5;
     } else {
@@ -123,26 +129,29 @@ Vector2i ZoomScrollPanel::delta_to_child(const Vector2i& rel) const {
 /* ------------------------------------------------------------------ */
 
 void ZoomScrollPanel::set_zoom(double z) {
+    double old = m_zoom;
     m_zoom = z;
     clamp_state();
-    m_update_layout = true;
+    if (!m_reflow_on_zoom && old > 1e-9 && m_zoom > 1e-9) { /* visual only */ }
+    else m_update_layout = true;
+    if (Screen* s = screen()) s->redraw();
 }
 
 void ZoomScrollPanel::set_zoom_about(double z, const Vector2i& anchor) {
-    // anchor is in panel-local pixels (i.e. relative to m_pos top-left).
+    double old = m_zoom;
     double new_zoom = std::clamp(z, m_zoom_min, m_zoom_max);
     if (m_zoom <= 0.0) {
         m_zoom = new_zoom;
     } else {
-        // Keep the point under the anchor fixed:
-        // new_pan = anchor - (anchor - old_pan) * (new_zoom / old_zoom)
         double k = new_zoom / m_zoom;
         m_pan_offset.x() = anchor.x() - (anchor.x() - m_pan_offset.x()) * k;
         m_pan_offset.y() = anchor.y() - (anchor.y() - m_pan_offset.y()) * k;
         m_zoom = new_zoom;
     }
     clamp_state();
-    m_update_layout = true;
+    if (m_reflow_on_zoom || std::abs(old - m_zoom) < 1e-9) m_update_layout = true;
+    else if (Screen* s = screen()) s->redraw();
+    else m_update_layout = true;
 }
 
 void ZoomScrollPanel::reset_view() {
@@ -150,6 +159,7 @@ void ZoomScrollPanel::reset_view() {
     m_pan_offset = Vector2d(0.0, 0.0);
     clamp_state();
     m_update_layout = true;
+    if (Screen* s = screen()) s->redraw();
 }
 
 Vector2f ZoomScrollPanel::scroll() const {
@@ -169,7 +179,9 @@ void ZoomScrollPanel::set_scroll(const Vector2f& s) {
     if (e.y() > m_size.y())
         m_pan_offset.y() = -(double)std::clamp(s.y(), 0.f, 1.f) * (e.y() - m_size.y());
     clamp_state();
-    m_update_layout = true;
+    if (m_reflow_on_zoom) m_update_layout = true;
+    else if (Screen* s = screen()) s->redraw();
+    else m_update_layout = true;
 }
 
 /* ------------------------------------------------------------------ */
@@ -190,8 +202,11 @@ void ZoomScrollPanel::perform_layout(NVGcontext* ctx) {
     child->set_position(Vector2i(0, 0));
 
     // Viewport size expressed in the child's (pre-zoom) logical units.
-    int view_w = (int)std::ceil(m_size.x() / std::max(m_zoom, 1e-9));
-    int view_h = (int)std::ceil(m_size.y() / std::max(m_zoom, 1e-9));
+    // When reflow_on_zoom is false (email), keep logical width at panel width: wrap
+    // stays, zoom is pure visual (H-scroll appears when zoomed).
+    int view_w, view_h;
+    if (!m_reflow_on_zoom) { view_w = m_size.x(); view_h = m_size.y(); }
+    else { view_w = (int)std::ceil(m_size.x() / std::max(m_zoom, 1e-9)); view_h = (int)std::ceil(m_size.y() / std::max(m_zoom, 1e-9)); }
 
     // First pass: constrain the child to the viewport so layouts that
     // can shrink (e.g. FlexLayout with flex_shrink, AlignItems::Stretch)

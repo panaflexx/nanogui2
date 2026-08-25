@@ -121,6 +121,11 @@ public:
     void set_scroll_type(ScrollTypes t) { m_scroll_type = t; }
     ScrollTypes scroll_type() const { return m_scroll_type; }
 
+    void set_scroll(float y) { set_scroll(Vector2f(scroll().x(), y)); }
+
+    bool reflow_on_zoom() const { return m_reflow_on_zoom; }
+    void set_reflow_on_zoom(bool v) { m_reflow_on_zoom = v; }
+
     /* ---- coordinate helpers ---- */
 
     /// Convert a point in this panel's parent coord space to child logical space.
@@ -164,6 +169,7 @@ protected:
     double    m_zoom_max;
     double    m_zoom_wheel_step;   ///< Multiplicative factor per wheel tick when zooming.
     bool      m_zoom_enabled;
+    bool      m_reflow_on_zoom = true;
 
     bool      m_scrolling_x;
     bool      m_scrolling_y;

@@ -12,6 +12,7 @@
 #include <nanogui/nanogui.h>
 #include <nanogui/opengl.h>
 #include <nanogui/scrollpanel.h>
+#include <nanogui/zoomscrollpanel.h>
 #include <nanogui/layout.h>
 #include <nanogui/icons.h>
 #include <GLFW/glfw3.h>
@@ -80,8 +81,10 @@ public:
         m_title = new Label(toolbar, "nmail_view", "sans-bold", 18);
         m_title->set_width(400);
 
-        m_scroll = new ScrollPanel(window);
-        m_scroll->set_scroll_type(ScrollPanel::ScrollTypes::Vertical);
+        m_scroll = new ZoomScrollPanel(window, ZoomScrollPanel::ScrollTypes::Both);
+        m_scroll->set_reflow_on_zoom(false);
+        m_scroll->set_zoom_range(0.5, 3.0);
+        m_scroll->set_zoom_enabled(true);
         m_scroll->set_height_flex(SizeMode::Expanding);
         root_flex->set_flex_item(m_scroll, FlexLayout::FlexItem(1.0f));
 
@@ -134,6 +137,7 @@ public:
             "<ul>"
             "<li><b>Ctrl+O</b> — open file</li>"
             "<li><b>Ctrl+T</b> — light / dark</li>"
+            "<li><b>Ctrl +/-</b> — zoom 20% step, <b>Ctrl+0</b> reset; pinch / Ctrl+wheel also</li>"
             "</ul>"
             "<p>Remote images load in the background.</p>");
         m_title->set_caption("nmail_view");
@@ -230,6 +234,12 @@ public:
         if (key == GLFW_KEY_T && (modifiers & SYSTEM_COMMAND_MOD)) {
             apply_theme(m_dark ? ThemeMode::Light : ThemeMode::Dark);
             return true;
+        }
+        if ((modifiers & SYSTEM_COMMAND_MOD) && m_scroll) {
+            Vector2i anchor = Vector2i(m_scroll->width()/2, m_scroll->height()/2);
+            if (key == GLFW_KEY_EQUAL || key == GLFW_KEY_KP_ADD) { m_scroll->zoom_by(1.2, anchor); redraw(); return true; }
+            if (key == GLFW_KEY_MINUS || key == GLFW_KEY_KP_SUBTRACT) { m_scroll->zoom_by(1.0/1.2, anchor); redraw(); return true; }
+            if (key == GLFW_KEY_0 || key == GLFW_KEY_KP_0) { m_scroll->reset_view(); redraw(); return true; }
         }
         return false;
     }
@@ -560,7 +570,7 @@ private:
         m_status->set_caption(buf);
     }
 
-    ScrollPanel  *m_scroll = nullptr;
+    ZoomScrollPanel *m_scroll = nullptr;
 public:
     HtmlDocument *m_view   = nullptr;
 private:
