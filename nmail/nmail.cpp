@@ -2333,7 +2333,7 @@ public:
         m_trash_btn->set_enabled(false);
         m_trash_btn->set_callback([this]() { move_selected_to("Trash"); });
 
-        m_junk_btn = make_button_tool(FA_MAIL_BULK, "Move to Junk / Spam");
+        m_junk_btn = make_button_tool(FA_BROOM, "Move to Junk / Spam");
         m_junk_btn->set_enabled(false);
         m_junk_btn->set_callback([this]() { move_selected_to("Junk"); });
 
