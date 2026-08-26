@@ -63,8 +63,22 @@ ZoomScrollPanel::ZoomScrollPanel(Widget* parent, ScrollTypes scroll_type)
 /* ------------------------------------------------------------------ */
 
 ZoomScrollPanel::Vector2d ZoomScrollPanel::effective_child_size() const {
-    return Vector2d(m_child_preferred_size.x() * m_zoom,
-                    m_child_preferred_size.y() * m_zoom);
+    if (m_children.empty())
+        return Vector2d(0,0);
+    double prefW = (double)m_child_preferred_size.x();
+    double prefH = (double)m_child_preferred_size.y();
+    // HtmlDocument zeroes preferred width (p.x=0) so logical width is the
+    // laid-out child size (view_w). Without this, e.x==0 and H-scroll/pan
+    // and the horizontal scrollbar never appear when zoomed.
+    if (prefW <= 0.5) {
+        prefW = (double)m_children[0]->size().x();
+        if (prefW <= 0.5) prefW = (double)m_size.x();
+    }
+    if (prefH <= 0.5) {
+        prefH = (double)m_children[0]->size().y();
+        if (prefH <= 0.5) prefH = (double)m_size.y();
+    }
+    return Vector2d(prefW * m_zoom, prefH * m_zoom);
 }
 
 bool ZoomScrollPanel::over_vbar(const Vector2i& p) const {
@@ -223,7 +237,16 @@ void ZoomScrollPanel::perform_layout(NVGcontext* ctx) {
     // panel when the content is smaller), but larger if the child wants
     // more (in which case scrolling kicks in). The viewport constraint
     // here is in pre-zoom logical units, matching `pref`.
-    Vector2i child_size(std::max(pref.x(), view_w), std::max(pref.y(), view_h));
+    // In no-reflow email mode, don't grow logical width beyond view_w —
+    // horizontal overflow when zoomed is provided by Zoom's scale transform
+    // (effective_child_size = m_child_preferred_size * zoom). Growing here
+    // would push the text block off-screen to the right.
+    Vector2i child_size;
+    if (!m_reflow_on_zoom) {
+        child_size = Vector2i(view_w, std::max(pref.y(), view_h));
+    } else {
+        child_size = Vector2i(std::max(pref.x(), view_w), std::max(pref.y(), view_h));
+    }
 
     child->set_size(child_size);
     child->perform_layout(ctx);
@@ -238,6 +261,29 @@ Vector2i ZoomScrollPanel::preferred_size(NVGcontext* ctx) const {
     Vector2i p = m_children[0]->preferred_size(ctx);
     // Reserve a bit of room for scrollbars.
     return p + Vector2i(kScrollbarSlot, kScrollbarSlot);
+}
+
+Widget* ZoomScrollPanel::find_widget(const Vector2i& p) {
+    if (!m_visible) return nullptr;
+    if (!m_children.empty() && m_children[0]->visible() && contains(p)) {
+        Widget* child = m_children[0];
+        Vector2i cp = to_child(p);
+        // cp is in child's logical (0,0) space; delegate to child's subtree
+        if (Widget* hit = child->find_widget(cp))
+            return hit;
+    }
+    return contains(p) ? this : nullptr;
+}
+
+const Widget* ZoomScrollPanel::find_widget(const Vector2i& p) const {
+    if (!m_visible) return nullptr;
+    if (!m_children.empty() && m_children[0]->visible() && contains(p)) {
+        const Widget* child = m_children[0];
+        Vector2i cp = to_child(p);
+        if (const Widget* hit = child->find_widget(cp))
+            return hit;
+    }
+    return contains(p) ? this : nullptr;
 }
 
 /* ------------------------------------------------------------------ */
@@ -405,27 +451,38 @@ bool ZoomScrollPanel::scroll_event(const Vector2i& p, const Vector2f& rel) {
 
     Vector2d e = effective_child_size();
 
-    // Shift+wheel = horizontal scroll. Otherwise vertical.
     bool shift = (glfwGetKey(screen()->glfw_window(), GLFW_KEY_LEFT_SHIFT) == GLFW_PRESS ||
                   glfwGetKey(screen()->glfw_window(), GLFW_KEY_RIGHT_SHIFT) == GLFW_PRESS);
 
     bool used = false;
 
-    if (!shift && VScrollable() && e.y() > m_size.y() && rel.y() != 0.f) {
+    // True 2-finger horizontal uses rel.x; GLFW/libinput normalizes it oddly on X,
+    // but H-scroll must work immediately when zoomed (e.x > size.x via effective size
+    // derived from the laid-out child width), not just when logical pref says so.
+    // So use the effective size above for both axes.
+    bool can_v = VScrollable() && e.y() > m_size.y();
+    bool can_h = HScrollable() && e.x() > m_size.x();
+    if (rel.x() != 0.f && can_h) {
+        // Direct pan for touchpad (no inertia latency); also prime vel for coasting.
+        double dx = (double)rel.x() * 18.0; // tune: 18 px per wheel tick ~ native feel
+        m_pan_offset.x() += dx;
+        clamp_state();
+        m_vel_x = std::clamp((double)rel.x() * m_size.x() * 0.6, -3500.0, 3500.0);
+        used = true;
+    }
+    if (!shift && can_v && rel.y() != 0.f) {
         m_vel_y = std::clamp(m_vel_y + (double)rel.y() * m_size.y() * 0.6, -3500.0, 3500.0);
         used = true;
     }
-    if (shift && HScrollable() && e.x() > m_size.x() && rel.y() != 0.f) {
+    if (shift && can_h && rel.y() != 0.f) {
+        double dx = (double)rel.y() * 18.0;
+        m_pan_offset.x() += dx; clamp_state();
         m_vel_x = std::clamp(m_vel_x + (double)rel.y() * m_size.x() * 0.6, -3500.0, 3500.0);
-        used = true;
-    }
-    if (!shift && HScrollable() && e.x() > m_size.x() && rel.x() != 0.f) {
-        // True 2D scroll deltas (trackpads, horizontal wheels, etc.)
-        m_vel_x = std::clamp(m_vel_x + (double)rel.x() * m_size.x() * 0.6, -3500.0, 3500.0);
         used = true;
     }
 
     if (used) {
+        if (Screen* s = screen()) s->redraw();
         return true;
     }
 

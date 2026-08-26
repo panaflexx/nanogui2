@@ -148,6 +148,8 @@ public:
     virtual bool scroll_event(const Vector2i& p, const Vector2f& rel) override;
     virtual bool zoom_event(double magnification, const Vector2i& pos) override;
     virtual void draw(NVGcontext* ctx) override;
+    virtual Widget* find_widget(const Vector2i& p) override;
+    virtual const Widget* find_widget(const Vector2i& p) const override;
 
 protected:
     /// Effective (scaled) child size in panel-local pixels.
