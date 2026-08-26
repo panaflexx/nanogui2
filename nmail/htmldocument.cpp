@@ -2134,12 +2134,26 @@ float cell_width_pct(GumboElement *el, const Builder &B) {
  * instead — but keep a real [20px | content | 20px] spacer row. */
 bool row_collapses_to_column(GumboElement *tr, const Builder &B) {
     int content = 0, wide_empty = 0;
+    int th_count = 0, td_count = 0;
+    int with_width = 0;
+    int with_block_display = 0;
     for (unsigned i = 0; i < tr->children.length; ++i) {
         GumboNode *cn = (GumboNode *)tr->children.data[i];
         if (cn->type != GUMBO_NODE_ELEMENT) continue;
         GumboElement *ce = &cn->v.element;
         if (ce->tag != GUMBO_TAG_TD && ce->tag != GUMBO_TAG_TH)
             continue;
+        if (ce->tag == GUMBO_TAG_TH) th_count++; else td_count++;
+        if (cell_px_width(ce, B) >= 0 || cell_width_pct(ce, B) > 0.0f)
+            with_width++;
+        const char *st = attr(ce, "style");
+        if (st) {
+            std::string l = trim_lower(st);
+            if (l.find("display:block") != std::string::npos ||
+                l.find("display: block") != std::string::npos ||
+                l.find("inline-block") != std::string::npos)
+                with_block_display++;
+        }
         if (cell_is_empty(ce)) {
             if (cell_px_width(ce, B) > 0)
                 wide_empty++;
@@ -2147,7 +2161,23 @@ bool row_collapses_to_column(GumboElement *tr, const Builder &B) {
             content++;
         }
     }
-    return content <= 1 && wide_empty == 0;
+    if (content <= 1 && wide_empty == 0)
+        return true;
+    // MyHeritage-style card: single <tr> with 3 <th display:block/inline-block>
+    // and no widths.  Intended as a vertical stack (image on top, title,
+    // blurb) not 3 side-by-side columns.  As a Row the 480px image is
+    // flex-shrunk to ~20px and then Document scales the bitmap to that
+    // cell width, so on every relayout/scroll the image appears to
+    // "resize".  Collapse to Column so each <th> is a full-width row.
+    // Guard: only TH-only rows with no explicit widths and at least one
+    // block/inline-block display — leaves real 50/50 TD columns alone.
+    if (th_count >= 2 && td_count == 0 && with_width == 0 && with_block_display > 0)
+        return true;
+    // Also catch TH-only rows with no widths even without explicit display
+    // (some templates rely on default block stacking for TH).
+    if (th_count >= 3 && td_count == 0 && with_width == 0 && content == th_count)
+        return true;
+    return false;
 }
 
 void decorate_block(HtmlBlock *b, GumboElement *el, const Builder &B) {
