@@ -233,6 +233,11 @@ struct BoxProps {
     /* display:inline-flex / inline-block / inline — shrink-to-content
      * instead of stretching as a block. */
     bool  inline_flex   = false;
+    /* display:inline-flex specifically (not inline-block/inline, which
+     * share the shrink-to-content behavior above but carry no flexbox
+     * centering intent — an MJML column's display:inline-block is a
+     * layout-flow convention, not "center my children"). */
+    bool  is_inline_flex = false;
     /* vertical-align:middle on a flex/painted box — center children. */
     bool  align_middle  = false;
     /* float:left — email nav bars (PennyMac header-menu LIs). */
@@ -380,7 +385,11 @@ static const PropHandler kHandlers[] = {
     {P_MARGIN,handle_margin},{P_MARGIN_LEFT,handle_margin},{P_MARGIN_RIGHT,handle_margin},
 };
 static void (*handler_for(PropId id))(const std::string&,Style&,TextAlignment&,bool&,BoxProps*,const char*,size_t) {
-    for(auto &h:kHandlers) if(h.id==id) return h.fn; return nullptr;
+    for (auto &h : kHandlers) {
+        if (h.id == id)
+            return h.fn;
+    }
+    return nullptr;
 }
 // Per-property implementations — moved verbatim from old if/else
 static void handle_color(const std::string &val, Style &st, TextAlignment&, bool&, BoxProps*, const char*, size_t){ bool ok=false; NVGcolor c=parse_html_color(val.c_str(),ok); if(ok) st.fgColor=c; }
@@ -388,24 +397,87 @@ static void handle_bg(const std::string &val, Style &st, TextAlignment&, bool&, 
     std::string lower=val; std::vector<std::string> toks; { size_t p=0; while(p<lower.size()){ while(p<lower.size() && std::isspace((unsigned char)lower[p])) ++p; if(p>=lower.size()) break; if(lower.compare(p,4,"url(")==0){ size_t q=lower.find(')',p); if(q==std::string::npos) q=lower.size()-1; toks.push_back(lower.substr(p,q-p+1)); p=q+1; } else { size_t q=lower.find_first_of(" \t",p); toks.push_back(lower.substr(p,q==std::string::npos?std::string::npos:q-p)); if(q==std::string::npos) break; p=q; } } }
     for(auto &tok:toks){ if(tok.rfind("url(",0)==0) continue; if(tok=="no-repeat"||tok=="repeat"||tok=="repeat-x"||tok=="repeat-y"||tok=="cover"||tok=="contain"||tok=="center"||tok=="left"||tok=="right"||tok=="top"||tok=="bottom"||tok.rfind("center/",0)==0) continue; bool ok=false; NVGcolor c=parse_html_color(tok.c_str(),ok); if(ok){ st.bgColor=c; break; } }
 }
-static void handle_bg_image(const std::string &val, Style &st, TextAlignment&, bool&, BoxProps *box, const char *decl_raw, size_t colon){
-    if(!box) return; (void)val; (void)st; std::string raw=trim(std::string(decl_raw).substr(colon+1)); size_t up=raw.find("url("); if(up==std::string::npos) return; size_t ustart=up+4; size_t uend=raw.find(')',ustart); if(uend==std::string::npos) return; std::string url=trim(raw.substr(ustart,uend-ustart)); if(!url.empty() && (url.front()=='\''||url.front()=='"')) url.erase(url.begin()); if(!url.empty() && (url.back()=='\''||url.back()=='"')) url.pop_back(); if(!url.empty()) box->bg_image_url=url;
+static void handle_bg_image(const std::string &val, Style &st, TextAlignment&, bool&, BoxProps *box, const char *decl_raw, size_t colon) {
+    (void)val; (void)st;
+    if (!box)
+        return;
+    std::string raw = trim(std::string(decl_raw).substr(colon + 1));
+    size_t up = raw.find("url(");
+    if (up == std::string::npos)
+        return;
+    size_t ustart = up + 4;
+    size_t uend = raw.find(')', ustart);
+    if (uend == std::string::npos)
+        return;
+    std::string url = trim(raw.substr(ustart, uend - ustart));
+    if (!url.empty() && (url.front() == '\'' || url.front() == '"'))
+        url.erase(url.begin());
+    if (!url.empty() && (url.back() == '\'' || url.back() == '"'))
+        url.pop_back();
+    if (!url.empty())
+        box->bg_image_url = url;
 }
 static void handle_font_size(const std::string &v, Style &st, TextAlignment&, bool&, BoxProps*, const char*, size_t){ apply_font_size(v, st.fontSize); }
 static void handle_font_weight(const std::string &v, Style &st, TextAlignment&, bool&, BoxProps*, const char*, size_t){ if(v=="bold"||v=="bolder"||atoi(v.c_str())>=600) st.bold=true; else if(v=="normal"||v=="lighter"||atoi(v.c_str())==400) st.bold=false; }
 static void handle_font_style(const std::string &v, Style &st, TextAlignment&, bool&, BoxProps*, const char*, size_t){ if(v=="italic"||v=="oblique") st.italic=true; else if(v=="normal") st.italic=false; }
 static void handle_text_decor(const std::string &v, Style &st, TextAlignment&, bool&, BoxProps*, const char*, size_t){ if(v.find("none")!=std::string::npos){ st.underline=false; st.strike=false; } else { if(v.find("underline")!=std::string::npos) st.underline=true; if(v.find("line-through")!=std::string::npos) st.strike=true; } }
 static void handle_font_family(const std::string &v, Style &st, TextAlignment&, bool&, BoxProps*, const char*, size_t){ if(v.find("mono")!=std::string::npos||v.find("courier")!=std::string::npos||v.find("consol")!=std::string::npos||v.find("menlo")!=std::string::npos) st.monospace=true; }
-static void handle_display(const std::string &v, Style &st, TextAlignment&, bool&, BoxProps *box, const char*, size_t){ if(v=="none") st.displayNone=true; else st.displayNone=false; if(box && v=="table-cell") box->table_cell=true; if(box && (v=="inline-flex"||v=="inline-block"||v=="inline")) box->inline_flex=true; }
+static void handle_display(const std::string &v, Style &st, TextAlignment&, bool&, BoxProps *box, const char*, size_t){ if(v=="none") st.displayNone=true; else st.displayNone=false; if(box && v=="table-cell") box->table_cell=true; if(box && (v=="inline-flex"||v=="inline-block"||v=="inline")) box->inline_flex=true; if(box && v=="inline-flex") box->is_inline_flex=true; }
 static void handle_mso_hide(const std::string &v, Style &st, TextAlignment&, bool&, BoxProps*, const char*, size_t){ if(v=="all") st.displayNone=true; }
 static void handle_text_align(const std::string &v, Style &, TextAlignment &a, bool &ha, BoxProps*, const char*, size_t){ if(v=="center"){a=TextAlignment::Center; ha=true;} else if(v=="right"){a=TextAlignment::Right; ha=true;} else if(v=="justify"){a=TextAlignment::Justify; ha=true;} else if(v=="left"){a=TextAlignment::Left; ha=true;} }
 static void handle_line_height(const std::string &v, Style &st, TextAlignment&, bool&, BoxProps*, const char*, size_t){ apply_line_height(v, st.lineHeight, st.fontSize); }
 static void handle_vert_align(const std::string &v, Style &st, TextAlignment&, bool&, BoxProps *box, const char*, size_t){ if(v=="super"){ st.superscript=true; st.verticalMiddle=false; } else if(v=="baseline"||v=="bottom"||v=="top"){ st.superscript=false; st.verticalMiddle=false; } else if(v=="middle"||v=="center"){ st.superscript=false; st.verticalMiddle=true; } if(box && (v=="middle"||v=="center")) box->align_middle=true; }
 static void handle_float(const std::string &v, Style&, TextAlignment&, bool&, BoxProps *box, const char*, size_t){ if(box) box->float_left=(v=="left"); }
-static void handle_padding_shorthand(const std::string &val, Style &st, TextAlignment&, bool&, BoxProps *box, const char*, size_t){
-    std::vector<std::string> tok; size_t p=0; while(p<val.size()){ while(p<val.size()&&std::isspace((unsigned char)val[p])) ++p; if(p>=val.size()) break; size_t q=val.find_first_of(" \t",p); tok.push_back(val.substr(p,q==std::string::npos?std::string::npos:q-p)); if(q==std::string::npos) break; p=q; }
-    if(tok.empty()) return; std::string top,right,bottom,left; if(tok.size()==1){top=right=bottom=left=tok[0];} else if(tok.size()==2){top=bottom=tok[0]; right=left=tok[1];} else if(tok.size()==3){top=tok[0]; right=left=tok[1]; bottom=tok[2];} else {top=tok[0]; right=tok[1]; bottom=tok[2]; left=tok[3];}
-    float py=0,pxv=0, px1=0,pct1=0, px2=0,pct2=0; if(parse_css_len(top,px1,pct1)&&pct1==0.f) py=std::max(py,px1); if(parse_css_len(bottom,px1,pct1)&&pct1==0.f) py=std::max(py,px1); if(parse_css_len(left,px2,pct2)&&pct2==0.f) pxv=std::max(pxv,px2); if(parse_css_len(right,px2,pct2)&&pct2==0.f) pxv=std::max(pxv,px2); if(py>0) {st.padY=std::max(st.padY,py); if(box) box->pad_y=std::max(box->pad_y,py);} if(pxv>0){st.padX=std::max(st.padX,pxv); if(box) box->pad_x=std::max(box->pad_x,pxv);} }
+static void handle_padding_shorthand(const std::string &val, Style &st, TextAlignment&, bool&, BoxProps *box, const char*, size_t) {
+    std::vector<std::string> tok;
+    size_t p = 0;
+    while (p < val.size()) {
+        while (p < val.size() && std::isspace((unsigned char)val[p]))
+            ++p;
+        if (p >= val.size())
+            break;
+        size_t q = val.find_first_of(" \t", p);
+        tok.push_back(val.substr(p, q == std::string::npos ? std::string::npos : q - p));
+        if (q == std::string::npos)
+            break;
+        p = q;
+    }
+    if (tok.empty())
+        return;
+    std::string top, right, bottom, left;
+    if (tok.size() == 1) {
+        top = right = bottom = left = tok[0];
+    } else if (tok.size() == 2) {
+        top = bottom = tok[0];
+        right = left = tok[1];
+    } else if (tok.size() == 3) {
+        top = tok[0];
+        right = left = tok[1];
+        bottom = tok[2];
+    } else {
+        top = tok[0];
+        right = tok[1];
+        bottom = tok[2];
+        left = tok[3];
+    }
+    float py = 0, pxv = 0, px1 = 0, pct1 = 0, px2 = 0, pct2 = 0;
+    if (parse_css_len(top, px1, pct1) && pct1 == 0.f)
+        py = std::max(py, px1);
+    if (parse_css_len(bottom, px1, pct1) && pct1 == 0.f)
+        py = std::max(py, px1);
+    if (parse_css_len(left, px2, pct2) && pct2 == 0.f)
+        pxv = std::max(pxv, px2);
+    if (parse_css_len(right, px2, pct2) && pct2 == 0.f)
+        pxv = std::max(pxv, px2);
+    if (py > 0) {
+        st.padY = std::max(st.padY, py);
+        if (box) box->pad_y = std::max(box->pad_y, py);
+    }
+    if (pxv > 0) {
+        st.padX = std::max(st.padX, pxv);
+        if (box) box->pad_x = std::max(box->pad_x, pxv);
+    }
+}
 static void handle_padding_side(const std::string &valRaw, Style &st, TextAlignment&, bool&, BoxProps *box, const char*, size_t colon_unused){
     (void)colon_unused; // side is encoded in valRaw? We dispatch via PropId so need key. Instead peek key via st trick: caller passes val, not key. So split by PropId at call: we handle generically.
     // This entry is called only for single side; the key distinction is which Pad it sets — we collapse to max based on which handler was chosen.
@@ -837,7 +909,8 @@ public:
             if (nvgStateDepth(ctx) <= depth0)
                 return;
         }
-        if (m_bg.a > 0.0f || m_bg_image > 0) {
+        bool bg_image_pending = m_bg_image <= 0 && !m_bg_image_src.empty();
+        if (m_bg.a > 0.0f || m_bg_image > 0 || bg_image_pending) {
             float x = (float)m_pos.x(), y = (float)m_pos.y();
             float w = (float)m_size.x(), h = (float)m_size.y();
             float rad = m_radius;
@@ -870,6 +943,26 @@ public:
                     nvgRect(ctx, x, y, w, h);
                 nvgFillPaint(ctx, paint);
                 nvgFill(ctx);
+            } else if (bg_image_pending && w > 0.0f && h > 0.0f) {
+                /* CSS background-image that hasn't resolved (still
+                 * loading, or the fetch failed) — a neutral gray tile,
+                 * same look as a plain <img> that hasn't loaded, instead
+                 * of leaving the box fully invisible. */
+                nvgBeginPath(ctx);
+                if (rad > 0.5f)
+                    nvgRoundedRect(ctx, x, y, w, h, rad);
+                else
+                    nvgRect(ctx, x, y, w, h);
+                nvgFillColor(ctx, nvgRGBA(128, 128, 136, 40));
+                nvgFill(ctx);
+                nvgBeginPath(ctx);
+                if (rad > 0.5f)
+                    nvgRoundedRect(ctx, x + 0.5f, y + 0.5f, w - 1.0f, h - 1.0f, rad);
+                else
+                    nvgRect(ctx, x + 0.5f, y + 0.5f, w - 1.0f, h - 1.0f);
+                nvgStrokeColor(ctx, nvgRGBA(128, 128, 136, 90));
+                nvgStrokeWidth(ctx, 1.0f);
+                nvgStroke(ctx);
             }
         }
         if (shifted)
@@ -1779,6 +1872,7 @@ void walk_inline(GumboNode *node, Style st, Flow &F, Builder &B,
             F.brk();
             Paragraph *ip = F.doc.addParagraph();
             ip->isImage   = true;
+            ip->alignment = F.align;
             ip->image     = ri.id;
             ip->image_w   = pw;
             ip->image_h   = ph;
@@ -2025,6 +2119,30 @@ bool has_explicit_shrink_width(GumboElement *el) {
     return v.back() != '%' && v != "100";  // bare "100" means 100%, not 100px
 }
 
+/* True if `td` contains nothing but a single nested <table> — the
+ * "double table" idiom some email templates use to re-center content
+ * for Outlook (<table width=N style="margin:auto"><tr><td><table>...
+ * real content...</table></td></tr></table>).  Such a cell has no
+ * layout identity of its own; it's a transparent re-wrap of its one
+ * child table. */
+bool cell_is_table_passthrough(GumboElement *td) {
+    GumboNode *only = nullptr;
+    for (unsigned i = 0; i < td->children.length; ++i) {
+        GumboNode *cn = (GumboNode *)td->children.data[i];
+        if (cn->type == GUMBO_NODE_WHITESPACE || cn->type == GUMBO_NODE_COMMENT)
+            continue;
+        if (cn->type == GUMBO_NODE_TEXT) {
+            for (const char *p = cn->v.text.text; *p; ++p)
+                if (!std::isspace((unsigned char)*p)) return false;
+            continue;
+        }
+        if (cn->type != GUMBO_NODE_ELEMENT || only)
+            return false;
+        only = cn;
+    }
+    return only && only->v.element.tag == GUMBO_TAG_TABLE;
+}
+
 /* True if any <tr> belonging to THIS table (not a nested <table>, which
  * has its own independent layout context — e.g. the pill's tiny inner
  * icon+"1" table) has more than one real cell: a column grid (a photo
@@ -2033,7 +2151,12 @@ bool has_explicit_shrink_width(GumboElement *el) {
  * bottom-up.  Their reported preferred size is near zero (grow-based
  * cells carry flex-basis 0), so shrink-wrapping the table via
  * AlignItems::Center — fine for a single-column table like an avatar or
- * a notification "pill" — collapses a grid to a sliver. */
+ * a notification "pill" — collapses a grid to a sliver.
+ *
+ * A cell that's nothing but a re-wrapping <table> (see
+ * cell_is_table_passthrough) isn't a real boundary — keep looking inside
+ * it for the grid it forwards to, instead of stopping and reporting "no
+ * grid here" for what is really just an Outlook centering wrapper. */
 bool table_has_multicell_row(GumboNode *node, bool is_root = true) {
     if (node->type != GUMBO_NODE_ELEMENT)
         return false;
@@ -2042,6 +2165,15 @@ bool table_has_multicell_row(GumboNode *node, bool is_root = true) {
         return false;
     if (el->tag == GUMBO_TAG_TR && count_row_cells(el) > 1)
         return true;
+    if ((el->tag == GUMBO_TAG_TD || el->tag == GUMBO_TAG_TH) &&
+        cell_is_table_passthrough(el)) {
+        for (unsigned i = 0; i < el->children.length; ++i) {
+            GumboNode *cn = (GumboNode *)el->children.data[i];
+            if (cn->type == GUMBO_NODE_ELEMENT && cn->v.element.tag == GUMBO_TAG_TABLE)
+                return table_has_multicell_row(cn, true);
+        }
+        return false;
+    }
     for (unsigned i = 0; i < el->children.length; ++i)
         if (table_has_multicell_row((GumboNode *)el->children.data[i], false))
             return true;
@@ -2104,6 +2236,56 @@ int cell_px_width(GumboElement *el, const Builder &B) {
     element_box(el, B, box);
     if (box.width_px > 0.0f && box.width_px < 2000.0f && box.width_pct <= 0.0f)
         return (int)box.width_px;
+    return -1;
+}
+
+TextAlignment element_align(GumboElement *el, TextAlignment inherited,
+                            bool &changed, const Builder &B);
+
+/* Pixel width of a cell's actual content, for a <td> that has no width
+ * of its own but wraps a single explicitly-sized element (a common
+ * photo-grid idiom: <td><a><div style="width:130px;...">tile</div></a>
+ * </td>).  Real browsers auto-size table columns to content, so such a
+ * cell sits snugly against its siblings instead of stretching to an
+ * equal share of the row — drill through single-element "passthrough"
+ * wrappers (<a>, <center>, ...) to find the sized element.  -1 if the
+ * cell holds more than one thing or nothing definite.
+ *
+ * A cell whose OWN alignment is center/right (align="right", a common
+ * "logo left, avatar right" header idiom) wants to stay a growing cell
+ * even though its content is small — align is exactly the signal that
+ * there's slack space to push the content into. Shrinking it to content
+ * width here packed the avatar right next to the logo instead of at the
+ * far edge. */
+int cell_content_px_width(GumboElement *td, const Builder &B) {
+    bool changed = false;
+    TextAlignment ta = element_align(td, TextAlignment::Left, changed, B);
+    if (ta == TextAlignment::Center || ta == TextAlignment::Right)
+        return -1;
+    GumboElement *el = td;
+    for (int guard = 0; guard < 8; ++guard) {
+        GumboNode *only = nullptr;
+        for (unsigned i = 0; i < el->children.length; ++i) {
+            GumboNode *cn = (GumboNode *)el->children.data[i];
+            if (cn->type == GUMBO_NODE_WHITESPACE || cn->type == GUMBO_NODE_COMMENT)
+                continue;
+            if (cn->type == GUMBO_NODE_TEXT) {
+                bool blank = true;
+                for (const char *p = cn->v.text.text; *p; ++p)
+                    if (!std::isspace((unsigned char)*p)) { blank = false; break; }
+                if (!blank) return -1;
+                continue;
+            }
+            if (cn->type != GUMBO_NODE_ELEMENT || only)
+                return -1;
+            only = cn;
+        }
+        if (!only) return -1;
+        el = &only->v.element;
+        int px = cell_px_width(el, B);
+        if (px > 0)
+            return px;
+    }
     return -1;
 }
 
@@ -2205,6 +2387,7 @@ void decorate_block(HtmlBlock *b, GumboElement *el, const Builder &B) {
         box.width_pct <= 0.0f) {
         float outer = box.width_px;
         if (box.border_box) outer = std::max(box.min_width_px, outer - 2.f*padX - 2.f*bw);
+        else outer += 2.f*padX + 2.f*bw;
         (void)apply_len;
         int w = (int)std::lround(std::max(outer, 1.f));
         b->set_min_width(std::max(b->min_size().x(), w));
@@ -2221,6 +2404,7 @@ void decorate_block(HtmlBlock *b, GumboElement *el, const Builder &B) {
     int h = element_height_px(el, box);
     if (h > 1) {
         if (box.border_box) h = std::max((int)box.min_height_px, h - (int)std::lround(2.f*padY) - (int)std::lround(2.f*bw));
+        else h += (int)std::lround(2.f*padY) + (int)std::lround(2.f*bw);
         b->set_min_height(std::max(b->min_size().y(), h));
     }
     if (auto *fl = dynamic_cast<FlexLayout *>(b->layout())) {
@@ -2232,8 +2416,14 @@ void decorate_block(HtmlBlock *b, GumboElement *el, const Builder &B) {
         /* Instagram's notification chip is `display:inline-flex;
          * vertical-align:middle; text-align:center` — a painted pill
          * whose heart+"1" must sit in the geometric middle, not at
-         * flex-start (top-left) of the padding box. */
-        if (box.inline_flex || (box.align_middle && b->m_bg.a > 0.0f)) {
+         * flex-start (top-left) of the padding box. Only true
+         * inline-flex carries that centering intent — inline-block
+         * (checked via the broader inline_flex flag elsewhere for its
+         * shared shrink-to-content sizing) is a layout-flow convention
+         * MJML columns use for side-by-side placement, not a request to
+         * center their children (that centered a schwab.com email's
+         * whole header row instead of stretching it). */
+        if (box.is_inline_flex || (box.align_middle && b->m_bg.a > 0.0f)) {
             fl->set_align_items(AlignItems::Center);
             fl->set_justify_content(JustifyContent::Center);
             fl->set_gap(0);
@@ -2420,6 +2610,12 @@ void build_children(Widget *container, GumboVector *kids, Style st,
                 BoxProps box;
                 element_box(el, B, box);
                 NVGcolor bg = block_background(el, B);
+                /* Legacy `align="center"` on <table> is the pre-CSS
+                 * equivalent of `margin:auto` — real browsers shrink-wrap
+                 * and center such a table exactly like margin:auto does. */
+                const char *align_attr = attr(el, "align");
+                if (align_attr && trim_lower(align_attr) == "center")
+                    box.center = true;
                 bool cap = box.max_width_px > 80.0f && box.max_width_px < 4000.0f;
                 /* Email convention: max-width:600px (even with width:100%)
                  * is a centered column, not a shrink-wrapped align=center
@@ -2427,13 +2623,29 @@ void build_children(Widget *container, GumboVector *kids, Style st,
                  * `margin:auto` plus an explicit non-% width= is the
                  * other common centering idiom (a lone avatar, a
                  * notification "pill") — shrink-wrap and center it too,
-                 * unless it's actually a column grid in disguise. */
+                 * unless it's actually a column grid in disguise.
+                 * A table with NO width signal anywhere (attribute or
+                 * CSS) is the same idiom by default: real "auto" table
+                 * layout shrinks to content unless told to fill. */
+                bool has_width_attr = attr(el, "width") && attr(el, "width")[0];
+                bool has_any_width_signal = has_width_attr ||
+                                            box.width_px > 0.0f ||
+                                            box.width_pct > 0.0f;
                 bool center_shrink = !cap && box.center &&
-                                     has_explicit_shrink_width(el) &&
+                                     (has_explicit_shrink_width(el) ||
+                                      !has_any_width_signal) &&
                                      !table_has_multicell_row(node);
                 if (cap || center_shrink) {
+                    /* `outer` centers the TABLE AS A WHOLE within its own
+                     * parent (the shrink-wrap/margin:auto semantic) — its
+                     * own ROWS must stay flush against each other
+                     * (AlignItems::Stretch), not individually re-center
+                     * relative to `outer`.  Center here collapsed a
+                     * multi-row table (e.g. a paragraph row next to a
+                     * narrower single-cell button row) into staggered
+                     * left edges instead of one shared left margin. */
                     HtmlBlock *outer = make_block(container, FlexDirection::Column,
-                                                  0, AlignItems::Center);
+                                                  0, AlignItems::Stretch);
                     target = outer;
                 }
                 if (bg.a > 0.0f || cap || box.radius_px > 0.0f) {
@@ -2478,6 +2690,7 @@ void build_children(Widget *container, GumboVector *kids, Style st,
                     if (cell == target && (h > 1 || box.radius_px > 0.0f ||
                                            box.max_width_px > 80.0f)) {
                         HtmlBlock *sp = make_block(target, FlexDirection::Column, 0);
+                        sp->m_bg = block_background(ce, B);
                         decorate_block(sp, ce, B);
                         cell = sp;
                     }
@@ -2524,6 +2737,8 @@ void build_children(Widget *container, GumboVector *kids, Style st,
                 if (ct != GUMBO_TAG_TD && ct != GUMBO_TAG_TH) continue;
                 if (cell_px_width(&cn->v.element, B) >= 0)
                     continue;
+                if (cell_content_px_width(&cn->v.element, B) > 0)
+                    continue;
                 if (cell_is_empty(&cn->v.element))
                     continue;
                 float pct = cell_width_pct(&cn->v.element, B);
@@ -2558,6 +2773,8 @@ void build_children(Widget *container, GumboVector *kids, Style st,
                     cst.bold = true;
                 build_children(cell, &ce->children, cst, B, list_depth, ta, depth+1);
                 int px = cell_px_width(ce, B);
+                if (px < 0)
+                    px = cell_content_px_width(ce, B);
                 float grow = auto_grow;
                 float shrink = 1.0f;
                 /* -1 ("auto"): FlexLayout::preferred_size() falls back to
@@ -2701,10 +2918,16 @@ void build_children(Widget *container, GumboVector *kids, Style st,
             int cap = (!box.table_cell && box.max_width_px > 80.0f &&
                        box.max_width_px < 4000.0f)
                           ? (int)box.max_width_px : 0;
+            /* An explicit pixel width (CSS `width:Npx`, e.g. an anchor
+             * sized to a fixed button width) is a hard constraint too,
+             * not just max-width — a block-anchor <a style="width:370px">
+             * wrapping a wider inner table must still cap to 370, not
+             * silently pass through and stretch to fill its container. */
+            bool has_width_px = box.width_px > 0.0f && box.width_pct <= 0.0f;
             if (bg.a <= 0.0f && !align_changed && cap <= 0 &&
                 box.radius_px <= 0.0f && !box.center &&
                 !box.inline_flex && box.pad_x <= 0.5f && box.pad_y <= 0.5f &&
-                box.bg_image_url.empty()) {
+                !has_width_px && box.bg_image_url.empty()) {
                 Style cst = st;
                 TextAlignment ta = child_align;
                 apply_cascade(el, cst, ta, B);
@@ -2718,16 +2941,36 @@ void build_children(Widget *container, GumboVector *kids, Style st,
                  * with the icon sitting at the top-left of a red bar.
                  * max-width alone is a ceiling (PennyMac .header-menu is
                  * 610px inside a 600px column) — only margin:auto is a
-                 * "center me as a page column" hint. */
-                bool shrink = box.inline_flex ||
+                 * "center me as a page column" hint.
+                 * inline-flex/inline-block normally means "shrink to
+                 * content", but an explicit width:100% contradicts that
+                 * (an MJML column uses display:inline-block purely to
+                 * sit side-by-side, not to shrink) — width wins. */
+                bool cap_triggered = cap > 0 && box.center;
+                bool shrink = (box.inline_flex && box.width_pct < 99.0f) ||
                               (box.center && box.width_px > 0.0f &&
                                box.width_pct < 99.0f);
                 bool parent_centers = false;
                 if (auto *pfl = dynamic_cast<FlexLayout *>(container->layout()))
                     parent_centers = pfl->align_items() == AlignItems::Center;
-                if (((cap > 0 && box.center) || shrink) && !parent_centers) {
+                if ((cap_triggered || shrink) && !parent_centers) {
+                    /* Two different reasons land here, and they want
+                     * opposite child alignment. `cap_triggered` (a
+                     * max-width/no-width centered column, e.g. a
+                     * max-width:768px page wrapper) wraps FLOWING
+                     * content — its own children (a <table>'s rows) must
+                     * stretch flush against each other, not individually
+                     * re-center (this collapsed a schwab.com email's
+                     * header row into a narrow 3-line column). `shrink`
+                     * (a true inline-flex chip, or margin:auto plus an
+                     * explicit small pixel width) wraps a SINGLE small
+                     * thing that must stay centered at its own size,
+                     * not stretch to fill whatever width an ancestor
+                     * hands `outer` (this turned the Instagram
+                     * notification pill into a full-width red bar). */
                     HtmlBlock *outer = make_block(container, FlexDirection::Column,
-                                                  0, AlignItems::Center);
+                                                  0, cap_triggered ? AlignItems::Stretch
+                                                                   : AlignItems::Center);
                     host = outer;
                 }
                 HtmlBlock *blk = make_block(host, FlexDirection::Column, 0);
@@ -2799,6 +3042,7 @@ void HtmlDocument::clear() {
     while (!m_children.empty())
         remove_child(m_children.back());
     m_has_remote = false;
+    m_reflow_budget = kReflowBudgetMax;
 }
 
 Vector2i HtmlDocument::preferred_size(NVGcontext *ctx) const {
@@ -2963,6 +3207,8 @@ std::string HtmlDocument::debug_summary() const {
             std::snprintf(extra, sizeof(extra), "  [bg.a=%.2f r=%.0f]",
                           hb->m_bg.a, hb->m_radius);
             out += extra;
+            if (!hb->m_link_url.empty())
+                out += "  href=\"" + hb->m_link_url + "\"";
         }
         if (auto *ht = dynamic_cast<const HtmlText *>(w)) {
             std::string t;
@@ -2987,10 +3233,12 @@ std::string HtmlDocument::debug_summary() const {
                         r.style.borderWidth);
                     if (r.style.superscript) t += " sup";
                     t += rs;
+                    if (!r.linkUrl.empty())
+                        t += " href=\"" + r.linkUrl + "\"";
                 }
                 t += " | ";
             }
-            if (t.size() > 700) t = t.substr(0, 700) + "...";
+            if (t.size() > 2000) t = t.substr(0, 2000) + "...";
             out += "  \"" + t + "\"";
         }
         out += "\n";
@@ -3001,6 +3249,11 @@ std::string HtmlDocument::debug_summary() const {
 }
 
 void HtmlDocument::request_reflow() {
+    // Coalesce: if already pending, don't spam redraw
+    if (m_reflow_pending) return;
+    // Oscillating content (see kReflowBudgetMax comment): stop asking for
+    // more relayouts once the budget for this width/content is spent.
+    if (m_reflow_budget <= 0) return;
     m_reflow_pending = true;
     if (Screen *s = screen())
         s->redraw();
@@ -3010,6 +3263,12 @@ void HtmlDocument::draw(NVGcontext *ctx) {
     if (nvgIsRecordingDisplayList(ctx))
         return;
     trace_draw("HtmlDocument", this);
+    if (m_size.x() != m_reflow_budget_w) {
+        // A real width change (resize/zoom) — give self-correction a
+        // fresh budget to settle into the new width.
+        m_reflow_budget_w = m_size.x();
+        m_reflow_budget = kReflowBudgetMax;
+    }
     if (m_reflow_pending) {
 #ifdef DEBUG
         if (debug_draw()) fprintf(stderr, "[trace] HtmlDocument reflow\n");
@@ -3019,6 +3278,7 @@ void HtmlDocument::draw(NVGcontext *ctx) {
          * widget below paints with consistent geometry (never relayout
          * mid-paint). */
         m_reflow_pending = false;
+        --m_reflow_budget;
         if (m_parent)
             m_parent->perform_layout(ctx);
     }

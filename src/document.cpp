@@ -364,6 +364,16 @@ void Document::draw(NVGcontext* ctx, float originX, float originY) {
                 float dw = para->image_w * scale;
                 float dh = para->image_h * scale;
                 float iy = y + pad;
+                /* A standalone block image (not wrapped in text) still
+                   honors its paragraph's alignment — e.g. a footer logo
+                   centered via the enclosing <td style="text-align:
+                   center"> (or, as with flex+margin:auto, whatever
+                   alignment the builder resolved down to it). */
+                float ix = originX;
+                if (para->alignment == TextAlignment::Center)
+                    ix = originX + (contentWidth - dw) * 0.5f;
+                else if (para->alignment == TextAlignment::Right)
+                    ix = originX + (contentWidth - dw);
 
                 /* Sentinel line/word so hit-test and the fast path can
                    recognize the block (mirrors the RULE pattern). */
@@ -374,11 +384,11 @@ void Document::draw(NVGcontext* ctx, float originX, float originY) {
                 img_line.y_top      = y;
                 img_line.y_bottom   = iy + dh + pad;
                 img_line.baseline   = iy;
-                img_line.x_start    = originX;
+                img_line.x_start    = ix;
                 WordLayout iw;
                 iw.byte_start = 0;
                 iw.byte_end   = 0;
-                iw.x          = originX;
+                iw.x          = ix;
                 iw.advance    = dw;                 // draw width
                 iw.style.fontSize = dh;             // draw height (piggy-back)
                 iw.image      = para->image;
@@ -388,7 +398,7 @@ void Document::draw(NVGcontext* ctx, float originX, float originY) {
                 m_rich_layout.push_back(std::move(img_line));
 
                 if (!layout_only)
-                    draw_image_block(ctx, para->image, originX, iy, dw, dh);
+                    draw_image_block(ctx, para->image, ix, iy, dw, dh);
                 y = iy + dh + pad;
             } else if (para->isRule) {
                 float pad = paragraphSpacing * 0.5f;

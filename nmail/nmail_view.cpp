@@ -326,6 +326,8 @@ public:
                     if (now < m_screenshot_grace && !timeout) return;
                 }
                 m_screenshot_done = true;
+                if (getenv("NMAIL_DEBUG_SUMMARY") && m_view)
+                    fprintf(stderr, "%s", m_view->debug_summary().c_str());
                 bool ok = save_png(m_screenshot_path);
                 printf("screenshot %s %s\n", ok ? "saved" : "FAILED", m_screenshot_path.c_str());
                 // exit after one more frame so status is visible if interactive

@@ -84,4 +84,14 @@ private:
     bool     m_has_remote = false;
     bool     m_reflow_pending = false;
     std::string m_last_hover_url;
+
+    /* Some HTML tables produce a preferred-size measurement that never
+     * settles (a leaf's cross-frame width/height keeps flip-flopping
+     * between two values under the FlexLayout solver). Cap consecutive
+     * self-correcting relayouts so such content degrades to "one frame
+     * slightly off" instead of pegging a core forever. Refilled whenever
+     * new content loads or our own width actually changes. */
+    static constexpr int kReflowBudgetMax = 6;
+    int      m_reflow_budget = kReflowBudgetMax;
+    int      m_reflow_budget_w = -1;
 };

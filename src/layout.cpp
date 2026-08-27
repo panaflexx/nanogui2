@@ -1391,7 +1391,17 @@ void FlexLayout::perform_layout(NVGcontext *ctx, Widget *widget) const {
                 child_size[cross_axis_idx] = cross_size;
                 break;
             case AlignItems::Center:
-                child_pos[cross_axis_idx] = inset_cross + (available_cross_space - cross_size) / 2;
+                /* An explicit min==max width (a fixed-width card) can
+                 * still exceed available_cross_space despite the "never
+                 * overflow" clamp above, since min wins over max when
+                 * min > max. Centering that overflow would push the
+                 * child to a negative position — clipped off the start
+                 * edge and invisible, rather than the natural "overflows
+                 * past the end edge" a browser without our fixed-size
+                 * reading pane would show. Floor at inset_cross so worst
+                 * case matches FlexStart instead of vanishing. */
+                child_pos[cross_axis_idx] = std::max(
+                    inset_cross, inset_cross + (available_cross_space - cross_size) / 2);
                 child_size[cross_axis_idx] = cross_size;
                 break;
             case AlignItems::Stretch: {
