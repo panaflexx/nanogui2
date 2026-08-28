@@ -3382,23 +3382,30 @@ public:
         if (!m_has_message) return;
         const MailMessage orig = m_current_message;   // copy: stays stable
 
-        Window *win = new Window(this, "Reply", false);
-        win->set_traffic_lights_mask(0x1);   // close (red) button only
+        Window *win = new Window(this, "Reply", true);
         win->set_layout(new BoxLayout(Orientation::Vertical, Alignment::Fill,
                                       12, 10));
         win->set_min_width(760);
         win->set_min_height(460);
 
         Widget *form = new Widget(win);
-        form->set_layout(new GridLayout(Orientation::Horizontal, 2,
-                                        Alignment::Middle, 0, 8));
+        /* Advanced grid so the entry column (stretch=1) absorbs all extra
+         * width when the window is resized, while the label column stays
+         * pinned to its natural width, flush left. */
+        auto *form_layout = new AdvancedGridLayout({0, 8, 0}, {0, 8, 0}, 0);
+        form_layout->set_col_stretch(2, 1.0f);
+        form->set_layout(form_layout);
 
-        new Label(form, "To:", "sans-bold");
+        Label *to_lbl = new Label(form, "To:", "sans-bold");
         TextBox *to = new TextBox(form);
         to->set_value(orig.from_addr.empty() ? orig.from : orig.from_addr);
         to->set_editable(true);
+        form_layout->set_anchor(to_lbl,
+            AdvancedGridLayout::Anchor(0, 0, Alignment::Minimum, Alignment::Middle));
+        form_layout->set_anchor(to,
+            AdvancedGridLayout::Anchor(2, 0, Alignment::Fill, Alignment::Middle));
 
-        new Label(form, "Subject:", "sans-bold");
+        Label *subj_lbl = new Label(form, "Subject:", "sans-bold");
         TextBox *subj = new TextBox(form);
         std::string s = orig.subject;
         if (s.size() < 3 || (s[0] != 'R' && s[0] != 'r') ||
@@ -3406,6 +3413,10 @@ public:
             s = "Re: " + s;
         subj->set_value(s);
         subj->set_editable(true);
+        form_layout->set_anchor(subj_lbl,
+            AdvancedGridLayout::Anchor(0, 2, Alignment::Minimum, Alignment::Middle));
+        form_layout->set_anchor(subj,
+            AdvancedGridLayout::Anchor(2, 2, Alignment::Fill, Alignment::Middle));
 
         /* Format toolbar: WYSIWYG style toggles (Ctrl+B/I/U also work). */
         Widget *fmt = new Widget(win);
@@ -3509,13 +3520,23 @@ public:
         refresh_fmt();
 
         Widget *buttons = new Widget(win);
-        buttons->set_layout(new BoxLayout(Orientation::Horizontal,
-                                          Alignment::Middle, 0, 8));
+        /* Middle column has all the stretch, so it swallows the extra
+         * width and pushes the action group flush against the right edge
+         * of the window while the format group stays flush left. */
+        auto *buttons_layout = new AdvancedGridLayout({0, 0, 0}, {0}, 0);
+        buttons_layout->set_col_stretch(1, 1.0f);
+        buttons->set_layout(buttons_layout);
+
+        Widget *fmt_group = new Widget(buttons);
+        fmt_group->set_layout(new BoxLayout(Orientation::Horizontal,
+                                            Alignment::Middle, 0, 8));
+        buttons_layout->set_anchor(fmt_group,
+            AdvancedGridLayout::Anchor(0, 0, Alignment::Minimum, Alignment::Middle));
 
         /* Send format: plain text, Markdown (MailMate-style markup=
          * markdown), or a generated HTML body. */
-        new Label(buttons, "Format:", "sans-bold");
-        Dropdown *fmt_box = new Dropdown(buttons, Dropdown::ComboBox,
+        new Label(fmt_group, "Format:", "sans-bold");
+        Dropdown *fmt_box = new Dropdown(fmt_group, Dropdown::ComboBox,
                                          "Format");
         /* NB: use the 5-arg add_item — the 2-arg overload installs no
          * callback, so clicking an item would never update the selection. */
@@ -3530,7 +3551,13 @@ public:
             "Plain: raw text.  Markdown: plain text with markup=markdown; "
             "aware clients render it styled.  HTML: generated text/html");
 
-        Button *send = new Button(buttons, "Send", FA_PAPER_PLANE);
+        Widget *action_group = new Widget(buttons);
+        action_group->set_layout(new BoxLayout(Orientation::Horizontal,
+                                               Alignment::Middle, 0, 8));
+        buttons_layout->set_anchor(action_group,
+            AdvancedGridLayout::Anchor(2, 0, Alignment::Maximum, Alignment::Middle));
+
+        Button *send = new Button(action_group, "Send", FA_PAPER_PLANE);
         send->set_callback([this, win, send, to, subj, body, fmt_box]() {
             std::string to_s  = to->value();
             std::string sub_s = subj->value();
@@ -3553,7 +3580,7 @@ public:
             send_reply(win, send, to_s, sub_s, text, format);
         });
 
-        Button *cancel = new Button(buttons, "Cancel", FA_TIMES);
+        Button *cancel = new Button(action_group, "Cancel", FA_TIMES);
         cancel->set_callback([win]() { win->dispose(); });
 
         win->center();
