@@ -435,6 +435,14 @@ bool PopupMenu::mouse_button_event(const Vector2i &p, int button, bool down, int
             set_highlighted_index(-1);
             set_visible(false);
 
+            // Keep the owning Dropdown's toggle state in sync with the popup
+            // we just closed. Otherwise a stray release event that lands on
+            // the Dropdown afterwards (e.g. because the popup was covering
+            // it and just disappeared) sees a stale m_pushed == true and
+            // reopens the popup right back up.
+            if (auto dd = dynamic_cast<Dropdown *>(m_parent_item))
+                dd->set_pushed(false);
+
             // close the menu and any parent menus
             Window *parent_window = m_parent_window;
             while (parent_window)

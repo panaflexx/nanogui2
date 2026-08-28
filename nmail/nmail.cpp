@@ -3282,14 +3282,22 @@ public:
         win->set_min_width(420);
 
         Widget *form = new Widget(win);
-        form->set_layout(new GridLayout(Orientation::Horizontal, 2,
-                                        Alignment::Middle, 0, 8));
+        auto *form_layout = new GridLayout(Orientation::Horizontal, 2,
+                                           Alignment::Middle, 0, 8);
+        /* Middle centers each field at its own preferred width, so the
+         * narrower ones (port numbers, the check-interval dropdown) sit
+         * indented instead of lining up with the wider text fields —
+         * fill the entry column so every field shares the same width. */
+        form_layout->set_col_alignment(
+            std::vector<Alignment>{Alignment::Middle, Alignment::Fill});
+        form->set_layout(form_layout);
 
         new Label(form, "IMAP server:", "sans-bold");
         TextBox *host = new TextBox(form);
         host->set_value(m_config.host);
         host->set_placeholder("imap.example.com");
         host->set_editable(true);
+        host->set_alignment(TextBox::Alignment::Right);
 
         new Label(form, "Port:", "sans-bold");
         IntBox<int> *port = new IntBox<int>(form);
@@ -3301,17 +3309,20 @@ public:
         user->set_value(m_config.username);
         user->set_placeholder("you@example.com");
         user->set_editable(true);
+        user->set_alignment(TextBox::Alignment::Right);
 
         new Label(form, "Password:", "sans-bold");
         TextBox *pass = new TextBox(form);
         pass->set_value(m_config.password);
         pass->set_editable(true);
+        pass->set_alignment(TextBox::Alignment::Right);
 
         new Label(form, "SMTP server:", "sans-bold");
         TextBox *smtp_host = new TextBox(form);
         smtp_host->set_value(m_config.smtp_host);
         smtp_host->set_placeholder("(same as IMAP server)");
         smtp_host->set_editable(true);
+        smtp_host->set_alignment(TextBox::Alignment::Right);
 
         new Label(form, "SMTP port:", "sans-bold");
         IntBox<int> *smtp_port = new IntBox<int>(form);
