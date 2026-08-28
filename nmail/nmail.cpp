@@ -68,6 +68,7 @@ struct MailConfig {
     std::string smtp_host;      // empty -> fall back to the IMAP host
     int         smtp_port = 587;
     bool        dark_mode = false;
+    int         check_interval_min = 15;  // how often to auto-check for new mail
 };
 
 static const char *CONFIG_PATH = "amail.config";
@@ -105,6 +106,9 @@ static bool load_config(MailConfig &c) {
     if (sp && sp->type == DICT_NUMBER) c.smtp_port = (int)sp->number_value;
     const DictValue *dm = dict_object_get(root, "dark_mode");
     if (dm && dm->type == DICT_BOOL) c.dark_mode = dm->bool_value != 0;
+    const DictValue *ci = dict_object_get(root, "check_interval_min");
+    if (ci && ci->type == DICT_INT64)  c.check_interval_min = (int)ci->int64_value;
+    if (ci && ci->type == DICT_NUMBER) c.check_interval_min = (int)ci->number_value;
     dict_destroy(root);
     return !c.host.empty();
 }
@@ -118,6 +122,7 @@ static void save_config(const MailConfig &c) {
     dict_object_set(root, "smtp_host", dict_create_string(c.smtp_host.c_str()));
     dict_object_set(root, "smtp_port", dict_create_int64(c.smtp_port));
     dict_object_set(root, "dark_mode", dict_create_bool(c.dark_mode ? 1 : 0));
+    dict_object_set(root, "check_interval_min", dict_create_int64(c.check_interval_min));
 
     char buf[8192];
     if (dict_serialize_json(root, buf, sizeof(buf), /*pretty=*/1)) {
@@ -137,6 +142,12 @@ public:
     std::function<void(const std::vector<MailFolder> &)>        cb_folders;
     std::function<void(const std::string &,
                        const std::vector<MailSummary> &)>       cb_summaries;
+    /* Periodic background check (see Type::AutoRefresh): delivers the same
+     * shape as cb_summaries, but the GUI must merge it in without disturbing
+     * the user's scroll position or selection, rather than replacing the
+     * list wholesale. */
+    std::function<void(const std::string &,
+                       const std::vector<MailSummary> &)>       cb_auto_summaries;
     /* Older-message page (appended to the bottom of the list). */
     std::function<void(const std::string &,
                        const std::vector<MailSummary> &)>       cb_older;
@@ -213,7 +224,7 @@ public:
     }
 
 private:
-    enum class Type { Connect, Refresh, Select, FetchBody, FetchOlder, Prefetch, Move };
+    enum class Type { Connect, Refresh, Select, FetchBody, FetchOlder, Prefetch, Move, AutoRefresh };
     struct Cmd {
         Type type;
         std::string folder;
@@ -302,38 +313,61 @@ private:
             report_error("Could not open folder", err);
             return;
         }
-        m_selected_folder = folder;
-        m_first_loaded    = 0;
+        m_selected_folder   = folder;
+        m_first_loaded      = 0;
+        m_last_known_exists = 0;
         do_fetch_summaries(folder, exists);
     }
 
-    void do_fetch_summaries(const std::string &folder, int exists) {
+    /* is_auto: a periodic background check (Type::AutoRefresh) rather than
+     * an explicit Refresh/Select. Fetches only the delta beyond the last
+     * known message count (cheap, regardless of how far back the user has
+     * paged) and delivers via cb_auto_summaries instead of cb_summaries, so
+     * the GUI can merge new mail in without disturbing scroll/selection. */
+    void do_fetch_summaries(const std::string &folder, int exists,
+                            bool is_auto = false) {
         std::vector<MailSummary> summaries;
         std::string err;
-        /* First load shows the newest 150 messages; refreshes re-fetch the
-           whole window the user has paged back through. */
-        int first = m_first_loaded > 0 ? m_first_loaded
+        int first;
+        if (is_auto) {
+            first = m_last_known_exists + 1;
+            if (first > exists) {
+                m_last_known_exists = exists;
+                return;   // nothing new since the last check
+            }
+        } else {
+            /* First load shows the newest 150 messages; refreshes re-fetch
+               the whole window the user has paged back through. */
+            first = m_first_loaded > 0 ? m_first_loaded
                                        : std::max(1, exists - 149);
+        }
         if (!m_imap.fetch_summaries(first, exists, summaries, err)) {
-            report_error("Could not fetch messages", err);
+            report_error(is_auto ? "Could not check for new mail"
+                                 : "Could not fetch messages", err);
             return;
         }
-        m_first_loaded = first;
+        if (!is_auto) m_first_loaded = first;
+        m_last_known_exists = std::max(m_last_known_exists, exists);
         /* Newest first. */
         std::reverse(summaries.begin(), summaries.end());
-        report_status(folder + ": " + std::to_string(exists) +
-                      (exists == 1 ? " message" : " messages"));
-        deliver([this, folder, summaries]() {
-            if (cb_summaries) cb_summaries(folder, summaries);
+        if (!is_auto)
+            report_status(folder + ": " + std::to_string(exists) +
+                          (exists == 1 ? " message" : " messages"));
+        deliver([this, folder, summaries, is_auto]() {
+            if (is_auto) { if (cb_auto_summaries) cb_auto_summaries(folder, summaries); }
+            else         { if (cb_summaries)      cb_summaries(folder, summaries); }
         });
         // Seed a low-priority backlog with the first 25 (newest first).
         // Further visible rows get enqueued on demand via ensure_visible_cached().
         {
             std::lock_guard<std::mutex> lock(m_mutex);
             m_prefetch_folder = folder;
-            m_prefetch_queue.clear();
-            m_prefetch_queued.clear();
+            if (!is_auto) {
+                m_prefetch_queue.clear();
+                m_prefetch_queued.clear();
+            }
             for (size_t i = 0; i < summaries.size() && i < 25; ++i) {
+                if (m_prefetch_queued.count(summaries[i].seq)) continue;
                 m_prefetch_queue.push_back(summaries[i].seq);
                 m_prefetch_queued.insert(summaries[i].seq);
             }
@@ -516,22 +550,46 @@ private:
     }
 
     void run() {
+        /* Only advances when a wait actually times out (a real interval
+           elapsed), not on every unrelated command — so an active user
+           doesn't perpetually postpone the background mail check. */
+        auto next_check = std::chrono::steady_clock::now();
         for (;;) {
             Cmd cmd;
             {
                 std::unique_lock<std::mutex> lock(m_mutex);
-                m_cv.wait(lock, [this]() {
+                bool got_cmd = m_cv.wait_until(lock, next_check, [this]() {
                     return m_quit || !m_queue.empty();
                 });
                 if (m_quit) return;
-                cmd = m_queue.front();
-                m_queue.pop_front();
+                if (!got_cmd) {
+                    int interval_min = std::max(1, m_config.check_interval_min);
+                    next_check = std::chrono::steady_clock::now() +
+                                std::chrono::minutes(interval_min);
+                    if (m_config.host.empty() || m_selected_folder.empty())
+                        continue;   // nothing configured/selected to check yet
+                    cmd.type = Type::AutoRefresh;
+                } else {
+                    cmd = m_queue.front();
+                    m_queue.pop_front();
+                }
             }
 
             switch (cmd.type) {
             case Type::Connect:
                 do_connect();
                 break;
+            case Type::AutoRefresh: {
+                if (!m_imap.is_open()) {
+                    if (!do_connect()) break;
+                }
+                if (m_selected_folder.empty()) break;
+                std::string err;
+                int exists = 0;
+                if (m_imap.select_folder(m_selected_folder, exists, err))
+                    do_fetch_summaries(m_selected_folder, exists, /*is_auto=*/true);
+                break;
+            }
             case Type::Refresh:
                 if (!m_imap.is_open()) {
                     if (!do_connect()) break;
@@ -637,6 +695,9 @@ private:
     /* Oldest sequence number currently shown in m_selected_folder
        (0 = nothing loaded).  Drives "load older" paging. */
     int                     m_first_loaded = 0;
+    /* Highest sequence number fetched so far in m_selected_folder — lets
+       Type::AutoRefresh fetch only the delta since the last check. */
+    int                     m_last_known_exists = 0;
     // background prefetch backlog (low priority, viewport-aware)
     std::string             m_prefetch_folder;
     std::deque<int>         m_prefetch_queue;
@@ -1256,6 +1317,28 @@ public:
                         std::make_move_iterator(more.begin()),
                         std::make_move_iterator(more.end()));
         screen()->redraw();
+    }
+
+    /* Splice newly-arrived mail in at the top (background auto-check)
+       without disturbing the user's current place: the rows already on
+       screen stay on screen (scroll advances by exactly the inserted
+       height) and the selected message stays selected (re-resolved by
+       seq, since prepending shifts every existing row's index). */
+    void prepend_emails(std::vector<EmailData> newer) {
+        if (newer.empty()) return;
+        int prev_selected_seq = selected_seq();
+        float inserted_h = (float)newer.size() * row_h();
+        m_emails.insert(m_emails.begin(),
+                        std::make_move_iterator(newer.begin()),
+                        std::make_move_iterator(newer.end()));
+        m_scroll = std::clamp(m_scroll + inserted_h, 0.0f, max_scroll());
+        if (prev_selected_seq >= 0) {
+            m_selected = -1;
+            for (int i = 0; i < (int)m_emails.size(); ++i)
+                if (m_emails[i].seq == prev_selected_seq) { m_selected = i; break; }
+        }
+        m_hovered = -1;
+        if (screen()) screen()->redraw();
     }
 
     /* Spinner strip at the bottom while older messages are fetched. */
@@ -2450,6 +2533,10 @@ public:
                                        const std::vector<MailSummary> &sums) {
             on_summaries(folder, sums);
         };
+        m_worker.cb_auto_summaries = [this](const std::string &folder,
+                                            const std::vector<MailSummary> &sums) {
+            on_auto_summaries(folder, sums);
+        };
         m_worker.cb_older = [this](const std::string &folder,
                                    const std::vector<MailSummary> &sums) {
             on_older(folder, sums);
@@ -2591,6 +2678,63 @@ public:
                     need.push_back(s);
             if (!need.empty()) m_worker.ensure_visible_cached(folder, need);
         });
+        glfwPostEmptyEvent();
+    }
+
+    /* Periodic background check (see MailWorker::Type::AutoRefresh):
+       splice newly-arrived mail in at the top instead of replacing the
+       list, so the user's scroll position and selection are undisturbed.
+       Announces the count on the status bar rather than jumping the view
+       to show it. */
+    void on_auto_summaries(const std::string &folder,
+                           const std::vector<MailSummary> &sums) {
+        if (sums.empty()) return;
+        // The worker already sends only the delta since the last check,
+        // but de-dupe defensively in case a manual refresh/select raced
+        // with this background one.
+        std::unordered_set<int> known;
+        known.reserve(m_summaries.size());
+        for (const MailSummary &s : m_summaries) known.insert(s.seq);
+        std::vector<MailSummary> fresh;
+        fresh.reserve(sums.size());
+        for (const MailSummary &s : sums)
+            if (!known.count(s.seq)) fresh.push_back(s);
+        if (fresh.empty()) return;
+
+        // sums arrives newest-first; prepend ahead of the existing
+        // (also newest-first) list to keep ordering correct.
+        m_summaries.insert(m_summaries.begin(), fresh.begin(), fresh.end());
+        m_summary_cache[folder] = m_summaries;
+
+        if (folder != m_current_folder) return;   // not looking at this folder
+
+        /* Splice in only the rows passing the active filter; unlike
+           apply_filter() this leaves scroll position and selection alone
+           (see EmailListView::prepend_emails). */
+        std::string needle = m_filter;
+        for (char &c : needle) c = (char)std::tolower((unsigned char)c);
+        std::vector<EmailData> rows;
+        rows.reserve(fresh.size());
+        for (const MailSummary &s : fresh) {
+            if (!needle.empty()) {
+                std::string hay = s.from + "\n" + s.subject;
+                for (char &c : hay) c = (char)std::tolower((unsigned char)c);
+                if (hay.find(needle) == std::string::npos) continue;
+            }
+            EmailData d;
+            d.seq     = s.seq;
+            d.sender  = s.from;
+            d.subject = s.subject;
+            d.preview = s.preview;
+            d.date    = s.date;
+            d.seen    = s.seen;
+            rows.push_back(d);
+        }
+        if (!rows.empty())
+            m_email_list->prepend_emails(std::move(rows));
+
+        set_status(std::to_string(fresh.size()) + " New email" +
+                  (fresh.size() == 1 ? "" : "s"));
         glfwPostEmptyEvent();
     }
 
@@ -3174,19 +3318,41 @@ public:
         smtp_port->set_value(m_config.smtp_port);
         smtp_port->set_editable(true);
 
+        new Label(form, "Check for mail:", "sans-bold");
+        Dropdown *check_interval = new Dropdown(form, Dropdown::ComboBox,
+                                                "Check for mail");
+        static const int kIntervalMinutes[] = {5, 15, 30, 60};
+        check_interval->add_item({"Every 5 minutes", "check_5"}, FA_CLOCK,
+                                 [] {}, {{0, 0}}, true);
+        check_interval->add_item({"Every 15 minutes", "check_15"}, FA_CLOCK,
+                                 [] {}, {{0, 0}}, true);
+        check_interval->add_item({"Every 30 minutes", "check_30"}, FA_CLOCK,
+                                 [] {}, {{0, 0}}, true);
+        check_interval->add_item({"Hourly", "check_60"}, FA_CLOCK,
+                                 [] {}, {{0, 0}}, true);
+        {
+            int idx = 1;   // default: 15 minutes
+            for (int i = 0; i < 4; ++i)
+                if (kIntervalMinutes[i] == m_config.check_interval_min) idx = i;
+            check_interval->set_selected_index(idx);
+        }
+
         Widget *buttons = new Widget(win);
         buttons->set_layout(new BoxLayout(Orientation::Horizontal,
                                           Alignment::Middle, 0, 8));
 
         Button *save = new Button(buttons, "Save && Connect", FA_CHECK);
         save->set_callback([this, win, host, port, user, pass,
-                            smtp_host, smtp_port]() {
+                            smtp_host, smtp_port, check_interval]() {
             m_config.host     = host->value();
             m_config.port     = port->value();
             m_config.username = user->value();
             m_config.password = pass->value();
             m_config.smtp_host = smtp_host->value();
             m_config.smtp_port = smtp_port->value();
+            int idx = check_interval->selected_index();
+            m_config.check_interval_min =
+                kIntervalMinutes[(idx >= 0 && idx < 4) ? idx : 1];
             save_config(m_config);
             win->dispose();
             m_worker.set_config(m_config);
