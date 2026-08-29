@@ -80,6 +80,9 @@ public:
     virtual void draw(NVGcontext *ctx) override;
 protected:
     /// The caption text of this CheckBox.
+    /// Memoized preferred_size() text measurement (see TextSizeCache).
+    mutable TextSizeCache m_size_cache;
+
     std::string m_caption;
     /**
      * Internal tracking variable to distinguish between mouse click and release.

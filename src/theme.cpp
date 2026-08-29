@@ -45,6 +45,7 @@ Theme::Theme(NVGcontext *ctx, ThemeMode mode) {
 
 void Theme::set_mode(ThemeMode mode) {
     m_mode = mode;
+    ++m_generation;   // invalidate measurement caches keyed on this theme
     apply_common_metrics();
     if (mode == ThemeMode::Light)
         apply_light_palette();
@@ -152,6 +153,8 @@ void Theme::apply_dark_palette() {
     m_menubar_button_focused        = Color(10, 132, 255, 220);
     m_menu_popup_fill               = Color(42, 42, 48, 250);
     m_menu_separator                = Color(255, 255, 255, 28);
+    m_menu_item_highlight_fill      = m_accent_color;
+    m_menu_item_highlight_text      = Color(255, 255, 255, 255);
 
     m_text_box_bg_top               = Color(0, 0, 0, 70);
     m_text_box_bg_bot               = Color(0, 0, 0, 55);
@@ -224,6 +227,8 @@ void Theme::apply_light_palette() {
     m_menubar_button_focused        = Color(0, 122, 255, 255);
     m_menu_popup_fill               = Color(255, 255, 255, 250);
     m_menu_separator                = Color(0, 0, 0, 28);
+    m_menu_item_highlight_fill      = m_accent_color;
+    m_menu_item_highlight_text      = Color(255, 255, 255, 255);
 
     m_text_box_bg_top               = Color(255, 255, 255, 200);
     m_text_box_bg_bot               = Color(245, 247, 250, 180);
@@ -232,6 +237,8 @@ void Theme::apply_light_palette() {
 }
 
 void Theme::configure_as_menubar() {
+    ++m_generation;   // invalidate measurement caches keyed on this theme
+
     // Glass strip: no window chrome, transparent ghost buttons until hover
     m_window_corner_radius          = 0;
     m_window_header_height          = 0;

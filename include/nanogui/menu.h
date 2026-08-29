@@ -81,6 +81,10 @@ protected:
 
     /// The callback issued for all types of buttons.
     std::function<void(bool)> m_highlight_callback;
+
+    /// Memoized preferred_text_size(); Dropdown::preferred_size() calls this
+    /// for every item in its popup, so it is the hottest measurement here.
+    mutable TextSizeCache m_text_size_cache;
 };
 
 class NANOGUI_EXPORT Separator : public MenuItem

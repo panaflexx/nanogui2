@@ -57,6 +57,16 @@ public:
     ThemeMode mode() const { return m_mode; }
 
     /**
+     * \brief Monotonic counter bumped whenever the palette/metrics change.
+     *
+     * Screen::set_theme_mode() mutates the Theme *in place* rather than
+     * swapping the object, so a cached measurement cannot key off the Theme
+     * pointer alone. Including this counter in a cache key makes such caches
+     * self-invalidating across a light/dark switch.
+     */
+    uint32_t generation() const { return m_generation; }
+
+    /**
      * \brief Replace the palette with the light or dark preset.
      *
      * Fonts and icons are preserved. Mode-independent structural defaults
@@ -262,6 +272,13 @@ public:
     Color m_menu_separator;
     /// Rounded menu-item highlight radius (default: 6).
     int m_menu_item_corner_radius;
+    /// Selection pill behind the highlighted menu item.
+    /// Distinct from the generic button-hover gradient: a menu selection is a
+    /// solid accent fill, whereas m_button_gradient_*_focused is a subtle
+    /// light wash that is invisible (white-on-white) against a light popup.
+    Color m_menu_item_highlight_fill;
+    /// Text/icon color drawn on top of m_menu_item_highlight_fill.
+    Color m_menu_item_highlight_text;
 
     /* ---- Text field chrome ------------------------------------------------ */
     /// TextBox unfocused background gradient top (alpha included).
@@ -285,6 +302,8 @@ public:
 
 protected:
     ThemeMode m_mode = ThemeMode::Dark;
+    /// Bumped by set_mode()/configure_as_menubar(); see generation().
+    uint32_t m_generation = 1;
 
     /// Apply structural metrics shared by light and dark presets.
     void apply_common_metrics();

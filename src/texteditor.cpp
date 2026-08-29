@@ -1455,22 +1455,9 @@ void TextEditor::draw_rich(NVGcontext* ctx) {
     m_content_h = m_doc->last_drawn_height;
 
     // ---- Selection highlight (semi-transparent, drawn over text) ----
-	/*
-    printf("draw_rich: has_sel=%d anchor={%zu,%zu} caret={%zu,%zu} layout_lines=%zu\n",
-           (int)has_selection(),
-           m_anchor.paragraph, m_anchor.column,
-           m_caret.paragraph,  m_caret.column,
-           m_doc->m_rich_layout.size());
-	*/
     if (has_selection()) {
         auto [sel_a, sel_b] = selection();
-		/*
-        printf("  sel=[{%zu,%zu}->{%zu,%zu}]\n",
-               sel_a.paragraph, sel_a.column,
-               sel_b.paragraph, sel_b.column);
-		*/
         nvgFillColor(ctx, m_selection_color);
-        int rect_count = 0;
         for (const auto& rl : m_doc->m_rich_layout) {
             // Skip lines outside the selection paragraph range
             if (rl.para_idx < sel_a.paragraph || rl.para_idx > sel_b.paragraph)
@@ -1516,17 +1503,10 @@ void TextEditor::draw_rich(NVGcontext* ctx) {
             }
 
             float w = std::max(2.f, x1 - x0);
-            /*
-			printf("  rect[%d] para=%zu bytes=[%zu,%zu] x=[%.1f,%.1f] y=[%.1f,%.1f]\n",
-                   rect_count++, rl.para_idx,
-                   line_sel_start, line_sel_end,
-                   x0, x1, rl.y_top, rl.y_bottom);
-			*/
             nvgBeginPath(ctx);
             nvgRect(ctx, x0, rl.y_top, w, rl.y_bottom - rl.y_top);
             nvgFill(ctx);
         }
-        //printf("  total rects drawn: %d\n", rect_count);
     }
 
     // ---- I-beam caret ----

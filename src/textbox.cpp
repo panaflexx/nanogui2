@@ -70,6 +70,14 @@ Vector2i TextBox::preferred_size(NVGcontext *ctx) const {
     if (m_min_size.y() > 0)
         control_h = std::max(control_h, m_min_size.y());
 
+    // Every input below feeds the measured result, so all of them are in the key.
+    TextSizeCache::Key key{m_value + '\x1f' + m_placeholder + '\x1f' + m_units,
+                           font_size(), m_units_image, m_theme.get(),
+                           m_theme ? m_theme->generation() : 0,
+                           m_spinnable ? 1 : 0, m_min_size};
+    if (m_size_cache.hit(key))
+        return m_size_cache.size;
+
     nvgFontSize(ctx, font_size());
     nvgFontFace(ctx, "sans");
 
@@ -99,7 +107,7 @@ Vector2i TextBox::preferred_size(NVGcontext *ctx) const {
         // Unconstrained fields get a usable empty-field floor (forms, etc.).
         width = std::max(content_w, m_theme->m_control_min_width);
     }
-    return Vector2i(width, control_h);
+    return m_size_cache.store(key, Vector2i(width, control_h));
 }
 
 void TextBox::draw(NVGcontext* ctx) {

@@ -29,6 +29,12 @@ Button::Button(Widget* parent, const std::string& caption, int icon)
 Vector2i Button::preferred_size(NVGcontext* ctx) const {
     int font_size = m_font_size == -1 ? m_theme->m_button_font_size : m_font_size;
     int control_h = m_theme ? m_theme->m_control_height : (font_size + 10);
+
+    TextSizeCache::Key key{m_caption, font_size, m_icon, m_theme.get(),
+                           m_theme ? m_theme->generation() : 0};
+    if (m_size_cache.hit(key))
+        return m_size_cache.size;
+
     nvgFontSize(ctx, font_size);
     nvgFontFace(ctx, "sans-bold");
     float tw = nvgTextBounds(ctx, 0, 0, m_caption.c_str(), nullptr, nullptr);
@@ -50,7 +56,7 @@ Vector2i Button::preferred_size(NVGcontext* ctx) const {
         }
     }
     int height = std::max(control_h, font_size + 10);
-    return Vector2i((int)(tw + iw) + 20, height);
+    return m_size_cache.store(key, Vector2i((int)(tw + iw) + 20, height));
 }
 
 bool Button::mouse_enter_event(const Vector2i& p, bool enter) {
@@ -204,7 +210,7 @@ bool Button::keyboard_event(int key, int scancode, int action, int modifiers) {
     if (!m_enabled)
         return false;
 
-	ref<Button> self = this;  // protect during potential callback
+    ref<Button> self = this;  // protect during potential callback
     if (action == GLFW_PRESS || action == GLFW_REPEAT) {
         if (key == GLFW_KEY_ENTER || key == GLFW_KEY_SPACE) {
             return handle_event(true, true);

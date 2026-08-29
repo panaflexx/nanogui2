@@ -58,15 +58,9 @@ Widget::Widget(Widget* parent)
 }
 
 Widget::~Widget() {
-#define  DEBUG
-#ifdef DEBUG
-    #warning DEBUG ENABLED
-    if(m_id.length())
-        printf("~Widget id=%s debugname=%s\n",
-        this->m_id.c_str(),
-        this->DebugName.c_str()
-    );
-#endif
+    if (m_id.length())
+        NANOGUI_TRACE("~Widget id=%s debugname=%s",
+                      this->m_id.c_str(), this->DebugName.c_str());
     // If this widget is NOT itself the Screen but is attached to one,
     // notify the screen so it can scrub stale pointers (focus path,
     // drag widget, animation registry, etc.). Without this, a dynamically
@@ -449,7 +443,7 @@ void Widget::start_animation(AnimationType type) {
             m_size.y() = 0;
             m_min_size.y() = 0;
         }
-        printf("Start animation %0.1f for %s\n", m_animation_start, m_id.c_str());
+        NANOGUI_TRACE("start animation %0.1f for %s", m_animation_start, m_id.c_str());
 
         // Register with the owning screen so animation_in_progress() is O(1).
         if (Screen* scr = screen())
@@ -478,7 +472,7 @@ void Widget::apply_animation_transform(NVGcontext* ctx, float progress) {
 
     switch (m_animation_type) {
         case AnimationType::Sproing: {
-            printf("sproing %.2f for %s\n", progress, m_id.c_str());
+            NANOGUI_TRACE("sproing %.2f for %s", progress, m_id.c_str());
             float scale = 1.0f + 0.5f * std::sin(progress * 4.0f * float(M_PI)) * std::exp(-progress * 3.0f);
             nvgScale(ctx, scale, scale);
             break;
@@ -525,19 +519,19 @@ void Widget::apply_animation_transform(NVGcontext* ctx, float progress) {
 void Widget::end_animation() {
     if (m_animation_type == AnimationType::SlideClose) {
         m_visible = false;
-        printf("End animation for %s\n", m_id.c_str());
+        NANOGUI_TRACE("end animation for %s", m_id.c_str());
     } else if (m_animation_type == AnimationType::SlideUp) {
         // After collapsing, hide the widget but restore its size so it can
         // be shown again later (e.g. via SlideDown) at the right dimensions.
         m_visible = false;
         m_size = m_animation_original_size;
         m_min_size = m_animation_original_min_size;
-        printf("End SlideUp animation for %s\n", m_id.c_str());
+        NANOGUI_TRACE("end SlideUp animation for %s", m_id.c_str());
     } else if (m_animation_type == AnimationType::SlideDown) {
         // Ensure we end at exactly the original size (avoids rounding drift).
         m_size = m_animation_original_size;
         m_min_size = m_animation_original_min_size;
-        printf("End SlideDown animation for %s\n", m_id.c_str());
+        NANOGUI_TRACE("end SlideDown animation for %s", m_id.c_str());
     }
     // Subclasses can override for more logic
 }

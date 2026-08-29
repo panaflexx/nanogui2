@@ -49,12 +49,18 @@ bool CheckBox::mouse_button_event(const Vector2i &p, int button, bool down,
 Vector2i CheckBox::preferred_size(NVGcontext *ctx) const {
     if (m_min_size != Vector2i(0))
         return m_min_size;
+
+    TextSizeCache::Key key{m_caption, font_size(), 0, m_theme.get(),
+                           m_theme ? m_theme->generation() : 0};
+    if (m_size_cache.hit(key))
+        return m_size_cache.size;
+
     nvgFontSize(ctx, font_size());
     nvgFontFace(ctx, "sans");
-    return Vector2i(
+    return m_size_cache.store(key, Vector2i(
         nvgTextBounds(ctx, 0, 0, m_caption.c_str(), nullptr, nullptr) +
             1.8f * font_size(),
-        font_size() * 1.3f);
+        font_size() * 1.3f));
 }
 
 void CheckBox::draw(NVGcontext *ctx) {

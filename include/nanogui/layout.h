@@ -658,6 +658,39 @@ public:
     SizeMode width_mode(const Widget* w) const { return w ? w->width_mode() : SizeMode::Preferred; }
     SizeMode height_mode(const Widget* w) const { return w ? w->height_mode() : SizeMode::Preferred; }
 
+    /**
+     * \brief The flex properties actually used to lay `widget` out.
+     *
+     * An explicit \ref set_flex_item entry always wins. Otherwise the item is
+     * derived from the widget's own \ref SizeMode on this layout's main axis,
+     * so the declarative \ref Widget::set_width_flex / \ref
+     * Widget::set_height_flex API works without every caller also having to
+     * register a FlexItem:
+     *
+     * | main-axis SizeMode | grow | shrink |
+     * |--------------------|------|--------|
+     * | Expanding          | 1    | 1      |
+     * | Fixed              | 0    | 0      |
+     * | Minimum, Preferred | 0    | 1      | (unchanged default)
+     *
+     * Minimum/Preferred reproduce the previous default exactly, so widgets
+     * that never call set_*_flex() lay out as before.
+     */
+    FlexItem resolved_item(const Widget *widget) const {
+        auto it = m_flex_items.find(widget);
+        if (it != m_flex_items.end())
+            return it->second;
+
+        FlexItem item;   // grow=0, shrink=1, basis=-1
+        switch (is_row_direction() ? width_mode(widget) : height_mode(widget)) {
+            case SizeMode::Expanding: item.flex_grow = 1.f; item.flex_shrink = 1.f; break;
+            case SizeMode::Fixed:     item.flex_grow = 0.f; item.flex_shrink = 0.f; break;
+            case SizeMode::Minimum:
+            case SizeMode::Preferred: break;
+        }
+        return item;
+    }
+
     /* Implementation of the layout interface */
     virtual Vector2i preferred_size(NVGcontext *ctx, const Widget *widget) const override;
     virtual void perform_layout(NVGcontext *ctx, Widget *widget) const override;

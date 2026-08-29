@@ -20,6 +20,7 @@
 #include <vector>
 #include <string>
 #include <limits.h>
+#include <cstdio>
 #if !defined (__linux__)
 #  include <algorithm>
 #  include <stdexcept>
@@ -257,6 +258,32 @@ extern NANOGUI_EXPORT void async(const std::function<void()> &func);
 
 extern NANOGUI_EXPORT std::vector<Widget *> g_widgets_to_cleanup;
 extern NANOGUI_EXPORT std::mutex g_widgets_to_cleanup_mutex;
+
+/**
+ * \brief Diagnostic tracing, compiled out by default.
+ *
+ * Library diagnostics must never print on a normal build: several of the
+ * call sites sit in per-frame paths (animation ticks, scroll handling,
+ * widget teardown) where an unconditional printf is both console noise and
+ * a measurable cost.  Define \c NANOGUI_ENABLE_TRACE to turn them back on.
+ *
+ * The message is a printf-style literal, e.g.
+ * \code
+ *     NANOGUI_TRACE("end animation for %s", m_id.c_str());
+ * \endcode
+ * The argument list is still type-checked when tracing is disabled (it sits
+ * in an unevaluated branch), so a stale trace call cannot silently rot.
+ */
+#if defined(NANOGUI_ENABLE_TRACE)
+#  define NANOGUI_TRACE(fmt, ...)                                              \
+      std::fprintf(stderr, "[nanogui] " fmt "\n", ##__VA_ARGS__)
+#else
+#  define NANOGUI_TRACE(fmt, ...)                                              \
+      do {                                                                     \
+          if (false)                                                           \
+              std::fprintf(stderr, "[nanogui] " fmt "\n", ##__VA_ARGS__);      \
+      } while (0)
+#endif
 
 
 /**

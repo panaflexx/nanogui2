@@ -102,13 +102,6 @@ bool ScrollPanel::keyboard_event(int key, int scancode, int action, int modifier
 	//printf("keyboard_event: key=%d action=%d focused=%s\n", key, action,
 	//	focused()?"TRUE":"FALSE");
 
-    /*
-    if (focused()) {
-		if(modifiers == GLFW_MOD_SHIFT)
-			printf("Got shift!\n");
-	}
-	*/
-
     auto child = m_children[0];
 	return child->keyboard_event(key, scancode, action, modifiers);
     // Content of a ScrollPanel is a natural retained view (scroll = transform only).

@@ -171,11 +171,17 @@ MenuItem::MenuItem(Widget *parent, const std::string &caption, int button_icon, 
 Vector2i MenuItem::preferred_text_size(NVGcontext *ctx) const
 {
     int font_size = m_font_size == -1 ? m_theme->m_button_font_size : m_font_size;
+
+    TextSizeCache::Key key{m_caption, font_size, 0, m_theme.get(),
+                           m_theme ? m_theme->generation() : 0};
+    if (m_text_size_cache.hit(key))
+        return m_text_size_cache.size;
+
     nvgFontSize(ctx, font_size);
     nvgFontFace(ctx, "sans-bold");
     float tw = nvgTextBounds(ctx, 0, 0, m_caption.c_str(), nullptr, nullptr);
 
-    return Vector2i((int)(tw) + 24, font_size + 10);
+    return m_text_size_cache.store(key, Vector2i((int)(tw) + 24, font_size + 10));
 }
 
 Vector2i MenuItem::preferred_size(NVGcontext *ctx) const
@@ -187,9 +193,19 @@ Vector2i MenuItem::preferred_size(NVGcontext *ctx) const
     // nvgFontSize(ctx, ih);
     // iw = nvgTextBounds(ctx, 0, 0, utf8(m_icon).data(), nullptr, nullptr) + m_size.y() * 0.15f;
     float iw = font_size * icon_scale();
-    float sw =
-        shortcut().text.size() ? nvgTextBounds(ctx, 0, 0, shortcut().text.c_str(), nullptr, nullptr) + iw * 5 : 0;
-    return preferred_text_size(ctx) + Vector2i((int)(iw + sw), 0);
+    if (!shortcut().text.size())
+        return preferred_text_size(ctx) + Vector2i((int)iw, 0);
+
+    // Shortcut text is measured separately, so it belongs in the cache key.
+    TextSizeCache::Key key{m_caption + '\x1f' + shortcut().text, font_size,
+                           m_icon, m_theme.get(),
+                           m_theme ? m_theme->generation() : 0};
+    if (m_size_cache.hit(key))
+        return m_size_cache.size;
+
+    float sw = nvgTextBounds(ctx, 0, 0, shortcut().text.c_str(), nullptr, nullptr) + iw * 5;
+    return m_size_cache.store(
+        key, preferred_text_size(ctx) + Vector2i((int)(iw + sw), 0));
 }
 
 void MenuItem::set_highlighted(bool highlight, bool unhighlight_siblings, bool run_callbacks)
@@ -267,7 +283,7 @@ void MenuItem::draw(NVGcontext *ctx)
         nvgBeginPath(ctx);
         nvgRoundedRect(ctx, m_pos.x() + 4.f, m_pos.y() + 1.f,
                        m_size.x() - 8.f, m_size.y() - 2.f, cr);
-        nvgFillColor(ctx, m_theme->m_button_gradient_top_focused);
+        nvgFillColor(ctx, m_theme->m_menu_item_highlight_fill);
         nvgFill(ctx);
     }
 
@@ -277,12 +293,13 @@ void MenuItem::draw(NVGcontext *ctx)
 
     Vector2f center = Vector2f(m_pos) + Vector2f(m_size) * 0.5f;
     Vector2f text_pos(6, center.y() - 1);
-    // On solid highlight, prefer light text for contrast on both themes.
+    // On the solid accent selection pill, use the theme's dedicated
+    // on-highlight text color for contrast in both light and dark modes.
     NVGcolor text_color;
     if (!m_enabled)
         text_color = m_theme->m_disabled_text_color;
     else if (m_highlighted)
-        text_color = m_theme->m_button_text_on_solid;
+        text_color = m_theme->m_menu_item_highlight_text;
     else if (m_text_color.w() != 0)
         text_color = m_text_color;
     else
@@ -318,7 +335,7 @@ void MenuItem::draw(NVGcontext *ctx)
     Vector2f hotkey_pos(m_pos.x() + m_size.x() - 8, center.y() - 1);
     nvgTextAlign(ctx, NVG_ALIGN_RIGHT | NVG_ALIGN_MIDDLE);
     nvgFillColor(ctx, m_highlighted && m_enabled
-                          ? m_theme->m_button_text_on_solid
+                          ? m_theme->m_menu_item_highlight_text
                           : m_theme->m_disabled_text_color);
     nvgText(ctx, hotkey_pos.x(), hotkey_pos.y(), shortcut().text.c_str(), nullptr);
 }
@@ -585,7 +602,9 @@ bool PopupMenu::keyboard_event(int key, int scancode, int action, int modifiers)
     }
     catch (const std::exception &e)
     {
-        printf("Caught an exception in PopupMenu::keyboard_event(): %s", e.what());
+        std::fprintf(stderr,
+                     "PopupMenu::keyboard_event: caught exception in event handler: %s\n",
+                     e.what());
     }
 
     return false;

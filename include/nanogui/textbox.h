@@ -114,6 +114,9 @@ protected:
     bool m_editable;
     bool m_spinnable;
     bool m_committed;
+    /// Memoized preferred_size() text measurement (see TextSizeCache).
+    mutable TextSizeCache m_size_cache;
+
     std::string m_value;
     std::string m_default_value;
     Alignment m_alignment;

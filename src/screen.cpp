@@ -1336,7 +1336,6 @@ void Screen::cursor_pos_callback_event(double x, double y) {
     }
 }
 
-// Works great - but doesn't handle popups
 void Screen::mouse_button_callback_event(int button, int action, int modifiers) {
     m_modifiers = modifiers;
     m_last_interaction = glfwGetTime();
@@ -1449,124 +1448,6 @@ void Screen::mouse_button_callback_event(int button, int action, int modifiers) 
     }
 }
 
-/* // Broken, causes crash during popup cloing
-void Screen::mouse_button_callback_event(int button, int action, int modifiers) {
-    m_modifiers = modifiers;
-    m_last_interaction = glfwGetTime();
-
-#if defined(__APPLE__)
-    if (button == GLFW_MOUSE_BUTTON_1 && modifiers == GLFW_MOD_CONTROL)
-        button = GLFW_MOUSE_BUTTON_2;
-#endif
-
-    try {
-        if (m_focus_path.size() > 1) {
-            const Window* window =
-                dynamic_cast<Window*>(m_focus_path[m_focus_path.size() - 2]);
-            if (window && window->modal()) {
-                if (!window->contains(m_mouse_pos) && !m_drag_active)
-                    return;
-            }
-        }
-
-        if (action == GLFW_PRESS)
-            m_mouse_state |= 1 << button;
-        else
-            m_mouse_state &= ~(1 << button);
-
-        auto drop_widget = find_widget(m_mouse_pos);
-        if (m_drag_active && action == GLFW_RELEASE && drop_widget != m_drag_widget) {
-            // Check if m_drag_widget is still valid
-            if (m_drag_widget && (m_drag_widget->parent() != nullptr || m_drag_widget == this)) {
-                m_redraw |= m_drag_widget->mouse_button_event(
-                    m_mouse_pos - m_drag_widget->parent()->absolute_position(), button,
-                    false, m_modifiers);
-            } else {
-                m_drag_active = false;
-                m_drag_widget = nullptr;
-            }
-        }
-
-        if (drop_widget != nullptr && drop_widget->cursor() != m_cursor) {
-            m_cursor = drop_widget->cursor();
-            glfwSetCursor(m_glfw_window, m_cursors[(int)m_cursor]);
-        }
-
-        bool btn12 = button == GLFW_MOUSE_BUTTON_1 || button == GLFW_MOUSE_BUTTON_2;
-
-        // Check if the click is outside all visible popups
-        bool click_outside_popup = false;
-        if (action == GLFW_PRESS && btn12 && !m_drag_active && !m_popup_visible.empty()) {
-            click_outside_popup = true;
-			int cnt=0;
-            for (const auto& popup : m_popup_visible) {
-				printf("Check popup %d - %s\n", cnt++, popup->id().c_str() );
-                if (popup->contains(m_mouse_pos)) {
-                    click_outside_popup = false;
-                    break;
-                }
-            }
-        }
-
-        // Handle popup closure if clicking outside
-        if (click_outside_popup) {
-			printf("clicke_outsize_popup\n");
-            // Defer popup closure to avoid modifying widget hierarchy during event handling
-            async([this] {
-				printf("Close all popups...count=%ld\n", m_popup_visible.size());
-                // Create a copy of m_popup_visible to avoid iterator invalidation
-                //std::list<Widget*> popups_to_close = m_popup_visible;
-				//std::list< PopupButton*> popups_to_close = m_popup_visible;
-				int cnt=0;
-                for (auto popup : m_popup_visible) {
-					printf("Got popup %d - %s\n", cnt++, popup->id().c_str() );
-
-                    if (PopupMenu* popup_menu = dynamic_cast<PopupMenu*>(popup)) {
-						printf("It's a PopupMenu\n");
-                        // Update parent Dropdown or MenuBar
-                        if (Dropdown* dropdown = dynamic_cast<Dropdown*>(popup_menu->parent())) {
-                            dropdown->set_pushed(false); // Updates m_popup_visible via PopupButton
-                        }
-                        popup_menu->set_visible(false);
-                        popup_menu->set_highlighted_index(-1);
-                        popup_menu->set_selected_index(-1);
-                    } else if (PopupButton* popup_button = dynamic_cast<PopupButton*>(popup)) {
-						printf("It's a PopupButton\n");
-						popup_button->set_pushed(false); // Updates m_popup_visible
-                    } else {
-						printf("It's something else...\n");
-					}
-                }
-                m_redraw = true;
-				printf("DONE Close all popups...\n");
-            });
-        }
-
-        if (!m_drag_active && action == GLFW_PRESS && btn12) {
-            m_drag_widget = find_widget(m_mouse_pos);
-            if (m_drag_widget == this)
-                m_drag_widget = nullptr;
-            m_drag_active = m_drag_widget != nullptr;
-            if (!m_drag_active)
-                update_focus(nullptr);
-        } else if (m_drag_active && action == GLFW_RELEASE && btn12) {
-            m_drag_active = false;
-            m_drag_widget = nullptr;
-        }
-        m_redraw |= mouse_button_event(m_mouse_pos, button, action == GLFW_PRESS, m_modifiers);
-        if ((!m_redraw || m_close_popups) && m_popup_visible.size() != 0) {
-            int Size = m_popup_visible.size();
-            for (int Cnt = 0; Cnt < Size; Cnt++) {
-                m_popup_visible.pop_front();
-            }
-            m_redraw = true;
-            m_close_popups = false;
-        }
-    } catch (const std::exception& e) {
-        std::cerr << "Screen::mouse_button_callback_event: Caught exception in event handler: " << e.what() << std::endl;
-    }
-}
-*/
 
 void Screen::key_callback_event(int key, int scancode, int action, int mods) {
     m_last_interaction = glfwGetTime();

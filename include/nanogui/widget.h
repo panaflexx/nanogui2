@@ -34,6 +34,73 @@ enum class SizeMode {
 };
 
 /**
+ * \brief Memoizes the result of a text measurement in \ref
+ * Widget::preferred_size.
+ *
+ * ``nvgTextBounds()`` shapes the string through FreeType on every call, while
+ * layouts query ``preferred_size()`` several times per child per pass and
+ * recurse over the whole subtree — so an unmemoized measurement lands
+ * directly in frame time.
+ *
+ * The cache is keyed on every input that can change the result, so it
+ * *self-invalidates* rather than relying on each setter to remember to poke a
+ * dirty flag (which is how stale-size bugs get introduced). Note that the
+ * theme is identified by pointer **and** \ref Theme::generation(), because
+ * \ref Screen::set_theme_mode mutates the Theme in place.
+ *
+ * \code
+ *     Vector2i Foo::preferred_size(NVGcontext *ctx) const {
+ *         TextSizeCache::Key k{m_caption, font_size, m_icon,
+ *                              m_theme.get(), m_theme->generation()};
+ *         if (m_size_cache.hit(k)) return m_size_cache.size;
+ *         Vector2i s = ...expensive measurement...;
+ *         return m_size_cache.store(k, s);
+ *     }
+ * \endcode
+ */
+struct TextSizeCache {
+    struct Key {
+        /// Every string that feeds the measurement, joined (use '\x1f' between
+        /// parts so e.g. caption "a"+shortcut "b" cannot collide with "ab").
+        std::string  text;
+        int          font_size = -1;
+        /// Icon codepoint or image handle, whichever the widget draws.
+        int          icon      = 0;
+        const void  *theme     = nullptr;
+        uint32_t     theme_gen = 0;
+        /// Widget-specific bits that change the result (e.g. TextBox spinner).
+        int          flags     = 0;
+        /// A size constraint that feeds the result (min_size, wrap width, ...).
+        Vector2i     constraint{0, 0};
+
+        bool operator==(const Key &o) const {
+            return font_size == o.font_size && icon == o.icon &&
+                   theme == o.theme && theme_gen == o.theme_gen &&
+                   flags == o.flags && constraint == o.constraint &&
+                   text == o.text;
+        }
+    };
+
+    Vector2i size{0, 0};
+
+    /// True if `k` matches the cached inputs; `size` then holds the result.
+    bool hit(const Key &k) const { return m_valid && m_key == k; }
+
+    /// Record `s` for `k` and return it (so callers can `return store(...)`).
+    const Vector2i &store(const Key &k, const Vector2i &s) {
+        m_key = k; size = s; m_valid = true;
+        return size;
+    }
+
+    /// Drop the cached value (rarely needed; the key normally suffices).
+    void invalidate() { m_valid = false; }
+
+private:
+    Key  m_key;
+    bool m_valid = false;
+};
+
+/**
  * \class Widget widget.h nanogui/widget.h
  *
  * \brief Base class of all widgets.

@@ -144,6 +144,9 @@ NAMESPACE_BEGIN(nanogui)
         /// Whether or not this Button is currently pushed.
         bool m_pushed;
 
+        /// Memoized preferred_size() text measurement (see TextSizeCache).
+        mutable TextSizeCache m_size_cache;
+
         /// The current flags of this button (see \ref nanogui::Button::Flags for options).
         int m_flags;
 
