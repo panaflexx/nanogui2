@@ -314,8 +314,8 @@ public:
     void center_window(Window* window);
     void move_window_to_front(Window* window);
     void draw_widgets();
-    void set_popup_visible(PopupButton* iButton) { m_popup_visible.push_back(iButton); }
-    void remove_popup_visible(PopupButton* iButton) { m_close_popups = true; m_popup_visible.remove(iButton); }
+    void set_popup_visible(Popup* popup) { m_popup_visible.push_back(popup); }
+    void remove_popup_visible(Popup* popup) { m_close_popups = true; m_popup_visible.remove(popup); }
     std::vector<Widget*> m_focus_path;
     bool m_close_popups = false;
     double m_last_interaction;
@@ -326,7 +326,7 @@ protected:
     GLFWwindow* m_glfw_window = nullptr;
     NVGcontext* m_nvg_context = nullptr;
     GLFWcursor* m_cursors[(size_t)Cursor::CursorCount];
-    std::list< PopupButton*> m_popup_visible;
+    std::list<Popup*> m_popup_visible;
     Cursor m_cursor;
     Vector2i m_fbsize;
     float m_pixel_ratio;

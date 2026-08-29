@@ -505,9 +505,13 @@ public:
 	virtual void draw_table(NVGcontext *ctx, const Widget *widget) override;
 
 protected:
-    // Compute the maximum row and column sizes
+    // Compute the maximum row and column sizes. If min_grid is non-null,
+    // also fills it in with the hard floor (based on each widget's
+    // min_size(), ignoring preferred_size()) that a cell may never be
+    // shrunk below without violating a contained widget's own minimum.
     void compute_layout(NVGcontext *ctx, const Widget *widget,
-                        std::vector<int> *grid) const;
+                        std::vector<int> *grid,
+                        std::vector<int> *min_grid = nullptr) const;
 
 protected:
     /// The columns of this AdvancedGridLayout.

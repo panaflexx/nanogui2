@@ -44,11 +44,13 @@ NAMESPACE_BEGIN(nanogui)
         virtual void set_pushed(bool pushed)override
         {
             m_pushed = pushed;
-            // Add popup windows to screen
+            // Track the popup panel itself (not this button) with the
+            // screen, so outside-click detection can check the panel's own
+            // (screen-absolute) bounds rather than this button's.
             if(pushed) {
-                this->screen()->set_popup_visible(this);
+                this->screen()->set_popup_visible(m_popup);
 			} else {
-                this->screen()->remove_popup_visible(this);
+                this->screen()->remove_popup_visible(m_popup);
 			}
         }
 

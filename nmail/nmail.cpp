@@ -3383,12 +3383,26 @@ public:
         const MailMessage orig = m_current_message;   // copy: stays stable
 
         Window *win = new Window(this, "Reply", true);
-        win->set_layout(new BoxLayout(Orientation::Vertical, Alignment::Fill,
-                                      12, 10));
+        /* A single-column AdvancedGridLayout instead of a Vertical BoxLayout:
+         * BoxLayout never grows children past their preferred size on the
+         * main axis, so the message body would stay a fixed height no
+         * matter how tall the window got. Row 4 (the body) is the only row
+         * with stretch, so it alone absorbs extra height on resize. */
+        auto *win_layout = new AdvancedGridLayout({0}, {0, 10, 0, 10, 0, 10, 0}, 12);
+        win_layout->set_col_stretch(0, 1.0f);
+        win_layout->set_row_stretch(4, 1.0f);
+        win->set_layout(win_layout);
+        /* Width only: a floor smaller than the layout's own natural size is
+         * safe (there's a single column, so any slack just goes to it).
+         * Deliberately no set_min_height() — the fixed chrome rows (form,
+         * toolbar, buttons) can't shrink below their natural size, and the
+         * body row is already floored at its own min_height(300), so the
+         * layout's natural/intrinsic height *is* the right minimum; forcing
+         * a smaller one would just make something else get clipped. */
         win->set_min_width(760);
-        win->set_min_height(460);
 
         Widget *form = new Widget(win);
+        win_layout->set_anchor(form, AdvancedGridLayout::Anchor(0, 0));
         /* Advanced grid so the entry column (stretch=1) absorbs all extra
          * width when the window is resized, while the label column stays
          * pinned to its natural width, flush left. */
@@ -3422,6 +3436,7 @@ public:
         Widget *fmt = new Widget(win);
         fmt->set_layout(new BoxLayout(Orientation::Horizontal,
                                       Alignment::Middle, 0, 4));
+        win_layout->set_anchor(fmt, AdvancedGridLayout::Anchor(0, 2));
 
         TextEditor *body = new TextEditor(win, TextEditor::Mode::RichText);
         body->set_read_only(false);
@@ -3433,6 +3448,7 @@ public:
         body->set_default_style(bs);
         body->set_min_height(300);
         body->set_padding(10);
+        win_layout->set_anchor(body, AdvancedGridLayout::Anchor(0, 4));
 
         auto make_fmt = [&](int icon, TextEditor::StyleFlag f,
                             const std::string &tip) {
@@ -3526,6 +3542,7 @@ public:
         auto *buttons_layout = new AdvancedGridLayout({0, 0, 0}, {0}, 0);
         buttons_layout->set_col_stretch(1, 1.0f);
         buttons->set_layout(buttons_layout);
+        win_layout->set_anchor(buttons, AdvancedGridLayout::Anchor(0, 6));
 
         Widget *fmt_group = new Widget(buttons);
         fmt_group->set_layout(new BoxLayout(Orientation::Horizontal,

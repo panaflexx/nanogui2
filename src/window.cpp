@@ -411,6 +411,15 @@ void Window::perform_layout(NVGcontext* ctx) {
         content_min.x() = std::max(40, content_min.x());
         content_min.y() = std::max(40, content_min.y());
     }
+
+    // Window redeclares its own m_min_size (see window.h), shadowing the
+    // Widget::m_min_size that set_min_width()/set_min_height() write to —
+    // so an explicit caller-chosen floor would otherwise be silently
+    // discarded in favor of the content-derived one below. Let it win.
+    Vector2i explicit_min = Widget::min_size();
+    if (explicit_min.x() > 0) content_min.x() = explicit_min.x();
+    if (explicit_min.y() > 0) content_min.y() = explicit_min.y();
+
     m_min_size = content_min;
 
     // Scrollable content can shrink further; only enforce a small floor.
@@ -420,6 +429,25 @@ void Window::perform_layout(NVGcontext* ctx) {
                 m_min_size.y() = 40;
             if (sp->HScrollable())
                 m_min_size.x() = 40;
+        }
+    }
+
+    // If the window's current size (e.g. just set from preferred_size() by
+    // Screen::center_window(), which can legitimately come out smaller than
+    // an explicit set_min_width()/set_min_height() floor) sits below the
+    // floor just computed above, snap it up now and re-run the child layout
+    // for the corrected size. Otherwise the window sits inconsistent with
+    // its own minimum until the user's first resize drag — which clamps to
+    // m_min_size too, but without redoing the child layout — producing a
+    // sudden, unexplained jump in size on the very first touch.
+    if (m_resizable) {
+        Vector2i corrected = m_size;
+        if (m_min_size.x() > 0) corrected.x() = std::max(corrected.x(), m_min_size.x());
+        if (m_min_size.y() > 0) corrected.y() = std::max(corrected.y(), m_min_size.y());
+        if (corrected != m_size) {
+            m_size = corrected;
+            if (m_layout)
+                m_layout->perform_layout(ctx, this);
         }
     }
 }

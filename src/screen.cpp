@@ -1381,6 +1381,49 @@ void Screen::mouse_button_callback_event(int button, int action, int modifiers) 
 
         bool btn12 = button == GLFW_MOUSE_BUTTON_1 || button == GLFW_MOUSE_BUTTON_2;
 
+        // Dismiss any open Dropdown/PopupButton popup when clicking outside
+        // both the popup panel and the button that opened it. Clicks on the
+        // button itself are left to its own click handler (which toggles it
+        // closed), and clicks inside the panel are left to the popup's own
+        // widgets — only genuinely-outside clicks land here.
+        //
+        // Scan children() directly rather than the m_popup_visible
+        // bookkeeping list: Popup/PopupMenu are always added as direct
+        // Screen children (see Widget::Widget()), so this reliably finds
+        // every open popup regardless of whether whatever opened it
+        // remembered to register/unregister correctly.
+        if (action == GLFW_PRESS && btn12) {
+            std::vector<Popup*> to_close;
+            for (Widget* child : children()) {
+                Popup* popup = dynamic_cast<Popup*>(child);
+                if (!popup || !popup->visible() || popup->contains(m_mouse_pos))
+                    continue;
+                Widget* owner = popup->parent_button();
+                if (!owner) {
+                    if (auto* pm = dynamic_cast<PopupMenu*>(popup))
+                        owner = pm->parent_item();
+                }
+                if (owner && owner->visible() && owner->parent() &&
+                    owner->contains(m_mouse_pos - owner->parent()->absolute_position()))
+                    continue;
+                to_close.push_back(popup);
+            }
+            for (Popup* popup : to_close) {
+                if (auto* pm = dynamic_cast<PopupMenu*>(popup)) {
+                    if (auto* dd = dynamic_cast<Dropdown*>(pm->parent_item()))
+                        dd->set_pushed(false);
+                    else
+                        popup->set_visible(false);
+                } else if (auto* pb = popup->parent_button()) {
+                    pb->set_pushed(false);
+                } else {
+                    popup->set_visible(false);
+                }
+            }
+            if (!to_close.empty())
+                m_redraw = true;
+        }
+
         if (!m_drag_active && action == GLFW_PRESS && btn12) {
             m_drag_widget = find_widget(m_mouse_pos);
             if (m_drag_widget == this)

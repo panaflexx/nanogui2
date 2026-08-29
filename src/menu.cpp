@@ -857,6 +857,25 @@ bool Dropdown::mouse_button_event(const Vector2i &p, int button, bool down, int 
     return ret;
 }
 
+void Dropdown::set_pushed(bool pushed)
+{
+    m_pushed = pushed;
+    // Track the popup panel with the screen (mirrors PopupButton) so
+    // clicking outside it — anywhere other than the panel itself or this
+    // button — can find and dismiss it. Also make set_pushed() itself
+    // authoritative for visibility: callers elsewhere (e.g. an outside
+    // click, or PopupMenu closing itself after an item is selected) only
+    // toggle m_pushed via this setter and rely on it to actually hide the
+    // popup, rather than duplicating that logic at every call site.
+    if (pushed) {
+        screen()->set_popup_visible(m_popup);
+    } else {
+        screen()->remove_popup_visible(m_popup);
+        m_popup->set_visible(false);
+        m_popup->set_highlighted_index(-1);
+    }
+}
+
 bool Dropdown::keyboard_event(int key, int scancode, int action, int modifiers) {
     // Only act on key press, not key release
     if (!m_enabled || action != GLFW_PRESS)

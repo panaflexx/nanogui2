@@ -772,7 +772,74 @@ void AdvancedGridLayout::perform_layout(NVGcontext* ctx, Widget* widget) const {
     if (container_size == Vector2i(0, 0)) container_size = default_container;
 
     std::vector<int> grid[2];
-    compute_layout(ctx, widget, grid);
+    std::vector<int> min_grid[2];
+    compute_layout(ctx, widget, grid, min_grid);
+
+    // Redistribute any slack between the natural (intrinsic) grid size and
+    // the widget's *actual* on-screen size among the stretchy cells. This
+    // must happen here, using the real widget size already assigned by the
+    // parent layout — not inside compute_layout(), which is also used by
+    // preferred_size() and must stay purely intrinsic (otherwise a resizable
+    // top-level window's preferred size would depend on whatever size it
+    // currently happens to be, inflating/collapsing it on every pass).
+    {
+        Vector2i extra(2 * m_margin);
+        const Window* hdr_window = dynamic_cast<const Window*>(widget);
+        if (hdr_window && !hdr_window->title().empty())
+            extra[1] += widget->theme()->m_window_header_height - m_margin / 2;
+        Vector2i avail = container_size - extra;
+
+        for (int axis = 0; axis < 2; ++axis) {
+            std::vector<int>& g = grid[axis];
+            const std::vector<int>& g_min = min_grid[axis];
+            const std::vector<float>& stretch = axis == 0 ? m_col_stretch : m_row_stretch;
+
+            int current_size = std::accumulate(g.begin(), g.end(), 0);
+            float total_stretch = std::accumulate(stretch.begin(), stretch.end(), 0.0f);
+            if (current_size < avail[axis] && total_stretch > 0) {
+                // Window grew: give the extra space to the stretchy cells.
+                float amt = (avail[axis] - current_size) / total_stretch;
+                for (size_t i = 0; i < g.size(); ++i)
+                    g[i] += (int)std::round(amt * stretch[i]);
+            } else if (current_size > avail[axis]) {
+                // Window shrank below the natural content size: shrink the
+                // stretchy cells first, but never below the hard floor a
+                // contained widget's own min_size() demands (otherwise the
+                // widget refuses to shrink that far while its row/column
+                // does, and later widgets get positioned on top of it).
+                // If still too big after that, shrink every remaining cell
+                // proportionally, respecting the same floor; anything left
+                // over is genuine overflow that gets clipped, not collapsed.
+                int deficit = current_size - avail[axis];
+                if (total_stretch > 0) {
+                    for (size_t i = 0; i < g.size() && deficit > 0; ++i) {
+                        if (stretch[i] <= 0) continue;
+                        int slack = g[i] - g_min[i];
+                        if (slack <= 0) continue;
+                        int amt = std::min(slack,
+                            (int)std::round(deficit * (stretch[i] / total_stretch)));
+                        g[i] -= amt;
+                        deficit -= amt;
+                    }
+                }
+                if (deficit > 0) {
+                    int total_slack = 0;
+                    for (size_t i = 0; i < g.size(); ++i)
+                        total_slack += std::max(0, g[i] - g_min[i]);
+                    if (total_slack > 0) {
+                        for (size_t i = 0; i < g.size() && deficit > 0; ++i) {
+                            int slack = g[i] - g_min[i];
+                            if (slack <= 0) continue;
+                            int amt = std::min(slack, (int)std::round(
+                                deficit * ((float)slack / total_slack)));
+                            g[i] -= amt;
+                            deficit -= amt;
+                        }
+                    }
+                }
+            }
+        }
+    }
 
     grid[0].insert(grid[0].begin(), m_margin);
     const Window* window = dynamic_cast<const Window*>(widget);
@@ -795,14 +862,30 @@ void AdvancedGridLayout::perform_layout(NVGcontext* ctx, Widget* widget) const {
             int ps = w->preferred_size(ctx)[axis];
             int min_s = w->min_size()[axis];
             int max_s = w->max_size()[axis];
-            int target_size = ps;
-            if (max_s == 0) max_s = cell_size;
-            target_size = std::max(min_s, std::min(target_size, max_s));
-            target_size = std::min(target_size, cell_size);
+            int axis_max = max_s > 0 ? max_s : cell_size;
+            int target_size;
+            int offset = 0;
+            switch (anchor.align[axis]) {
+                case Alignment::Fill:
+                    target_size = std::max(min_s, std::min(cell_size, axis_max));
+                    break;
+                case Alignment::Middle:
+                    target_size = std::max(min_s, std::min(std::min(ps, axis_max), cell_size));
+                    offset = (cell_size - target_size) / 2;
+                    break;
+                case Alignment::Maximum:
+                    target_size = std::max(min_s, std::min(std::min(ps, axis_max), cell_size));
+                    offset = cell_size - target_size;
+                    break;
+                case Alignment::Minimum:
+                default:
+                    target_size = std::max(min_s, std::min(std::min(ps, axis_max), cell_size));
+                    break;
+            }
 
             Vector2i pos = w->position();
             Vector2i size = w->size();
-            pos[axis] = item_pos;
+            pos[axis] = item_pos + offset;
             size[axis] = target_size;
             w->set_position(pos);
             w->set_size(size);
@@ -811,7 +894,8 @@ void AdvancedGridLayout::perform_layout(NVGcontext* ctx, Widget* widget) const {
     }
 }
 
-void AdvancedGridLayout::compute_layout(NVGcontext* ctx, const Widget* widget, std::vector<int>* _grid) const {
+void AdvancedGridLayout::compute_layout(NVGcontext* ctx, const Widget* widget, std::vector<int>* _grid,
+                                        std::vector<int>* _min_grid) const {
     Vector2i default_container = widget->parent() && widget->parent()->size() != Vector2i(0, 0)
         ? widget->parent()->size() : Vector2i(1000, 1000);
     Vector2i container_size = widget->size();
@@ -829,6 +913,8 @@ void AdvancedGridLayout::compute_layout(NVGcontext* ctx, const Widget* widget, s
         const std::vector<int>& sizes = axis == 0 ? m_cols : m_rows;
         const std::vector<float>& stretch = axis == 0 ? m_col_stretch : m_row_stretch;
         grid = sizes;
+        std::vector<int>* min_grid = _min_grid ? &_min_grid[axis] : nullptr;
+        if (min_grid) *min_grid = sizes;
 
         for (int phase = 0; phase < 2; ++phase) {
             for (auto pair : m_anchor) {
@@ -871,8 +957,16 @@ void AdvancedGridLayout::compute_layout(NVGcontext* ctx, const Widget* widget, s
                 float total_stretch = 0;
                 for (int i = anchor.pos[axis];
                     i < anchor.pos[axis] + anchor.size[axis]; ++i) {
-                    if (sizes[i] == 0 && anchor.size[axis] == 1)
+                    if (sizes[i] == 0 && anchor.size[axis] == 1) {
                         grid[i] = std::max(grid[i], target_size);
+                        // A widget with no explicit min_size() is assumed
+                        // unshrinkable — its floor is its own natural size,
+                        // not zero — so e.g. a fixed toolbar/button row never
+                        // gets squished away to make room for a flexible
+                        // sibling (like the message body) to shrink.
+                        if (min_grid) (*min_grid)[i] = std::max((*min_grid)[i],
+                            min_s > 0 ? min_s : target_size);
+                    }
                     current_size += grid[i];
                     total_stretch += stretch[i];
                 }
@@ -889,13 +983,6 @@ void AdvancedGridLayout::compute_layout(NVGcontext* ctx, const Widget* widget, s
             }
         }
 
-        int current_size = std::accumulate(grid.begin(), grid.end(), 0);
-        float total_stretch = std::accumulate(stretch.begin(), stretch.end(), 0.0f);
-        if (current_size < container_size[axis] && total_stretch > 0) {
-            float amt = (container_size[axis] - current_size) / total_stretch;
-            for (size_t i = 0; i < grid.size(); ++i)
-                grid[i] += (int)std::round(amt * stretch[i]);
-        }
     }
 }
 
