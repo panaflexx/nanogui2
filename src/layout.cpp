@@ -1226,7 +1226,7 @@ Vector2i FlexLayout::preferred_size(NVGcontext *ctx, const Widget *widget) const
         // ratchet where children stay shrunk after the container grows back. Preferred = intrinsic.
         Vector2i clamped_pref = max(child_pref, min_s);
 
-        FlexItem flex_item = get_flex_item(child);
+        FlexItem flex_item = resolved_item(child);
 
         int main_size = flex_item.flex_basis >= 0 ? flex_item.flex_basis : clamped_pref[main_axis_idx];
         main_size = std::max(eff_main_min, std::min(main_size, max_s[main_axis_idx] > 0 ? max_s[main_axis_idx] : main_size));
@@ -1303,7 +1303,7 @@ void FlexLayout::perform_layout(NVGcontext *ctx, Widget *widget) const {
         Vector2i min_s = child->layout_min_size();
         Vector2i max_s = child->max_size();
 
-        FlexItem flex_item = get_flex_item(child);
+        FlexItem flex_item = resolved_item(child);
 
         // Flexible items (grow > 0 or explicit flex-basis) use only the user min as
         // floor — like CSS `min-height: 0` on flex children. Using preferred as a
@@ -1334,7 +1334,7 @@ void FlexLayout::perform_layout(NVGcontext *ctx, Widget *widget) const {
 
     for (size_t i = 0; i < visible_children.size(); ++i) {
         Widget *child = visible_children[i];
-        FlexItem flex_item = get_flex_item(child);
+        FlexItem flex_item = resolved_item(child);
         int final_size = base_sizes[i];
 
         if (remaining_space > 0 && total_flex_grow > 0) {
@@ -1438,7 +1438,7 @@ void FlexLayout::perform_layout(NVGcontext *ctx, Widget *widget) const {
         Widget *child = visible_children[i];
         Vector2i child_pos = child->position();
         Vector2i child_size = child->size();
-        FlexItem flex_item = get_flex_item(child);
+        FlexItem flex_item = resolved_item(child);
 
         child_pos[main_axis_idx] = positions[i];
         child_size[main_axis_idx] = final_sizes[i];

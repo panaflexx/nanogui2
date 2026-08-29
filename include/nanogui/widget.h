@@ -116,6 +116,32 @@ public:
     /// Construct a new widget with the given parent widget
     Widget(Widget* parent);
 
+    /**
+     * \brief Construct a widget and install its layout in one step.
+     *
+     * Equivalent to the two-line
+     * \code
+     *     Widget *w = new Widget(parent);
+     *     w->set_layout(new FlexLayout(...));
+     * \endcode
+     * which is by far the most common way a container is built (see
+     * examples/flexsample.cpp, where it appears dozens of times). \ref
+     * RootWindow has offered the same convenience for a while; this brings it
+     * to plain containers:
+     * \code
+     *     Widget *row = new Widget(parent, new FlexLayout(FlexDirection::Row));
+     * \endcode
+     *
+     * \param layout Layout to install; may be \c nullptr for no layout.
+     *
+     * \remark This calls \ref set_layout non-virtually (it runs during
+     * construction), which is what subclasses overriding \c set_layout — e.g.
+     * \ref Popup, which also disables draw caching — must be aware of: such
+     * subclasses should keep using their own constructor plus an explicit
+     * \c set_layout call rather than inheriting this one.
+     */
+    Widget(Widget* parent, Layout* layout);
+
     /// Return the parent widget
     Widget* parent() { return m_parent; }
     /// Return the parent widget

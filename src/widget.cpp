@@ -57,6 +57,13 @@ Widget::Widget(Widget* parent)
     }
 }
 
+Widget::Widget(Widget* parent, Layout* layout)
+    : Widget(parent) {
+    // Non-virtual on purpose: we are still inside construction, so a
+    // subclass override would not be reached anyway (see the header note).
+    Widget::set_layout(layout);
+}
+
 Widget::~Widget() {
     if (m_id.length())
         NANOGUI_TRACE("~Widget id=%s debugname=%s",
