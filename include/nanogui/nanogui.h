@@ -26,6 +26,7 @@
 #include <nanogui/popupbutton.h>
 #include <nanogui/combobox.h>
 #include <nanogui/progressbar.h>
+#include <nanogui/spinner.h>
 #include <nanogui/icons.h>
 #include <nanogui/messagedialog.h>
 #include <nanogui/folderdialog.h>

@@ -3414,8 +3414,9 @@ public:
          * BoxLayout never grows children past their preferred size on the
          * main axis, so the message body would stay a fixed height no
          * matter how tall the window got. Row 4 (the body) is the only row
-         * with stretch, so it alone absorbs extra height on resize. */
-        auto *win_layout = new AdvancedGridLayout({0}, {0, 10, 0, 10, 0, 10, 0}, 12);
+         * with stretch, so it alone absorbs extra height on resize.  Row 6
+         * is the send-status row (hidden until a send starts). */
+        auto *win_layout = new AdvancedGridLayout({0}, {0, 10, 0, 10, 0, 8, 0, 8, 0}, 12);
         win_layout->set_col_stretch(0, 1.0f);
         win_layout->set_row_stretch(4, 1.0f);
         win->set_layout(win_layout);
@@ -3478,6 +3479,24 @@ public:
         body->set_min_height(300);
         body->set_padding(10);
         win_layout->set_anchor(body, AdvancedGridLayout::Anchor(0, 4));
+
+        /* Busy overlay shown over the body while a send is in flight:
+         * same grid cell as the body, added after it so it draws on top
+         * and gets input events first (children are hit-tested in reverse
+         * order).  Hidden until Spinner::start(). */
+        Spinner *spinner = new Spinner(win, "Sending...");
+        win_layout->set_anchor(spinner, AdvancedGridLayout::Anchor(0, 4));
+
+        /* Send-status row: label + indeterminate bar, hidden until needed. */
+        Widget *status_row = new Widget(win);
+        status_row->set_layout(new BoxLayout(Orientation::Horizontal,
+                                             Alignment::Middle, 0, 8));
+        win_layout->set_anchor(status_row,
+                               AdvancedGridLayout::Anchor(0, 6));
+        new Label(status_row, "Sending...", "sans", 14);
+        IndeterminateBar *send_bar = new IndeterminateBar(status_row);
+        send_bar->set_fixed_size(Vector2i(140, 10));
+        status_row->set_visible(false);
 
         auto make_fmt = [&](int icon, TextEditor::StyleFlag f,
                             const std::string &tip) {
@@ -3575,7 +3594,7 @@ public:
         auto *buttons_layout = new AdvancedGridLayout({0, 0, 0}, {0}, 0);
         buttons_layout->set_col_stretch(1, 1.0f);
         buttons->set_layout(buttons_layout);
-        win_layout->set_anchor(buttons, AdvancedGridLayout::Anchor(0, 6));
+        win_layout->set_anchor(buttons, AdvancedGridLayout::Anchor(0, 8));
 
         Widget *fmt_group = new Widget(buttons);
         fmt_group->set_layout(new BoxLayout(Orientation::Horizontal,
@@ -3608,8 +3627,8 @@ public:
             AdvancedGridLayout::Anchor(2, 0, Alignment::Maximum, Alignment::Middle));
 
         Button *send = new Button(action_group, "Send", FA_PAPER_PLANE);
-        send->set_callback([this, win, send, to, subj, body, fmt_box,
-                           irt = reply ? orig.message_id : ""]() {
+        send->set_callback([this, win, send, to, subj, body, fmt_box, spinner,
+                           status_row, irt = reply ? orig.message_id : ""]() {
             std::string to_s  = to->value();
             std::string sub_s = subj->value();
             if (to_s.empty()) {
@@ -3620,6 +3639,13 @@ public:
                 return;
             }
             send->set_enabled(false);
+            /* Lock the composer and show busy feedback while SMTP runs. */
+            to->set_editable(false);
+            subj->set_editable(false);
+            body->set_read_only(true);
+            status_row->set_visible(true);
+            perform_layout();
+            spinner->start();
             int fmt = fmt_box->selected_index();
             if (fmt < 0) fmt = 1;   // default to Markdown
             MailFormat format = fmt == 0 ? MailFormat::Plain
@@ -3628,7 +3654,8 @@ public:
             std::string text = fmt == 0 ? body->plain_text()
                              : fmt == 2 ? document_to_html(*body->document())
                                         : document_to_markdown(*body->document());
-            send_reply(win, send, to_s, sub_s, text, irt, format);
+            send_reply(win, send, spinner, status_row, to, subj, body,
+                       to_s, sub_s, text, irt, format);
         });
 
         Button *cancel = new Button(action_group, "Cancel", FA_TIMES);
@@ -3640,7 +3667,9 @@ public:
 
     /* Send on a one-shot thread (SMTP is a separate connection from the
      * IMAP worker); the result is marshalled back with nanogui::async. */
-    void send_reply(Window *win, Button *send_btn,
+    void send_reply(Window *win, Button *send_btn, Spinner *spinner,
+                    Widget *status_row, TextBox *to_box, TextBox *subj_box,
+                    TextEditor *editor,
                     const std::string &to, const std::string &subject,
                     const std::string &body, const std::string &irt,
                     MailFormat format) {
@@ -3653,20 +3682,29 @@ public:
         std::string from = m_config.username;
 
         set_status("Sending...");
-        std::thread([this, win, send_btn, sc, from, to, subject, body,
+        std::thread([this, win, send_btn, spinner, status_row, to_box,
+                     subj_box, editor, sc, from, to, subject, body,
                      irt, format]() {
             SmtpClient smtp;
             std::string err;
             bool ok = smtp.send(sc, from, to, subject, body, irt, format,
                                 err);
             nanogui::async(std::function<void()>(
-                [this, win, send_btn, ok, err]() {
+                [this, win, send_btn, spinner, status_row, to_box,
+                 subj_box, editor, ok, err]() {
                     if (ok) {
                         set_status("Sent");
                         win->dispose();
                     } else {
                         set_status("Send failed");
+                        /* Restore the composer so the user can retry. */
+                        spinner->stop();
+                        status_row->set_visible(false);
                         send_btn->set_enabled(true);
+                        to_box->set_editable(true);
+                        subj_box->set_editable(true);
+                        editor->set_read_only(false);
+                        perform_layout();
                         auto *dlg = new MessageDialog(this,
                             MessageDialog::Type::Warning,
                             "Could not send message", err, "OK", "", false);
