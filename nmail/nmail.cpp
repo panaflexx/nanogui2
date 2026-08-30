@@ -2125,6 +2125,7 @@ public:
     Button       *m_images_btn  = nullptr;
     Button       *m_trash_btn   = nullptr;
     Button       *m_junk_btn    = nullptr;
+    Button       *m_restore_btn = nullptr;
 
     MailConfig  m_config;
     MailWorker  m_worker;
@@ -2269,12 +2270,27 @@ public:
             return s;
         };
         std::string curLow = lower(m_current_folder);
-        std::string trashDest = has_sel ? resolve_dest_folder("Trash") : "";
-        std::string junkDest  = has_sel ? resolve_dest_folder("Junk") : "";
-        bool trashSame = has_sel && lower(trashDest) == curLow;
-        bool junkSame  = has_sel && lower(junkDest) == curLow;
+        std::string trashDest = m_current_folder.empty() ? "" : resolve_dest_folder("Trash");
+        std::string junkDest  = m_current_folder.empty() ? "" : resolve_dest_folder("Junk");
+        bool trashSame = !trashDest.empty() && lower(trashDest) == curLow;
+        bool junkSame  = !junkDest.empty() && lower(junkDest) == curLow;
+        bool in_trash_or_junk = trashSame || junkSame;
         if (m_trash_btn) m_trash_btn->set_enabled(has_sel && !trashSame);
         if (m_junk_btn)  m_junk_btn->set_enabled(has_sel && !junkSame);
+        if (m_restore_btn) m_restore_btn->set_enabled(has_sel && in_trash_or_junk);
+        /* While viewing Trash/Junk, hide the trash/junk buttons and show
+         * a single "restore to Inbox" button instead. */
+        bool vis_changed = false;
+        if (m_trash_btn && m_trash_btn->visible() == in_trash_or_junk) {
+            m_trash_btn->set_visible(!in_trash_or_junk); vis_changed = true;
+        }
+        if (m_junk_btn && m_junk_btn->visible() == in_trash_or_junk) {
+            m_junk_btn->set_visible(!in_trash_or_junk); vis_changed = true;
+        }
+        if (m_restore_btn && m_restore_btn->visible() != in_trash_or_junk) {
+            m_restore_btn->set_visible(in_trash_or_junk); vis_changed = true;
+        }
+        if (vis_changed) perform_layout();
         // keep tooltips reflecting resolved destination
         if (m_trash_btn) m_trash_btn->set_tooltip(has_sel && !trashDest.empty()
             ? "Move to " + trashDest + " (Delete)" : "Move to Trash (Delete)");
@@ -2423,6 +2439,12 @@ public:
         m_junk_btn = make_button_tool(FA_BROOM, "Move to Junk / Spam");
         m_junk_btn->set_enabled(false);
         m_junk_btn->set_callback([this]() { move_selected_to("Junk"); });
+
+        /* Shown in place of trash/junk while viewing Trash or Junk. */
+        m_restore_btn = make_button_tool(FA_ARROW_UP, "Move back to Inbox");
+        m_restore_btn->set_enabled(false);
+        m_restore_btn->set_visible(false);
+        m_restore_btn->set_callback([this]() { move_selected_to("Inbox"); });
 
         Button *prefs_btn = make_button_tool(FA_COG, "Preferences");
         prefs_btn->set_callback([this]() { show_preferences(); });
