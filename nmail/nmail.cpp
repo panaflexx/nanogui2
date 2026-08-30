@@ -2119,6 +2119,7 @@ public:
     HtmlDocument *m_view        = nullptr;
     Label        *m_status      = nullptr;
     Button       *m_theme_btn   = nullptr;
+    Button       *m_compose_btn = nullptr;
     Button       *m_reply_btn   = nullptr;
     Button       *m_save_btn    = nullptr;
     Button       *m_images_btn  = nullptr;
@@ -2389,9 +2390,12 @@ public:
         Button *refresh_btn = make_button_tool(FA_SYNC, "Refresh");
         refresh_btn->set_callback([this]() { do_refresh(); });
 
+        m_compose_btn = make_button_tool(FA_PEN, "Compose a new message");
+        m_compose_btn->set_callback([this]() { show_compose(false); });
+
         m_reply_btn = make_button_tool(FA_REPLY, "Reply to this message");
         m_reply_btn->set_enabled(false);
-        m_reply_btn->set_callback([this]() { show_compose(); });
+        m_reply_btn->set_callback([this]() { show_compose(true); });
 
         m_save_btn = make_button_tool(FA_SAVE,
             "Save this email as HTML for nmail_view (Ctrl+S)");
@@ -3378,11 +3382,12 @@ public:
     }
 
     /* ---- Reply compose window ---- */
-    void show_compose() {
-        if (!m_has_message) return;
-        const MailMessage orig = m_current_message;   // copy: stays stable
+    /* reply=false: compose a fresh message (empty To/Subject, no quote). */
+    void show_compose(bool reply = true) {
+        if (reply && !m_has_message) return;
+        const MailMessage orig = reply ? m_current_message : MailMessage{};
 
-        Window *win = new Window(this, "Reply", true);
+        Window *win = new Window(this, reply ? "Reply" : "New Message", true);
         /* A single-column AdvancedGridLayout instead of a Vertical BoxLayout:
          * BoxLayout never grows children past their preferred size on the
          * main axis, so the message body would stay a fixed height no
@@ -3412,7 +3417,9 @@ public:
 
         Label *to_lbl = new Label(form, "To:", "sans-bold");
         TextBox *to = new TextBox(form);
-        to->set_value(orig.from_addr.empty() ? orig.from : orig.from_addr);
+        to->set_value(reply ? (orig.from_addr.empty() ? orig.from
+                                                        : orig.from_addr)
+                            : "");
         to->set_editable(true);
         form_layout->set_anchor(to_lbl,
             AdvancedGridLayout::Anchor(0, 0, Alignment::Minimum, Alignment::Middle));
@@ -3421,9 +3428,9 @@ public:
 
         Label *subj_lbl = new Label(form, "Subject:", "sans-bold");
         TextBox *subj = new TextBox(form);
-        std::string s = orig.subject;
-        if (s.size() < 3 || (s[0] != 'R' && s[0] != 'r') ||
-            (s[1] != 'e' && s[1] != 'E') || s[2] != ':')
+        std::string s = reply ? orig.subject : "";
+        if (reply && (s.size() < 3 || (s[0] != 'R' && s[0] != 'r') ||
+            (s[1] != 'e' && s[1] != 'E') || s[2] != ':'))
             s = "Re: " + s;
         subj->set_value(s);
         subj->set_editable(true);
@@ -3510,25 +3517,29 @@ public:
         };
         body->change_callback = refresh_fmt;
 
-        /* Prefill: empty paragraph for the reply, then the quoted original
-         * as indented paragraphs (serialized back to "> " lines). */
+        /* Prefill (reply only): empty paragraph for the reply, then the
+         * quoted original as indented paragraphs (serialized back to
+         * "> " lines). */
         {
             Document *doc = body->document().get();
             doc->paragraphs.clear();
             doc->addParagraph();   // reply goes here
-            doc->addParagraph();   // spacer
 
-            Style meta_s = bs; meta_s.fgColor = meta_color();
-            doc->addParagraph("On " + orig.date + ", " + orig.from +
-                              " wrote:", meta_s);
+            if (reply) {
+                doc->addParagraph();   // spacer
 
-            std::istringstream iss(orig.body);
-            std::string qline;
-            while (std::getline(iss, qline)) {
-                if (!qline.empty() && qline.back() == '\r') qline.pop_back();
-                if (qline.empty()) continue;
-                Paragraph *qp = doc->addParagraph(qline, bs);
-                qp->leftIndent = 16.0f;
+                Style meta_s = bs; meta_s.fgColor = meta_color();
+                doc->addParagraph("On " + orig.date + ", " + orig.from +
+                                  " wrote:", meta_s);
+
+                std::istringstream iss(orig.body);
+                std::string qline;
+                while (std::getline(iss, qline)) {
+                    if (!qline.empty() && qline.back() == '\r') qline.pop_back();
+                    if (qline.empty()) continue;
+                    Paragraph *qp = doc->addParagraph(qline, bs);
+                    qp->leftIndent = 16.0f;
+                }
             }
             doc->markLayoutDirty();
         }
@@ -3575,7 +3586,8 @@ public:
             AdvancedGridLayout::Anchor(2, 0, Alignment::Maximum, Alignment::Middle));
 
         Button *send = new Button(action_group, "Send", FA_PAPER_PLANE);
-        send->set_callback([this, win, send, to, subj, body, fmt_box]() {
+        send->set_callback([this, win, send, to, subj, body, fmt_box,
+                           irt = reply ? orig.message_id : ""]() {
             std::string to_s  = to->value();
             std::string sub_s = subj->value();
             if (to_s.empty()) {
@@ -3594,7 +3606,7 @@ public:
             std::string text = fmt == 0 ? body->plain_text()
                              : fmt == 2 ? document_to_html(*body->document())
                                         : document_to_markdown(*body->document());
-            send_reply(win, send, to_s, sub_s, text, format);
+            send_reply(win, send, to_s, sub_s, text, irt, format);
         });
 
         Button *cancel = new Button(action_group, "Cancel", FA_TIMES);
@@ -3608,7 +3620,8 @@ public:
      * IMAP worker); the result is marshalled back with nanogui::async. */
     void send_reply(Window *win, Button *send_btn,
                     const std::string &to, const std::string &subject,
-                    const std::string &body, MailFormat format) {
+                    const std::string &body, const std::string &irt,
+                    MailFormat format) {
         SmtpConfig sc;
         sc.host     = m_config.smtp_host.empty() ? m_config.host
                                                  : m_config.smtp_host;
@@ -3616,9 +3629,8 @@ public:
         sc.username = m_config.username;
         sc.password = m_config.password;
         std::string from = m_config.username;
-        std::string irt  = m_current_message.message_id;
 
-        set_status("Sending reply...");
+        set_status("Sending...");
         std::thread([this, win, send_btn, sc, from, to, subject, body,
                      irt, format]() {
             SmtpClient smtp;
@@ -3628,14 +3640,14 @@ public:
             nanogui::async(std::function<void()>(
                 [this, win, send_btn, ok, err]() {
                     if (ok) {
-                        set_status("Reply sent");
+                        set_status("Sent");
                         win->dispose();
                     } else {
                         set_status("Send failed");
                         send_btn->set_enabled(true);
                         auto *dlg = new MessageDialog(this,
                             MessageDialog::Type::Warning,
-                            "Could not send reply", err, "OK", "", false);
+                            "Could not send message", err, "OK", "", false);
                         dlg->center();
                     }
                 }));
