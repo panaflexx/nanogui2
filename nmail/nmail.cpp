@@ -24,6 +24,7 @@
 #include <nanogui/label.h>
 #include <nanogui/button.h>
 #include <nanogui/messagedialog.h>
+#include <nanogui/spinner.h>
 #include <GLFW/glfw3.h>
 #include <iostream>
 #include <fstream>

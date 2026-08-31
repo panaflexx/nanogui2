@@ -437,6 +437,7 @@ add_library(nanogui ${NANOGUI_LIBRARY_TYPE}
   include/nanogui/popupbutton.h src/popupbutton.cpp
   include/nanogui/combobox.h src/combobox.cpp
   include/nanogui/progressbar.h src/progressbar.cpp
+  include/nanogui/spinner.h src/spinner.cpp
   include/nanogui/slider.h src/slider.cpp
   include/nanogui/messagedialog.h src/messagedialog.cpp
   include/nanogui/folderdialog.h src/folderdialog.cpp
@@ -645,6 +646,12 @@ if (NANOGUI_BUILD_EXAMPLES)
       target_compile_definitions(htmldoc_test PRIVATE HAVE_OPENSSL)
       target_link_libraries(htmldoc_test OpenSSL::SSL OpenSSL::Crypto)
     endif()
+  endif()
+  if(EXISTS ${CMAKE_CURRENT_SOURCE_DIR}/nmail/sketch/spinner_test.cpp)
+    add_executable(spinner_test  nmail/sketch/spinner_test.cpp)
+    target_include_directories(spinner_test PRIVATE nmail/ ${CMAKE_CURRENT_SOURCE_DIR})
+    set_target_properties(spinner_test PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}/bin)
+    target_link_libraries(spinner_test  nanogui pthread ${NANOGUI_LIBS})
   endif()
   if(EXISTS ${CMAKE_CURRENT_SOURCE_DIR}/tst/gold_diff.cpp)
     add_executable(gold_diff tst/gold_diff.cpp)
