@@ -22,8 +22,9 @@ ShowInstDetails show
 SetCompressor /SOLID lzma
 
 !define MUI_ABORTWARNING
-!define MUI_ICON "${NSISDIR}\Contrib\Graphics\Icons\modern-install.ico"
-!define MUI_UNICON "${NSISDIR}\Contrib\Graphics\Icons\modern-uninstall.ico"
+; Paths are relative to this .nsi file.
+!define MUI_ICON "..\resources\nmail.ico"
+!define MUI_UNICON "..\resources\nmail.ico"
 
 !insertmacro MUI_PAGE_WELCOME
 !insertmacro MUI_PAGE_DIRECTORY
@@ -53,6 +54,7 @@ Section "nmail" SecApp
   WriteRegStr HKLM "Software\Microsoft\Windows\CurrentVersion\Uninstall\nmail" "UninstallString" "$INSTDIR\Uninstall.exe"
   WriteRegStr HKLM "Software\Microsoft\Windows\CurrentVersion\Uninstall\nmail" "DisplayVersion" "${NMAIL_VERSION}"
   WriteRegStr HKLM "Software\Microsoft\Windows\CurrentVersion\Uninstall\nmail" "Publisher" "panaflexx"
+  WriteRegStr HKLM "Software\Microsoft\Windows\CurrentVersion\Uninstall\nmail" "DisplayIcon" "$INSTDIR\nmail.exe,0"
   WriteUninstaller "$INSTDIR\Uninstall.exe"
 SectionEnd
 

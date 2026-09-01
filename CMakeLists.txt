@@ -739,6 +739,61 @@ if (NANOGUI_BUILD_EXAMPLES)
       ${CMAKE_CURRENT_SOURCE_DIR})
   target_link_libraries(nmail         nanogui ${NMAIL_SYS_LIBS} gumbo ${NANOGUI_LIBS})
   target_link_libraries(nmail_view    nanogui ${NMAIL_SYS_LIBS} gumbo ${NANOGUI_LIBS})
+
+  # Keep in step with the -DNMAIL_VERSION passed to makensis by build_win_pkg.ps1.
+  set(NMAIL_VERSION "0.1.0" CACHE STRING "nmail version (Info.plist, installer)")
+
+  # -------------------------------------------------------------------------
+  # nmail packaging: GUI subsystem on Windows, .app bundle on macOS, and the
+  # nmail logo as the application icon on all three.  nmail_view is a command
+  # line tool (--dump/--gold/--screenshot), so it keeps its console and stays
+  # an unbundled binary.
+  # -------------------------------------------------------------------------
+  if (WIN32)
+    # Without this the exe links /SUBSYSTEM:CONSOLE and Windows opens a console
+    # window behind the app.  /ENTRY keeps the portable int main(): MSVC's
+    # /SUBSYSTEM:WINDOWS otherwise demands a WinMain.
+    set_target_properties(nmail PROPERTIES WIN32_EXECUTABLE TRUE)
+    if (MSVC)
+      target_link_options(nmail PRIVATE "/ENTRY:mainCRTStartup")
+    endif()
+    target_sources(nmail PRIVATE resources/nmail.rc)
+  elseif (APPLE)
+    # A Dock/Finder icon requires a bundle; glfwSetWindowIcon is a no-op here.
+    set_target_properties(nmail PROPERTIES
+      MACOSX_BUNDLE TRUE
+      MACOSX_BUNDLE_INFO_PLIST "${CMAKE_CURRENT_SOURCE_DIR}/resources/nmail-Info.plist.in"
+      MACOSX_BUNDLE_BUNDLE_NAME "nmail"
+      MACOSX_BUNDLE_EXECUTABLE_NAME "nmail"
+      MACOSX_BUNDLE_GUI_IDENTIFIER "org.adamantine.nmail"
+      MACOSX_BUNDLE_ICON_FILE "nmail.icns"
+      MACOSX_BUNDLE_SHORT_VERSION_STRING "${NMAIL_VERSION}"
+      MACOSX_BUNDLE_BUNDLE_VERSION "${NMAIL_VERSION}")
+
+    # Contents/Resources/nmail.icns
+    target_sources(nmail PRIVATE resources/nmail.icns)
+    set_source_files_properties(resources/nmail.icns PROPERTIES
+      MACOSX_PACKAGE_LOCATION "Resources")
+
+    # theme.cpp loads "resources/NotoColorEmoji.ttf" relative to the working
+    # directory.  Ship the faces at Contents/Resources/resources/ so the chdir
+    # that nmail does at startup finds them when launched from Finder.
+    file(GLOB NMAIL_BUNDLE_FONTS "${CMAKE_CURRENT_SOURCE_DIR}/resources/*.ttf")
+    target_sources(nmail PRIVATE ${NMAIL_BUNDLE_FONTS})
+    set_source_files_properties(${NMAIL_BUNDLE_FONTS} PROPERTIES
+      MACOSX_PACKAGE_LOCATION "Resources/resources"
+      HEADER_FILE_ONLY TRUE)
+  else()
+    # Freedesktop launcher entry; Icon=nmail resolves through the hicolor theme.
+    install(TARGETS nmail RUNTIME DESTINATION bin)
+    install(FILES "${CMAKE_CURRENT_SOURCE_DIR}/resources/nmail.desktop"
+            DESTINATION share/applications)
+    foreach (_sz 16 24 32 48 64 128 256 512)
+      install(FILES "${CMAKE_CURRENT_SOURCE_DIR}/resources/icons/nmail-${_sz}.png"
+              DESTINATION "share/icons/hicolor/${_sz}x${_sz}/apps"
+              RENAME "nmail.png")
+    endforeach()
+  endif()
   # STARTTLS / imaps support in nmail_socket.c / nmail_socket_win.c
   if (WIN32 AND EXISTS "C:/Program Files/OpenSSL-Win64/lib/VC/x64/MD/libssl.lib")
     set(_NMAIL_SSL_LIB "C:/Program Files/OpenSSL-Win64/lib/VC/x64/MD/libssl.lib")

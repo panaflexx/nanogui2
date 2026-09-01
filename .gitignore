@@ -48,3 +48,7 @@ resources/nanogui-entypo
 compile_commands.json
 .clangd
 .cache/
+
+# nmail account config / password key (never commit these)
+amail.config
+amail.key

@@ -56,8 +56,26 @@
 #include "gumbo.h"
 #include <memory>
 #include <cstdlib>
+#include <cerrno>
 #ifdef _WIN32
 #include <direct.h>
+#define WIN32_LEAN_AND_MEAN
+#define NOMINMAX
+#include <windows.h>
+#else
+#include <sys/stat.h>
+#include <unistd.h>
+#endif
+#ifdef __APPLE__
+#include <mach-o/dyld.h>
+#include <libgen.h>
+#endif
+#include <stb_image.h>
+#include "nmail_icon.h"
+#ifdef HAVE_OPENSSL
+#include <openssl/evp.h>
+#include <openssl/rand.h>
+#include <openssl/crypto.h>
 #endif
 
 using namespace nanogui;
@@ -76,27 +94,180 @@ struct MailConfig {
     int         check_interval_min = 15;  // how often to auto-check for new mail
 };
 
+/* Writable per-user directory: %APPDATA%\nmail on Windows, ~/.amail elsewhere.
+   Program Files (or whatever the CWD happens to be) is not a place for prefs.
+   The directory holds amail.config and amail.key. */
+static const std::string &config_dir() {
+    static const std::string dir = []() -> std::string {
 #ifdef _WIN32
-/* Writable per-user file: Program Files is not a place to store prefs. */
+        const char *base = std::getenv("APPDATA");
+        if (base && base[0]) {
+            std::string d = std::string(base) + "\\nmail";
+            if (_mkdir(d.c_str()) == 0 || errno == EEXIST)
+                return d;
+        }
+#else
+        const char *base = std::getenv("HOME");
+        if (base && base[0]) {
+            std::string d = std::string(base) + "/.amail";
+            if (::mkdir(d.c_str(), 0700) == 0 || errno == EEXIST)
+                return d;
+        }
+#endif
+        /* No usable home: keep working out of the current directory. */
+        return std::string(".");
+    }();
+    return dir;
+}
+
+static std::string config_file(const char *name) {
+#ifdef _WIN32
+    return config_dir() + "\\" + name;
+#else
+    return config_dir() + "/" + name;
+#endif
+}
+
 static const std::string &config_path() {
-    static std::string path;
-    if (path.empty()) {
-        const char *appdata = std::getenv("APPDATA");
-        if (appdata && appdata[0]) {
-            std::string dir = std::string(appdata) + "\\nmail";
-            _mkdir(dir.c_str());
-            path = dir + "\\amail.config";
-        } else {
-            path = "amail.config";
+    static const std::string path = config_file("amail.config");
+    return path;
+}
+
+/* Pre-1.0 builds kept the config in the working directory. */
+static const char *legacy_config_path() { return "amail.config"; }
+
+// ---------------------------------------------------------------------------
+// Password storage.  The password has to be recoverable to log in, so this is
+// AES-256-GCM under a random key kept beside the config (amail.key, mode 0600)
+// rather than a passphrase.  It keeps the password out of the config file --
+// which gets copied into backups, sync folders and bug reports -- but it does
+// not defend against someone who can already read the user's home directory.
+// ---------------------------------------------------------------------------
+#ifdef HAVE_OPENSSL
+
+enum { kKeyBytes = 32, kIvBytes = 12, kTagBytes = 16 };
+
+/* 32 random bytes in amail.key, created on first use. */
+static bool config_key(unsigned char key[kKeyBytes]) {
+    const std::string path = config_file("amail.key");
+    {
+        std::ifstream in(path, std::ios::binary);
+        if (in) {
+            in.read((char *)key, kKeyBytes);
+            if (in.gcount() == kKeyBytes) return true;
         }
     }
-    return path;
+    if (RAND_bytes(key, kKeyBytes) != 1) return false;
+    std::ofstream out(path, std::ios::binary | std::ios::trunc);
+    if (!out) return false;
+    out.write((const char *)key, kKeyBytes);
+    out.close();
+    if (!out) return false;
+#ifndef _WIN32
+    ::chmod(path.c_str(), S_IRUSR | S_IWUSR);
+#endif
+    return true;
 }
-#else
-static const std::string &config_path() {
-    static const std::string path = "amail.config";
-    return path;
+
+static std::string b64_encode(const unsigned char *data, int len) {
+    std::string out((size_t)((len + 2) / 3) * 4 + 1, '\0');
+    int n = EVP_EncodeBlock((unsigned char *)&out[0], data, len);
+    out.resize(n > 0 ? (size_t)n : 0);
+    return out;
 }
+
+static std::vector<unsigned char> b64_decode(const std::string &s) {
+    if (s.empty() || s.size() % 4) return {};
+    std::vector<unsigned char> out(s.size() / 4 * 3);
+    int n = EVP_DecodeBlock(out.data(), (const unsigned char *)s.data(),
+                            (int)s.size());
+    if (n < 0) return {};
+    /* EVP_DecodeBlock rounds up to a multiple of 3; drop the '=' padding. */
+    size_t pad = 0;
+    while (pad < 2 && pad < s.size() && s[s.size() - 1 - pad] == '=') ++pad;
+    out.resize((size_t)n > pad ? (size_t)n - pad : 0);
+    return out;
+}
+
+/* base64(iv | tag | ciphertext) */
+static bool encrypt_secret(const std::string &plain, std::string &out_b64) {
+    unsigned char key[kKeyBytes];
+    if (!config_key(key)) return false;
+
+    std::vector<unsigned char> blob(kIvBytes + kTagBytes + plain.size());
+    unsigned char *iv  = blob.data();
+    unsigned char *tag = iv + kIvBytes;
+    unsigned char *ct  = tag + kTagBytes;
+
+    bool ok = RAND_bytes(iv, kIvBytes) == 1;
+    EVP_CIPHER_CTX *ctx = ok ? EVP_CIPHER_CTX_new() : NULL;
+    int len = 0, total = 0;
+    if (ctx) {
+        ok = EVP_EncryptInit_ex(ctx, EVP_aes_256_gcm(), NULL, key, iv) == 1;
+        if (ok && !plain.empty())
+            ok = EVP_EncryptUpdate(ctx, ct, &len,
+                                   (const unsigned char *)plain.data(),
+                                   (int)plain.size()) == 1;
+        total = len;
+        if (ok) ok = EVP_EncryptFinal_ex(ctx, ct + total, &len) == 1;
+        total += len;
+        if (ok) ok = EVP_CIPHER_CTX_ctrl(ctx, EVP_CTRL_GCM_GET_TAG,
+                                         kTagBytes, tag) == 1;
+        EVP_CIPHER_CTX_free(ctx);
+    } else {
+        ok = false;
+    }
+    OPENSSL_cleanse(key, sizeof(key));
+    if (!ok) return false;
+
+    out_b64 = b64_encode(blob.data(), kIvBytes + kTagBytes + total);
+    OPENSSL_cleanse(blob.data(), blob.size());
+    return true;
+}
+
+static bool decrypt_secret(const std::string &b64, std::string &out) {
+    std::vector<unsigned char> blob = b64_decode(b64);
+    if (blob.size() < (size_t)(kIvBytes + kTagBytes)) return false;
+
+    unsigned char key[kKeyBytes];
+    if (!config_key(key)) return false;
+
+    const unsigned char *iv  = blob.data();
+    const unsigned char *tag = iv + kIvBytes;
+    const unsigned char *ct  = tag + kTagBytes;
+    const int ct_len = (int)(blob.size() - kIvBytes - kTagBytes);
+
+    std::string plain((size_t)ct_len + 1, '\0');
+    EVP_CIPHER_CTX *ctx = EVP_CIPHER_CTX_new();
+    int len = 0, total = 0;
+    bool ok = ctx != NULL;
+    if (ok) {
+        ok = EVP_DecryptInit_ex(ctx, EVP_aes_256_gcm(), NULL, key, iv) == 1;
+        if (ok && ct_len)
+            ok = EVP_DecryptUpdate(ctx, (unsigned char *)&plain[0], &len,
+                                   ct, ct_len) == 1;
+        total = len;
+        if (ok) ok = EVP_CIPHER_CTX_ctrl(ctx, EVP_CTRL_GCM_SET_TAG, kTagBytes,
+                                         (void *)tag) == 1;
+        /* Fails if the blob was tampered with or the key no longer matches. */
+        if (ok) ok = EVP_DecryptFinal_ex(ctx, (unsigned char *)&plain[0] + total,
+                                         &len) == 1;
+        total += len;
+        EVP_CIPHER_CTX_free(ctx);
+    }
+    OPENSSL_cleanse(key, sizeof(key));
+    if (!ok) return false;
+
+    plain.resize((size_t)total);
+    out = plain;
+    return true;
+}
+
+#else  /* no OpenSSL: nothing to encrypt with, fall back to plain text */
+
+static bool encrypt_secret(const std::string &, std::string &) { return false; }
+static bool decrypt_secret(const std::string &, std::string &) { return false; }
+
 #endif
 
 static std::string config_get_str(const DictValue *root, const char *key) {
@@ -107,7 +278,14 @@ static std::string config_get_str(const DictValue *root, const char *key) {
 
 static bool load_config(MailConfig &c) {
     std::ifstream in(config_path(), std::ios::binary);
-    if (!in) return false;
+    if (!in) {
+        in.clear();
+        in.open(legacy_config_path(), std::ios::binary);
+        if (!in) return false;
+        std::cerr << "[nmail] migrating " << legacy_config_path() << " to "
+                  << config_path() << "; delete the old file afterwards"
+                  << std::endl;
+    }
     std::string text((std::istreambuf_iterator<char>(in)),
                      std::istreambuf_iterator<char>());
     if (text.empty()) return false;
@@ -122,7 +300,18 @@ static bool load_config(MailConfig &c) {
     }
     c.host     = config_get_str(root, "host");
     c.username = config_get_str(root, "username");
-    c.password = config_get_str(root, "password");
+    c.password = config_get_str(root, "password");   /* legacy plain text */
+    const std::string enc = config_get_str(root, "password_enc");
+    if (!enc.empty()) {
+        std::string plain;
+        if (decrypt_secret(enc, plain))
+            c.password = plain;
+        else
+            std::cerr << "[nmail] could not decrypt the stored password ("
+                      << config_file("amail.key")
+                      << " missing or stale); re-enter it in Preferences"
+                      << std::endl;
+    }
     c.smtp_host = config_get_str(root, "smtp_host");
     const DictValue *p = dict_object_get(root, "port");
     if (p && p->type == DICT_INT64)  c.port = (int)p->int64_value;
@@ -144,7 +333,11 @@ static bool save_config(const MailConfig &c) {
     dict_object_set(root, "host",     dict_create_string(c.host.c_str()));
     dict_object_set(root, "port",     dict_create_int64(c.port));
     dict_object_set(root, "username", dict_create_string(c.username.c_str()));
-    dict_object_set(root, "password", dict_create_string(c.password.c_str()));
+    std::string enc;
+    if (encrypt_secret(c.password, enc))
+        dict_object_set(root, "password_enc", dict_create_string(enc.c_str()));
+    else
+        dict_object_set(root, "password", dict_create_string(c.password.c_str()));
     dict_object_set(root, "smtp_host", dict_create_string(c.smtp_host.c_str()));
     dict_object_set(root, "smtp_port", dict_create_int64(c.smtp_port));
     dict_object_set(root, "dark_mode", dict_create_bool(c.dark_mode ? 1 : 0));
@@ -158,9 +351,55 @@ static bool save_config(const MailConfig &c) {
             out << buf;
             ok = (bool)out;
         }
+#ifndef _WIN32
+        if (ok) ::chmod(config_path().c_str(), S_IRUSR | S_IWUSR);
+#endif
     }
     dict_destroy(root);
     return ok;
+}
+
+/* Give the window the nmail logo.  Works on Windows and X11; GLFW documents
+   this as unsupported on macOS (the bundle icon is used) and on Wayland. */
+static void set_window_icon(GLFWwindow *win) {
+#if !defined(__APPLE__)
+    std::vector<GLFWimage> images;
+    std::vector<unsigned char *> pixels;
+    for (const NmailIconBlob &blob : nmail_icon_pngs) {
+        int w = 0, h = 0, ch = 0;
+        unsigned char *px = stbi_load_from_memory(blob.data, (int)blob.size,
+                                                  &w, &h, &ch, 4);
+        if (!px) continue;
+        pixels.push_back(px);
+        GLFWimage img;
+        img.width  = w;
+        img.height = h;
+        img.pixels = px;
+        images.push_back(img);
+    }
+    if (!images.empty())
+        glfwSetWindowIcon(win, (int)images.size(), images.data());
+    for (unsigned char *px : pixels)
+        stbi_image_free(px);
+#else
+    (void)win;
+#endif
+}
+
+/* Launched from Finder a bundle gets "/" as its working directory, but
+   theme.cpp loads "resources/NotoColorEmoji.ttf" relative to it.  Point the
+   CWD at Contents/Resources, where the CMake bundle rules put the faces. */
+static void chdir_to_bundle_resources() {
+#ifdef __APPLE__
+    char exe[4096];
+    uint32_t len = sizeof(exe);
+    if (_NSGetExecutablePath(exe, &len) != 0) return;
+    /* <bundle>/Contents/MacOS/nmail -> <bundle>/Contents/Resources */
+    std::string dir = dirname(exe);            /* .../Contents/MacOS   */
+    std::string res = dir + "/../Resources";
+    if (::chdir(res.c_str()) != 0)
+        std::cerr << "[nmail] could not chdir to " << res << std::endl;
+#endif
 }
 
 // ---------------------------------------------------------------------------
@@ -2407,6 +2646,7 @@ public:
 
     MailApp() : Screen(Vector2i(1100, 700), "nmail") {
         inc_ref();
+        set_window_icon(glfw_window());
 
         // Theme — light background like macOS Mail (toggle with Ctrl/Cmd+T)
         set_theme_mode(ThemeMode::Light);
@@ -3828,6 +4068,7 @@ public:
 // main
 // ---------------------------------------------------------------------------
 int main() {
+    chdir_to_bundle_resources();
     try {
         /* The IMAP worker writes to a socket the server may have closed;
          * nanoproxy's socket_write handles EPIPE, but only if SIGPIPE
@@ -3848,6 +4089,11 @@ int main() {
         std::string error_msg =
             std::string("Caught a fatal error: ") + std::string(e.what());
         std::cerr << error_msg << std::endl;
+#ifdef _WIN32
+        /* /SUBSYSTEM:WINDOWS means stderr goes nowhere -- say it in a dialog. */
+        MessageBoxA(NULL, error_msg.c_str(), "nmail",
+                    MB_OK | MB_ICONERROR | MB_SETFOREGROUND);
+#endif
         return -1;
     }
     return 0;
