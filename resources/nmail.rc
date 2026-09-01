@@ -1,0 +1,7 @@
+/* Windows resource script for nmail.
+ *
+ * Resource ID 1: Explorer, the task bar and Alt-Tab all use the icon with the
+ * numerically lowest ID as the application icon, so keep this first.
+ * The path is relative to this .rc file, which is where rc.exe looks first. */
+
+1 ICON "nmail.ico"

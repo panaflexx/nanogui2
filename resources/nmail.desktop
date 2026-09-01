@@ -1,0 +1,12 @@
+[Desktop Entry]
+Type=Application
+Version=1.0
+Name=nmail
+GenericName=Mail Client
+Comment=IMAP mail client built on NanoGUI
+Exec=nmail
+Icon=nmail
+Terminal=false
+Categories=Network;Email;
+Keywords=mail;email;imap;
+StartupNotify=true
