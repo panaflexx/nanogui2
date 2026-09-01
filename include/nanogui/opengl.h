@@ -50,6 +50,13 @@
 #endif
 
 #include <nanovg.h>
+#if defined(NANOGUI_USE_OPENGL)
+#  define NANOVG_GL3
+#  include <nanovg_gl.h>
+#elif defined(NANOGUI_USE_GLES)
+#  define NANOVG_GLES2
+#  include <nanovg_gl.h>
+#endif
 
 // Special treatment of linux Nvidia opengl headers
 #if !defined(_WIN32) && !defined(__APPLE__) && defined(NANOGUI_USE_OPENGL)

@@ -54,6 +54,10 @@
 #include "saved_email.h"
 #include "gumbo.h"
 #include <memory>
+#include <cstdlib>
+#ifdef _WIN32
+#include <direct.h>
+#endif
 
 using namespace nanogui;
 
@@ -71,7 +75,28 @@ struct MailConfig {
     int         check_interval_min = 15;  // how often to auto-check for new mail
 };
 
-static const char *CONFIG_PATH = "amail.config";
+#ifdef _WIN32
+/* Writable per-user file: Program Files is not a place to store prefs. */
+static const std::string &config_path() {
+    static std::string path;
+    if (path.empty()) {
+        const char *appdata = std::getenv("APPDATA");
+        if (appdata && appdata[0]) {
+            std::string dir = std::string(appdata) + "\\nmail";
+            _mkdir(dir.c_str());
+            path = dir + "\\amail.config";
+        } else {
+            path = "amail.config";
+        }
+    }
+    return path;
+}
+#else
+static const std::string &config_path() {
+    static const std::string path = "amail.config";
+    return path;
+}
+#endif
 
 static std::string config_get_str(const DictValue *root, const char *key) {
     const DictValue *v = dict_object_get(root, key);
@@ -80,7 +105,7 @@ static std::string config_get_str(const DictValue *root, const char *key) {
 }
 
 static bool load_config(MailConfig &c) {
-    std::ifstream in(CONFIG_PATH, std::ios::binary);
+    std::ifstream in(config_path(), std::ios::binary);
     if (!in) return false;
     std::string text((std::istreambuf_iterator<char>(in)),
                      std::istreambuf_iterator<char>());
@@ -90,7 +115,7 @@ static bool load_config(MailConfig &c) {
     DictValue *root = dict_deserialize_json_len(text.c_str(), text.size(),
                                             err, sizeof(err));
     if (!root) {
-        std::cerr << "[nmail] could not parse " << CONFIG_PATH << ": "
+        std::cerr << "[nmail] could not parse " << config_path() << ": "
                   << err << std::endl;
         return false;
     }
@@ -113,7 +138,7 @@ static bool load_config(MailConfig &c) {
     return !c.host.empty();
 }
 
-static void save_config(const MailConfig &c) {
+static bool save_config(const MailConfig &c) {
     DictValue *root = dict_create_object();
     dict_object_set(root, "host",     dict_create_string(c.host.c_str()));
     dict_object_set(root, "port",     dict_create_int64(c.port));
@@ -125,11 +150,16 @@ static void save_config(const MailConfig &c) {
     dict_object_set(root, "check_interval_min", dict_create_int64(c.check_interval_min));
 
     char buf[8192];
+    bool ok = false;
     if (dict_serialize_json(root, buf, sizeof(buf), /*pretty=*/1)) {
-        std::ofstream out(CONFIG_PATH, std::ios::binary | std::ios::trunc);
-        out << buf;
+        std::ofstream out(config_path(), std::ios::binary | std::ios::trunc);
+        if (out) {
+            out << buf;
+            ok = (bool)out;
+        }
     }
     dict_destroy(root);
+    return ok;
 }
 
 // ---------------------------------------------------------------------------
@@ -3390,14 +3420,29 @@ public:
             int idx = check_interval->selected_index();
             m_config.check_interval_min =
                 kIntervalMinutes[(idx >= 0 && idx < 4) ? idx : 1];
-            save_config(m_config);
-            win->dispose();
+            if (!save_config(m_config)) {
+                auto *dlg = new MessageDialog(this, MessageDialog::Type::Warning,
+                    "Save failed",
+                    "Could not write " + config_path(), "OK", "", false);
+                dlg->center();
+                return;
+            }
+            m_config_loaded = true;
+            if (PopupMenu *pop = check_interval->popup())
+                pop->set_visible(false);
             m_worker.set_config(m_config);
             m_worker.connect();
+            /* Destroy the prefs window after this callback returns so we
+               do not free the Save button while it is still running. */
+            nanogui::async([win]() { win->dispose(); });
+            glfwPostEmptyEvent();
         });
 
         Button *cancel = new Button(buttons, "Cancel", FA_TIMES);
-        cancel->set_callback([win]() { win->dispose(); });
+        cancel->set_callback([win]() {
+            nanogui::async([win]() { win->dispose(); });
+            glfwPostEmptyEvent();
+        });
 
         win->center();
         win->request_focus();
@@ -3785,8 +3830,10 @@ int main() {
     try {
         /* The IMAP worker writes to a socket the server may have closed;
          * nanoproxy's socket_write handles EPIPE, but only if SIGPIPE
-         * doesn't kill the process first. */
+         * doesn't kill the process first.  Windows has no SIGPIPE. */
+#ifndef _WIN32
         signal(SIGPIPE, SIG_IGN);
+#endif
         nanogui::init();
         {
             ref<MailApp> app = new MailApp();

@@ -25,6 +25,10 @@
 #		include <OpenGL/gl3.h>
 #		include <OpenGL/glext.h>
 #		define NANOVG_FBO_VALID 1
+#   elif defined(_WIN32)
+#		include <windows.h>
+#		include <glad/glad.h>
+#		define NANOVG_FBO_VALID 1
 #   else
 #		include <GL/gl.h>
 #		include <GL/glext.h>

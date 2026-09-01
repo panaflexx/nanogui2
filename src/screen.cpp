@@ -454,8 +454,55 @@ Screen::Screen(const Vector2i& size, const std::string& caption, bool resizable,
                 return;
 
             s->resize_callback_event(width, height);
+#if defined(_WIN32)
+            /* Win32: WM_SIZE is delivered from inside the nested
+               sizing modal loop, so glfwWaitEvents has not returned.
+               Layout + swap here or the GL contents stay frozen until
+               the drag ends. */
+#if defined(NANOGUI_USE_OPENGL) || defined(NANOGUI_USE_GLES)
+            glfwMakeContextCurrent(w);
+#endif
+            s->draw_all();
+#endif
         }
     );
+#if defined(_WIN32)
+    /* Win32 live-resize: dragging a border/corner runs a nested modal
+       loop (WM_ENTERSIZEMOVE).  glfwWaitEvents is blocked until the
+       drag ends, so the mainloop cannot paint.  GLFW still delivers
+       WM_SIZE (windowSize) and WM_PAINT (windowRefresh) on this
+       thread — redraw immediately so the contents track the frame. */
+    glfwSetWindowRefreshCallback(m_glfw_window,
+        [](GLFWwindow* w) {
+            auto it = __nanogui_screens.find(w);
+            if (it == __nanogui_screens.end())
+                return;
+            Screen* s = it->second;
+            if (!s->m_process_events)
+                return;
+#if defined(NANOGUI_USE_OPENGL) || defined(NANOGUI_USE_GLES)
+            glfwMakeContextCurrent(w);
+#endif
+            s->redraw();
+            s->draw_all();
+        }
+    );
+    glfwSetWindowSizeCallback(m_glfw_window,
+        [](GLFWwindow* w, int ww, int wh) {
+            auto it = __nanogui_screens.find(w);
+            if (it == __nanogui_screens.end())
+                return;
+            Screen* s = it->second;
+            if (!s->m_process_events)
+                return;
+            s->resize_callback_event(ww, wh);
+#if defined(NANOGUI_USE_OPENGL) || defined(NANOGUI_USE_GLES)
+            glfwMakeContextCurrent(w);
+#endif
+            s->draw_all();
+        }
+    );
+#endif
 #if defined(__APPLE__)
     /* macOS: live-resize drags the GLFW window while Cocoa runs a nested
        modal NSRunLoop — the nanogui mainloop's glfwWaitEvents is blocked.

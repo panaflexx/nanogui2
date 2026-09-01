@@ -136,7 +136,7 @@ endif()
 
 if (MSVC)
   # Disable annoying MSVC warnings (all targets)
-  add_definitions(/D "_CRT_SECURE_NO_WARNINGS")
+  add_definitions(/D "_CRT_SECURE_NO_WARNINGS" /D "_USE_MATH_DEFINES" /D "NOMINMAX")
 
   # Parallel build on MSVC (all targets)
   set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} /MP")
@@ -153,8 +153,12 @@ elseif (CMAKE_CXX_COMPILER_ID MATCHES "Clang" OR CMAKE_CXX_COMPILER_ID MATCHES "
   set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -Wall -Wextra -Wno-unused-parameter -Wno-unused-function")
 endif()
 
-# Use C++17, visibility=hidden by default, interprocedural optimization
-set(CMAKE_CXX_STANDARD 17)
+# Use C++17 (C++20 on MSVC: designated initializers in window.h, etc.)
+if (MSVC)
+  set(CMAKE_CXX_STANDARD 20)
+else()
+  set(CMAKE_CXX_STANDARD 17)
+endif()
 set(CMAKE_CXX_VISIBILITY_PRESET hidden)
 
 # Prefer libc++ in conjunction with Clang
@@ -324,23 +328,52 @@ endif()
 
 # SQLite support on all desktop platforms
 if (NOT ${CMAKE_CXX_COMPILER_ID} MATCHES "Emscripten")
+  if (WIN32 AND EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/ext/sqlite/sqlite3.c")
+    add_library(sqlite3 STATIC ext/sqlite/sqlite3.c)
+    target_include_directories(sqlite3 PUBLIC ext/sqlite)
+    target_compile_definitions(sqlite3 PRIVATE SQLITE_OMIT_LOAD_EXTENSION SQLITE_THREADSAFE=1)
+    set_target_properties(sqlite3 PROPERTIES POSITION_INDEPENDENT_CODE ON)
+    if (MSVC)
+      target_compile_options(sqlite3 PRIVATE /W0)
+    endif()
+    message(STATUS "NanoGUI: using vendored SQLite amalgamation (ext/sqlite).")
+  endif()
   list(APPEND NANOGUI_LIBS sqlite3)
 endif()
 
-# Use freetype library
+# Use freetype library (required by this tree's fontstash.h).
 if (NANOGUI_USE_FREETYPE)
+  find_package(Freetype QUIET)
+  if (NOT Freetype_FOUND AND EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/ext/freetype/CMakeLists.txt")
+    set(FT_DISABLE_HARFBUZZ ON CACHE BOOL "" FORCE)
+    set(FT_DISABLE_BZIP2 ON CACHE BOOL "" FORCE)
+    set(FT_DISABLE_PNG ON CACHE BOOL "" FORCE)
+    set(FT_DISABLE_ZLIB ON CACHE BOOL "" FORCE)
+    set(FT_DISABLE_BROTLI ON CACHE BOOL "" FORCE)
+    set(SKIP_INSTALL_ALL ON CACHE BOOL "" FORCE)
+    add_subdirectory(ext/freetype EXCLUDE_FROM_ALL)
+    set(FREETYPE_LIBRARIES freetype)
+    set(Freetype_FOUND TRUE)
+    message(STATUS "NanoGUI: using vendored FreeType (ext/freetype).")
+  endif()
+  if (NOT Freetype_FOUND)
+    find_package(Freetype REQUIRED)
+  endif()
   add_definitions(-DFONS_USE_FREETYPE)
-  find_package(Freetype REQUIRED)
   list(APPEND NANOGUI_LIBS ${FREETYPE_LIBRARIES})
-  include_directories(${FREETYPE_INCLUDE_DIRS})
+  if (FREETYPE_INCLUDE_DIRS)
+    include_directories(${FREETYPE_INCLUDE_DIRS})
+  endif()
 
-  find_package(PkgConfig)
-  pkg_check_modules(HARFBUZZ harfbuzz)
-  if (HARFBUZZ_FOUND)
-    message(STATUS "HARFBUZZ_LIBRARIES (pkg-config): ${HARFBUZZ_LIBRARIES}")
-    message(STATUS "HARFBUZZ_INCLUDE_DIRS (pkg-config): ${HARFBUZZ_INCLUDE_DIRS}")
-    list(APPEND NANOGUI_LIBS ${HARFBUZZ_LIBRARIES})
-    include_directories(${HARFBUZZ_INCLUDE_DIRS})
+  find_package(PkgConfig QUIET)
+  if (PkgConfig_FOUND)
+    pkg_check_modules(HARFBUZZ harfbuzz)
+    if (HARFBUZZ_FOUND)
+      message(STATUS "HARFBUZZ_LIBRARIES (pkg-config): ${HARFBUZZ_LIBRARIES}")
+      message(STATUS "HARFBUZZ_INCLUDE_DIRS (pkg-config): ${HARFBUZZ_INCLUDE_DIRS}")
+      list(APPEND NANOGUI_LIBS ${HARFBUZZ_LIBRARIES})
+      include_directories(${HARFBUZZ_INCLUDE_DIRS})
+    endif()
   endif()
 endif()
 
@@ -437,6 +470,7 @@ add_library(nanogui ${NANOGUI_LIBRARY_TYPE}
   include/nanogui/popupbutton.h src/popupbutton.cpp
   include/nanogui/combobox.h src/combobox.cpp
   include/nanogui/progressbar.h src/progressbar.cpp
+  include/nanogui/spinner.h src/spinner.cpp
   include/nanogui/slider.h src/slider.cpp
   include/nanogui/messagedialog.h src/messagedialog.cpp
   include/nanogui/folderdialog.h src/folderdialog.cpp
@@ -547,7 +581,7 @@ endif()
 if (CMAKE_COMPILER_IS_GNUCC)
   set_source_files_properties(ext/nanovgd/src/nanovg.c PROPERTIES COMPILE_FLAGS -Wno-unused-result)
 elseif(MSVC)
-  set_source_files_properties(ext/nanovgd/src/nanovg.c PROPERTIES COMPILE_FLAGS "/wd4005 /wd4456 /wd4457")
+  set_source_files_properties(ext/nanovgd/src/nanovg.c PROPERTIES COMPILE_FLAGS "/wd4005 /wd4456 /wd4457 /FIwindows.h")
 endif()
 
 # Optional QuickJS-NG scripting engine
@@ -632,15 +666,29 @@ if (NANOGUI_BUILD_EXAMPLES)
   file(GLOB GUMBO_SOURCES CONFIGURE_DEPENDS ext/gumbo/src/*.c)
   add_library(gumbo STATIC ${GUMBO_SOURCES})
   target_include_directories(gumbo PUBLIC ext/gumbo/src)
+  if (MSVC AND EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/ext/gumbo/visualc/include")
+    target_include_directories(gumbo PRIVATE ext/gumbo/visualc/include)
+  endif()
   set_target_properties(gumbo PROPERTIES POSITION_INDEPENDENT_CODE ON)
+  if (MSVC)
+    target_compile_options(gumbo PRIVATE /W0)
+  endif()
 
-  add_executable(nmail         nmail/nmail.cpp nmail/imap_client.cpp nmail/smtp_client.cpp nmail/nmail_socket.c nmail/htmldocument.cpp)
-  add_executable(nmail_view    nmail/nmail_view.cpp nmail/htmldocument.cpp nmail/nmail_socket.c)
+  if (WIN32)
+    set(NMAIL_SOCKET nmail/nmail_socket_win.c)
+    set(NMAIL_SYS_LIBS ws2_32 shell32 crypt32)
+  else()
+    set(NMAIL_SOCKET nmail/nmail_socket.c)
+    set(NMAIL_SYS_LIBS pthread)
+  endif()
+
+  add_executable(nmail         nmail/nmail.cpp nmail/imap_client.cpp nmail/smtp_client.cpp ${NMAIL_SOCKET} nmail/htmldocument.cpp)
+  add_executable(nmail_view    nmail/nmail_view.cpp nmail/htmldocument.cpp ${NMAIL_SOCKET})
   if(EXISTS ${CMAKE_CURRENT_SOURCE_DIR}/nmail/sketch/htmldoc_test.cpp)
-    add_executable(htmldoc_test  nmail/sketch/htmldoc_test.cpp nmail/htmldocument.cpp nmail/nmail_socket.c)
+    add_executable(htmldoc_test  nmail/sketch/htmldoc_test.cpp nmail/htmldocument.cpp ${NMAIL_SOCKET})
     target_include_directories(htmldoc_test PRIVATE nmail/ ${CMAKE_CURRENT_SOURCE_DIR})
     set_target_properties(htmldoc_test PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}/bin)
-    target_link_libraries(htmldoc_test  nanogui pthread gumbo ${NANOGUI_LIBS})
+    target_link_libraries(htmldoc_test  nanogui ${NMAIL_SYS_LIBS} gumbo ${NANOGUI_LIBS})
     if(OPENSSL_FOUND)
       target_compile_definitions(htmldoc_test PRIVATE HAVE_OPENSSL)
       target_link_libraries(htmldoc_test OpenSSL::SSL OpenSSL::Crypto)
@@ -671,21 +719,74 @@ if (NANOGUI_BUILD_EXAMPLES)
       ${CMAKE_CURRENT_SOURCE_DIR})
   # Output name "nmail" would collide with the nmail/ source directory
   set_target_properties(nmail PROPERTIES
-      RUNTIME_OUTPUT_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}/bin)
+      RUNTIME_OUTPUT_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}/bin
+      RUNTIME_OUTPUT_DIRECTORY_DEBUG ${CMAKE_CURRENT_BINARY_DIR}/bin
+      RUNTIME_OUTPUT_DIRECTORY_RELEASE ${CMAKE_CURRENT_BINARY_DIR}/bin
+      RUNTIME_OUTPUT_DIRECTORY_RELWITHDEBINFO ${CMAKE_CURRENT_BINARY_DIR}/bin)
   set_target_properties(nmail_view PROPERTIES
-      RUNTIME_OUTPUT_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}/bin)
+      RUNTIME_OUTPUT_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}/bin
+      RUNTIME_OUTPUT_DIRECTORY_DEBUG ${CMAKE_CURRENT_BINARY_DIR}/bin
+      RUNTIME_OUTPUT_DIRECTORY_RELEASE ${CMAKE_CURRENT_BINARY_DIR}/bin
+      RUNTIME_OUTPUT_DIRECTORY_RELWITHDEBINFO ${CMAKE_CURRENT_BINARY_DIR}/bin)
   target_include_directories(nmail_view PRIVATE
       nmail/
       ${CMAKE_CURRENT_SOURCE_DIR})
-  target_link_libraries(nmail         nanogui pthread gumbo ${NANOGUI_LIBS})
-  target_link_libraries(nmail_view    nanogui pthread gumbo ${NANOGUI_LIBS})
-  # STARTTLS / imaps support in nmail_socket.c (guarded by HAVE_OPENSSL)
-  find_package(OpenSSL)
+  target_link_libraries(nmail         nanogui ${NMAIL_SYS_LIBS} gumbo ${NANOGUI_LIBS})
+  target_link_libraries(nmail_view    nanogui ${NMAIL_SYS_LIBS} gumbo ${NANOGUI_LIBS})
+  # STARTTLS / imaps support in nmail_socket.c / nmail_socket_win.c
+  if (WIN32 AND EXISTS "C:/Program Files/OpenSSL-Win64/lib/VC/x64/MD/libssl.lib")
+    set(_NMAIL_SSL_LIB "C:/Program Files/OpenSSL-Win64/lib/VC/x64/MD/libssl.lib")
+    set(_NMAIL_CRYPTO_LIB "C:/Program Files/OpenSSL-Win64/lib/VC/x64/MD/libcrypto.lib")
+    set(_NMAIL_SSL_INC "C:/Program Files/OpenSSL-Win64/include")
+    if (NOT TARGET OpenSSL::Crypto)
+      add_library(OpenSSL::Crypto UNKNOWN IMPORTED)
+      set_target_properties(OpenSSL::Crypto PROPERTIES
+        IMPORTED_LOCATION "${_NMAIL_CRYPTO_LIB}"
+        INTERFACE_INCLUDE_DIRECTORIES "${_NMAIL_SSL_INC}")
+    endif()
+    if (NOT TARGET OpenSSL::SSL)
+      add_library(OpenSSL::SSL UNKNOWN IMPORTED)
+      set_target_properties(OpenSSL::SSL PROPERTIES
+        IMPORTED_LOCATION "${_NMAIL_SSL_LIB}"
+        INTERFACE_INCLUDE_DIRECTORIES "${_NMAIL_SSL_INC}"
+        INTERFACE_LINK_LIBRARIES OpenSSL::Crypto)
+    endif()
+    set(OPENSSL_FOUND TRUE)
+    message(STATUS "nmail: using OpenSSL from C:/Program Files/OpenSSL-Win64")
+  else()
+    find_package(OpenSSL)
+  endif()
   if (OPENSSL_FOUND)
     target_compile_definitions(nmail PRIVATE HAVE_OPENSSL)
     target_link_libraries(nmail OpenSSL::SSL OpenSSL::Crypto)
     target_compile_definitions(nmail_view PRIVATE HAVE_OPENSSL)
     target_link_libraries(nmail_view OpenSSL::SSL OpenSSL::Crypto)
+    if (WIN32)
+      file(GLOB _NMAIL_SSL_DLLS
+        "C:/Program Files/OpenSSL-Win64/bin/libssl*.dll"
+        "C:/Program Files/OpenSSL-Win64/bin/libcrypto*.dll")
+      foreach(_t nmail nmail_view)
+        foreach(_dll ${_NMAIL_SSL_DLLS})
+          add_custom_command(TARGET ${_t} POST_BUILD
+            COMMAND ${CMAKE_COMMAND} -E copy_if_different
+              "${_dll}" "$<TARGET_FILE_DIR:${_t}>"
+            VERBATIM)
+        endforeach()
+      endforeach()
+    endif()
+  endif()
+  # nvgCreateFont("emoji") loads resources/NotoColorEmoji.ttf from disk
+  # (other faces are embedded). Keep TTFs next to the executables.
+  file(GLOB _NMAIL_FONTS "${CMAKE_CURRENT_SOURCE_DIR}/resources/*.ttf")
+  if (_NMAIL_FONTS)
+    foreach(_t nmail nmail_view)
+      add_custom_command(TARGET ${_t} POST_BUILD
+        COMMAND ${CMAKE_COMMAND} -E make_directory
+          "$<TARGET_FILE_DIR:${_t}>/resources"
+        COMMAND ${CMAKE_COMMAND} -E copy_if_different
+          ${_NMAIL_FONTS} "$<TARGET_FILE_DIR:${_t}>/resources"
+        VERBATIM)
+    endforeach()
   endif()
   target_link_libraries(nanovg-colorfont-atlas nanogui ${NANOGUI_LIBS})
   target_link_libraries(imagestash_test nanogui ${NANOGUI_LIBS})

@@ -25,9 +25,13 @@
 #include <string_view>
 #include <unordered_map>
 #include <vector>
-#include <fcntl.h> // open() for /dev/null redirect in open_url_secure child
 #include <errno.h>
-#ifndef _WIN32
+#ifdef _WIN32
+#define WIN32_LEAN_AND_MEAN
+#include <windows.h>
+#include <shellapi.h>
+#else
+#include <fcntl.h> // open() for /dev/null redirect in open_url_secure child
 #include <unistd.h>
 #endif
 
@@ -478,11 +482,14 @@ static void handle_padding_shorthand(const std::string &val, Style &st, TextAlig
         if (box) box->pad_x = std::max(box->pad_x, pxv);
     }
 }
+thread_local PropId t_last_pad_side=P_NONE;
+thread_local PropId t_last_border=P_BORDER;
+thread_local PropId t_last_overflow=P_OVERFLOW;
 static void handle_padding_side(const std::string &valRaw, Style &st, TextAlignment&, bool&, BoxProps *box, const char*, size_t colon_unused){
     (void)colon_unused; // side is encoded in valRaw? We dispatch via PropId so need key. Instead peek key via st trick: caller passes val, not key. So split by PropId at call: we handle generically.
     // This entry is called only for single side; the key distinction is which Pad it sets — we collapse to max based on which handler was chosen.
     // To avoid key re-parse, we use a thread_local last_key stored by dispatcher (set before call).
-    extern thread_local PropId t_last_pad_side; PropId side=t_last_pad_side; float px=0,pct=0; if(!parse_css_len(valRaw,px,pct)||pct!=0.f) return; if(side==P_PADDING_TOP||side==P_PADDING_BOTTOM){ st.padY=std::max(st.padY,px); if(box) box->pad_y=std::max(box->pad_y,px);} else { st.padX=std::max(st.padX,px); if(box) box->pad_x=std::max(box->pad_x,px);} }
+    PropId side=t_last_pad_side; float px=0,pct=0; if(!parse_css_len(valRaw,px,pct)||pct!=0.f) return; if(side==P_PADDING_TOP||side==P_PADDING_BOTTOM){ st.padY=std::max(st.padY,px); if(box) box->pad_y=std::max(box->pad_y,px);} else { st.padX=std::max(st.padX,px); if(box) box->pad_x=std::max(box->pad_x,px);} }
 static void handle_width(const std::string &v, Style&, TextAlignment&, bool&, BoxProps *box, const char*, size_t){ if(!box) return; float px=0,pct=0; if(!parse_css_len(v,px,pct)) return; if(pct>0) box->width_pct=pct; else box->width_px=px; }
 static void handle_max_width(const std::string &v, Style&, TextAlignment&, bool&, BoxProps *box, const char*, size_t){ if(!box) return; float px=0,pct=0; if(!parse_css_len(v,px,pct)) return; if(pct<=0) box->max_width_px=px; else if(box->width_pct<=0) box->width_pct=pct; }
 static void handle_height(const std::string &v, Style&, TextAlignment&, bool&, BoxProps *box, const char*, size_t){ if(!box) return; float px=0,pct=0; if(!parse_css_len(v,px,pct)) return; if(pct<=0) box->height_px=px; }
@@ -492,7 +499,7 @@ static void handle_min_height(const std::string &v, Style&, TextAlignment&, bool
 static void handle_border(const std::string &val, Style &st, TextAlignment&, bool&, BoxProps*, const char*, size_t){
     // covers border, border-width, border-color, border-style — same body split into border vs others happens in dispatcher via key, but reuse
     // Determine which sub-key we are by thread_local (see dispatcher). For generic border, parse width||color||style.
-    extern thread_local PropId t_last_border; PropId k=t_last_border; if(val=="none"||val=="0"||val=="0px"||val.find("none")==0){ if(k!=P_BORDER_COLOR) st.borderWidth=0; return; }
+    PropId k=t_last_border; if(val=="none"||val=="0"||val=="0px"||val.find("none")==0){ if(k!=P_BORDER_COLOR) st.borderWidth=0; return; }
     size_t rp=0; while(rp<val.size()){ while(rp<val.size()&&std::isspace((unsigned char)val[rp])) ++rp; if(rp>=val.size()) break; size_t sp=val.find_first_of(" \t",rp); std::string tok=val.substr(rp, sp==std::string::npos?std::string::npos:sp-rp); rp=(sp==std::string::npos)?val.size():sp+1; if(tok=="solid"||tok=="dashed"||tok=="dotted"||tok=="double"||tok=="groove"||tok=="ridge") continue; float px=0,pct=0; if(parse_css_len(tok,px,pct)&&pct==0.f){ st.borderWidth=px; continue; } bool ok=false; NVGcolor c=parse_html_color(tok.c_str(),ok); if(ok){ st.borderColor=c; if(st.borderWidth<=0.f && k==P_BORDER_COLOR) st.borderWidth=1; } }
 }
 static void handle_border_radius(const std::string &val, Style&, TextAlignment&, bool&, BoxProps *box, const char*, size_t){ if(!box) return; float px=0,pct=0; size_t sp=val.find_first_of(" \t"); std::string a=(sp==std::string::npos)?val:val.substr(0,sp); if(parse_css_len(a,px,pct)){ if(pct>0) box->radius_px=9999.f; else if(px>0) box->radius_px=px; } }
@@ -501,9 +508,8 @@ static void handle_text_transform(const std::string &val, Style &st, TextAlignme
 static void handle_opacity(const std::string &val, Style &st, TextAlignment&, bool&, BoxProps*, const char*, size_t){ char *e=nullptr; float v=strtof(val.c_str(),&e); if(e!=val.c_str()) st.opacity=std::clamp(v,0.f,1.f); }
 static void handle_white_space(const std::string &val, Style &st, TextAlignment&, bool&, BoxProps*, const char*, size_t){ if(val=="nowrap") st.whiteSpace=WhiteSpace::Nowrap; else if(val=="pre"||val=="pre-wrap") st.whiteSpace=WhiteSpace::Pre; else if(val=="normal") st.whiteSpace=WhiteSpace::Normal; }
 static void handle_box_sizing(const std::string &val, Style&, TextAlignment&, bool&, BoxProps *box, const char*, size_t){ if(!box) return; if(val=="border-box") box->border_box=true; else if(val=="content-box") box->border_box=false; }
-static void handle_overflow(const std::string &val, Style&, TextAlignment&, bool&, BoxProps *box, const char*, size_t){ if(!box) return; extern thread_local PropId t_last_overflow; PropId k=t_last_overflow; (void)k; if(val=="hidden"||val=="clip") box->overflow_hidden=true; else if(val=="visible"||val=="auto"||val=="scroll") box->overflow_hidden=false; }
+static void handle_overflow(const std::string &val, Style&, TextAlignment&, bool&, BoxProps *box, const char*, size_t){ if(!box) return; PropId k=t_last_overflow; (void)k; if(val=="hidden"||val=="clip") box->overflow_hidden=true; else if(val=="visible"||val=="auto"||val=="scroll") box->overflow_hidden=false; }
 static void handle_margin(const std::string &val, Style&, TextAlignment&, bool&, BoxProps *box, const char*, size_t){ if(!box) return; if(val.find("auto")!=std::string::npos) box->center=true; }
-thread_local PropId t_last_pad_side=P_NONE; thread_local PropId t_last_border=P_BORDER; thread_local PropId t_last_overflow=P_OVERFLOW;
 void apply_style_attr(const char *css, Style &st,
                       TextAlignment &align, bool &has_align,
                       BoxProps *box = nullptr,
@@ -666,10 +672,7 @@ static bool open_url_secure(const std::string &raw) {
     std::string url;
     if (!is_allowed_url(raw, url)) return false;
 #if defined(_WIN32)
-    std::string esc;
-    for(char c:url){ if(c=='"') esc+="\\\""; else esc+=c; }
-    std::string cmd="start \"\" \""+esc+"\"";
-    return system(cmd.c_str())==0;
+    return (int)(intptr_t)ShellExecuteA(NULL, "open", url.c_str(), NULL, NULL, SW_SHOWNORMAL) > 32;
 #else
     pid_t pid = fork();
     if (pid == 0) {

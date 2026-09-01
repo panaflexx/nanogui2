@@ -650,6 +650,19 @@ Dropdown::Dropdown(Widget *parent, Mode mode, const string &caption) : MenuItem(
     set_min_height(menu_item_height);
 }
 
+Dropdown::~Dropdown() {
+    /* PopupMenu is parented to the Screen, not this widget. Disposing the
+       owning window would otherwise leave a dangling parent_window /
+       parent_item and crash on the next draw. */
+    if (m_popup) {
+        m_popup->set_visible(false);
+        if (Screen *s = screen())
+            s->remove_popup_visible(m_popup);
+        m_popup->dispose();
+        m_popup = nullptr;
+    }
+}
+
 Dropdown::Dropdown(Widget *parent, const vector<string> &items, const vector<int> &icons, Mode mode,
                    const string &caption) :
     Dropdown(parent, mode, caption)

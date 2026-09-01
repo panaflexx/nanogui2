@@ -22,10 +22,16 @@
 #include <memory.h>
 #include <string.h>
 
+#ifdef _WIN32
+#include <windows.h>
+#include <glad/glad.h>
+#endif
 #ifdef __LINUX__
 #include <GL/glcorearb.h>
 #endif
 #include "nanovg.h"
+#define NANOVG_GL3_IMPLEMENTATION
+#include "nanovg_gl.h"
 #define NANOVG_GL3
 #define NANOVG_GL_IMPLEMENTATION
 #include "nanovg_gl_utils.h"

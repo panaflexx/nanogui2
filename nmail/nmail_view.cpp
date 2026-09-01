@@ -617,7 +617,9 @@ int main(int argc, char **argv) {
     }
     if (!screenshot.empty()) {
         // --screenshot supersedes --dump: interactive window that auto-saves+exits
+#ifndef _WIN32
         signal(SIGPIPE, SIG_IGN);
+#endif
         nanogui::init();
         {
             // Resolve path relative to screenshot flag order: first positional
@@ -635,7 +637,9 @@ int main(int argc, char **argv) {
         nanogui::shutdown(); return 0;
     }
     if (dump) {
+#ifndef _WIN32
         signal(SIGPIPE, SIG_IGN);
+#endif
         nanogui::init();
         // Size screen to fit full document + toolbar/status, capped.
         // This lets dump capture full email, not just 800px viewport.
@@ -676,7 +680,9 @@ int main(int argc, char **argv) {
         nanogui::shutdown(); return 0;
     }
     try {
+#ifndef _WIN32
         signal(SIGPIPE, SIG_IGN);
+#endif
         nanogui::init();
         {
             std::string p2;

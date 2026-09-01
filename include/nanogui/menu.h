@@ -158,6 +158,7 @@ public:
      */
     Dropdown(Widget *parent, const std::vector<std::string> &items, const std::vector<int> &icons = {},
              Mode mode = ComboBox, const std::string &caption = "Untitled");
+    ~Dropdown();
 
     Mode mode() const { return m_mode; }
     void set_mode(Mode mode) { m_mode = mode; }

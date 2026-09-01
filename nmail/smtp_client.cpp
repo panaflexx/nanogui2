@@ -13,7 +13,12 @@
 #include <cstdlib>
 #include <cstring>
 #include <ctime>
+#ifdef _WIN32
+#include <process.h>
+#define getpid _getpid
+#else
 #include <unistd.h>
+#endif
 
 // ---------------------------------------------------------------------------
 // Small helpers
@@ -58,7 +63,11 @@ static std::string rfc_date() {
     char buf[64];
     time_t now = time(nullptr);
     struct tm tmv;
+#ifdef _WIN32
+    localtime_s(&tmv, &now);
+#else
     localtime_r(&now, &tmv);
+#endif
     if (strftime(buf, sizeof(buf), "%a, %d %b %Y %H:%M:%S %z", &tmv) == 0)
         return "";
     return buf;
@@ -169,9 +178,17 @@ bool SmtpClient::send(const SmtpConfig &cfg,
     }
 
     char hostbuf[256] = "localhost";
+#ifdef _WIN32
+    const char *cn = std::getenv("COMPUTERNAME");
+    if (cn && cn[0]) {
+        std::strncpy(hostbuf, cn, sizeof(hostbuf) - 1);
+        hostbuf[sizeof(hostbuf) - 1] = '\0';
+    }
+#else
     if (gethostname(hostbuf, sizeof(hostbuf) - 1) != 0)
         strcpy(hostbuf, "localhost");
     hostbuf[sizeof(hostbuf) - 1] = '\0';
+#endif
 
     if (!command(std::string("EHLO ") + hostbuf, 2, reply, err)) {
         close();
