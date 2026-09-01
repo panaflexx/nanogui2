@@ -22,18 +22,22 @@
 #include <memory.h>
 #include <string.h>
 
-#ifdef _WIN32
-#include <windows.h>
-#include <glad/glad.h>
-#endif
-#ifdef __LINUX__
-#include <GL/glcorearb.h>
+/* The NanoVG GL headers below name GL types and entry points without pulling in
+   an OpenGL header of their own, so include the platform's one first. */
+#ifdef __APPLE__
+#  include <OpenGL/gl3.h>
+#  include <OpenGL/glext.h>
+#elif defined(_WIN32)
+#  include <windows.h>
+#  include <glad/glad.h>
+#else
+#  define GL_GLEXT_PROTOTYPES
+#  include <GL/gl.h>
+#  include <GL/glext.h>
 #endif
 #include "nanovg.h"
 #define NANOVG_GL3_IMPLEMENTATION
 #include "nanovg_gl.h"
-#define NANOVG_GL3
-#define NANOVG_GL_IMPLEMENTATION
 #include "nanovg_gl_utils.h"
 #define FONTSTASH_IMPLEMENTATION
 #include "fontstash.h"
