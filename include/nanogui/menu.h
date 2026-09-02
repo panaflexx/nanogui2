@@ -54,7 +54,13 @@ public:
              const std::vector<Shortcut> &s = {{0, 0}});
 
     size_t                       num_shortcuts() const { return m_shortcuts.size(); }
-    const Shortcut              &shortcut(size_t i = 0) const { return m_shortcuts.at(i); }
+    /// Shortcut \p i, or an empty one when the item has none.  draw() and
+    /// preferred_text_size() call shortcut() unconditionally, so an item built
+    /// with an empty shortcut list must not throw on its first draw.
+    const Shortcut              &shortcut(size_t i = 0) const {
+        static const Shortcut none;   // Shortcut(0, 0) has empty text
+        return i < m_shortcuts.size() ? m_shortcuts[i] : none;
+    }
     const std::vector<Shortcut> &shortcuts() const { return m_shortcuts; }
 
     bool mouse_enter_event(const Vector2i &p, bool enter) override;

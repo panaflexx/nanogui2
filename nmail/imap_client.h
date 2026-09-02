@@ -20,12 +20,24 @@ struct MailFolder {
 
 struct MailSummary {
     int seq = 0;               // IMAP message sequence number
-    std::string from;
+    std::string from;          // display name, or the address if none was given
+    std::string from_addr;     // bare address of the sender
     std::string subject;
     std::string date;          // formatted for display
     std::string preview;
     bool seen = false;
 };
+
+/* One entry of an RFC 822 address list. */
+struct MailAddress {
+    std::string name;          // display name (RFC 2047 decoded), "" when absent
+    std::string address;       // bare addr-spec, e.g. "jane@example.com"
+};
+
+/* Split an address header ("A <a@x>, b@y, \"Doe, J\" <j@z>") into its parts.
+ * Commas inside quotes or angle brackets do not split.  Entries without a
+ * plausible address are dropped, so the result may be shorter than the input. */
+std::vector<MailAddress> parse_address_list(const std::string &raw);
 
 struct MailImage {
     std::string cid;          // Content-ID without angle brackets ("" if none)

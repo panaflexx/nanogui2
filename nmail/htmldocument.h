@@ -61,6 +61,15 @@ public:
     void set_hover_url(const std::string &url);
     std::function<void(const std::string &url)> on_link_hover;
 
+    /* Called when a link is clicked, before the URL is handed to the
+     * platform browser.  Return true to say "handled, do not open" — this
+     * is how the host claims its own private schemes.  A false return (or
+     * no callback) leaves the normal http/https/mailto behaviour alone. */
+    std::function<bool(const std::string &url)> on_link_click;
+    /* Walk up from a leaf widget and offer the click to the owning
+     * document; returns true when the host consumed it. */
+    bool notify_link_click(const std::string &url);
+
     virtual bool mouse_enter_event(const nanogui::Vector2i &p, bool enter) override;
     virtual void draw(NVGcontext *ctx) override;
     virtual nanogui::Vector2i preferred_size(NVGcontext *ctx) const override;

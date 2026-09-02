@@ -835,10 +835,17 @@ public:
         else { std::string u=hit_url(p); m_hover_url=u; if(!u.empty()) set_cursor(Cursor::Hand); else set_cursor(Cursor::Arrow); notify_hover(u); }
         return Widget::mouse_enter_event(p, enter);
     }
+    bool notify_click(const std::string &url) {
+        for (Widget *pp = parent(); pp; pp = pp->parent())
+            if (auto *hd = dynamic_cast<HtmlDocument *>(pp))
+                return hd->notify_link_click(url);
+        return false;
+    }
     virtual bool mouse_button_event(const Vector2i &p, int button, bool down, int mods) override {
         if(button==GLFW_MOUSE_BUTTON_1 && !down){
             std::string u=hit_url(p);
             if(!u.empty()){
+                if(notify_click(u)) return true;   // host claimed it
                 std::string n; if(is_allowed_url(u,n)){ open_url_secure(n); return true; }
             }
         }
@@ -893,6 +900,11 @@ public:
             }
         }
         if(!m_link_url.empty() && button==GLFW_MOUSE_BUTTON_1 && !down){
+            for (Widget *pp = parent(); pp; pp = pp->parent())
+                if (auto *hd = dynamic_cast<HtmlDocument *>(pp)) {
+                    if (hd->notify_link_click(m_link_url)) return true;
+                    break;
+                }
             std::string n; if(is_allowed_url(m_link_url,n)){ open_url_secure(n); return true; }
         }
         return false;
@@ -3024,6 +3036,10 @@ HtmlDocument::HtmlDocument(Widget *parent) : Widget(parent) {
     if (debug_draw())
         fprintf(stderr, "[trace] HtmlDocument flatten+skip-identity-save\n");
 #endif
+}
+
+bool HtmlDocument::notify_link_click(const std::string &url) {
+    return on_link_click ? on_link_click(url) : false;
 }
 
 void HtmlDocument::set_hover_url(const std::string &url) {

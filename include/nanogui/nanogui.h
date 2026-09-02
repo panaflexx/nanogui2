@@ -31,6 +31,7 @@
 #include <nanogui/messagedialog.h>
 #include <nanogui/folderdialog.h>
 #include <nanogui/textbox.h>
+#include <nanogui/autocomplete.h>
 #include <nanogui/textarea.h>
 #include <nanogui/slider.h>
 #include <nanogui/imagepanel.h>

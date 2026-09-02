@@ -369,14 +369,17 @@ private:
     static bool decode_base64(const std::string &in, std::string &out) {
         out.clear();
         out.reserve(in.size() * 3 / 4);
-        int val = 0, valb = -8;
+        /* Unsigned + masked: see the matching decoder in imap_client.cpp.
+         * A signed accumulator overflows after a few symbols. */
+        unsigned val = 0;
+        int valb = -8;
         for (unsigned char c : in) {
             if (c == '=' || std::isspace(c))
                 continue;
             int d = b64_val((char)c);
             if (d < 0)
                 return false;
-            val = (val << 6) + d;
+            val = ((val << 6) | (unsigned)d) & 0xFFFFFFu;
             valb += 6;
             if (valb >= 0) {
                 out.push_back(char((val >> valb) & 0xFF));

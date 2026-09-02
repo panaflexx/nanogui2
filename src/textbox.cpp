@@ -38,8 +38,8 @@ TextBox::TextBox(Widget *parent, const std::string &value,
       m_valid_format(true),
       m_value_temp(value),
       m_placeholder(placeholder),
-      m_cursor_pos(-1),
-      m_selection_pos(-1),
+      m_cursor_pos(kNoCursor),
+      m_selection_pos(kNoCursor),
       m_mouse_pos(Vector2i(-1,-1)),
       m_mouse_down_pos(Vector2i(-1,-1)),
       m_mouse_drag_pos(Vector2i(-1,-1)),
@@ -290,8 +290,8 @@ void TextBox::draw(NVGcontext* ctx) {
         nglyphs = nvgTextGlyphPositions(ctx, draw_pos.x(), draw_pos.y(),
                 m_value_temp.c_str(), nullptr, glyphs, max_glyphs);
 
-        if (m_cursor_pos > -1) {
-            if (m_selection_pos > -1) {
+        if (m_cursor_pos > kNoCursor) {
+            if (m_selection_pos > kNoCursor) {
                 float caretx = cursor_index_to_position(m_cursor_pos, text_bound[2],
                                                     glyphs, nglyphs);
                 float selx = cursor_index_to_position(m_selection_pos, text_bound[2],
@@ -425,7 +425,7 @@ bool TextBox::focus_event(bool focused) {
                character.  A mouse press overrides this via m_mouse_down_pos
                before the next draw, so clicks still position the cursor at
                the click point. */
-            m_cursor_pos = -2;
+            m_cursor_pos = kCursorEnd;
         } else {
             if (m_valid_format) {
                 if (m_value_temp == "")
@@ -439,8 +439,8 @@ bool TextBox::focus_event(bool focused) {
 
             m_valid_format = true;
             m_committed = true;
-            m_cursor_pos = -1;
-            m_selection_pos = -1;
+            m_cursor_pos = kNoCursor;
+            m_selection_pos = kNoCursor;
             m_text_offset = 0;
             m_mouse_down_pos = Vector2i(-1, -1);
         }
@@ -451,44 +451,54 @@ bool TextBox::focus_event(bool focused) {
     return true;
 }
 
+void TextBox::resolve_cursor() {
+    const int n = (int) m_value_temp.size();
+    /* kNoCursor means "not editing" and must survive. */
+    if (m_cursor_pos == kCursorEnd || m_cursor_pos > n)
+        m_cursor_pos = n;
+    if (m_selection_pos == kCursorEnd || m_selection_pos > n)
+        m_selection_pos = n;
+}
+
 bool TextBox::keyboard_event(int key, int /* scancode */, int action, int modifiers) {
     if (m_editable && focused()) {
+        resolve_cursor();
         if (action == GLFW_PRESS || action == GLFW_REPEAT) {
             if (key == GLFW_KEY_LEFT) {
                 if (modifiers == GLFW_MOD_SHIFT) {
-                    if (m_selection_pos == -1)
+                    if (m_selection_pos == kNoCursor)
                         m_selection_pos = m_cursor_pos;
                 } else {
-                    m_selection_pos = -1;
+                    m_selection_pos = kNoCursor;
                 }
 
                 if (m_cursor_pos > 0)
                     m_cursor_pos--;
             } else if (key == GLFW_KEY_RIGHT) {
                 if (modifiers == GLFW_MOD_SHIFT) {
-                    if (m_selection_pos == -1)
+                    if (m_selection_pos == kNoCursor)
                         m_selection_pos = m_cursor_pos;
                 } else {
-                    m_selection_pos = -1;
+                    m_selection_pos = kNoCursor;
                 }
 
                 if (m_cursor_pos < (int) m_value_temp.length())
                     m_cursor_pos++;
             } else if (key == GLFW_KEY_HOME) {
                 if (modifiers == GLFW_MOD_SHIFT) {
-                    if (m_selection_pos == -1)
+                    if (m_selection_pos == kNoCursor)
                         m_selection_pos = m_cursor_pos;
                 } else {
-                    m_selection_pos = -1;
+                    m_selection_pos = kNoCursor;
                 }
 
                 m_cursor_pos = 0;
             } else if (key == GLFW_KEY_END) {
                 if (modifiers == GLFW_MOD_SHIFT) {
-                    if (m_selection_pos == -1)
+                    if (m_selection_pos == kNoCursor)
                         m_selection_pos = m_cursor_pos;
                 } else {
-                    m_selection_pos = -1;
+                    m_selection_pos = kNoCursor;
                 }
 
                 m_cursor_pos = (int) m_value_temp.size();
@@ -537,6 +547,7 @@ bool TextBox::keyboard_event(int key, int /* scancode */, int action, int modifi
 
 bool TextBox::keyboard_character_event(unsigned int codepoint) {
     if (m_editable && focused()) {
+        resolve_cursor();
         std::ostringstream convert;
         convert << (char) codepoint;
 
@@ -569,7 +580,7 @@ bool TextBox::check_format(const std::string &input, const std::string &format) 
 }
 
 bool TextBox::copy_selection() {
-    if (m_selection_pos > -1) {
+    if (m_selection_pos > kNoCursor) {
         Screen *sc = screen();
         if (!sc)
             return false;
@@ -598,7 +609,7 @@ void TextBox::paste_from_clipboard() {
 }
 
 bool TextBox::delete_selection() {
-    if (m_selection_pos > -1) {
+    if (m_selection_pos > kNoCursor) {
         int begin = m_cursor_pos;
         int end = m_selection_pos;
 
@@ -609,7 +620,7 @@ bool TextBox::delete_selection() {
                            m_value_temp.begin() + end);
 
         m_cursor_pos = begin;
-        m_selection_pos = -1;
+        m_selection_pos = kNoCursor;
         return true;
     }
 
@@ -622,29 +633,29 @@ void TextBox::update_cursor(NVGcontext *, float lastx,
     // handle mouse cursor events
     if (m_mouse_down_pos.x() != -1) {
         if (m_mouse_down_modifier == GLFW_MOD_SHIFT) {
-            if (m_selection_pos == -1)
+            if (m_selection_pos == kNoCursor)
                 m_selection_pos = m_cursor_pos;
         } else
-            m_selection_pos = -1;
+            m_selection_pos = kNoCursor;
 
         m_cursor_pos =
             position_to_cursor_index(m_mouse_down_pos.x(), lastx, glyphs, size);
 
         m_mouse_down_pos = Vector2i(-1, -1);
     } else if (m_mouse_drag_pos.x() != -1) {
-        if (m_selection_pos == -1)
+        if (m_selection_pos == kNoCursor)
             m_selection_pos = m_cursor_pos;
 
         m_cursor_pos =
             position_to_cursor_index(m_mouse_drag_pos.x(), lastx, glyphs, size);
     } else {
         // set cursor to last character
-        if (m_cursor_pos == -2)
+        if (m_cursor_pos == kCursorEnd)
             m_cursor_pos = size;
     }
 
     if (m_cursor_pos == m_selection_pos)
-        m_selection_pos = -1;
+        m_selection_pos = kNoCursor;
 }
 
 float TextBox::cursor_index_to_position(int index, float lastx,

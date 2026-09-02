@@ -25,6 +25,7 @@
 #include <nanogui/button.h>
 #include <nanogui/messagedialog.h>
 #include <nanogui/spinner.h>
+#include <nanogui/autocomplete.h>
 #include <GLFW/glfw3.h>
 #include <iostream>
 #include <fstream>
@@ -36,6 +37,7 @@
 #include <map>
 #include <unordered_map>
 #include <unordered_set>
+#include <set>
 #include <algorithm>
 #include <thread>
 #include <mutex>
@@ -53,6 +55,7 @@
 #include "http_fetch.h"
 #include "htmldocument.h"
 #include "saved_email.h"
+#include "contacts.h"
 #include "gumbo.h"
 #include <memory>
 #include <cstdlib>
@@ -91,6 +94,9 @@ struct MailConfig {
     std::string smtp_host;      // empty -> fall back to the IMAP host
     int         smtp_port = 587;
     bool        dark_mode = false;
+    /* Off by default: harvested addresses stay in memory for the session
+     * unless the user opts into keeping them on disk. */
+    bool        save_contacts = false;
     int         check_interval_min = 15;  // how often to auto-check for new mail
 };
 
@@ -321,6 +327,8 @@ static bool load_config(MailConfig &c) {
     if (sp && sp->type == DICT_NUMBER) c.smtp_port = (int)sp->number_value;
     const DictValue *dm = dict_object_get(root, "dark_mode");
     if (dm && dm->type == DICT_BOOL) c.dark_mode = dm->bool_value != 0;
+    const DictValue *sc = dict_object_get(root, "save_contacts");
+    if (sc && sc->type == DICT_BOOL) c.save_contacts = sc->bool_value != 0;
     const DictValue *ci = dict_object_get(root, "check_interval_min");
     if (ci && ci->type == DICT_INT64)  c.check_interval_min = (int)ci->int64_value;
     if (ci && ci->type == DICT_NUMBER) c.check_interval_min = (int)ci->number_value;
@@ -341,6 +349,8 @@ static bool save_config(const MailConfig &c) {
     dict_object_set(root, "smtp_host", dict_create_string(c.smtp_host.c_str()));
     dict_object_set(root, "smtp_port", dict_create_int64(c.smtp_port));
     dict_object_set(root, "dark_mode", dict_create_bool(c.dark_mode ? 1 : 0));
+    dict_object_set(root, "save_contacts",
+                    dict_create_bool(c.save_contacts ? 1 : 0));
     dict_object_set(root, "check_interval_min", dict_create_int64(c.check_interval_min));
 
     char buf[8192];
@@ -2324,6 +2334,99 @@ static std::string document_to_html(const Document &doc) {
 /* Render a fetched message into a reading-pane Document.  Used for
  * Markdown and plain-text bodies; text/html bodies go straight to
  * HtmlDocument::set_html (see render_current). */
+/* ---------------------------------------------------------------------------
+ * Message header card.
+ *
+ * The header is chrome, not content, but it shares a document with the mail's
+ * own HTML — which routinely paints its own background.  Theme-coloured text
+ * then lands on whatever the sender chose (light ink on white in dark mode),
+ * so the card carries its own parchment palette and stays legible in both
+ * modes and against any message background.  Fixed colours on purpose: these
+ * do NOT follow the light/dark theme.
+ * ------------------------------------------------------------------------ */
+namespace parchment {
+    static const char *kPaper   = "#f4ecd8";  // aged paper
+    static const char *kEdge    = "#ddd0b0";  // slightly darker rule/border
+    static const char *kInk     = "#2b2418";  // primary text
+    static const char *kInkBold = "#1f1a12";  // subject
+    /* Label contrast on kPaper is 5.09:1 — WCAG AA for body text.  The
+     * lighter brown this replaced measured 3.76:1 and failed. */
+    static const char *kLabel   = "#756040";  // "From:" / "To:" / "Date:"
+    static const char *kMeta    = "#6b5d45";  // date value
+}
+
+/* Private scheme for the header's name links.  is_allowed_url() only ever
+ * lets http/https/mailto reach the browser, so an unhandled click here is
+ * inert rather than dangerous. */
+static const char *kAddrScheme = "x-nmail-addr:";
+
+/* Render an address header.  Entries that carry a display name become links
+ * that swap to the bare address when clicked; entries that are already just
+ * an address have nothing to reveal and stay plain text. */
+static std::string address_row_html(const std::string &raw,
+                                    const std::set<std::string> &expanded) {
+    using namespace parchment;
+    std::vector<MailAddress> addrs = parse_address_list(raw);
+    if (addrs.empty())                       // unparseable: show it verbatim
+        return "<span style=\"color:" + std::string(kInk) + "\">" +
+               html_escape(raw) + "</span>";
+
+    std::string out;
+    for (size_t i = 0; i < addrs.size(); ++i) {
+        if (i) out += ", ";
+        const MailAddress &a = addrs[i];
+        std::string low = a.address;
+        for (char &c : low) c = (char)std::tolower((unsigned char)c);
+
+        if (a.name.empty()) {
+            out += "<span style=\"color:" + std::string(kInk) + "\">" +
+                   html_escape(a.address) + "</span>";
+            continue;
+        }
+        const bool show_addr = expanded.count(low) > 0;
+        out += "<a href=\"" + std::string(kAddrScheme) + html_escape(a.address) +
+               "\" style=\"color:" + kInk + "\">" +
+               html_escape(show_addr ? a.address : a.name) + "</a>";
+    }
+    return out;
+}
+
+/* One <div> card: subject, then the From/To/Date rows. */
+static std::string header_html(const MailMessage &msg,
+                               const std::set<std::string> &expanded) {
+    using namespace parchment;
+    std::string h;
+    h += std::string("<div style=\"background-color:") + kPaper +
+         ";border:1px solid " + kEdge +
+         ";border-radius:8px;padding:14px 16px;color:" + kInk + "\">";
+
+    h += std::string("<p style=\"font-size:24px;color:") + kInkBold +
+         "\"><b>" + html_escape(msg.subject) + "</b></p>";
+
+    auto label_cell = [&](const char *label) {
+        return std::string("<p style=\"font-size:15px\"><b style=\"color:") +
+               kLabel + "\">" + label + " </b>";
+    };
+
+    h += label_cell("From:") + address_row_html(msg.from_addr.empty()
+                                                ? msg.from
+                                                : msg.from + " <" +
+                                                  msg.from_addr + ">",
+                                                expanded) + "</p>";
+    if (!msg.to.empty())
+        h += label_cell("To:") + address_row_html(msg.to, expanded) + "</p>";
+    if (!msg.date.empty())
+        h += label_cell("Date:") +
+             "<span style=\"color:" + std::string(kMeta) + "\">" +
+             html_escape(msg.date) + "</span></p>";
+
+    h += "</div>";
+    /* Vertical margin is not supported by the renderer, so separate the card
+     * from the message body with an explicit spacer. */
+    h += "<div style=\"height:12px\"></div>";
+    return h;
+}
+
 static void render_message(Document &doc, const MailMessage &msg,
                            NVGcolor text_color, NVGcolor meta_color) {
     doc.paragraphs.clear();
@@ -2437,7 +2540,27 @@ public:
     std::vector<MailFolder> m_folders;
     bool m_move_inflight = false;
     std::string m_status_base;
+
+    ContactStore m_contacts;
+
+    static const std::string &contacts_path() {
+        static const std::string p = config_file("contacts.json");
+        return p;
+    }
+
+    /* Every correspondent we see becomes a completion candidate. */
+    void harvest(const std::vector<MailSummary> &sums) {
+        for (const MailSummary &s : sums)
+            m_contacts.observe(s.from, s.from_addr);
+    }
+    void harvest(const MailMessage &msg) {
+        m_contacts.observe(msg.from, msg.from_addr);
+        m_contacts.observe_header(msg.to);
+    }
     std::string m_hover_url;
+    /* Header recipients the user has clicked to reveal, lowercased.
+     * Reset whenever a different message is rendered. */
+    std::set<std::string> m_expanded_addrs;
 
     // helpers for Trash/Junk moves
     std::string resolve_dest_folder(const std::string &kind) const {
@@ -2516,6 +2639,17 @@ public:
         if (url.empty()) {
             m_hover_url.clear();
             if (m_status) m_status->set_caption(m_status_base.empty() ? "Ready" : m_status_base);
+            return;
+        }
+        if (url.compare(0, std::strlen(kAddrScheme), kAddrScheme) == 0) {
+            const std::string addr = url.substr(std::strlen(kAddrScheme));
+            std::string low_a = addr;
+            for (char &c : low_a) c = (char)std::tolower((unsigned char)c);
+            m_hover_url.clear();
+            if (m_status)
+                m_status->set_caption(m_expanded_addrs.count(low_a)
+                                          ? "Click to show the display name"
+                                          : "Click to show " + addr);
             return;
         }
         std::string low; low.reserve(url.size());
@@ -2647,7 +2781,6 @@ public:
     MailApp() : Screen(Vector2i(1100, 700), "nmail") {
         inc_ref();
         set_window_icon(glfw_window());
-
         // Theme — light background like macOS Mail (toggle with Ctrl/Cmd+T)
         set_theme_mode(ThemeMode::Light);
         m_theme->m_split_divider_width = 2;
@@ -2801,6 +2934,12 @@ public:
         m_view->image_resolver = [this](const std::string &src) {
             return resolve_image(src);
         };
+        m_view->on_link_click = [this](const std::string &url) -> bool {
+            const size_t n = std::strlen(kAddrScheme);
+            if (url.compare(0, n, kAddrScheme) != 0) return false;
+            toggle_expanded_addr(url.substr(n));
+            return true;                     // handled: do not open a browser
+        };
         m_view->on_link_hover = [this](const std::string &url) {
             handle_link_hover(url);
         };
@@ -2867,6 +3006,9 @@ public:
         } else {
             show_preferences();
         }
+        /* Only touch contacts.json when the user has opted in. */
+        if (m_config.save_contacts)
+            m_contacts.load(contacts_path());
         apply_theme_mode(m_config.dark_mode ? ThemeMode::Dark
                                             : ThemeMode::Light);
     }
@@ -2875,6 +3017,8 @@ public:
         *m_alive = false;
         clear_image_textures();
         m_worker.stop();
+        if (m_config.save_contacts && m_contacts.dirty())
+            m_contacts.save(contacts_path());
     }
 
     /* ---- appearance ---- */
@@ -2959,6 +3103,7 @@ public:
         m_current_folder = folder;
         m_summaries      = sums;
         m_summary_cache[folder] = sums;
+        harvest(sums);
         m_older_inflight = false;
         m_move_inflight = false;
         m_email_list->set_loading_more(false);
@@ -3002,6 +3147,7 @@ public:
         // (also newest-first) list to keep ordering correct.
         m_summaries.insert(m_summaries.begin(), fresh.begin(), fresh.end());
         m_summary_cache[folder] = m_summaries;
+        harvest(fresh);
 
         if (folder != m_current_folder) return;   // not looking at this folder
 
@@ -3056,6 +3202,7 @@ public:
 
         m_summaries.insert(m_summaries.end(), sums.begin(), sums.end());
         m_summary_cache[folder] = m_summaries;
+        harvest(sums);
         // make newly paged-in older rows eligible for viewport prefetch too
         {
             std::vector<int> seqs; seqs.reserve(sums.size());
@@ -3092,6 +3239,7 @@ public:
     }
 
     void on_body(int seq, const MailMessage &msg) {
+        harvest(msg);
         // Always enrich the preview + cache, even if this wasn't the
         // foreground fetch — background prefetches land here too when
         // the user happens to be looking at that message.
@@ -3116,6 +3264,7 @@ public:
         m_current_message = msg;
         m_has_message     = true;
         m_rendered_seq    = seq;
+        m_expanded_addrs.clear();   // reveals belong to the message shown
         m_reply_btn->set_enabled(true);
         if (m_save_btn) m_save_btn->set_enabled(true);
         render_current();
@@ -3125,6 +3274,7 @@ public:
                        const MailMessage &msg, const std::string &preview) {
         if (m_body_cache.size() > 256) m_body_cache.clear();
         m_body_cache[folder + ":" + std::to_string(seq)] = msg;
+        harvest(msg);
         if (folder != m_current_folder) return;
         // only enrich empty/thin previews — never clobber a real one with
         // a shorter derived snippet from a failed decode edge case
@@ -3291,6 +3441,7 @@ public:
             m_current_message = cached->second;
             m_has_message     = true;
             m_rendered_seq    = seq;
+            m_expanded_addrs.clear();
             m_reply_btn->set_enabled(true);
             if (m_save_btn) m_save_btn->set_enabled(true);
             render_current();
@@ -3500,6 +3651,20 @@ public:
 
     /* (Re-)render the current message — on select, body arrival, theme
        change.  Image bytes bind in place via bind_loaded_images(). */
+    /* Re-render the message with the current set of revealed addresses.
+     * Cheap enough: this is the same path a message switch already takes. */
+    void toggle_expanded_addr(const std::string &addr) {
+        std::string low = addr;
+        for (char &c : low) c = (char)std::tolower((unsigned char)c);
+        if (!m_expanded_addrs.erase(low))
+            m_expanded_addrs.insert(low);
+        /* render_current() resets the scroll to the top; the user clicked a
+         * name, they did not ask to be sent back to the start of the mail. */
+        Vector2f keep = m_view_scroll ? m_view_scroll->scroll() : Vector2f(0.f, 0.f);
+        render_current();
+        if (m_view_scroll) m_view_scroll->set_scroll(keep);
+    }
+
     void render_current() {
         if (!m_has_message) return;
         clear_image_textures();
@@ -3510,16 +3675,7 @@ public:
             /* Rich render of the HTML part (preferred, like other
              * clients), with the header fields as a small HTML fragment
              * on top. */
-            std::string h;
-            h += "<p><span style=\"font-size:24px\"><b>" +
-                 html_escape(msg.subject) + "</b></span></p>";
-            h += "<p><b>From: </b>" + html_escape(msg.from) + "</p>";
-            if (!msg.to.empty())
-                h += "<p><b>To: </b>" + html_escape(msg.to) + "</p>";
-            if (!msg.date.empty())
-                h += "<p><b>Date: </b>" + html_escape(msg.date) + "</p>";
-            h += "<hr>";
-            m_view->set_html(h + msg.html);
+            m_view->set_html(header_html(msg, m_expanded_addrs) + msg.html);
             m_has_remote_images = m_view->has_remote_images();
         } else {
             Document doc;
@@ -3645,13 +3801,22 @@ public:
             check_interval->set_selected_index(idx);
         }
 
+        new Label(form, "Contacts:", "sans-bold");
+        CheckBox *save_contacts = new CheckBox(form, "Remember on disk");
+        save_contacts->set_checked(m_config.save_contacts);
+        save_contacts->set_tooltip(
+            "Keep addresses harvested from your mail in " +
+            contacts_path() + " so completions survive a restart. "
+            "When off they are kept only for this session.");
+
         Widget *buttons = new Widget(win);
         buttons->set_layout(new BoxLayout(Orientation::Horizontal,
                                           Alignment::Middle, 0, 8));
 
         Button *save = new Button(buttons, "Save && Connect", FA_CHECK);
         save->set_callback([this, win, host, port, user, pass,
-                            smtp_host, smtp_port, check_interval]() {
+                            smtp_host, smtp_port, check_interval,
+                            save_contacts]() {
             m_config.host     = host->value();
             m_config.port     = port->value();
             m_config.username = user->value();
@@ -3661,6 +3826,7 @@ public:
             int idx = check_interval->selected_index();
             m_config.check_interval_min =
                 kIntervalMinutes[(idx >= 0 && idx < 4) ? idx : 1];
+            m_config.save_contacts = save_contacts->checked();
             if (!save_config(m_config)) {
                 auto *dlg = new MessageDialog(this, MessageDialog::Type::Warning,
                     "Save failed",
@@ -3669,6 +3835,9 @@ public:
                 return;
             }
             m_config_loaded = true;
+            /* Write straight away so enabling the option survives a crash. */
+            if (m_config.save_contacts && m_contacts.dirty())
+                m_contacts.save(contacts_path());
             if (PopupMenu *pop = check_interval->popup())
                 pop->set_visible(false);
             m_worker.set_config(m_config);
@@ -3725,11 +3894,24 @@ public:
         form->set_layout(form_layout);
 
         Label *to_lbl = new Label(form, "To:", "sans-bold");
-        TextBox *to = new TextBox(form);
+        AutoCompleteBox *to = new AutoCompleteBox(form);
         to->set_value(reply ? (orig.from_addr.empty() ? orig.from
                                                         : orig.from_addr)
                             : "");
         to->set_editable(true);
+        /* Complete one recipient at a time so "a@x.com, ja" offers Jane. */
+        to->set_token_separator(',');
+        to->set_provider([this](const std::string &q) {
+            std::vector<AutoCompleteBox::Item> out;
+            for (const Contact &c : m_contacts.search(q, 8)) {
+                AutoCompleteBox::Item it;
+                it.label  = c.name.empty() ? c.address : c.name;
+                it.detail = c.name.empty() ? "" : c.address;
+                it.value  = format_address(c);
+                out.push_back(it);
+            }
+            return out;
+        });
         form_layout->set_anchor(to_lbl,
             AdvancedGridLayout::Anchor(0, 0, Alignment::Minimum, Alignment::Middle));
         form_layout->set_anchor(to,

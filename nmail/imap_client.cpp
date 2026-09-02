@@ -61,12 +61,16 @@ static std::string base64_decode(const std::string &in) {
     };
     std::string out;
     out.reserve(in.size() * 3 / 4);
-    int val = 0, bits = -8;
+    /* The accumulator is shifted left on every symbol and never truncated,
+     * so a signed int overflows (UB) after a handful of them.  Unsigned wraps
+     * predictably, and the mask keeps only the 24 bits that are ever read. */
+    unsigned val = 0;
+    int bits = -8;
     for (unsigned char c : in) {
         if (c == '=') break;
         int d = T[c];
         if (d < 0) continue;
-        val = (val << 6) | d;
+        val = ((val << 6) | (unsigned)d) & 0xFFFFFFu;
         bits += 6;
         if (bits >= 0) {
             out += (char)((val >> bits) & 0xFF);
@@ -298,6 +302,50 @@ parse_headers(const std::string &block) {
         value = line.substr(colon + 1);
     }
     flush();
+    return out;
+}
+
+/* One address-list entry -> {name, address}.  Mirrors display_from()/
+ * address_of() but keeps both halves and leaves the name empty when the
+ * header carried only a bare address. */
+static MailAddress split_address(const std::string &entry) {
+    MailAddress a;
+    std::string s = decode_encoded_words(entry);
+    size_t lt = s.find('<');
+    if (lt != std::string::npos) {
+        size_t gt = s.find('>', lt);
+        a.address = trim(s.substr(lt + 1,
+                         gt == std::string::npos ? gt : gt - lt - 1));
+        std::string name = trim(s.substr(0, lt));
+        if (name.size() >= 2 && name.front() == '"' && name.back() == '"')
+            name = trim(name.substr(1, name.size() - 2));
+        a.name = name;
+    } else {
+        a.address = trim(s);
+    }
+    return a;
+}
+
+std::vector<MailAddress> parse_address_list(const std::string &raw) {
+    std::vector<MailAddress> out;
+    bool in_quotes = false, in_angle = false;
+    std::string cur;
+    auto flush = [&]() {
+        MailAddress a = split_address(cur);
+        cur.clear();
+        /* Require something that can plausibly be routed. */
+        if (a.address.find('@') == std::string::npos) return;
+        if (a.address.find(' ') != std::string::npos) return;
+        out.push_back(a);
+    };
+    for (char c : raw) {
+        if (c == '"' && !in_angle)      in_quotes = !in_quotes;
+        else if (c == '<' && !in_quotes) in_angle = true;
+        else if (c == '>' && !in_quotes) in_angle = false;
+        if (c == ',' && !in_quotes && !in_angle) { flush(); continue; }
+        cur += c;
+    }
+    if (!trim(cur).empty()) flush();
     return out;
 }
 
@@ -1325,7 +1373,8 @@ static bool parse_summaries(const std::vector<std::string> &untagged,
             auto it = h.find(k);
             return it == h.end() ? "" : it->second;
         };
-        sum.from    = display_from(get("from"));
+        sum.from      = display_from(get("from"));
+        sum.from_addr = address_of(decode_encoded_words(get("from")));
         sum.subject = decode_encoded_words(get("subject"));
         if (sum.subject.empty()) sum.subject = "(no subject)";
         sum.preview = sanitize_preview(text);

@@ -99,6 +99,17 @@ protected:
     void paste_from_clipboard();
     bool delete_selection();
 
+    /**
+     * \brief Turn the "end of text" cursor sentinel into a real index.
+     *
+     * focus_event() parks m_cursor_pos at kCursorEnd and leaves it to the next
+     * draw() to resolve against the laid-out glyphs.  Editing events can
+     * arrive before that frame ever runs, so every entry point that indexes
+     * the text calls this first.  Also clamps an index left stale by a
+     * change to the buffer.  A committed cursor (-1) is left alone.
+     */
+    void resolve_cursor();
+
     void update_cursor(NVGcontext *ctx, float lastx,
                        const NVGglyphPosition *glyphs, int size);
     float cursor_index_to_position(int index, float lastx,
@@ -111,6 +122,18 @@ protected:
     SpinArea spin_area(const Vector2i &pos);
 
 protected:
+    /**
+     * \brief Sentinel values for m_cursor_pos and m_selection_pos.
+     *
+     * Both are otherwise indices into m_value_temp.  kCursorEnd is what
+     * focus_event() installs when the caret belongs after the last character
+     * but the text has not been laid out yet; update_cursor() turns it into a
+     * real index on the next draw, and resolve_cursor() does the same for
+     * editing events that arrive before that frame.
+     */
+    static constexpr int kNoCursor  = -1;  ///< Not editing; no caret drawn.
+    static constexpr int kCursorEnd = -2;  ///< "After the last character".
+
     bool m_editable;
     bool m_spinnable;
     bool m_committed;
