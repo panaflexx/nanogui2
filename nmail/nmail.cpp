@@ -892,15 +892,28 @@ private:
             Cmd cmd;
             {
                 std::unique_lock<std::mutex> lock(m_mutex);
-                /* Wake for whichever comes first: the periodic mail check or
-                 * a pending "mark read" deadline. */
-                auto deadline = next_check;
-                if (m_seen_seq > 0 && m_seen_at < deadline)
-                    deadline = m_seen_at;
-                bool got_cmd = m_cv.wait_until(lock, deadline, [this]() {
-                    return m_quit || !m_queue.empty();
-                });
+                /* Sleep until there is work: a queued command, shutdown, or
+                 * a deadline (the periodic mail check or a pending "mark
+                 * read" timer).  The deadline is recomputed after EVERY wake
+                 * because schedule_seen() notifies precisely so a newly armed
+                 * timer can shorten a wait already in progress — folding the
+                 * deadline into a pred-based wait_until would instead keep
+                 * sleeping until the ORIGINAL deadline (up to
+                 * check_interval_min away), leaving \Seen unset for minutes
+                 * on an otherwise idle connection. */
+                for (;;) {
+                    auto deadline = next_check;
+                    if (m_seen_seq > 0 && m_seen_at < deadline)
+                        deadline = m_seen_at;
+                    m_cv.wait_until(lock, deadline);
+                    if (m_quit || !m_queue.empty() ||
+                        std::chrono::steady_clock::now() >= deadline)
+                        break;
+                    /* Woke early on a notify (e.g. schedule_seen) with an
+                     * empty queue: loop to recompute the deadline. */
+                }
                 if (m_quit) return;
+                bool got_cmd = !m_queue.empty();
                 if (!got_cmd) {
                     auto now = std::chrono::steady_clock::now();
                     if (m_seen_seq > 0 && now >= m_seen_at) {
@@ -1443,6 +1456,25 @@ public:
     static constexpr float SB_W      = 6.0f;
     static constexpr float SB_MARGIN = 3.0f;
 
+    /* Status indicators drawn at the top-right of a row, just left of the
+     * date, stacking leftward in table order.  A new flag (starred,
+     * has_attachment, ...) only needs a bool on EmailData and a row here.
+     * `show_when` is the flag value that displays the glyph, so "unread"
+     * is `seen == false`.  Glyphs come from the monochrome FontAwesome
+     * "icons" face, so the fill color tints them -- pick per-row colors
+     * freely (unread green, starred amber, ...). */
+    struct Indicator {
+        bool EmailData::*flag;
+        bool        show_when;
+        const char *glyph;   // UTF-8 literal, drawn with the "icons" (FontAwesome) face
+        Color       color;
+    };
+    inline static const Indicator kIndicators[] = {
+        { &EmailData::seen, false, "\xEF\x84\x91" /* FA_CIRCLE */, Color(60, 180, 75, 255) },
+    };
+    static constexpr float IND_FONT_SCALE = 0.45f;  // of the sender font size
+    static constexpr float IND_GAP        = 5.0f;
+
     EmailListView(Widget *parent,
                   std::function<void(int, const EmailData &)> on_select = nullptr)
         : Widget(parent), m_on_select(std::move(on_select)) {
@@ -1904,9 +1936,32 @@ private:
         nvgTextBounds(ctx, 0, 0, d.date.c_str(), nullptr, db);
         const float date_w = (db[2] - db[0]) + padx * 1.8f;
 
-        // Sender name (bold, clipped against date)
+        /* Indicators (unread dot, future flags): right-aligned, starting
+         * just left of the date and stacking leftward.  `ind_w` widens the
+         * sender clip below so the name never runs under the dots. */
+        float ind_w = 0.0f;
+        {
+            const float ind_fs = sender_fs * IND_FONT_SCALE;
+            float ix = x + cw - padx - (db[2] - db[0]) - IND_GAP;
+            nvgFontSize(ctx, ind_fs);
+            nvgFontFace(ctx, "icons");
+            nvgTextAlign(ctx, NVG_ALIGN_RIGHT | NVG_ALIGN_MIDDLE);
+            for (const Indicator &ind : kIndicators) {
+                if (d.*(ind.flag) != ind.show_when) continue;
+                nvgFillColor(ctx, ind.color);
+                nvgText(ctx, ix, y1, ind.glyph, nullptr);
+                float gb[4] = {};
+                nvgTextBounds(ctx, 0, 0, ind.glyph, nullptr, gb);
+                const float gw = (gb[2] - gb[0]) + IND_GAP;
+                ix    -= gw;
+                ind_w += gw;
+            }
+            if (ind_w > 0.0f) ind_w += IND_GAP;   // space before the sender
+        }
+
+        // Sender name (bold, clipped against date + indicators)
         nvgSave(ctx);
-        nvgIntersectScissor(ctx, x + padx, y, cw - date_w - padx, h);
+        nvgIntersectScissor(ctx, x + padx, y, cw - date_w - ind_w - padx, h);
         nvgFontSize(ctx, sender_fs);
         nvgFontFace(ctx, "sans-bold");
         nvgFillColor(ctx, name_col);
@@ -2923,7 +2978,7 @@ public:
             m_rendered_seq = -1;
             m_reply_btn->set_enabled(false);
             if (m_save_btn) m_save_btn->set_enabled(false);
-            m_images_btn->set_enabled(false);
+            m_images_btn->set_enabled(m_show_remote_images);
             Document doc;
             parse_markdown(doc, "*Message moved to " + dest + "*", text_color(), 18.f);
             m_view->set_document(std::move(doc));
@@ -3003,16 +3058,38 @@ public:
 
         m_images_btn = make_button_tool(FA_IMAGE,
             "Load remote images (off by default to block tracking pixels)");
+        m_images_btn->set_flags(Button::ToggleButton);
         m_images_btn->set_enabled(false);
-        m_images_btn->set_callback([this]() {
-            m_show_remote_images = true;
-            m_images_btn->set_enabled(false);
-            /* Do not re-parse the HTML: bind_loaded_images() re-runs the
-             * resolver, which queues HTTP GETs and leaves placeholders
-             * until each texture arrives. */
-            if (m_view)
-                m_view->bind_loaded_images();
-            update_image_status();
+        /* change_callback, not callback: a ToggleButton only fires
+         * callback() on the click that pushes it IN — the un-push click
+         * would never reach us. */
+        m_images_btn->set_change_callback([this](bool on) {
+            m_show_remote_images = on;
+            /* The transparent toolbar buttons have no visible toggle state,
+             * so light up a solid green pill while loading is on (alpha 0
+             * falls back to the normal transparent look when off). */
+            m_images_btn->set_background_color(on ? Color(40, 160, 60, 255)
+                                                  : Color(0, 0, 0, 0));
+            m_images_btn->set_tooltip(on
+                ? "Remote images on -- click to stop loading (cached stay)"
+                : "Load remote images (off by default to block tracking pixels)");
+            if (on) {
+                /* Do not re-parse the HTML: bind_loaded_images() re-runs the
+                 * resolver, which queues HTTP GETs and leaves placeholders
+                 * until each texture arrives. */
+                if (m_view)
+                    m_view->bind_loaded_images();
+                update_image_status();
+            } else {
+                /* Stop future loading: drop queued fetches that have not
+                 * started.  In-flight ones still land in the cache, and
+                 * everything already cached keeps showing — resolve_image()
+                 * consults m_img_tex before the m_show_remote_images gate. */
+                for (const std::string &u : m_fetch_queue)
+                    m_remote_pending.erase(u);
+                m_fetch_queue.clear();
+            }
+            redraw();
         });
 
         m_trash_btn = make_button_tool(FA_TRASH, "Move to Trash (Delete)");
@@ -3497,6 +3574,9 @@ public:
         std::string folder = item->tooltip();
         if (folder.empty()) folder = item->caption();
         if (folder == m_current_folder) return;
+        /* A mark-read timer armed in the old folder must not fire here --
+         * the message is no longer on screen (and seqs may shift). */
+        m_worker.cancel_seen();
         m_email_list->set_emails({});
         m_loading_seq  = -1;
         m_pending_seq  = -1;
@@ -3691,6 +3771,7 @@ public:
         /* Explicit refresh means "forget everything I know". */
         m_summary_cache.clear();
         m_body_cache.clear();
+        m_worker.cancel_seen();   // seqs may renumber; don't flag a stranger
         m_worker.refresh();
     }
 
@@ -3900,8 +3981,11 @@ public:
             render_message(doc, msg, text_color(), meta_color());
             m_view->set_document(std::move(doc));
         }
-        m_images_btn->set_enabled(m_has_remote_images &&
-                                  !m_show_remote_images);
+        /* Enabled when this message has remote images, or whenever loading
+         * is on so it can always be switched back off.  The pushed state
+         * follows the global opt-in, not the message. */
+        m_images_btn->set_pushed(m_show_remote_images);
+        m_images_btn->set_enabled(m_has_remote_images || m_show_remote_images);
         m_view_scroll->set_scroll(0.0f);
         redraw();
     }
