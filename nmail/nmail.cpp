@@ -440,6 +440,8 @@ public:
     std::function<void(const std::string &)>                    cb_status;
     std::function<void(const std::string &, int,
                        const std::string &)>                    cb_moved;
+    /* A message was flagged \Seen on the server. */
+    std::function<void(const std::string &, int)>               cb_seen;
 
     void set_config(const MailConfig &c) {
         std::lock_guard<std::mutex> lock(m_mutex);
@@ -471,6 +473,29 @@ public:
     }
     void fetch_body(const std::string &folder, int seq) { post(Type::FetchBody, folder, seq); }
     void fetch_older()                          { post(Type::FetchOlder); }
+    /* Flag `seq` in `folder` as \Seen once `delay_sec` has passed without a
+     * newer request.  Calling again replaces the pending one, so moving to a
+     * different message restarts the clock rather than queueing a second
+     * mark. */
+    void schedule_seen(const std::string &folder, int seq, double delay_sec) {
+        {
+            std::lock_guard<std::mutex> lock(m_mutex);
+            m_seen_folder = folder;
+            m_seen_seq    = seq;
+            m_seen_at     = std::chrono::steady_clock::now() +
+                            std::chrono::milliseconds((long long)(delay_sec * 1000.0));
+        }
+        m_cv.notify_one();   // the loop may need to wake earlier than planned
+    }
+
+    void cancel_seen() {
+        {
+            std::lock_guard<std::mutex> lock(m_mutex);
+            m_seen_seq = 0;
+        }
+        m_cv.notify_one();
+    }
+
     void move_message(const std::string &folder, int seq,
                       const std::string &dest_folder) {
         post(Type::Move, folder, seq, dest_folder);
@@ -504,7 +529,7 @@ public:
     }
 
 private:
-    enum class Type { Connect, Refresh, Select, FetchBody, FetchOlder, Prefetch, Move, AutoRefresh };
+    enum class Type { Connect, Refresh, Select, FetchBody, FetchOlder, Prefetch, Move, MarkSeen, AutoRefresh };
     struct Cmd {
         Type type;
         std::string folder;
@@ -689,6 +714,12 @@ private:
     }
 
     bool do_move(const Cmd &cmd) {
+        /* move_message() may EXPUNGE, which renumbers the mailbox — a queued
+         * "mark read" seq would then point at an unrelated message. */
+        {
+            std::lock_guard<std::mutex> lock(m_mutex);
+            m_seen_seq = 0;
+        }
         std::string folder = cmd.folder;
         int seq = cmd.seq;
         std::string dest = cmd.dest_folder;
@@ -759,6 +790,29 @@ private:
         // (EXPUNGE resequences). Next explicit Refresh will fully
         // reconcile with the server.
         return true;
+    }
+
+    /* Best effort: a failed read-flag is not worth interrupting the user,
+     * so this reports nothing on error beyond a status line. */
+    void do_mark_seen(const Cmd &cmd) {
+        if (cmd.seq <= 0 || cmd.folder.empty() || !m_imap.is_open())
+            return;
+        std::string err;
+        if (m_imap.selected_folder() != cmd.folder &&
+            !m_imap.ensure_selected(cmd.folder, err))
+            return;
+        if (!m_imap.mark_seen(cmd.seq, err)) {
+            if (!ImapClient::is_connection_error(err))
+                return;
+            std::string re;
+            if (!m_imap.reconnect(re) ||
+                !m_imap.ensure_selected(cmd.folder, err) ||
+                !m_imap.mark_seen(cmd.seq, err))
+                return;
+        }
+        std::string folder = cmd.folder;
+        int seq = cmd.seq;
+        deliver([this, folder, seq]() { if (cb_seen) cb_seen(folder, seq); });
     }
 
     bool already_prefetch_queued_locked(int seq, const std::string &folder) const {
@@ -838,17 +892,31 @@ private:
             Cmd cmd;
             {
                 std::unique_lock<std::mutex> lock(m_mutex);
-                bool got_cmd = m_cv.wait_until(lock, next_check, [this]() {
+                /* Wake for whichever comes first: the periodic mail check or
+                 * a pending "mark read" deadline. */
+                auto deadline = next_check;
+                if (m_seen_seq > 0 && m_seen_at < deadline)
+                    deadline = m_seen_at;
+                bool got_cmd = m_cv.wait_until(lock, deadline, [this]() {
                     return m_quit || !m_queue.empty();
                 });
                 if (m_quit) return;
                 if (!got_cmd) {
-                    int interval_min = std::max(1, m_config.check_interval_min);
-                    next_check = std::chrono::steady_clock::now() +
-                                std::chrono::minutes(interval_min);
-                    if (m_config.host.empty() || m_selected_folder.empty())
-                        continue;   // nothing configured/selected to check yet
-                    cmd.type = Type::AutoRefresh;
+                    auto now = std::chrono::steady_clock::now();
+                    if (m_seen_seq > 0 && now >= m_seen_at) {
+                        cmd.type   = Type::MarkSeen;
+                        cmd.folder = m_seen_folder;
+                        cmd.seq    = m_seen_seq;
+                        m_seen_seq = 0;             // consume the request
+                    } else if (now >= next_check) {
+                        int interval_min = std::max(1, m_config.check_interval_min);
+                        next_check = now + std::chrono::minutes(interval_min);
+                        if (m_config.host.empty() || m_selected_folder.empty())
+                            continue;   // nothing configured/selected to check yet
+                        cmd.type = Type::AutoRefresh;
+                    } else {
+                        continue;       // woke early; nothing due yet
+                    }
                 } else {
                     cmd = m_queue.front();
                     m_queue.pop_front();
@@ -960,6 +1028,9 @@ private:
             case Type::Move:
                 do_move(cmd);
                 break;
+            case Type::MarkSeen:
+                do_mark_seen(cmd);
+                break;
             }
         }
     }
@@ -982,6 +1053,11 @@ private:
     std::string             m_prefetch_folder;
     std::deque<int>         m_prefetch_queue;
     std::unordered_set<int> m_prefetch_queued;
+
+    /* Pending "mark read" request; m_seen_seq == 0 means none. */
+    std::string m_seen_folder;
+    int         m_seen_seq = 0;
+    std::chrono::steady_clock::time_point m_seen_at;
 };
 
 // ---------------------------------------------------------------------------
@@ -1651,6 +1727,18 @@ public:
     // Selects the message below the deleted one, or the last if at end.
     // IMAP sequence numbers shift after EXPUNGE, so remaining seqs > deleted
     // are decremented to stay in sync without a full refresh.
+    /* Flip a row's read state in place (the server confirmed a \Seen flag).
+     * Returns false when the seq is not in the current view. */
+    bool set_seen(int seq, bool seen) {
+        for (EmailData &e : m_emails)
+            if (e.seq == seq) {
+                if (e.seen == seen) return true;
+                e.seen = seen;
+                return true;
+            }
+        return false;
+    }
+
     bool remove_seq(int seq) {
         for (int i = 0; i < (int)m_emails.size(); ++i) {
             if (m_emails[i].seq != seq) continue;
@@ -2520,6 +2608,8 @@ public:
     double                   m_preview_settle_at = 0.0;
     EmailData                m_pending_email;
     static constexpr double  kPreviewSettleSec = 0.10;
+    /* Dwell time before a viewed message is flagged \Seen on the server. */
+    static constexpr double  kMarkReadSec = 5.0;
 
     /* ---- inline/remote images in the reading pane ---- */
     std::unordered_map<std::string, int>         m_img_tex;        // src -> nvg id
@@ -2561,6 +2651,95 @@ public:
     /* Header recipients the user has clicked to reveal, lowercased.
      * Reset whenever a different message is rendered. */
     std::set<std::string> m_expanded_addrs;
+
+    /* Taskbar: one button per open dialog, bottom-right of the root window.
+     * Windows opt in by carrying one of the ids below. */
+    Widget *m_taskbar = nullptr;
+    std::vector<Window *> m_task_order;   // stable creation order
+
+    static bool taskbar_kind(const std::string &id, int &icon,
+                             std::string &tip) {
+        if (id == "nmail-prefs")   { icon = FA_SLIDERS_H; tip = "Preferences";  return true; }
+        if (id == "nmail-compose") { icon = FA_PEN;       tip = "New Message";  return true; }
+        if (id == "nmail-reply")   { icon = FA_REPLY;     tip = "Reply";        return true; }
+        return false;
+    }
+
+    /* Single exit for the dialogs the taskbar tracks.  Dispose once the event
+     * stack has unwound, then refresh the buttons and ask for a frame: the
+     * taskbar syncs during draw(), and closing a window does not by itself
+     * request a redraw. */
+    void close_dialog(Window *win) {
+        if (!win) return;
+        auto alive = m_alive;
+        nanogui::async([this, win, alive] {
+            if (!*alive) return;
+            if (win && win->parent()) win->dispose();
+            sync_taskbar();
+            redraw();
+        });
+        redraw();
+        glfwPostEmptyEvent();
+    }
+
+    bool is_live_window(const Window *w) const {
+        for (const Widget *c : children())
+            if (c == w) return true;
+        return false;
+    }
+
+    /* Rebuild the buttons when the set of open dialogs changes.  Driven off
+     * the live child list rather than close callbacks, so a window disposed
+     * by any route simply stops appearing. */
+    void sync_taskbar() {
+        if (!m_taskbar) return;
+
+        std::vector<Window *> live;
+        for (Widget *c : children()) {
+            auto *w = dynamic_cast<Window *>(c);
+            if (!w || w->is_root() || dynamic_cast<Popup *>(w) || !w->visible())
+                continue;
+            int icon; std::string tip;
+            if (taskbar_kind(w->id(), icon, tip)) live.push_back(w);
+        }
+
+        /* children() gets reordered every time a window is raised, so keep
+         * our own order: drop the closed, append the newly opened. */
+        std::vector<Window *> order;
+        for (Window *w : m_task_order)
+            if (std::find(live.begin(), live.end(), w) != live.end())
+                order.push_back(w);
+        for (Window *w : live)
+            if (std::find(order.begin(), order.end(), w) == order.end())
+                order.push_back(w);
+
+        if (order == m_task_order &&
+            m_taskbar->child_count() == (int)order.size())
+            return;                                  // nothing changed
+        m_task_order = order;
+
+        while (m_taskbar->child_count() > 0)
+            m_taskbar->remove_child_at(m_taskbar->child_count() - 1);
+
+        for (Window *w : m_task_order) {
+            int icon = 0; std::string tip;
+            taskbar_kind(w->id(), icon, tip);
+            Button *b = new Button(m_taskbar, "", icon);
+            b->set_tooltip(tip);
+            b->set_fixed_size(Vector2i(30, 22));
+            b->set_callback([this, w] {
+                /* The window may have been disposed between the rebuild that
+                 * created this button and the click. */
+                if (!is_live_window(w)) { sync_taskbar(); return; }
+                w->set_visible(true);
+                move_window_to_front(w);
+                w->request_focus();
+                sync_taskbar();
+                redraw();
+            });
+        }
+        perform_layout();
+    }
 
     // helpers for Trash/Junk moves
     std::string resolve_dest_folder(const std::string &kind) const {
@@ -2947,11 +3126,18 @@ public:
         m_view_scroll->set_height_flex(SizeMode::Expanding);
         rflex->set_flex_item(m_view_scroll, FlexLayout::FlexItem(1.0f));
 
-        // ---- Status bar ----
-        m_status = new Label(window, "Not connected", "sans", 16);
-        m_status->set_min_height(26);
-        m_status->set_height(26);
-        m_status->set_height_flex(SizeMode::Fixed);
+        // ---- Status bar (left) + window taskbar (right) ----
+        Widget *statusbar = new Widget(window);
+        statusbar->set_min_height(26);
+        statusbar->set_height(26);
+        statusbar->set_height_flex(SizeMode::Fixed);
+        statusbar->set_layout(new FlexLayout(FlexDirection::Row,
+                                             JustifyContent::SpaceBetween,
+                                             AlignItems::Center, 0, 6));
+        m_status = new Label(statusbar, "Not connected", "sans", 16);
+        m_taskbar = new Widget(statusbar);
+        m_taskbar->set_layout(new BoxLayout(Orientation::Horizontal,
+                                            Alignment::Middle, 0, 4));
         m_status_base = "Not connected";
 
         split->set_drag_position(0.22f);
@@ -2991,6 +3177,9 @@ public:
         };
         m_worker.cb_status = [this](const std::string &msg) {
             set_status(msg);
+        };
+        m_worker.cb_seen = [this](const std::string &folder, int seq) {
+            on_seen(folder, seq);
         };
         m_worker.cb_moved = [this](const std::string &folder, int seq,
                                    const std::string &dest) {
@@ -3265,6 +3454,7 @@ public:
         m_has_message     = true;
         m_rendered_seq    = seq;
         m_expanded_addrs.clear();   // reveals belong to the message shown
+        arm_read_timer(seq);
         m_reply_btn->set_enabled(true);
         if (m_save_btn) m_save_btn->set_enabled(true);
         render_current();
@@ -3357,6 +3547,9 @@ public:
             if (!around.empty()) m_worker.ensure_visible_cached(m_current_folder, around);
         }
         m_loading_seq = -1;   // drop in-flight body for a previous seq
+        /* Cancel now rather than waiting for the preview to settle, so a
+         * near-expired timer on the previous message cannot still fire. */
+        if (d.seq != m_rendered_seq) m_worker.cancel_seen();
         const bool switched = (d.seq != m_rendered_seq);
         m_pending_seq       = d.seq;
         m_pending_email     = d;
@@ -3428,6 +3621,30 @@ public:
         m_view_scroll->set_scroll(0.0f);
     }
 
+    /* Start the read clock for the message now on screen.  Already-read mail
+     * needs no STORE, and a message with no folder cannot be addressed. */
+    void arm_read_timer(int seq) {
+        if (seq <= 0 || m_current_folder.empty()) { m_worker.cancel_seen(); return; }
+        for (const MailSummary &s : m_summaries)
+            if (s.seq == seq && s.seen) { m_worker.cancel_seen(); return; }
+        m_worker.schedule_seen(m_current_folder, seq, kMarkReadSec);
+    }
+
+    /* The server confirmed the flag: mirror it locally so the row stops
+     * rendering as unread. */
+    void on_seen(const std::string &folder, int seq) {
+        auto mark = [seq](std::vector<MailSummary> &v) {
+            for (MailSummary &s : v)
+                if (s.seq == seq) { s.seen = true; break; }
+        };
+        auto it = m_summary_cache.find(folder);
+        if (it != m_summary_cache.end()) mark(it->second);
+        if (folder != m_current_folder) return;
+        mark(m_summaries);
+        if (m_email_list) m_email_list->set_seen(seq, true);
+        redraw();
+    }
+
     void commit_pending_preview() {
         if (m_pending_seq < 0)
             return;
@@ -3445,6 +3662,7 @@ public:
             m_reply_btn->set_enabled(true);
             if (m_save_btn) m_save_btn->set_enabled(true);
             render_current();
+            arm_read_timer(seq);
             return;
         }
         m_loading_seq = seq;
@@ -3729,6 +3947,8 @@ public:
     /* ---- Preferences window ---- */
     void show_preferences() {
         Window *win = new Window(this, "IMAP Preferences", false);
+        win->set_id("nmail-prefs");
+        win->set_close_callback([this, win] { close_dialog(win); });
         win->set_traffic_lights_mask(0x1);   // close (red) button only
         win->set_layout(new BoxLayout(Orientation::Vertical, Alignment::Fill,
                                       12, 10));
@@ -3844,15 +4064,12 @@ public:
             m_worker.connect();
             /* Destroy the prefs window after this callback returns so we
                do not free the Save button while it is still running. */
-            nanogui::async([win]() { win->dispose(); });
+            close_dialog(win);
             glfwPostEmptyEvent();
         });
 
         Button *cancel = new Button(buttons, "Cancel", FA_TIMES);
-        cancel->set_callback([win]() {
-            nanogui::async([win]() { win->dispose(); });
-            glfwPostEmptyEvent();
-        });
+        cancel->set_callback([this, win]() { close_dialog(win); });
 
         win->center();
         win->request_focus();
@@ -3865,6 +4082,8 @@ public:
         const MailMessage orig = reply ? m_current_message : MailMessage{};
 
         Window *win = new Window(this, reply ? "Reply" : "New Message", true);
+        win->set_id(reply ? "nmail-reply" : "nmail-compose");
+        win->set_close_callback([this, win] { close_dialog(win); });
         /* A single-column AdvancedGridLayout instead of a Vertical BoxLayout:
          * BoxLayout never grows children past their preferred size on the
          * main axis, so the message body would stay a fixed height no
@@ -4127,7 +4346,7 @@ public:
         });
 
         Button *cancel = new Button(action_group, "Cancel", FA_TIMES);
-        cancel->set_callback([win]() { win->dispose(); });
+        cancel->set_callback([this, win]() { close_dialog(win); });
 
         win->center();
         win->request_focus();
@@ -4163,6 +4382,8 @@ public:
                     if (ok) {
                         set_status("Sent");
                         win->dispose();
+                        sync_taskbar();     // drop its taskbar button
+                        redraw();
                     } else {
                         set_status("Send failed");
                         /* Restore the composer so the user can retry. */
@@ -4228,6 +4449,7 @@ public:
 
     virtual void draw(NVGcontext *ctx) override {
         pump_preview();
+        sync_taskbar();
         // Background gradient
         nvgSave(ctx);
         nvgBeginPath(ctx);

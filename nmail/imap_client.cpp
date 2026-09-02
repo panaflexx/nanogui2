@@ -867,6 +867,15 @@ void ImapClient::abort() {
     nmail_sock_abort(m_fd);
 }
 
+bool ImapClient::mark_seen(int seq, std::string &err) {
+    if (seq <= 0) { err = "invalid sequence number"; return false; }
+    if (m_fd < 0)  { err = "not connected"; return false; }
+    /* .SILENT: the updated flags do not need to be echoed back at us. */
+    std::vector<std::string> untagged;
+    return run("STORE " + std::to_string(seq) + " +FLAGS.SILENT (\\Seen)",
+               untagged, err);
+}
+
 void ImapClient::close() {
     if (m_fd >= 0) {
         nmail_sock_close(m_fd);

@@ -94,6 +94,12 @@ public:
     bool move_message(int seq, const std::string &dest_folder,
                       std::string &err);
 
+    /* STORE +FLAGS.SILENT (\Seen) on one message, marking it read on the
+     * server.  Caller must have the containing folder SELECTed.  Sequence
+     * numbers shift on EXPUNGE, so only call this with a seq known current
+     * for the selected mailbox. */
+    bool mark_seen(int seq, std::string &err);
+
     void close();
     bool is_open() const { return m_fd >= 0; }
     const std::string &selected_folder() const { return m_selected_folder; }

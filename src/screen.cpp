@@ -1674,6 +1674,14 @@ void Screen::center_window(Window* window) {
 }
 
 void Screen::move_window_to_front(Window* window) {
+    /* A root window is the backdrop the other windows sit on.  Raising it --
+       which update_focus() does for whatever window you click -- buries every
+       open dialog behind it, so clicking the app "loses" the Preferences or
+       compose window.  Leave the z-order alone for roots; they are created
+       first and so already sit at the bottom. */
+    if (window && window->is_root())
+        return;
+
     m_children.erase(std::remove(m_children.begin(), m_children.end(), window), m_children.end());
     m_children.push_back(window);
     /* Brute force topological sort (no problem for a few windows..) */
