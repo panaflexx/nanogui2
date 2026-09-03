@@ -1,10 +1,10 @@
 /*
  * nmail_view — standalone HtmlDocument viewer for emails saved from nmail.
  *
- *   nmail_view [file.html]
+ *   nmail_view [file.eml | file.html]
  *
- * Opens the same renderer the reading pane uses. Drop a saved nmail HTML
- * file (or any .html) on it to reproduce layout bugs without IMAP.
+ * Opens the same renderer the reading pane uses. Drop a saved .eml (RFC 822
+ * from nmail's Save button), a legacy nmail HTML dump, or any .html.
  *
  * Remote <img> URLs load in the background: the document paints immediately
  * with placeholders, then each texture is bound as it arrives.
@@ -15,9 +15,18 @@
 #include <nanogui/zoomscrollpanel.h>
 #include <nanogui/layout.h>
 #include <nanogui/icons.h>
+#include <nanogui/menu.h>
+#include <nanogui/messagedialog.h>
 #include <GLFW/glfw3.h>
+#ifndef _WIN32
+#include <sys/stat.h>
+#include <unistd.h>
+#include <fcntl.h>
+#endif
 
 #include "htmldocument.h"
+#include "imap_client.h"
+#include "attachment_widgets.h"
 #include "saved_email.h"
 #include "http_fetch.h"
 
@@ -25,6 +34,8 @@
 #include <cstdio>
 #include <cstring>
 #include <cctype>
+#include <cmath>
+#include <cstdlib>
 #include <fstream>
 #include <iostream>
 #include <iterator>
@@ -92,9 +103,17 @@ public:
         m_view->image_resolver = [this](const std::string &src) {
             return resolve_image(src);
         };
+        m_view->embed_widget = [this](Widget *parent, const HtmlEmbedSpec &spec)
+                -> Widget * {
+            if (spec.id == "nmail-att-preview-bar")
+                return make_att_preview_bar(parent);
+            if (spec.id != "nmail-attachments" || m_att_preview)
+                return nullptr;
+            return make_attachment_strip(parent);
+        };
         apply_theme(ThemeMode::Light);
 
-        m_status = new Label(window, "Open an HTML email, or pass a path",
+        m_status = new Label(window, "Open an .eml or HTML email, or pass a path",
                              "sans", 16);
         m_status->set_min_height(24);
         m_status->set_height(24);
@@ -122,7 +141,7 @@ public:
             m_dark ? nvgRGBA(226, 227, 233, 255) : nvgRGBA(20, 20, 25, 255),
             m_dark ? nvgRGBA(150, 152, 166, 255) : nvgRGBA(110, 110, 125, 255));
         if (!m_last_raw.empty())
-            apply_saved(m_last, /*reset_scroll=*/false);
+            apply_message(m_last, /*reset_scroll=*/false);
         else
             show_help();
         perform_layout();
@@ -132,8 +151,8 @@ public:
     void show_help() {
         m_view->set_html(
             "<h1>nmail_view</h1>"
-            "<p>Open an HTML file saved from nmail "
-            "(Save Email / Ctrl+S), or any .html fragment.</p>"
+            "<p>Open an <b>.eml</b> saved from nmail (Save / Ctrl+S), "
+            "a legacy nmail HTML dump, or any .html fragment.</p>"
             "<ul>"
             "<li><b>Ctrl+O</b> — open file</li>"
             "<li><b>Ctrl+T</b> — light / dark</li>"
@@ -145,70 +164,331 @@ public:
 
     void open_dialog() {
         auto paths = file_dialog(
-            { {"html", "HTML email"}, {"txt", "Plain text"} },
+            { {"eml", "Email message (RFC 822)"},
+              {"html", "HTML email"}, {"txt", "Plain text"} },
             false, false, "");
         if (!paths.empty() && !paths[0].empty())
             load_path(paths[0]);
     }
 
+    static bool looks_like_rfc822(const std::string &s) {
+        if (s.compare(0, 16, "<!-- nmail-saved") == 0)
+            return false;
+        size_t i = 0;
+        if (s.compare(0, 5, "From ") == 0) {
+            size_t nl = s.find('\n');
+            if (nl == std::string::npos) return true;
+            i = nl + 1;
+        }
+        size_t colon = s.find(':', i);
+        size_t nl = s.find('\n', i);
+        if (colon == std::string::npos || (nl != std::string::npos && colon > nl))
+            return false;
+        bool name = false;
+        for (size_t k = i; k < colon; ++k) {
+            unsigned char c = (unsigned char)s[k];
+            if (std::isalnum(c) || c == '-') name = true;
+            else if (c == ' ' || c == '\t') break;
+            else return false;
+        }
+        return name;
+    }
+
+    static std::string html_esc(const std::string &s) {
+        std::string o;
+        for (char c : s) {
+            if (c == '&') o += "&amp;";
+            else if (c == '<') o += "&lt;";
+            else if (c == '>') o += "&gt;";
+            else o += c;
+        }
+        return o;
+    }
+
     void load_path(const std::string &path) {
-        std::string err;
-        SavedEmail e;
-        if (!nmail_load_email_file(path, e, err)) {
-            m_status->set_caption(err);
+        std::ifstream in(path, std::ios::binary);
+        if (!in) {
+            m_status->set_caption("Could not open " + path);
             return;
         }
-        m_last = e;
-        std::ifstream in(path, std::ios::binary);
-        m_last_raw.assign((std::istreambuf_iterator<char>(in)),
-                          std::istreambuf_iterator<char>());
+        std::string raw((std::istreambuf_iterator<char>(in)),
+                        std::istreambuf_iterator<char>());
+        m_last_raw = raw;
         m_path = path;
-        apply_saved(e, /*reset_scroll=*/true);
+        m_last = MailMessage{};
+
+        if (raw.compare(0, 16, "<!-- nmail-saved") == 0) {
+            SavedEmail e;
+            std::string err;
+            if (!nmail_parse_email(raw, e)) {
+                m_status->set_caption("Could not parse " + path);
+                return;
+            }
+            m_last.from = e.from;
+            m_last.to = e.to;
+            m_last.subject = e.subject;
+            m_last.date = e.date;
+            m_last.html = e.html;
+            m_last.body = e.body;
+        } else if (looks_like_rfc822(raw)) {
+            if (!parse_rfc822_message(raw, m_last)) {
+                m_status->set_caption("Could not parse RFC 822 " + path);
+                return;
+            }
+        } else {
+            m_last.html = raw;
+        }
+
+        apply_message(m_last, /*reset_scroll=*/true);
         glfwSetWindowTitle(glfw_window(), ("nmail_view — " + path).c_str());
         update_image_status();
     }
 
-    void apply_saved(const SavedEmail &e, bool reset_scroll) {
-        std::string caption = e.subject.empty() ? m_path : e.subject;
+    Widget *make_attachment_strip(Widget *parent) {
+        auto vis = visible_attachments(m_last);
+        if (vis.empty() || !parent) return nullptr;
+        auto *strip = new AttachmentStrip(parent);
+        for (size_t i = 0; i < vis.size(); ++i) {
+            const MailAttachment &a = *vis[i];
+            int thumb = 0;
+            if (a.mime.rfind("image/", 0) == 0 && !a.data.empty()) {
+                std::string key = "att:" + std::to_string(i) + ":" + a.filename;
+                thumb = create_texture(key, a.data);
+            }
+            auto *chip = new AttachmentChip(strip, a, thumb);
+            chip->on_open = [this, chip] { open_attachment(chip->attachment()); };
+            chip->on_save = [this, chip] { save_attachment(chip->attachment()); };
+            chip->on_menu = [this, chip](const Vector2i &p) {
+                show_attachment_menu(chip, p);
+            };
+        }
+        return strip;
+    }
+
+    Widget *make_att_preview_bar(Widget *parent) {
+        Widget *bar = new Widget(parent);
+        auto *fl = new FlexLayout(FlexDirection::Row, JustifyContent::FlexStart,
+                                  AlignItems::Center, 0, 10);
+        fl->set_padding(2, 4);
+        bar->set_layout(fl);
+        bar->set_live(true);
+        Button *back = new Button(bar, "Back", FA_ARROW_LEFT);
+        back->set_callback([this] { close_attachment_preview(); });
+        new Label(bar, m_att_preview_name, "sans-bold", 18);
+        return bar;
+    }
+
+    void close_attachment_preview() {
+        Vector2f keep = m_att_preview_scroll;
+        m_att_preview = false;
+        apply_message(m_last, /*reset_scroll=*/false);
+        if (m_scroll) m_scroll->set_scroll(keep);
+    }
+
+    void show_attachment_preview(const MailAttachment &att) {
+        m_att_preview_scroll = m_scroll ? m_scroll->scroll() : Vector2f(0.f, 0.f);
+        m_att_preview = true;
+        m_att_preview_name = att_display_name(att);
+        clear_image_textures();
+        std::string html = attachment_is_html(att)
+                               ? with_preview_bar(att.data)
+                               : text_attachment_html(att);
+        m_view->set_html(html);
+        if (m_scroll) m_scroll->set_scroll(0.0f);
+        perform_layout();
+        redraw();
+    }
+
+    void open_attachment(const MailAttachment &att) {
+        if (attachment_is_inpane_preview(att)) {
+            show_attachment_preview(att);
+            return;
+        }
+        if (attachment_is_exec(att) || attachment_is_archive(att) ||
+            !is_open_allowlisted(attachment_ext(att)))
+            return;
+        std::string path, err;
+        if (write_temp_attachment(att, path, err))
+            desktop_open_file(path);
+    }
+
+    void save_attachment(const MailAttachment &att) {
+        const std::string ext = attachment_ext(att);
+        auto paths = file_dialog(
+            { { ext.empty() ? "dat" : ext, att.mime.empty() ? "File" : att.mime } },
+            true, false, "");
+        if (paths.empty() || paths[0].empty()) return;
+        std::string path = paths[0];
+        std::ofstream out(path, std::ios::binary | std::ios::trunc);
+        if (out)
+            out.write(att.data.data(), (std::streamsize)att.data.size());
+    }
+
+    static Vector2i visual_screen_pos(const Widget *w, const Vector2i &logical_abs) {
+        const ZoomScrollPanel *zsp = nullptr;
+        for (const Widget *p = w; p && !zsp; p = p->parent())
+            zsp = dynamic_cast<const ZoomScrollPanel *>(p);
+        if (!zsp) return logical_abs;
+        Vector2i zsp_abs = zsp->absolute_position();
+        Vector2i rel = logical_abs - zsp_abs;
+        double z = zsp->zoom();
+        auto pan = zsp->pan_offset();
+        return zsp_abs + Vector2i(
+            (int)std::lround(pan.x() + rel.x() * z),
+            (int)std::lround(pan.y() + rel.y() * z));
+    }
+
+    void show_attachment_menu(AttachmentChip *chip, const Vector2i &screen_pos) {
+        if (!chip) return;
+        Screen *s = screen();
+        Window *w = chip->window();
+        if (!s || !w) return;
+        if (!m_att_popup)
+            m_att_popup = new PopupMenu(s, w, nullptr, false);
+        while (m_att_popup->child_count() > 0)
+            m_att_popup->remove_child_at(m_att_popup->child_count() - 1);
+        const MailAttachment att = chip->attachment();
+        auto *open_item = new MenuItem(m_att_popup, "Open");
+        open_item->set_enabled(attachment_is_inpane_preview(att) ||
+            (!attachment_is_exec(att) && !attachment_is_archive(att) &&
+             is_open_allowlisted(attachment_ext(att))));
+        open_item->set_callback([this, att] {
+            if (m_att_popup) m_att_popup->set_visible(false);
+            open_attachment(att);
+        });
+        auto *browser_item = new MenuItem(m_att_popup, "Open in browser");
+        browser_item->set_enabled(attachment_opens_in_browser(att));
+        browser_item->set_callback([this, att] {
+            if (m_att_popup) m_att_popup->set_visible(false);
+            std::string path, err;
+            if (write_temp_attachment(att, path, err))
+                desktop_open_file(path);
+        });
+        auto *save_item = new MenuItem(m_att_popup, "Save As\u2026");
+        save_item->set_callback([this, att] {
+            if (m_att_popup) m_att_popup->set_visible(false);
+            save_attachment(att);
+        });
+        auto *dl_item = new MenuItem(m_att_popup, "Save to Downloads");
+        dl_item->set_enabled(!att.data.empty());
+        dl_item->set_callback([this, att] {
+            if (m_att_popup) m_att_popup->set_visible(false);
+            save_to_downloads(att);
+        });
+        NVGcontext *ctx = s->nvg_context();
+        Vector2i pref = m_att_popup->preferred_size(ctx);
+        m_att_popup->set_size(pref);
+        m_att_popup->perform_layout(ctx);
+        Vector2i pos = visual_screen_pos(chip, screen_pos);
+        pos.x() = std::min(pos.x(), std::max(0, s->width() - pref.x()));
+        if (pos.y() + pref.y() > s->height())
+            pos.y() = std::max(0, pos.y() - pref.y());
+        m_att_popup->set_position(pos);
+        m_att_popup->set_visible(true);
+        s->set_popup_visible(m_att_popup);
+        redraw();
+    }
+
+    bool write_temp_attachment(const MailAttachment &att, std::string &path_out,
+                               std::string &err) {
+        const std::string ext = attachment_ext(att);
+        const std::string name = sanitize_filename(att.filename, ext);
+#ifndef _WIN32
+        char tmpl[] = "/tmp/nmail-att-XXXXXX";
+        if (!mkdtemp(tmpl)) { err = "temp dir"; return false; }
+        std::string path = std::string(tmpl) + "/" + name;
+#else
+        (void)err;
+        std::string path = name;
+#endif
+        std::ofstream out(path, std::ios::binary | std::ios::trunc);
+        if (!out) { err = "write failed"; return false; }
+        out.write(att.data.data(), (std::streamsize)att.data.size());
+#ifndef _WIN32
+        ::chmod(path.c_str(), S_IRUSR | S_IWUSR);
+#endif
+        path_out = path;
+        return true;
+    }
+
+    bool desktop_open_file(const std::string &path) {
+#ifndef _WIN32
+        if (path.empty() || path.front() != '/') return false;
+        pid_t pid = fork();
+        if (pid == 0) {
+            setsid();
+            int fd = open("/dev/null", O_RDWR);
+            if (fd >= 0) { dup2(fd, 0); dup2(fd, 1); dup2(fd, 2); if (fd > 2) close(fd); }
+#ifdef __APPLE__
+            execlp("open", "open", path.c_str(), (char *)nullptr);
+#else
+            execlp("xdg-open", "xdg-open", path.c_str(), (char *)nullptr);
+#endif
+            _exit(127);
+        }
+        return pid > 0;
+#else
+        return false;
+#endif
+    }
+
+    void save_to_downloads(const MailAttachment &att) {
+        const char *home = std::getenv("HOME");
+        std::string dir = (home && home[0]) ? std::string(home) + "/Downloads"
+                                            : std::string("Downloads");
+#ifndef _WIN32
+        ::mkdir(dir.c_str(), 0755);
+#endif
+        std::string name = sanitize_filename(att.filename, attachment_ext(att));
+        std::string path = dir + "/" + name;
+        std::ofstream out(path, std::ios::binary | std::ios::trunc);
+        if (out)
+            out.write(att.data.data(), (std::streamsize)att.data.size());
+    }
+
+    void apply_message(const MailMessage &msg, bool reset_scroll) {
+        std::string caption = msg.subject.empty() ? m_path : msg.subject;
         m_title->set_caption(caption);
         m_doc_remotes.clear();
+        clear_image_textures();
 
-        if (!e.html.empty()) {
-            std::string h;
-            /* Full HTML documents already have their own header (logo,
-             * nav).  Only prepend From/Subject on fragments. */
-            auto is_full_doc = [](const std::string &s) {
-                auto has = [&](const char *a, const char *b) {
-                    return s.find(a) != std::string::npos ||
-                           s.find(b) != std::string::npos;
-                };
-                return has("<html", "<HTML") || has("<body", "<BODY");
+        auto is_full_doc = [](const std::string &s) {
+            auto has = [&](const char *a, const char *b) {
+                return s.find(a) != std::string::npos ||
+                       s.find(b) != std::string::npos;
             };
-            if (!is_full_doc(e.html) &&
-                (!e.subject.empty() || !e.from.empty())) {
-                auto esc = [](const std::string &s) {
-                    std::string o;
-                    for (char c : s) {
-                        if (c == '&') o += "&amp;";
-                        else if (c == '<') o += "&lt;";
-                        else if (c == '>') o += "&gt;";
-                        else o += c;
-                    }
-                    return o;
-                };
-                h += "<p><span style=\"font-size:24px\"><b>" +
-                     esc(e.subject) + "</b></span></p>";
-                if (!e.from.empty())
-                    h += "<p><b>From: </b>" + esc(e.from) + "</p>";
-                if (!e.to.empty())
-                    h += "<p><b>To: </b>" + esc(e.to) + "</p>";
-                if (!e.date.empty())
-                    h += "<p><b>Date: </b>" + esc(e.date) + "</p>";
-                h += "<hr>";
+            return has("<html", "<HTML") || has("<body", "<BODY");
+        };
+
+        std::string h;
+        const bool fragment = msg.html.empty() || !is_full_doc(msg.html);
+        if (fragment && (!msg.subject.empty() || !msg.from.empty())) {
+            h += "<p><span style=\"font-size:24px\"><b>" +
+                 html_esc(msg.subject) + "</b></span></p>";
+            if (!msg.from.empty())
+                h += "<p><b>From: </b>" + html_esc(msg.from) + "</p>";
+            if (!msg.to.empty())
+                h += "<p><b>To: </b>" + html_esc(msg.to) + "</p>";
+            if (!msg.date.empty())
+                h += "<p><b>Date: </b>" + html_esc(msg.date) + "</p>";
+            h += "<hr>";
+        }
+
+        if (!msg.html.empty()) {
+            m_view->set_html(with_attachment_slots(h + msg.html, msg));
+        } else if (!msg.body.empty() || !visible_attachments(msg).empty()) {
+            std::string body_html = h;
+            if (!msg.body.empty()) {
+                std::string p;
+                for (char c : html_esc(msg.body)) {
+                    if (c == '\n') p += "<br>";
+                    else p += c;
+                }
+                body_html += "<p>" + p + "</p>";
             }
-            m_view->set_html(h + e.html);
+            m_view->set_html(with_attachment_slots(body_html, msg));
         } else {
-            m_view->set_plain(e.body);
+            m_view->set_plain("");
         }
         if (reset_scroll)
             m_scroll->set_scroll(0.0f);
@@ -223,6 +503,10 @@ public:
             return true;
         if (action != GLFW_PRESS)
             return false;
+        if (key == GLFW_KEY_ESCAPE && m_att_preview) {
+            close_attachment_preview();
+            return true;
+        }
         if (key == GLFW_KEY_O && (modifiers & SYSTEM_COMMAND_MOD)) {
             open_dialog();
             return true;
@@ -468,6 +752,15 @@ private:
             return make_info(cached->second);
 
         std::string bytes;
+        if (src.rfind("cid:", 0) == 0) {
+            std::string cid = src.substr(4);
+            for (const MailImage &img : m_last.images) {
+                if (img.cid == cid)
+                    return make_info(create_texture(src, img.data));
+            }
+            return HtmlImageInfo{};
+        }
+
         if (decode_data_url(src, bytes)) {
             int id = create_texture(src, bytes);
             return make_info(id);
@@ -585,7 +878,11 @@ private:
     bool          m_dark = false;
     std::string   m_path;
     std::string   m_last_raw;
-    SavedEmail    m_last;
+    MailMessage   m_last;
+    PopupMenu    *m_att_popup = nullptr;
+    bool          m_att_preview = false;
+    Vector2f      m_att_preview_scroll{0.f, 0.f};
+    std::string   m_att_preview_name;
     // Save PNG (toolbar Ctrl+S or --screenshot)
     std::string   m_pending_save_path;
     double        m_pending_save_deadline = 0;

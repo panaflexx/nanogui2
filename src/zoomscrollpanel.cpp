@@ -100,7 +100,10 @@ bool ZoomScrollPanel::over_hbar(const Vector2i& p) const {
 void ZoomScrollPanel::clamp_state() {
     m_zoom = std::clamp(m_zoom, m_zoom_min, m_zoom_max);
     Vector2d e = effective_child_size();
-    // X clamp — in no-reflow email mode keep H offset left-pinned
+    // When the child is smaller than the viewport: canvas-style zoom
+    // (reflow_on_zoom) centers it; document/email mode pins to the
+    // top-left so a short message is not floating in the middle of the
+    // pane (and so Widget::absolute_position matches what is drawn).
     if (e.x() <= m_size.x()) {
         if (!m_reflow_on_zoom) m_pan_offset.x() = 0.0;
         else                   m_pan_offset.x() = (m_size.x() - e.x()) * 0.5;
@@ -110,7 +113,8 @@ void ZoomScrollPanel::clamp_state() {
         m_pan_offset.x() = std::clamp(m_pan_offset.x(), lo, hi);
     }
     if (e.y() <= m_size.y()) {
-        m_pan_offset.y() = (m_size.y() - e.y()) * 0.5;
+        if (!m_reflow_on_zoom) m_pan_offset.y() = 0.0;
+        else                   m_pan_offset.y() = (m_size.y() - e.y()) * 0.5;
     } else {
         double lo = (double)m_size.y() - e.y();
         double hi = 0.0;

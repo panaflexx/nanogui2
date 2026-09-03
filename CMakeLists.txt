@@ -684,7 +684,7 @@ if (NANOGUI_BUILD_EXAMPLES)
   endif()
 
   add_executable(nmail         nmail/nmail.cpp nmail/imap_client.cpp nmail/smtp_client.cpp nmail/contacts.cpp ${NMAIL_SOCKET} nmail/htmldocument.cpp)
-  add_executable(nmail_view    nmail/nmail_view.cpp nmail/htmldocument.cpp ${NMAIL_SOCKET})
+  add_executable(nmail_view    nmail/nmail_view.cpp nmail/htmldocument.cpp nmail/imap_client.cpp ${NMAIL_SOCKET})
   if(EXISTS ${CMAKE_CURRENT_SOURCE_DIR}/nmail/sketch/htmldoc_test.cpp)
     add_executable(htmldoc_test  nmail/sketch/htmldoc_test.cpp nmail/htmldocument.cpp ${NMAIL_SOCKET})
     target_include_directories(htmldoc_test PRIVATE nmail/ ${CMAKE_CURRENT_SOURCE_DIR})

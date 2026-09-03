@@ -69,11 +69,16 @@ struct MailMessage {
     std::string body;          // decoded plain text (best effort)
     std::string html;          // decoded text/html part, "" when none
     std::string message_id;    // Message-ID header (for reply threading)
+    std::string raw;           // original RFC 822 bytes (IMAP BODY[])
     bool body_markdown = false; // text part declared markup=markdown
                                 // (MailMate convention) or text/markdown
     std::vector<MailImage> images;   // inline image/* parts (for cid: srcs)
     std::vector<MailAttachment> attachments; // non-body MIME parts
 };
+
+/* Parse a complete RFC 822 / MIME message (the IMAP BODY[] payload, or
+ * a saved .eml file).  Fills `msg` including `msg.raw`. */
+bool parse_rfc822_message(const std::string &raw, MailMessage &msg);
 
 /* Derive a collapsed preview snippet (<=160 chars) from a fully fetched
  * message — prefers the plain body, falls back to stripped HTML. */

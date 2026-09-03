@@ -117,6 +117,6 @@ inline std::string nmail_default_filename(const std::string &subject,
         s = "email";
     if (s.size() > 80)
         s.resize(80);
-    s += html ? ".html" : ".txt";
+    s += html ? ".html" : ".eml";
     return s;
 }

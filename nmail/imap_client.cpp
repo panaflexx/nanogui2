@@ -505,13 +505,6 @@ static std::string mime_content_id(const std::map<std::string, std::string> &hea
     return cid;
 }
 
-static bool disposition_is_attachment(const std::map<std::string, std::string> &headers) {
-    auto it = headers.find("content-disposition");
-    if (it == headers.end()) return false;
-    std::string d = to_lower(trim(it->second));
-    return starts_with(d, "attachment");
-}
-
 static void mime_push_attachment(std::vector<MailAttachment> &attachments,
                                  const std::map<std::string, std::string> &headers,
                                  const std::string &ct, const std::string &base,
@@ -570,7 +563,6 @@ static void mime_extract_parts(const std::string &head, const std::string &body,
         return;
     }
 
-    const bool want_attach = disposition_is_attachment(headers);
     const std::string cid = mime_content_id(headers);
 
     /* Inline image part (referenced from the HTML via cid:). */
@@ -588,9 +580,13 @@ static void mime_extract_parts(const std::string &head, const std::string &body,
         return;
     }
 
+    /* First text/html and text/plain are the message body.  Mailers often
+     * stamp Content-Disposition: attachment on every mixed part, even the
+     * body, and with no filename that used to become "Attachment.txt".
+     * Extra text parts (a real attached .txt / .html) still become chips. */
     if (base == "text/html") {
         std::string decoded = cte_decode(body, cte);
-        if (html.empty() && !want_attach) {
+        if (html.empty()) {
             html = std::move(decoded);
             return;
         }
@@ -599,7 +595,7 @@ static void mime_extract_parts(const std::string &head, const std::string &body,
     }
     if (base == "text/plain" || base == "text/markdown") {
         std::string decoded = cte_decode(body, cte);
-        if (plain.empty() && !want_attach) {
+        if (plain.empty()) {
             plain = std::move(decoded);
             plain_markdown =
                 base == "text/markdown" ||
@@ -1708,6 +1704,14 @@ bool ImapClient::fetch_message(int seq, MailMessage &msg, std::string &err,
         return false;
     }
     imap_dbg("FETCH seq=%d raw=%zu bytes, MIME decode", seq, raw.size());
+    return parse_rfc822_message(raw, msg);
+}
+
+bool parse_rfc822_message(const std::string &raw, MailMessage &msg) {
+    msg = MailMessage{};
+    msg.raw = raw;
+    if (raw.empty())
+        return false;
 
     std::string head, body;
     split_head_body(raw, head, body);
@@ -1733,9 +1737,10 @@ bool ImapClient::fetch_message(int seq, MailMessage &msg, std::string &err,
              : !html.empty()  ? strip_html(html)
                               : "";
     msg.body_markdown = plain_markdown && !plain.empty();
-    imap_dbg("FETCH seq=%d parsed subject='%s' body=%zu html=%zu atts=%zu",
-             seq, msg.subject.substr(0, 40).c_str(),
-             msg.body.size(), msg.html.size(), msg.attachments.size());
+    imap_dbg("parse_rfc822 subject='%s' body=%zu html=%zu atts=%zu raw=%zu",
+             msg.subject.substr(0, 40).c_str(),
+             msg.body.size(), msg.html.size(), msg.attachments.size(),
+             raw.size());
     return true;
 }
 
