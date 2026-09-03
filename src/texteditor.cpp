@@ -771,6 +771,20 @@ int TextEditor::paragraph_header() const {
     return 0;
 }
 
+void TextEditor::set_base_font_size(float size) {
+    size = std::max(size, 1.0f);
+    const float old_base = m_default_style.fontSize;
+    if (old_base > 0.f && size != old_base) {
+        const float ratio = size / old_base;
+        for (auto &pp : m_doc->paragraphs)
+            for (Text &r : pp->runs)
+                r.style.fontSize *= ratio;
+    }
+    m_default_style.fontSize = size;
+    fire_changed();
+    if (screen()) screen()->redraw();
+}
+
 void TextEditor::set_paragraph_header(int level) {
     if (m_read_only || m_caret.paragraph >= paragraph_count()) return;
     if (paragraph_header() == level) level = 0;   // toggle off

@@ -81,6 +81,18 @@ public:
     void set_default_style(const Style& s) { m_default_style = s; }
     const Style& default_style() const { return m_default_style; }
 
+    /**
+     * \brief Rescale the whole RichText document to a new base font size.
+     *
+     * Every run's fontSize is multiplied by size / default_style().fontSize,
+     * so headings and code blocks -- whose sizes were derived from the old
+     * base via set_paragraph_header() / toggle_paragraph_code() -- keep their
+     * proportions (e.g. an H1 at 1.625x base is still 1.625x the new base).
+     * Also updates the baseline used for new insertions, so typing after the
+     * change picks up the new size.
+     */
+    void set_base_font_size(float size);
+
     void set_code_style(const Style& s)    { m_code_style = s; }
     const Style& code_style() const        { return m_code_style; }
 

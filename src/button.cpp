@@ -141,6 +141,7 @@ bool Button::handle_event(bool active, bool contains_point) {
     ref<Button> self = this;
 
     if (active) {
+        m_pressed = true;
         if (m_flags & RadioButton) {
             if (m_button_group.empty()) {
                 for (auto widget : parent()->children()) {
@@ -178,7 +179,8 @@ bool Button::handle_event(bool active, bool contains_point) {
         else
             set_pushed(true);
     }
-    else if (m_pushed || (m_flags & MenuButton)) {
+    else if (m_pressed || (m_flags & MenuButton)) {
+        m_pressed = false;
         if (contains_point && m_callback)
             m_callback();
         if (m_flags & NormalButton)

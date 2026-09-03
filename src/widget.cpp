@@ -736,6 +736,13 @@ void Widget::process_pending_cache_updates(NVGcontext* ctx) {
     for (Widget* w : ready) {
         if (w->m_size.x() <= 0 || w->m_size.y() <= 0)
             continue;
+        // remove_child() detaches (m_parent = nullptr) before the widget's
+        // actual destruction is queued, so a still-cached descendant of a
+        // just-dispose()d window can reach here after the tree no longer
+        // leads to a Screen. Drawing it is pointless (and unsafe -- widgets
+        // like Dropdown deref screen() unconditionally), so drop it.
+        if (!w->screen())
+            continue;
         w->update_draw_cache(ctx);
         w->m_cache_dirty = false;
         w->m_cache_redraw_delay_ms = 0;

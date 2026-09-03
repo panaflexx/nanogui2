@@ -899,10 +899,14 @@ void Dropdown::set_pushed(bool pushed)
     // click, or PopupMenu closing itself after an item is selected) only
     // toggle m_pushed via this setter and rely on it to actually hide the
     // popup, rather than duplicating that logic at every call site.
+    Screen* scr = screen();
+    // A widget queued for a deferred cache redraw can outlive its parent
+    // window's detachment (see Widget::process_pending_cache_updates), so
+    // screen() may legitimately be null here -- just skip the bookkeeping.
     if (pushed) {
-        screen()->set_popup_visible(m_popup);
+        if (scr) scr->set_popup_visible(m_popup);
     } else {
-        screen()->remove_popup_visible(m_popup);
+        if (scr) scr->remove_popup_visible(m_popup);
         m_popup->set_visible(false);
         m_popup->set_highlighted_index(-1);
     }

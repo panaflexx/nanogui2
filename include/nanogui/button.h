@@ -144,6 +144,13 @@ NAMESPACE_BEGIN(nanogui)
         /// Whether or not this Button is currently pushed.
         bool m_pushed;
 
+        /// Whether the mouse/key press that started the current click is
+        /// still down.  Tracked separately from m_pushed because a
+        /// ToggleButton flips m_pushed immediately on press (for visual
+        /// feedback while held) -- gating the release/callback on m_pushed
+        /// would then silently skip the callback every other click.
+        bool m_pressed = false;
+
         /// Memoized preferred_size() text measurement (see TextSizeCache).
         mutable TextSizeCache m_size_cache;
 

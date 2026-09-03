@@ -98,6 +98,9 @@ struct MailConfig {
      * unless the user opts into keeping them on disk. */
     bool        save_contacts = false;
     int         check_interval_min = 15;  // how often to auto-check for new mail
+    /* Base font size for the compose/reply editor; headings and code blocks
+     * are drawn as ratios of this (see TextEditor::set_base_font_size). */
+    int         compose_font_size = 16;
 };
 
 /* Writable per-user directory: %APPDATA%\nmail on Windows, ~/.amail elsewhere.
@@ -332,6 +335,9 @@ static bool load_config(MailConfig &c) {
     const DictValue *ci = dict_object_get(root, "check_interval_min");
     if (ci && ci->type == DICT_INT64)  c.check_interval_min = (int)ci->int64_value;
     if (ci && ci->type == DICT_NUMBER) c.check_interval_min = (int)ci->number_value;
+    const DictValue *fs = dict_object_get(root, "compose_font_size");
+    if (fs && fs->type == DICT_INT64)  c.compose_font_size = (int)fs->int64_value;
+    if (fs && fs->type == DICT_NUMBER) c.compose_font_size = (int)fs->number_value;
     dict_destroy(root);
     return !c.host.empty();
 }
@@ -352,6 +358,7 @@ static bool save_config(const MailConfig &c) {
     dict_object_set(root, "save_contacts",
                     dict_create_bool(c.save_contacts ? 1 : 0));
     dict_object_set(root, "check_interval_min", dict_create_int64(c.check_interval_min));
+    dict_object_set(root, "compose_font_size", dict_create_int64(c.compose_font_size));
 
     char buf[8192];
     bool ok = false;
@@ -4245,7 +4252,7 @@ public:
                                           : Color(250, 250, 252, 255));
         Style bs;
         bs.fgColor = text_color();
-        bs.fontSize = 16.f;
+        bs.fontSize = (float)m_config.compose_font_size;
         body->set_default_style(bs);
         body->set_min_height(300);
         body->set_padding(10);
@@ -4275,7 +4282,15 @@ public:
             b->set_flags(Button::Flags::ToggleButton);
             b->set_font_size(20);
             b->set_tooltip(tip);
-            b->set_callback([body, f]() { body->toggle_style(f); });
+            b->set_callback([body, f]() {
+                body->toggle_style(f);
+                /* Widget::mouse_button_event() hands this button focus on
+                 * mouse-down (any unfocused widget gets it on click); give
+                 * it back so the caret stays live and the pending typing
+                 * style toggle_style() just set for an empty selection is
+                 * not wiped by having to click back into the editor. */
+                body->request_focus();
+            });
             return b;
         };
         Button *fmt_b = make_fmt(FA_BOLD,      TextEditor::StyleFlag::Bold,
@@ -4295,7 +4310,10 @@ public:
             b->set_flags(Button::Flags::ToggleButton);
             b->set_font_size(icon ? 20 : 15);
             b->set_tooltip(tip);
-            b->set_callback([fn]() { fn(); });
+            b->set_callback([fn, body]() {
+                fn();
+                body->request_focus();   // see make_fmt's callback for why
+            });
             return b;
         };
         Button *fmt_h1 = make_par("H1", 0, "Heading 1",
@@ -4308,6 +4326,52 @@ public:
                                   [body]() { body->toggle_paragraph_code(); });
         Button *fmt_ls = make_par("", FA_LIST_UL, "Bullet list",
                                   [body]() { body->toggle_paragraph_bullet(); });
+
+        /* Base font size for the whole document.  Headings/code scale off
+         * this (TextEditor::set_base_font_size), so raising it grows H1 etc.
+         * too instead of leaving them frozen at whatever size they were
+         * originally applied at. */
+        Widget *fmt_spacer = new Widget(fmt);
+        fmt_spacer->set_min_width(10);
+        fmt_spacer->set_width(10);
+        new Label(fmt, "Size:", "sans-bold");
+        IntBox<int> *font_size = new IntBox<int>(fmt);
+        font_size->set_editable(true);
+        font_size->set_spinnable(true);
+        font_size->set_min_max_values(8, 36);
+        font_size->set_value_increment(1);
+        font_size->set_fixed_size(Vector2i(56, 0));
+        font_size->set_value(m_config.compose_font_size);
+        auto apply_font_size = [this, body, font_size](int v) {
+            font_size->set_value(v);   // clamps to [8, 36]
+            v = font_size->value();
+            m_config.compose_font_size = v;
+            save_config(m_config);
+            body->set_base_font_size((float)v);
+        };
+        font_size->set_callback(apply_font_size);
+
+        /* Ctrl/Cmd +/- bumps the compose font size, mirroring the main
+         * window's viewer zoom shortcut. key_filter runs before
+         * TextEditor::keyboard_event's own handling and, if it returns
+         * true, before MailApp::keyboard_event's fallback chain ever sees
+         * the key -- so this keeps the reply window's +/- from being
+         * stolen by the HTML viewer zoom behind it. */
+        body->key_filter = [font_size, apply_font_size](int key, int /*scancode*/,
+                                                        int action, int mods) {
+            if (!(mods & SYSTEM_COMMAND_MOD) ||
+                (action != GLFW_PRESS && action != GLFW_REPEAT))
+                return false;
+            if (key == GLFW_KEY_EQUAL || key == GLFW_KEY_KP_ADD) {
+                apply_font_size(font_size->value() + 1);
+                return true;
+            }
+            if (key == GLFW_KEY_MINUS || key == GLFW_KEY_KP_SUBTRACT) {
+                apply_font_size(font_size->value() - 1);
+                return true;
+            }
+            return false;
+        };
 
         /* Toolbar state follows the caret. */
         std::function<void()> refresh_fmt =
