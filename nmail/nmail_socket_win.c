@@ -316,8 +316,14 @@ int nmail_sock_starttls_host(int fd, const char *hostname,
 }
 
 void nmail_sock_abort(int fd) {
-    if (fd >= 0)
-        shutdown((SOCKET)fd, SD_BOTH);
+    if (fd < 0)
+        return;
+    /* 1 ms recv timeout so a blocking SSL_read/recv wakes on cancel.
+     * shutdown() alone does not reliably interrupt OpenSSL. */
+    DWORD ms = 1;
+    setsockopt((SOCKET)fd, SOL_SOCKET, SO_RCVTIMEO, (const char *)&ms,
+               sizeof(ms));
+    shutdown((SOCKET)fd, SD_BOTH);
 }
 
 void nmail_sock_close(int fd) {
@@ -330,6 +336,7 @@ void nmail_sock_close(int fd) {
 #ifdef HAVE_OPENSSL
     ssl = tls_take(fd);
     if (ssl) {
+        SSL_set_quiet_shutdown(ssl, 1);
         SSL_shutdown(ssl);
         SSL_free(ssl);
     }

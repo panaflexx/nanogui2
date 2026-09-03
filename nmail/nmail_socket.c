@@ -9,6 +9,8 @@
 #define STRINGBUF_IMPLEMENTATION  /* one TU must provide stringbuf's impl */
 #include "socket_server.h"
 #include <pthread.h>
+#include <sys/time.h>
+#include <sys/socket.h>
 
 static pthread_once_t g_sock_init_once = PTHREAD_ONCE_INIT;
 
@@ -167,13 +169,29 @@ int nmail_sock_starttls_host(int fd, const char *hostname,
 }
 
 void nmail_sock_abort(int fd) {
-    if (fd >= 0)
-        shutdown(fd, SHUT_RDWR);
+    if (fd < 0)
+        return;
+    /* Collapse the 60s SO_RCVTIMEO so a blocking SSL_read/recv in the
+     * worker returns immediately when the GUI cancels a folder switch.
+     * shutdown() alone does not reliably wake OpenSSL on all platforms. */
+    struct timeval tv;
+    tv.tv_sec = 0;
+    tv.tv_usec = 1000;
+    setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
+    shutdown(fd, SHUT_RDWR);
 }
 
 void nmail_sock_close(int fd) {
     if (fd < 0)
         return;
+#ifdef HAVE_OPENSSL
+    /* Quiet shutdown: do not wait for the peer close_notify. After a
+     * folder-switch abort() the TCP socket is already dead and a full
+     * SSL_shutdown() blocks indefinitely — that's "Opening Trash..." forever. */
+    int idx = get_conn(fd);
+    if (idx >= 0 && clients[idx].ssl)
+        SSL_set_quiet_shutdown(clients[idx].ssl, 1);
+#endif
     shutdown(fd, SHUT_RDWR); /* wakes a recv() blocked in another thread */
     conn_del(fd);            /* closes fd and frees bookkeeping */
 }

@@ -7,10 +7,18 @@
 #ifndef IMAP_CLIENT_H
 #define IMAP_CLIENT_H
 
+/* Set to 1 (or compile with -DNMAIL_IMAP_DEBUG=1) to log IMAP commands,
+ * FETCH progress, and worker folder-switch traces to stderr. */
+#ifndef NMAIL_IMAP_DEBUG
+#define NMAIL_IMAP_DEBUG 0
+#endif
+
 #include <string>
 #include <vector>
 #include <set>
 #include <functional>
+#include <atomic>
+#include <cstdint>
 
 struct MailFolder {
     std::string name;
@@ -79,12 +87,19 @@ public:
     /* SELECT a folder; returns the number of messages it contains. */
     bool select_folder(const std::string &name, int &exists, std::string &err);
 
+    /* STATUS name (MESSAGES [UNSEEN]); used to cross-check SELECT EXISTS. */
+    bool status_counts(const std::string &name, int &messages, int &unseen,
+                       std::string &err);
+
     /* FETCH header summaries + a small text preview for seq [first, last]. */
     bool fetch_summaries(int first, int last,
                          std::vector<MailSummary> &out, std::string &err);
 
-    /* FETCH the full raw message and extract a readable plain-text body. */
-    bool fetch_message(int seq, MailMessage &msg, std::string &err);
+    /* FETCH the full raw message and extract a readable plain-text body.
+     * If `still_wanted` is set, it is checked after the IMAP round-trip
+     * and before MIME decode — so a folder switch can skip a large body. */
+    bool fetch_message(int seq, MailMessage &msg, std::string &err,
+                       const std::function<bool()> &still_wanted = {});
 
     /* Move a single message (by sequence number) to another folder.
      * Tries IMAP MOVE when advertised, otherwise falls back to
@@ -103,14 +118,31 @@ public:
     void close();
     bool is_open() const { return m_fd >= 0; }
     const std::string &selected_folder() const { return m_selected_folder; }
-    bool reconnect(std::string &err);
+    /* Re-LOGIN.  When `reselect` is true, SELECT the previously open
+     * mailbox afterwards (idle-timeout recovery).  Folder-switch cancel
+     * uses reselect=false so we do not reopen the mailbox the user left. */
+    bool reconnect(std::string &err, bool reselect = true);
     static bool is_connection_error(const std::string &err);
+    static bool is_cancelled_error(const std::string &err);
     bool ensure_selected(const std::string &folder, std::string &err);
 
     /* Wake a recv() blocked in another thread (used when shutting down).
      * Does not touch any other state, so it is safe to call concurrently
      * with an in-flight operation. */
     void abort();
+
+    /* Abort the in-flight command so a folder switch does not wait for a
+     * 150-message FETCH to drain.  Bumps a generation that run() treats as
+     * non-retryable "cancelled"; the socket is unusable afterwards and the
+     * caller must reconnect.  Safe to call from the GUI thread. */
+    void cancel();
+    uint64_t op_gen() const { return m_op_gen.load(std::memory_order_acquire); }
+
+    /* Optional FETCH progress: done/total untagged FETCH lines.
+     * Called from the worker thread; keep it cheap. */
+    std::function<void(int done, int total)> on_progress;
+    void expect_progress(int total) { m_progress_total = total; m_progress_done = 0; }
+    void clear_progress() { m_progress_total = 0; m_progress_done = 0; }
 
 private:
     int m_fd = -1;
@@ -124,6 +156,9 @@ private:
     std::string m_user;
     std::string m_pass;
     std::string m_selected_folder; // last successfully SELECTed mailbox
+    std::atomic<uint64_t> m_op_gen{0}; // bumped by cancel() to drop in-flight cmds
+    int m_progress_total = 0;
+    int m_progress_done = 0;
 
     /* Send a tagged command, collect untagged responses until the tagged
      * completion.  Returns false on NO/BAD or I/O error (err explains).

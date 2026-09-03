@@ -7,12 +7,14 @@
  */
 #include "smtp_client.h"
 #include "nmail_socket.h"
+#include "imap_client.h"
 
 #include <cctype>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
 #include <ctime>
+#include <vector>
 #ifdef _WIN32
 #include <process.h>
 #define getpid _getpid
@@ -29,6 +31,34 @@ static std::string trim(const std::string &s) {
     while (a < b && std::isspace((unsigned char)s[a])) ++a;
     while (b > a && std::isspace((unsigned char)s[b - 1])) --b;
     return s.substr(a, b - a);
+}
+
+/* RFC 5321 MAIL FROM / RCPT TO take a mailbox, not "Name <addr>". */
+static std::string smtp_mailbox(const std::string &s) {
+    std::string t = trim(s);
+    size_t lt = t.find('<');
+    if (lt != std::string::npos) {
+        size_t gt = t.find('>', lt);
+        t = trim(t.substr(lt + 1,
+                          gt == std::string::npos ? std::string::npos
+                                                  : gt - lt - 1));
+    }
+    if (t.size() >= 2 && t.front() == '"' && t.back() == '"')
+        t = t.substr(1, t.size() - 2);
+    return trim(t);
+}
+
+static std::vector<std::string> smtp_mailboxes(const std::string &raw) {
+    std::vector<std::string> out;
+    for (const MailAddress &a : parse_address_list(raw))
+        if (!a.address.empty())
+            out.push_back(a.address);
+    if (out.empty()) {
+        std::string one = smtp_mailbox(raw);
+        if (!one.empty())
+            out.push_back(one);
+    }
+    return out;
 }
 
 static std::string base64_encode(const std::string &in) {
@@ -282,9 +312,29 @@ bool SmtpClient::send(const SmtpConfig &cfg,
         }
     }
 
-    if (!command("MAIL FROM:<" + from + ">", 2, reply, err) ||
-        !command("RCPT TO:<" + to + ">", 2, reply, err) ||
-        !command("DATA", 3, reply, err)) {
+    std::string mail_from = smtp_mailbox(from);
+    std::vector<std::string> rcpts = smtp_mailboxes(to);
+    if (mail_from.empty() || mail_from.find('@') == std::string::npos) {
+        err = "invalid From address";
+        close();
+        return false;
+    }
+    if (rcpts.empty()) {
+        err = "no valid recipient address (use name@host, or Name <name@host>)";
+        close();
+        return false;
+    }
+    if (!command("MAIL FROM:<" + mail_from + ">", 2, reply, err)) {
+        close();
+        return false;
+    }
+    for (const std::string &rcpt : rcpts) {
+        if (!command("RCPT TO:<" + rcpt + ">", 2, reply, err)) {
+            close();
+            return false;
+        }
+    }
+    if (!command("DATA", 3, reply, err)) {
         close();
         return false;
     }

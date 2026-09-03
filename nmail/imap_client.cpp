@@ -9,11 +9,30 @@
 
 #include <algorithm>
 #include <cctype>
+#include <cstdarg>
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
 #include <map>
 #include <sstream>
+#include <chrono>
+
+#if NMAIL_IMAP_DEBUG
+static void imap_dbg(const char *fmt, ...) {
+    using clock = std::chrono::steady_clock;
+    static const auto t0 = clock::now();
+    double sec = std::chrono::duration<double>(clock::now() - t0).count();
+    fprintf(stderr, "[imap +%7.3fs] ", sec);
+    va_list ap;
+    va_start(ap, fmt);
+    vfprintf(stderr, fmt, ap);
+    va_end(ap);
+    fputc('\n', stderr);
+    fflush(stderr);
+}
+#else
+#define imap_dbg(...) ((void)0)
+#endif
 
 // ---------------------------------------------------------------------------
 // Small text utilities
@@ -867,6 +886,14 @@ void ImapClient::abort() {
     nmail_sock_abort(m_fd);
 }
 
+void ImapClient::cancel() {
+    m_op_gen.fetch_add(1, std::memory_order_acq_rel);
+    imap_dbg("CANCEL gen=%llu fd=%d selected='%s'",
+             (unsigned long long)m_op_gen.load(std::memory_order_acquire),
+             m_fd, m_selected_folder.c_str());
+    abort();
+}
+
 bool ImapClient::mark_seen(int seq, std::string &err) {
     if (seq <= 0) { err = "invalid sequence number"; return false; }
     if (m_fd < 0)  { err = "not connected"; return false; }
@@ -877,6 +904,7 @@ bool ImapClient::mark_seen(int seq, std::string &err) {
 }
 
 void ImapClient::close() {
+    imap_dbg("close fd=%d selected='%s'", m_fd, m_selected_folder.c_str());
     if (m_fd >= 0) {
         nmail_sock_close(m_fd);
         m_fd = -1;
@@ -887,6 +915,7 @@ void ImapClient::close() {
 
 bool ImapClient::is_connection_error(const std::string &err) {
     std::string l = to_lower(err);
+    if (l.find("cancelled") != std::string::npos)  return false;
     if (l.find("connection") != std::string::npos) return true;
     if (l.find("timed out") != std::string::npos)  return true;
     if (l.find("closed") != std::string::npos)     return true;
@@ -895,7 +924,11 @@ bool ImapClient::is_connection_error(const std::string &err) {
     return false;
 }
 
-bool ImapClient::reconnect(std::string &err) {
+bool ImapClient::is_cancelled_error(const std::string &err) {
+    return to_lower(err).find("cancelled") != std::string::npos;
+}
+
+bool ImapClient::reconnect(std::string &err, bool reselect) {
     if (m_host.empty() || m_user.empty()) {
         err = "no saved credentials for reconnect";
         return false;
@@ -944,10 +977,12 @@ bool ImapClient::reconnect(std::string &err) {
             if (!authenticate(m_user, m_pass, e)) { close(); err = e; return false; }
         }
     }
-    if (!saved_folder.empty()) {
+    if (reselect && !saved_folder.empty()) {
         std::vector<std::string> un; std::string se;
         if (run_once("SELECT " + quote(saved_folder), un, se))
             m_selected_folder = saved_folder;
+    } else {
+        m_selected_folder.clear();
     }
     err.clear();
     return true;
@@ -1023,7 +1058,12 @@ bool ImapClient::read_logical_line(std::string &out, std::string &err) {
         if (!digits || close == open + 1) return true;
 
         std::string lit, rest;
-        if (!read_bytes(n, lit, err)) return false;
+        if (n > 4096)
+            imap_dbg("literal {%zu} bytes (line has %zu so far)", n, out.size());
+        if (!read_bytes(n, lit, err)) {
+            imap_dbg("literal {%zu} READ FAILED: %s", n, err.c_str());
+            return false;
+        }
         out += "\r\n" + lit;
         /* The remainder of the response follows on the next line. */
         std::string tail;
@@ -1035,31 +1075,85 @@ bool ImapClient::read_logical_line(std::string &out, std::string &err) {
 std::string ImapClient::send_with_tag(const std::string &cmd) {
     std::string tag = "a" + std::to_string(++m_tag);
     std::string wire = tag + " " + cmd + "\r\n";
-    if (nmail_sock_send(m_fd, wire.data(), (int)wire.size()) < 0)
+    std::string shown = cmd;
+    if (starts_with(shown, "LOGIN "))
+        shown = "LOGIN (redacted)";
+    imap_dbg(">> %s %s  (fd=%d gen=%llu)", tag.c_str(), shown.c_str(),
+             m_fd, (unsigned long long)m_op_gen.load(std::memory_order_acquire));
+    if (nmail_sock_send(m_fd, wire.data(), (int)wire.size()) < 0) {
+        imap_dbg("SEND FAILED tag=%s", tag.c_str());
         return "";
+    }
     return tag;
 }
 
 bool ImapClient::wait_tagged(const std::string &tag,
                              std::vector<std::string> &untagged,
                              std::string &err) {
+#if NMAIL_IMAP_DEBUG
+    using clock = std::chrono::steady_clock;
+    auto t0 = clock::now();
+    auto last_hb = t0;
+#endif
+    const uint64_t gen = m_op_gen.load(std::memory_order_acquire);
     for (;;) {
+        if (m_op_gen.load(std::memory_order_acquire) != gen) {
+            err = "cancelled";
+            imap_dbg("wait %s aborted (gen changed) after %d untagged",
+                     tag.c_str(), (int)untagged.size());
+            return false;
+        }
+#if NMAIL_IMAP_DEBUG
+        auto now = clock::now();
+        if (now - last_hb >= std::chrono::seconds(1)) {
+            double sec = std::chrono::duration<double>(now - t0).count();
+            imap_dbg("wait %s still blocked +%.1fs untagged=%d rbuf=%zu last='%s'",
+                     tag.c_str(), sec, (int)untagged.size(), m_rbuf.size(),
+                     untagged.empty() ? "" :
+                         untagged.back().substr(0, 80).c_str());
+            last_hb = now;
+        }
+#endif
         std::string line;
-        if (!read_logical_line(line, err)) return false;
+        if (!read_logical_line(line, err)) {
+            if (m_op_gen.load(std::memory_order_acquire) != gen)
+                err = "cancelled";
+#if NMAIL_IMAP_DEBUG
+            double sec = std::chrono::duration<double>(clock::now() - t0).count();
+#endif
+            imap_dbg("wait %s READ FAIL +%.3fs: %s (untagged=%d rbuf=%zu)",
+                     tag.c_str(), sec, err.c_str(), (int)untagged.size(),
+                     m_rbuf.size());
+            return false;
+        }
         // Server-initiated BYE (idle timeout) — treat as connection loss
         // so the caller can reconnect rather than surfacing "BYE" as a
         // command failure.
         if (starts_with(line, "* BYE")) {
             err = "connection to the server was lost (" + line + ")";
+            imap_dbg("wait %s BYE: %s", tag.c_str(), line.c_str());
             return false;
         }
         if (starts_with(line, tag + " ")) {
             std::string rest = line.substr(tag.size() + 1);
+#if NMAIL_IMAP_DEBUG
+            double sec = std::chrono::duration<double>(clock::now() - t0).count();
+#endif
+            imap_dbg("<< %s %s  (+%.3fs, %d untagged)", tag.c_str(),
+                     rest.substr(0, 120).c_str(), sec, (int)untagged.size());
             if (starts_with(rest, "OK")) return true;
             err = rest;           // NO / BAD + server message
             return false;
         }
         untagged.push_back(line);
+        if (m_progress_total > 0 && line.find(" FETCH") != std::string::npos) {
+            ++m_progress_done;
+            if (on_progress)
+                on_progress(m_progress_done, m_progress_total);
+        }
+        if (untagged.size() <= 3 || untagged.size() % 50 == 0)
+            imap_dbg("   untagged[%d] %s", (int)untagged.size(),
+                     line.substr(0, 100).c_str());
     }
 }
 
@@ -1076,12 +1170,33 @@ bool ImapClient::run_once(const std::string &cmd,
 
 bool ImapClient::run(const std::string &cmd,
                      std::vector<std::string> &untagged, std::string &err) {
+    const uint64_t gen = m_op_gen.load(std::memory_order_acquire);
     std::string err1;
     if (run_once(cmd, untagged, err1)) return true;
+    /* Folder switch called cancel(): do not reconnect and retry THIS
+     * command — the worker will open the new mailbox instead. */
+    if (m_op_gen.load(std::memory_order_acquire) != gen ||
+        is_cancelled_error(err1)) {
+        imap_dbg("run('%s') dropped (cancelled), not retrying",
+                 starts_with(cmd, "LOGIN ") ? "LOGIN (redacted)" : cmd.c_str());
+        err = "cancelled";
+        close();
+        return false;
+    }
     if (!is_connection_error(err1)) { err = err1; return false; }
     std::string re_err;
-    if (!reconnect(re_err)) {
+    if (!reconnect(re_err, /*reselect=*/true)) {
+        if (m_op_gen.load(std::memory_order_acquire) != gen) {
+            err = "cancelled";
+            close();
+            return false;
+        }
         err = err1 + " (reconnect failed: " + re_err + ")";
+        return false;
+    }
+    if (m_op_gen.load(std::memory_order_acquire) != gen) {
+        err = "cancelled";
+        close();
         return false;
     }
     untagged.clear();
@@ -1344,14 +1459,61 @@ bool ImapClient::list_folders(std::vector<MailFolder> &out, std::string &err) {
 bool ImapClient::select_folder(const std::string &name, int &exists,
                                std::string &err) {
     exists = 0;
+    imap_dbg("SELECT begin name='%s' currently='%s'",
+             name.c_str(), m_selected_folder.c_str());
     std::vector<std::string> untagged;
-    if (!run("SELECT " + quote(name), untagged, err)) return false;
+    if (!run("SELECT " + quote(name), untagged, err)) {
+        imap_dbg("SELECT '%s' FAILED: %s", name.c_str(), err.c_str());
+        return false;
+    }
     for (const std::string &line : untagged) {
-        if (line.size() > 2 && line[0] == '*' &&
-            line.find(" EXISTS") != std::string::npos)
-            exists = std::atoi(line.c_str() + 1);
+        /* RFC 3501: "* <n> EXISTS" — require EXISTS as its own token so a
+         * stray "EXISTS" inside another atom cannot clobber the count. */
+        if (line.size() < 3 || line[0] != '*') continue;
+        const char *p = line.c_str() + 1;
+        while (*p == ' ') ++p;
+        if (!std::isdigit((unsigned char)*p)) continue;
+        int n = std::atoi(p);
+        while (std::isdigit((unsigned char)*p)) ++p;
+        if (*p != ' ') continue;
+        ++p;
+        if (std::strncmp(p, "EXISTS", 6) == 0 &&
+            (p[6] == '\0' || p[6] == ' ' || p[6] == '\r'))
+            exists = n;
     }
     m_selected_folder = name;
+    imap_dbg("SELECT '%s' OK exists=%d untagged=%d",
+             name.c_str(), exists, (int)untagged.size());
+    return true;
+}
+
+bool ImapClient::status_counts(const std::string &name, int &messages,
+                               int &unseen, std::string &err) {
+    messages = 0;
+    unseen = 0;
+    std::vector<std::string> st;
+    if (!run("STATUS " + quote(name) + " (MESSAGES UNSEEN)", st, err))
+        return false;
+    for (const std::string &line : st) {
+        if (!starts_with(line, "* STATUS")) continue;
+        size_t lp = line.rfind('(');
+        size_t rp = line.rfind(')');
+        if (lp == std::string::npos || rp <= lp) continue;
+        std::string inner = line.substr(lp + 1, rp - lp - 1);
+        ImapCursor c2(inner);
+        while (!c2.eof()) {
+            c2.skip_ws();
+            size_t start = c2.pos;
+            while (!c2.eof() && c2.peek() != ' ') ++c2.pos;
+            std::string key = to_lower(inner.substr(start, c2.pos - start));
+            c2.skip_ws();
+            int val = 0;
+            while (!c2.eof() && std::isdigit((unsigned char)c2.peek()))
+                val = val * 10 + (c2.s[c2.pos++] - '0');
+            if (key == "messages") messages = val;
+            else if (key == "unseen") unseen = val;
+        }
+    }
     return true;
 }
 
@@ -1396,28 +1558,55 @@ bool ImapClient::fetch_summaries(int first, int last,
                                  std::vector<MailSummary> &out,
                                  std::string &err) {
     out.clear();
-    if (first > last) return true;
+    if (first > last) {
+        imap_dbg("FETCH summaries empty range %d:%d", first, last);
+        return true;
+    }
 
     std::string range = std::to_string(first) + ":" + std::to_string(last);
+    imap_dbg("FETCH summaries %s (%d msgs) in '%s'",
+             range.c_str(), last - first + 1, m_selected_folder.c_str());
+    expect_progress(last - first + 1);
+    if (on_progress)
+        on_progress(0, m_progress_total);
     std::vector<std::string> untagged;
     /* Some servers reject partial body fetches; fall back if needed. */
     if (!run("FETCH " + range +
              " (FLAGS INTERNALDATE BODY.PEEK[HEADER.FIELDS (FROM SUBJECT DATE)]"
              " BODY.PEEK[TEXT]<0.512>)", untagged, err)) {
+        imap_dbg("FETCH+TEXT %s failed (%s), falling back to headers",
+                 range.c_str(), err.c_str());
         err.clear();
         if (!run("FETCH " + range +
                  " (FLAGS INTERNALDATE BODY.PEEK[HEADER.FIELDS (FROM SUBJECT DATE)])",
-                 untagged, err))
+                 untagged, err)) {
+            imap_dbg("FETCH headers %s FAILED: %s", range.c_str(), err.c_str());
+            clear_progress();
             return false;
+        }
     }
-    return parse_summaries(untagged, out);
+    bool ok = parse_summaries(untagged, out);
+    imap_dbg("FETCH summaries %s parsed %d of %d untagged",
+             range.c_str(), (int)out.size(), (int)untagged.size());
+    if (ok && on_progress && m_progress_total > 0)
+        on_progress(m_progress_total, m_progress_total);
+    clear_progress();
+    return ok;
 }
 
-bool ImapClient::fetch_message(int seq, MailMessage &msg, std::string &err) {
+bool ImapClient::fetch_message(int seq, MailMessage &msg, std::string &err,
+                               const std::function<bool()> &still_wanted) {
     std::vector<std::string> untagged;
     if (!run("FETCH " + std::to_string(seq) + " (BODY.PEEK[])",
              untagged, err))
         return false;
+    if (still_wanted && !still_wanted()) {
+        imap_dbg("FETCH seq=%d dropped after IMAP (folder switched)", seq);
+        err = "cancelled";
+        return false;
+    }
+    imap_dbg("FETCH seq=%d IMAP done, parsing %d untagged", seq,
+             (int)untagged.size());
 
     std::string raw;
     for (const std::string &line : untagged) {
@@ -1432,6 +1621,7 @@ bool ImapClient::fetch_message(int seq, MailMessage &msg, std::string &err) {
         err = "the server returned no message data";
         return false;
     }
+    imap_dbg("FETCH seq=%d raw=%zu bytes, MIME decode", seq, raw.size());
 
     std::string head, body;
     split_head_body(raw, head, body);
@@ -1457,6 +1647,9 @@ bool ImapClient::fetch_message(int seq, MailMessage &msg, std::string &err) {
              : !html.empty()  ? strip_html(html)
                               : body;
     msg.body_markdown = plain_markdown && !plain.empty();
+    imap_dbg("FETCH seq=%d parsed subject='%s' body=%zu html=%zu",
+             seq, msg.subject.substr(0, 40).c_str(),
+             msg.body.size(), msg.html.size());
     return true;
 }
 

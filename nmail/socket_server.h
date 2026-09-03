@@ -406,6 +406,7 @@ static inline int conn_del(int fd) {
     }
 #ifdef HAVE_OPENSSL
     if (clients[i].ssl) {
+        SSL_set_quiet_shutdown(clients[i].ssl, 1);
         SSL_shutdown(clients[i].ssl);
         SSL_free(clients[i].ssl);
         clients[i].ssl = NULL;

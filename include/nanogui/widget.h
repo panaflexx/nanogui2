@@ -449,8 +449,10 @@ public:
         SlideOpen,  // Slide in horizontally (translate from left + fade in)
         SlideClose, // Slide out horizontally (translate to left + fade out)
         SlideUp,    // Collapse vertically to 0 height + fade out (hides at end)
-        SlideDown   // Expand vertically from 0 height + fade in
-        // Add more types here as needed, e.g., Fade, Pulse
+        SlideDown,  // Expand vertically from 0 height + fade in
+        Loop        // Infinite self-draw (progress bars, spinners). Duration is
+                    // the loop period. Widget is drawn live so cached ancestors
+                    // cannot freeze a single frame.
     };
 
 	void set_animation_type(AnimationType type) { m_animation_type = type; }
@@ -463,6 +465,17 @@ public:
     void stop_animation();
     /// Alias for stop_animation (some older headers used the plural form)
     void stop_animations();
+
+    /**
+     * Continuously-redrawing widget (indeterminate bars, spinners).
+     * Registers with the screen so the main loop ticks at ~60 FPS, and
+     * marks the widget live so a cached parent cannot bake one frame.
+     */
+    void set_self_animating(bool v);
+    bool self_animating() const {
+        return m_self_animating ||
+               (animating() && m_animation_type == AnimationType::Loop);
+    }
 
     /**
      * Returns true if a currently-running animation wants to override the
@@ -607,6 +620,8 @@ protected:
     // Display-list cache
     bool m_cached = false;
     bool m_live = false;   // omit from parent list; always draw live
+    bool m_self_animating = false;
+    bool m_live_from_loop = false; // set_live(true) owned by Loop animation
     bool m_cache_dirty = true;
     ::NVGdrawList* m_draw_list = nullptr;
     int m_cache_redraw_delay_ms = 0;

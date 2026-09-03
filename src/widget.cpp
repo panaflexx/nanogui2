@@ -412,9 +412,14 @@ std::pair<bool, float> Widget::get_animation_progress() {
     bool anim_active = m_animation_start >= 0.0;
 
     if (anim_active) {
-        //printf("anim_active TRUE for %s\n", m_id.c_str());
         double elapsed = current_time - m_animation_start;
-        if (elapsed >= m_animation_duration) {
+        if (m_animation_type == AnimationType::Loop) {
+            /* Never completes. Duration is the loop period. */
+            double period = m_animation_duration > 1e-4 ? m_animation_duration : 1.0;
+            double phase = std::fmod(elapsed / period, 1.0);
+            if (phase < 0.0) phase += 1.0;
+            progress = static_cast<float>(phase);
+        } else if (elapsed >= m_animation_duration) {
             progress = 1.0f;
             end_animation();
             m_animation_start = -1.0;
@@ -450,19 +455,43 @@ void Widget::start_animation(AnimationType type) {
             m_size.y() = 0;
             m_min_size.y() = 0;
         }
+        /* Loop widgets paint every frame; omit them from ancestor display
+         * lists so a cached status bar cannot freeze one tessellated sweep. */
+        if (m_animation_type == AnimationType::Loop && !m_live) {
+            m_live_from_loop = true;
+            set_live(true);
+        }
         NANOGUI_TRACE("start animation %0.1f for %s", m_animation_start, m_id.c_str());
 
-        // Register with the owning screen so animation_in_progress() is O(1).
-        if (Screen* scr = screen())
+        // Register with the owning screen so animation_in_progress() is O(1)
+        // and the refresh thread ticks at ~60 FPS.
+        if (Screen* scr = screen()) {
             scr->register_animation(this);
+            scr->redraw();
+        }
     }
 }
 
 void Widget::stop_animation() {
     end_animation();
     m_animation_start = -1.0;
+    m_self_animating = false;
+    if (m_live_from_loop) {
+        m_live_from_loop = false;
+        set_live(false);
+    }
     if (Screen* scr = screen())
         scr->unregister_animation(this);
+}
+
+void Widget::set_self_animating(bool v) {
+    m_self_animating = v;
+    if (v) {
+        if (!(animating() && m_animation_type == AnimationType::Loop))
+            start_animation(AnimationType::Loop);
+    } else if (m_animation_type == AnimationType::Loop) {
+        stop_animation();
+    }
 }
 
 void Widget::stop_animations() {
@@ -640,7 +669,7 @@ void Widget::draw_cached_content(NVGcontext* ctx) {
         m_layout->draw_table(ctx, this);
 
     for (auto child : m_children) {
-        if (!child->visible() || child->live())
+        if (!child->visible() || child->live() || child->self_animating())
             continue;
 #if !defined(NANOGUI_SHOW_WIDGET_BOUNDS)
         nvgSave(ctx);
@@ -666,7 +695,7 @@ void Widget::draw_live_overlays(NVGcontext* ctx) {
         nvgIntersectScissor(ctx, child->position().x(), child->position().y(),
                             child->size().x(), child->size().y());
 #endif
-        if (child->live()) {
+        if (child->live() || child->self_animating()) {
             child->draw(ctx);
         } else {
             // Descend so a live grandchild under a non-live intermediate still paints.
@@ -766,7 +795,7 @@ void Widget::draw(NVGcontext* ctx) {
     // into an ancestor display list: those packets replay at record-time
     // coordinates and scissor, which shows up as content painting across
     // sibling panes. draw_live_overlays() paints them in the real frame.
-    if (m_live && nvgIsRecordingDisplayList(ctx))
+    if ((m_live || self_animating()) && nvgIsRecordingDisplayList(ctx))
         return;
 
     // Apply animation transform for this widget
@@ -848,7 +877,7 @@ void Widget::draw(NVGcontext* ctx) {
         for (auto child : m_children) {
             if (!child->visible())
                 continue;
-            if (recording && child->live())
+            if (recording && (child->live() || child->self_animating()))
                 continue;
         #if !defined(NANOGUI_SHOW_WIDGET_BOUNDS)
             nvgSave(ctx);

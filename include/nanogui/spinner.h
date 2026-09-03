@@ -23,8 +23,9 @@ NAMESPACE_BEGIN(nanogui)
  * Meant to be placed on top of an existing widget (e.g. anchored to the
  * same layout cell as a TextEditor).  While active it dims the covered
  * widget, draws a rotating arc with an optional message, and swallows all
- * mouse input so the underlying widget cannot be edited.  It animates by
- * requesting a screen redraw on every frame while spinning.
+ * mouse input so the underlying widget cannot be edited.  \ref start()
+ * registers a looping animation so the screen redraws it live (cached
+ * parents cannot freeze a single frame).
  */
 class NANOGUI_EXPORT Spinner : public Widget {
 public:
@@ -59,13 +60,27 @@ protected:
  * \class IndeterminateBar spinner.h nanogui/spinner.h
  *
  * \brief ProgressBar that shows a sliding segment when the total amount
- *        of work is unknown.  Self-animates while visible.
+ *        of work is unknown.
+ *
+ * Call \ref start() / \ref stop() (or \ref set_self_animating) so the
+ * widget is drawn live each frame via the screen animation registry.
  */
 class NANOGUI_EXPORT IndeterminateBar : public ProgressBar {
 public:
     IndeterminateBar(Widget *parent);
 
+    /// Unknown total: ping-pong slider. Known total: call \ref set_progress.
+    void start();
+    void stop();
+    /// Determinate fill in [0, 1]. Stays live so cached parents keep updating.
+    void set_progress(float v);
+    bool running() const { return visible(); }
+    bool determinate() const { return m_determinate; }
+
     virtual void draw(NVGcontext *ctx) override;
+
+protected:
+    bool m_determinate = false;
 };
 
 NAMESPACE_END(nanogui)

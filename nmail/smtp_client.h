@@ -31,10 +31,13 @@ public:
     ~SmtpClient();
 
     /* Connect, authenticate if credentials are given, and send one
-     * message.  from/to are bare addresses.  in_reply_to is an optional
-     * Message-ID the message replies to (sets In-Reply-To and
-     * References).  format selects the Content-Type (see MailFormat).
-     * Returns false with a human-readable err on failure. */
+     * message.  from/to may be bare addresses or RFC 5322 mailbox
+     * lists ("Bob <bob@x.com>", comma-separated).  Envelope MAIL FROM /
+     * RCPT TO use the mailbox only; the To: header keeps the original
+     * display form.  in_reply_to is an optional Message-ID the message
+     * replies to (sets In-Reply-To and References).  format selects the
+     * Content-Type (see MailFormat).  Returns false with a
+     * human-readable err on failure. */
     bool send(const SmtpConfig &cfg,
               const std::string &from, const std::string &to,
               const std::string &subject, const std::string &body_text,
