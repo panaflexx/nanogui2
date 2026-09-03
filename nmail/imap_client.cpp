@@ -457,15 +457,85 @@ static std::string mime_base_type(const std::string &ct) {
     return to_lower(trim(ct.substr(0, semi)));
 }
 
+static std::string pct_decode(const std::string &s) {
+    std::string out;
+    out.reserve(s.size());
+    for (size_t i = 0; i < s.size(); ++i) {
+        if (s[i] == '%' && i + 2 < s.size()) {
+            int hi = hex_val(s[i + 1]), lo = hex_val(s[i + 2]);
+            if (hi >= 0 && lo >= 0) {
+                out += (char)((hi << 4) | lo);
+                i += 2;
+                continue;
+            }
+        }
+        out += s[i];
+    }
+    return out;
+}
+
+/* filename / name from Content-Disposition or Content-Type. */
+static std::string mime_part_filename(const std::map<std::string, std::string> &headers,
+                                      const std::string &ct) {
+    std::string cd;
+    auto it = headers.find("content-disposition");
+    if (it != headers.end()) cd = it->second;
+    std::string fn = content_type_param(cd, "filename*");
+    if (!fn.empty()) {
+        size_t p = fn.find("''");
+        if (p != std::string::npos)
+            fn = pct_decode(fn.substr(p + 2));
+    }
+    if (fn.empty())
+        fn = decode_encoded_words(content_type_param(cd, "filename"));
+    if (fn.empty())
+        fn = decode_encoded_words(content_type_param(ct, "name"));
+    size_t slash = fn.find_last_of("/\\");
+    if (slash != std::string::npos)
+        fn = fn.substr(slash + 1);
+    return trim(fn);
+}
+
+static std::string mime_content_id(const std::map<std::string, std::string> &headers) {
+    auto it = headers.find("content-id");
+    if (it == headers.end()) return "";
+    std::string cid = trim(it->second);
+    if (!cid.empty() && cid.front() == '<') cid = cid.substr(1);
+    if (!cid.empty() && cid.back() == '>') cid.pop_back();
+    return cid;
+}
+
+static bool disposition_is_attachment(const std::map<std::string, std::string> &headers) {
+    auto it = headers.find("content-disposition");
+    if (it == headers.end()) return false;
+    std::string d = to_lower(trim(it->second));
+    return starts_with(d, "attachment");
+}
+
+static void mime_push_attachment(std::vector<MailAttachment> &attachments,
+                                 const std::map<std::string, std::string> &headers,
+                                 const std::string &ct, const std::string &base,
+                                 const std::string &data, const std::string &cid) {
+    if (data.empty()) return;
+    MailAttachment a;
+    a.filename = mime_part_filename(headers, ct);
+    a.mime = base;
+    a.cid = cid;
+    a.data = data;
+    attachments.push_back(std::move(a));
+}
+
 /* Recursively collect the readable text parts of a MIME entity: the first
  * text/plain part fills `plain`, the first text/html part fills `html`
  * (both content-transfer-decoded, HTML *not* stripped).  plain_markdown is
  * set when the plain part declares markup=markdown (MailMate convention)
- * or is text/markdown outright. */
+ * or is text/markdown outright.  Remaining parts become attachments. */
 static void mime_extract_parts(const std::string &head, const std::string &body,
                                std::string &plain, std::string &html,
                                bool &plain_markdown,
-                               std::vector<MailImage> &images, int depth) {
+                               std::vector<MailImage> &images,
+                               std::vector<MailAttachment> &attachments,
+                               int depth) {
     if (depth > 6) return;
     auto headers = parse_headers(head);
     std::string ct;
@@ -494,40 +564,56 @@ static void mime_extract_parts(const std::string &head, const std::string &body,
             std::string ph, pb;
             split_head_body(part, ph, pb);
             mime_extract_parts(ph, pb, plain, html, plain_markdown,
-                               images, depth + 1);
+                               images, attachments, depth + 1);
             pos = next;
         }
         return;
     }
 
+    const bool want_attach = disposition_is_attachment(headers);
+    const std::string cid = mime_content_id(headers);
+
     /* Inline image part (referenced from the HTML via cid:). */
     if (starts_with(base, "image/")) {
         MailImage img;
         img.mime = base;
-        it = headers.find("content-id");
-        if (it != headers.end()) {
-            std::string cid = trim(it->second);
-            if (!cid.empty() && cid.front() == '<') cid = cid.substr(1);
-            if (!cid.empty() && cid.back() == '>') cid.pop_back();
-            img.cid = cid;
-        }
+        img.cid = cid;
         img.data = cte_decode(body, cte);
-        if (!img.data.empty())
-            images.push_back(std::move(img));
+        if (!img.data.empty()) {
+            if (!cid.empty())
+                images.push_back(img);
+            /* Chips for cid images used in the HTML are filtered at display. */
+            mime_push_attachment(attachments, headers, ct, base, img.data, cid);
+        }
         return;
     }
 
     if (base == "text/html") {
-        if (html.empty()) html = cte_decode(body, cte);
+        std::string decoded = cte_decode(body, cte);
+        if (html.empty() && !want_attach) {
+            html = std::move(decoded);
+            return;
+        }
+        mime_push_attachment(attachments, headers, ct, base, decoded, cid);
         return;
     }
-    /* text/plain and unknown types: decode and pass through. */
-    if (plain.empty()) {
-        plain = cte_decode(body, cte);
-        plain_markdown =
-            base == "text/markdown" ||
-            to_lower(content_type_param(ct, "markup")) == "markdown";
+    if (base == "text/plain" || base == "text/markdown") {
+        std::string decoded = cte_decode(body, cte);
+        if (plain.empty() && !want_attach) {
+            plain = std::move(decoded);
+            plain_markdown =
+                base == "text/markdown" ||
+                to_lower(content_type_param(ct, "markup")) == "markdown";
+            return;
+        }
+        mime_push_attachment(attachments, headers, ct, base, decoded, cid);
+        return;
     }
+
+    /* Everything else (PDF, office, calendars, binaries, extra text)
+     * is an attachment — never dump it into the plain body. */
+    mime_push_attachment(attachments, headers, ct, base,
+                         cte_decode(body, cte), cid);
 }
 
 // ---------------------------------------------------------------------------
@@ -1641,15 +1727,15 @@ bool ImapClient::fetch_message(int seq, MailMessage &msg, std::string &err,
     std::string plain, html;
     bool plain_markdown = false;
     mime_extract_parts(head, body, plain, html, plain_markdown,
-                       msg.images, 0);
+                       msg.images, msg.attachments, 0);
     msg.html = html;
     msg.body = !plain.empty() ? plain
              : !html.empty()  ? strip_html(html)
-                              : body;
+                              : "";
     msg.body_markdown = plain_markdown && !plain.empty();
-    imap_dbg("FETCH seq=%d parsed subject='%s' body=%zu html=%zu",
+    imap_dbg("FETCH seq=%d parsed subject='%s' body=%zu html=%zu atts=%zu",
              seq, msg.subject.substr(0, 40).c_str(),
-             msg.body.size(), msg.html.size());
+             msg.body.size(), msg.html.size(), msg.attachments.size());
     return true;
 }
 

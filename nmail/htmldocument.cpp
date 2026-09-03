@@ -1047,6 +1047,51 @@ const char *attr(GumboElement *el, const char *name) {
     return (a && a->value) ? a->value : nullptr;
 }
 
+/* Custom / unknown tag name, lowercased. HTML5 slots like <nmail-widget>
+ * arrive as GUMBO_TAG_UNKNOWN; original_tag holds the source spelling. */
+std::string gumbo_tag_name(GumboElement *el) {
+    if (el->tag != GUMBO_TAG_UNKNOWN) {
+        const char *n = gumbo_normalized_tagname(el->tag);
+        return n ? n : "";
+    }
+    GumboStringPiece t = el->original_tag;
+    gumbo_tag_from_original_text(&t);
+    if (!t.data || t.length == 0)
+        return "";
+    std::string n(t.data, t.length);
+    for (char &c : n)
+        c = (char)std::tolower((unsigned char)c);
+    return n;
+}
+
+/* Host slot: <nmail-widget id="..."> or any element with data-nmail-widget. */
+bool host_embed_id(GumboElement *el, std::string &id) {
+    if (const char *d = attr(el, "data-nmail-widget")) {
+        id = d;
+        return !id.empty();
+    }
+    if (el->tag == GUMBO_TAG_UNKNOWN && gumbo_tag_name(el) == "nmail-widget") {
+        const char *v = attr(el, "id");
+        id = v ? v : "";
+        return true;
+    }
+    return false;
+}
+
+void try_host_embed(Widget *container, GumboElement *el, const std::string &id,
+                    Builder &B) {
+    if (!B.view || !B.view->embed_widget)
+        return;
+    HtmlEmbedSpec spec;
+    spec.id = id;
+    for (unsigned i = 0; i < el->attributes.length; ++i) {
+        GumboAttribute *a = (GumboAttribute *)el->attributes.data[i];
+        if (a && a->name)
+            spec.attrs.emplace_back(a->name, a->value ? a->value : "");
+    }
+    B.view->embed_widget(container, spec);
+}
+
 // ---------------------------------------------------------------------------
 // Stylesheet: <style> blocks from the mail (class / id / element selectors,
 // prefers-color-scheme media). Inline style="" still wins.
@@ -2532,6 +2577,17 @@ void build_children(Widget *container, GumboVector *kids, Style st,
         }
         GumboElement *el = &node->v.element;
         GumboTag tag = el->tag;
+
+        /* Host widget slot: flush the text flow and ask the factory to
+         * parent a live child here. Unknown ids (and sender-injected tags
+         * the host did not register) are skipped. */
+        std::string embed_id;
+        if (host_embed_id(el, embed_id)) {
+            flush();
+            try_host_embed(container, el, embed_id, B);
+            continue;
+        }
+
         bool block_anchor = tag == GUMBO_TAG_A && element_has_block_child(el);
 
         if ((!is_container_tag(tag) || is_skipped_tag(tag)) && !block_anchor) {

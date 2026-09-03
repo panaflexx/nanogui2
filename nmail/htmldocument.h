@@ -7,6 +7,11 @@
  * into HtmlText leaves that render a nanogui::Document (styled runs,
  * headings, bullets, <pre>, <hr>, images).
  *
+ * Host widgets: `<nmail-widget id="...">` (or `data-nmail-widget`) is a
+ * slot. During the Gumbo walk the host factory is asked to parent a live
+ * Widget at that point in the tree — attachment chips, reply actions, etc.
+ * Unknown ids are ignored; sender HTML cannot spawn widgets on its own.
+ *
  * Host it in a ScrollPanel; it reports its laid-out content height as
  * its preferred size.
  */
@@ -16,6 +21,14 @@
 #include <nanogui/document.h>
 #include <functional>
 #include <string>
+#include <utility>
+#include <vector>
+
+/* Arguments passed to HtmlDocument::embed_widget for one host slot. */
+struct HtmlEmbedSpec {
+    std::string id;
+    std::vector<std::pair<std::string, std::string>> attrs;
+};
 
 /* A resolved <img>: an NVG image id plus its intrinsic pixel size.
  * id == 0 means "unresolved" (caller draws a placeholder). */
@@ -66,6 +79,13 @@ public:
      * is how the host claims its own private schemes.  A false return (or
      * no callback) leaves the normal http/https/mailto behaviour alone. */
     std::function<bool(const std::string &url)> on_link_click;
+
+    /* Host-widget factory.  Invoked from the Gumbo walk when a slot is
+     * found; `parent` is the current block container.  Return the new
+     * child (already parented) or nullptr to skip.  Not cleared by
+     * set_html() / clear(). */
+    std::function<nanogui::Widget *(nanogui::Widget *parent,
+                                    const HtmlEmbedSpec &spec)> embed_widget;
     /* Walk up from a leaf widget and offer the click to the owning
      * document; returns true when the host consumed it. */
     bool notify_link_click(const std::string &url);

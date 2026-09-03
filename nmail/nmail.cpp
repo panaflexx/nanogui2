@@ -34,6 +34,7 @@
 #include <string>
 #include <sstream>
 #include <array>
+#include <initializer_list>
 #include <map>
 #include <unordered_map>
 #include <unordered_set>
@@ -44,6 +45,7 @@
 #include <condition_variable>
 #include <deque>
 #include <cctype>
+#include <cmath>
 #include <cstdio>
 #include <cstring>
 #include <csignal>
@@ -72,9 +74,11 @@
 #define WIN32_LEAN_AND_MEAN
 #define NOMINMAX
 #include <windows.h>
+#include <shellapi.h>
 #else
 #include <sys/stat.h>
 #include <unistd.h>
+#include <fcntl.h>
 #endif
 #ifdef __APPLE__
 #include <mach-o/dyld.h>
@@ -2923,6 +2927,498 @@ static void render_message(Document &doc, const MailMessage &msg,
 }
 
 // ---------------------------------------------------------------------------
+// Attachments: Mail-style document chips hosted in the HtmlDocument tree.
+// ---------------------------------------------------------------------------
+
+static std::string att_lower(std::string s) {
+    for (char &c : s) c = (char)std::tolower((unsigned char)c);
+    return s;
+}
+
+static bool html_uses_cid(const std::string &html, const std::string &cid) {
+    if (html.empty() || cid.empty()) return false;
+    const std::string needle = att_lower("cid:" + cid);
+    const std::string hay = att_lower(html);
+    size_t p = hay.find(needle);
+    while (p != std::string::npos) {
+        size_t e = p + needle.size();
+        char n = e < hay.size() ? hay[e] : '\0';
+        if (!n || n == '"' || n == '\'' || n == ' ' || n == '>' ||
+            n == '&' || n == '?' || n == '#')
+            return true;
+        p = hay.find(needle, p + 1);
+    }
+    return false;
+}
+
+static std::vector<const MailAttachment *>
+visible_attachments(const MailMessage &msg) {
+    std::vector<const MailAttachment *> out;
+    out.reserve(msg.attachments.size());
+    for (const MailAttachment &a : msg.attachments) {
+        if (a.data.empty()) continue;
+        if (!a.cid.empty() && html_uses_cid(msg.html, a.cid))
+            continue;
+        out.push_back(&a);
+    }
+    return out;
+}
+
+static std::string mime_ext_guess(const std::string &mime) {
+    if (mime == "application/pdf") return "pdf";
+    if (mime == "image/jpeg" || mime == "image/jpg") return "jpg";
+    if (mime == "image/png")  return "png";
+    if (mime == "image/gif")  return "gif";
+    if (mime == "image/webp") return "webp";
+    if (mime == "image/tiff") return "tiff";
+    if (mime == "text/plain") return "txt";
+    if (mime == "text/html")  return "html";
+    if (mime == "text/csv")   return "csv";
+    if (mime == "text/calendar") return "ics";
+    if (mime == "application/rtf" || mime == "text/rtf") return "rtf";
+    if (mime == "application/zip") return "zip";
+    if (mime == "application/msword") return "doc";
+    if (mime.find("wordprocessingml") != std::string::npos) return "docx";
+    if (mime.find("spreadsheetml") != std::string::npos) return "xlsx";
+    if (mime.find("presentationml") != std::string::npos) return "pptx";
+    if (mime == "application/vnd.ms-excel") return "xls";
+    if (mime == "application/vnd.ms-powerpoint") return "ppt";
+    if (mime.find("opendocument.text") != std::string::npos) return "odt";
+    if (mime.find("opendocument.spreadsheet") != std::string::npos) return "ods";
+    if (mime.find("opendocument.presentation") != std::string::npos) return "odp";
+    if (mime.rfind("audio/", 0) == 0) return "audio";
+    if (mime.rfind("video/", 0) == 0) return "video";
+    return "";
+}
+
+static std::string attachment_ext(const MailAttachment &a) {
+    std::string fn = a.filename;
+    size_t dot = fn.find_last_of('.');
+    if (dot != std::string::npos && dot + 1 < fn.size() &&
+        fn.find('/', dot) == std::string::npos &&
+        fn.find('\\', dot) == std::string::npos) {
+        std::string e = att_lower(fn.substr(dot + 1));
+        if (e.size() <= 8 && e.find_first_not_of(
+                "abcdefghijklmnopqrstuvwxyz0123456789") == std::string::npos)
+            return e;
+    }
+    return mime_ext_guess(a.mime);
+}
+
+static std::string format_bytes(size_t n) {
+    char buf[32];
+    if (n < 1024)
+        std::snprintf(buf, sizeof(buf), "%zu bytes", n);
+    else if (n < 1024ull * 1024)
+        std::snprintf(buf, sizeof(buf), n < 10 * 1024 ? "%.1f KB" : "%.0f KB",
+                      n / 1024.0);
+    else
+        std::snprintf(buf, sizeof(buf), "%.1f MB", n / (1024.0 * 1024.0));
+    return buf;
+}
+
+static std::string sanitize_filename(const std::string &raw, const std::string &ext) {
+    std::string fn = raw;
+    size_t slash = fn.find_last_of("/\\");
+    if (slash != std::string::npos) fn = fn.substr(slash + 1);
+    std::string out;
+    out.reserve(fn.size());
+    for (unsigned char c : fn) {
+        if (c < 32 || c == ':' || c == '*' || c == '?' || c == '"' ||
+            c == '<' || c == '>' || c == '|' || c == '\\' || c == '/')
+            out += '_';
+        else
+            out += (char)c;
+    }
+    while (!out.empty() && (out.front() == '.' || out.front() == ' '))
+        out.erase(out.begin());
+    if (out.size() > 120) out.resize(120);
+    if (out.empty()) out = "attachment";
+    if (!ext.empty()) {
+        std::string have;
+        size_t dot = out.find_last_of('.');
+        if (dot != std::string::npos)
+            have = att_lower(out.substr(dot + 1));
+        if (have != ext)
+            out += "." + ext;
+    }
+    return out;
+}
+
+static bool ext_in(const std::string &ext, std::initializer_list<const char *> list) {
+    for (const char *s : list)
+        if (ext == s) return true;
+    return false;
+}
+
+static bool is_exec_ext(const std::string &ext) {
+    return ext_in(ext, {
+        "exe", "com", "bat", "cmd", "msi", "scr", "pif", "dll", "so",
+        "dylib", "app", "bin", "run", "out", "elf", "sh", "bash", "zsh",
+        "ps1", "py", "rb", "pl", "js", "jsx", "vbs", "jse", "wsf", "php",
+        "lua", "desktop", "lnk", "url", "jar", "apk", "command", "cgi"
+    });
+}
+
+static bool is_archive_ext(const std::string &ext) {
+    return ext_in(ext, {
+        "zip", "rar", "7z", "tar", "gz", "tgz", "bz2", "xz", "cab",
+        "iso", "dmg", "pkg", "zst", "lz", "lzma"
+    });
+}
+
+static bool is_open_allowlisted(const std::string &ext) {
+    return ext_in(ext, {
+        "pdf", "txt", "rtf", "csv", "html", "htm",
+        "png", "jpg", "jpeg", "gif", "webp", "tif", "tiff", "bmp", "heic", "heif",
+        "doc", "docx", "xls", "xlsx", "ppt", "pptx", "odt", "ods", "odp",
+        "mp3", "mp4", "wav", "aac", "m4a", "mov", "webm", "ogg",
+        "json", "xml", "vcf", "ics", "svg", "pages", "numbers", "key"
+    });
+}
+
+/* Magic: PE, ELF, Mach-O. PK is zip — office Open XML is also PK, so the
+ * caller combines this with the extension. */
+enum class AttMagic { Other, Exec, Zip };
+static AttMagic sniff_magic(const std::string &data) {
+    if (data.size() < 4) return AttMagic::Other;
+    const unsigned char *b = (const unsigned char *)data.data();
+    if (b[0] == 'M' && b[1] == 'Z') return AttMagic::Exec;
+    if (b[0] == 0x7f && b[1] == 'E' && b[2] == 'L' && b[3] == 'F')
+        return AttMagic::Exec;
+    uint32_t be = ((uint32_t)b[0] << 24) | ((uint32_t)b[1] << 16) |
+                  ((uint32_t)b[2] << 8) | b[3];
+    if (be == 0xFEEDFACEu || be == 0xFEEDFACFu || be == 0xCAFEBABEu ||
+        be == 0xCEFAEDFEu || be == 0xCFFAEDFEu)
+        return AttMagic::Exec;
+    if (b[0] == 'P' && b[1] == 'K') return AttMagic::Zip;
+    return AttMagic::Other;
+}
+
+static bool attachment_is_exec(const MailAttachment &a) {
+    const std::string ext = attachment_ext(a);
+    if (is_exec_ext(ext)) return true;
+    return sniff_magic(a.data) == AttMagic::Exec;
+}
+
+static bool attachment_is_archive(const MailAttachment &a) {
+    const std::string ext = attachment_ext(a);
+    if (is_archive_ext(ext)) return true;
+    if (sniff_magic(a.data) == AttMagic::Zip &&
+        !ext_in(ext, { "docx", "xlsx", "pptx", "odt", "ods", "odp",
+                       "pages", "numbers", "key", "epub" }))
+        return true;
+    return false;
+}
+
+static NVGcolor att_type_color(const std::string &ext) {
+    if (ext == "pdf") return nvgRGB(196, 52, 48);
+    if (ext == "doc" || ext == "docx" || ext == "odt" || ext == "pages")
+        return nvgRGB(42, 92, 178);
+    if (ext == "xls" || ext == "xlsx" || ext == "ods" || ext == "numbers" ||
+        ext == "csv")
+        return nvgRGB(36, 138, 68);
+    if (ext == "ppt" || ext == "pptx" || ext == "odp" || ext == "key")
+        return nvgRGB(208, 108, 36);
+    if (ext == "png" || ext == "jpg" || ext == "jpeg" || ext == "gif" ||
+        ext == "webp" || ext == "tif" || ext == "tiff" || ext == "bmp" ||
+        ext == "heic" || ext == "heif" || ext == "svg")
+        return nvgRGB(42, 138, 148);
+    if (is_archive_ext(ext)) return nvgRGB(140, 102, 48);
+    if (ext == "txt" || ext == "rtf") return nvgRGB(96, 98, 110);
+    return nvgRGB(88, 112, 156);
+}
+
+static std::string att_badge(const std::string &ext) {
+    if (ext.empty()) return "";
+    std::string b = ext;
+    if (b.size() > 4) b.resize(4);
+    for (char &c : b) c = (char)std::toupper((unsigned char)c);
+    return b;
+}
+
+static std::string att_display_name(const MailAttachment &a) {
+    if (!a.filename.empty()) {
+        std::string fn = a.filename;
+        size_t slash = fn.find_last_of("/\\");
+        if (slash != std::string::npos) fn = fn.substr(slash + 1);
+        if (!fn.empty()) return fn;
+    }
+    std::string ext = attachment_ext(a);
+    return ext.empty() ? "Attachment" : "Attachment." + ext;
+}
+
+static std::string ellipsize(NVGcontext *ctx, const std::string &s, float max_w) {
+    if (nvgTextBounds(ctx, 0, 0, s.c_str(), nullptr, nullptr) <= max_w)
+        return s;
+    std::string out = s;
+    while (out.size() > 1) {
+        out.pop_back();
+        std::string t = out + "\xE2\x80\xA6";
+        if (nvgTextBounds(ctx, 0, 0, t.c_str(), nullptr, nullptr) <= max_w)
+            return t;
+    }
+    return "\xE2\x80\xA6";
+}
+
+/* One Mail-style page silhouette + filename + size. */
+class AttachmentChip : public Widget {
+public:
+    std::function<void()> on_open;
+    std::function<void()> on_save;
+    std::function<void(const Vector2i &screen_pos)> on_menu;
+
+    AttachmentChip(Widget *parent, const MailAttachment &att, int thumb)
+        : Widget(parent), m_att(att), m_thumb(thumb) {
+        set_live(true);
+        set_cursor(Cursor::Hand);
+        std::string tip = att_display_name(att) + "\n" +
+                          format_bytes(att.data.size());
+        if (!att.mime.empty()) tip += "\n" + att.mime;
+        set_tooltip(tip);
+        m_ext = attachment_ext(att);
+        m_name = att_display_name(att);
+        m_size_label = format_bytes(att.data.size());
+        m_badge = att_badge(m_ext);
+        m_accent = att_type_color(m_ext);
+    }
+
+    const MailAttachment &attachment() const { return m_att; }
+
+    virtual Vector2i preferred_size(NVGcontext *) const override {
+        return Vector2i(kChipW, kChipH);
+    }
+
+    virtual bool mouse_enter_event(const Vector2i &p, bool enter) override {
+        m_hover = enter;
+        if (Screen *s = screen()) s->redraw();
+        return Widget::mouse_enter_event(p, enter);
+    }
+
+    virtual bool mouse_button_event(const Vector2i &p, int button, bool down,
+                                    int mods) override {
+        (void)mods;
+        if (!contains(p)) return false;
+        if (button == GLFW_MOUSE_BUTTON_RIGHT && down) {
+            if (on_menu) on_menu(absolute_position() + (p - m_pos));
+            return true;
+        }
+        if (button == GLFW_MOUSE_BUTTON_1 && down) {
+            double now = glfwGetTime();
+            bool dbl = m_last_click > 0.0 && (now - m_last_click) < 0.35;
+            m_last_click = dbl ? 0.0 : now;
+            m_selected = true;
+            if (dbl && on_open) on_open();
+            if (Screen *s = screen()) s->redraw();
+            return true;
+        }
+        return false;
+    }
+
+    virtual void draw(NVGcontext *ctx) override {
+        const float x = (float)m_pos.x(), y = (float)m_pos.y();
+        const float w = (float)m_size.x(), h = (float)m_size.y();
+        bool dark = false;
+        if (Theme *t = theme())
+            dark = (t->m_text_color.r() + t->m_text_color.g() +
+                    t->m_text_color.b()) > 1.5f;
+
+        if (m_hover || m_selected) {
+            nvgBeginPath(ctx);
+            nvgRoundedRect(ctx, x, y, w, h, 8.0f);
+            nvgFillColor(ctx, m_selected
+                ? (dark ? nvgRGBA(80, 110, 180, 50) : nvgRGBA(40, 90, 180, 28))
+                : (dark ? nvgRGBA(255, 255, 255, 18) : nvgRGBA(0, 0, 0, 12)));
+            nvgFill(ctx);
+        }
+
+        const float pw = 56.0f, ph = 72.0f, fold = 13.0f, rad = 3.5f;
+        const float px = x + (w - pw) * 0.5f;
+        const float py = y + 8.0f;
+        NVGcolor paper = dark ? nvgRGB(58, 59, 68) : nvgRGB(248, 246, 240);
+        NVGcolor edge  = dark ? nvgRGB(110, 112, 124) : nvgRGB(196, 188, 172);
+        NVGcolor foldc = dark ? nvgRGB(72, 74, 84) : nvgRGB(232, 226, 214);
+
+        nvgBeginPath(ctx);
+        nvgMoveTo(ctx, px + rad, py);
+        nvgLineTo(ctx, px + pw - fold, py);
+        nvgLineTo(ctx, px + pw, py + fold);
+        nvgLineTo(ctx, px + pw, py + ph - rad);
+        nvgQuadTo(ctx, px + pw, py + ph, px + pw - rad, py + ph);
+        nvgLineTo(ctx, px + rad, py + ph);
+        nvgQuadTo(ctx, px, py + ph, px, py + ph - rad);
+        nvgLineTo(ctx, px, py + rad);
+        nvgQuadTo(ctx, px, py, px + rad, py);
+        nvgClosePath(ctx);
+        nvgFillColor(ctx, paper);
+        nvgFill(ctx);
+        nvgStrokeWidth(ctx, 1.15f);
+        nvgStrokeColor(ctx, edge);
+        nvgStroke(ctx);
+
+        nvgBeginPath(ctx);
+        nvgMoveTo(ctx, px + pw - fold, py);
+        nvgLineTo(ctx, px + pw, py + fold);
+        nvgLineTo(ctx, px + pw - fold, py + fold);
+        nvgClosePath(ctx);
+        nvgFillColor(ctx, foldc);
+        nvgFill(ctx);
+        nvgBeginPath(ctx);
+        nvgMoveTo(ctx, px + pw - fold, py);
+        nvgLineTo(ctx, px + pw, py + fold);
+        nvgLineTo(ctx, px + pw - fold, py + fold);
+        nvgStrokeColor(ctx, edge);
+        nvgStroke(ctx);
+
+        if (m_thumb > 0) {
+            nvgSave(ctx);
+            nvgIntersectScissor(ctx, px + 1, py + fold + 1,
+                                pw - 2, ph - fold - 7);
+            int iw = 0, ih = 0;
+            nvgImageSize(ctx, m_thumb, &iw, &ih);
+            float tw = (float)std::max(iw, 1), th = (float)std::max(ih, 1);
+            float scale = std::max((pw - 2) / tw, (ph - fold - 7) / th);
+            float dw = tw * scale, dh = th * scale;
+            float ox = px + 1 + ((pw - 2) - dw) * 0.5f;
+            float oy = py + fold + 1 + ((ph - fold - 7) - dh) * 0.5f;
+            NVGpaint paint = nvgImagePattern(ctx, ox, oy, dw, dh, 0.0f,
+                                             m_thumb, 1.0f);
+            nvgBeginPath(ctx);
+            nvgRect(ctx, px + 1, py + fold + 1, pw - 2, ph - fold - 7);
+            nvgFillPaint(ctx, paint);
+            nvgFill(ctx);
+            nvgRestore(ctx);
+        }
+
+        nvgBeginPath(ctx);
+        nvgRect(ctx, px, py + ph - 5.0f, pw, 5.0f);
+        nvgFillColor(ctx, m_accent);
+        nvgFill(ctx);
+
+        if (!m_badge.empty() && m_thumb <= 0) {
+            nvgFontFace(ctx, "sans-bold");
+            nvgFontSize(ctx, 9.0f);
+            float bw = nvgTextBounds(ctx, 0, 0, m_badge.c_str(), nullptr, nullptr);
+            float bh = 13.0f, pad = 5.0f;
+            float bx = px + 5.0f, by = py + ph - 22.0f;
+            nvgBeginPath(ctx);
+            nvgRoundedRect(ctx, bx, by, bw + pad * 2, bh, 2.5f);
+            nvgFillColor(ctx, m_accent);
+            nvgFill(ctx);
+            nvgFillColor(ctx, nvgRGB(255, 255, 255));
+            nvgTextAlign(ctx, NVG_ALIGN_LEFT | NVG_ALIGN_MIDDLE);
+            nvgText(ctx, bx + pad, by + bh * 0.5f, m_badge.c_str(), nullptr);
+        }
+
+        NVGcolor ink = dark ? nvgRGB(226, 227, 233) : nvgRGB(32, 32, 38);
+        NVGcolor meta = dark ? nvgRGB(150, 152, 166) : nvgRGB(110, 110, 125);
+        nvgFontFace(ctx, "sans");
+        nvgFontSize(ctx, 11.5f);
+        nvgFillColor(ctx, ink);
+        nvgTextAlign(ctx, NVG_ALIGN_CENTER | NVG_ALIGN_TOP);
+        std::string shown = ellipsize(ctx, m_name, w - 8.0f);
+        nvgText(ctx, x + w * 0.5f, py + ph + 6.0f, shown.c_str(), nullptr);
+        nvgFontSize(ctx, 10.0f);
+        nvgFillColor(ctx, meta);
+        nvgText(ctx, x + w * 0.5f, py + ph + 20.0f, m_size_label.c_str(), nullptr);
+    }
+
+private:
+    static constexpr int kChipW = 88;
+    static constexpr int kChipH = 118;
+    MailAttachment m_att;
+    int            m_thumb = 0;
+    std::string    m_ext, m_name, m_size_label, m_badge;
+    NVGcolor       m_accent{};
+    bool           m_hover = false;
+    bool           m_selected = false;
+    double         m_last_click = 0.0;
+};
+
+class AttachmentStrip : public Widget {
+public:
+    explicit AttachmentStrip(Widget *parent) : Widget(parent) {
+        set_live(true);
+        set_height_flex(SizeMode::Preferred);
+        set_width_flex(SizeMode::Expanding);
+    }
+
+    virtual Vector2i preferred_size(NVGcontext *ctx) const override {
+        int inner = m_size.x() > 40 ? m_size.x()
+                  : (parent() && parent()->width() > 40 ? parent()->width() : 400);
+        return layout_chips(ctx, inner, nullptr);
+    }
+
+    virtual void perform_layout(NVGcontext *ctx) override {
+        layout_chips(ctx, std::max(40, m_size.x()), this);
+        int need = preferred_size(ctx).y();
+        if (need > 0 && std::abs(need - m_size.y()) > 2) {
+            for (Widget *p = parent(); p; p = p->parent())
+                if (auto *hd = dynamic_cast<HtmlDocument *>(p)) {
+                    hd->request_reflow();
+                    break;
+                }
+        }
+    }
+
+private:
+    static constexpr int kGap = 10, kPad = 8;
+    Vector2i layout_chips(NVGcontext *ctx, int inner, Widget *place) const {
+        int x = kPad, y = kPad, row_h = 0, max_x = kPad;
+        for (Widget *c : m_children) {
+            if (!c->visible()) continue;
+            Vector2i ps = c->preferred_size(ctx);
+            if (x > kPad && x + ps.x() + kPad > inner) {
+                y += row_h + kGap;
+                x = kPad;
+                row_h = 0;
+            }
+            if (place) {
+                c->set_position(Vector2i(x, y));
+                c->set_size(ps);
+                c->perform_layout(ctx);
+            }
+            x += ps.x() + kGap;
+            row_h = std::max(row_h, ps.y());
+            max_x = std::max(max_x, x);
+        }
+        return Vector2i(std::max(inner, max_x + kPad - kGap),
+                        y + row_h + kPad);
+    }
+};
+
+/* Widget::absolute_position walks m_pos and does not see ZoomScrollPanel's
+ * pan/zoom draw transform. Map a logical screen point to where it is drawn. */
+static Vector2i visual_screen_pos(const Widget *w, const Vector2i &logical_abs) {
+    const ZoomScrollPanel *zsp = nullptr;
+    for (const Widget *p = w; p && !zsp; p = p->parent())
+        zsp = dynamic_cast<const ZoomScrollPanel *>(p);
+    if (!zsp)
+        return logical_abs;
+    Vector2i zsp_abs = zsp->absolute_position();
+    Vector2i rel = logical_abs - zsp_abs;
+    double z = zsp->zoom();
+    auto pan = zsp->pan_offset();
+    return zsp_abs + Vector2i(
+        (int)std::lround(pan.x() + rel.x() * z),
+        (int)std::lround(pan.y() + rel.y() * z));
+}
+
+static std::string with_attachment_slots(std::string html, const MailMessage &msg) {
+    if (visible_attachments(msg).empty()) return html;
+    const std::string slot =
+        "<div style=\"height:16px\"></div>"
+        "<nmail-widget id=\"nmail-attachments\"></nmail-widget>";
+    std::string low = att_lower(html);
+    size_t p = low.rfind("</body>");
+    if (p != std::string::npos)
+        html.insert(p, slot);
+    else
+        html += slot;
+    return html;
+}
+
+// ---------------------------------------------------------------------------
 // MailApp — the application
 // ---------------------------------------------------------------------------
 class MailApp : public Screen {
@@ -3007,6 +3503,10 @@ public:
     /* Header recipients the user has clicked to reveal, lowercased.
      * Reset whenever a different message is rendered. */
     std::set<std::string> m_expanded_addrs;
+
+    PopupMenu *m_att_popup = nullptr;
+    struct AttTemp { std::string file; std::string dir; };
+    std::vector<AttTemp> m_att_temps;
 
     /* Taskbar: one button per open dialog, bottom-right of the root window.
      * Windows opt in by carrying one of the ids below. */
@@ -3520,6 +4020,12 @@ public:
         m_view->on_link_hover = [this](const std::string &url) {
             handle_link_hover(url);
         };
+        m_view->embed_widget = [this](Widget *parent, const HtmlEmbedSpec &spec)
+                -> Widget * {
+            if (spec.id != "nmail-attachments")
+                return nullptr;
+            return make_attachment_strip(parent);
+        };
         style_editor();
         m_view_scroll->set_height_flex(SizeMode::Expanding);
         rflex->set_flex_item(m_view_scroll, FlexLayout::FlexItem(1.0f));
@@ -3626,6 +4132,7 @@ public:
     virtual ~MailApp() override {
         *m_alive = false;
         clear_image_textures();
+        cleanup_att_temps();
         m_worker.stop();
         if (m_config.save_contacts && m_contacts.dirty())
             m_contacts.save(contacts_path());
@@ -4380,6 +4887,7 @@ public:
 
     void render_current() {
         if (!m_has_message) return;
+        hide_att_popup();
         clear_image_textures();
         m_has_remote_images = false;
         m_doc_remotes.clear();
@@ -4388,12 +4896,14 @@ public:
             /* Rich render of the HTML part (preferred, like other
              * clients), with the header fields as a small HTML fragment
              * on top. */
-            m_view->set_html(header_html(msg, m_expanded_addrs) + msg.html);
+            m_view->set_html(with_attachment_slots(
+                header_html(msg, m_expanded_addrs) + msg.html, msg));
             m_has_remote_images = m_view->has_remote_images();
         } else {
             Document doc;
             render_message(doc, msg, text_color(), meta_color());
             m_view->set_document(std::move(doc));
+            make_attachment_strip(m_view);
         }
         /* Enabled when this message has remote images, or whenever loading
          * is on so it can always be switched back off.  The pushed state
@@ -4402,6 +4912,272 @@ public:
         m_images_btn->set_enabled(m_has_remote_images || m_show_remote_images);
         m_view_scroll->set_scroll(0.0f);
         redraw();
+    }
+
+    Widget *make_attachment_strip(Widget *parent) {
+        auto vis = visible_attachments(m_current_message);
+        if (vis.empty() || !parent) return nullptr;
+        auto *strip = new AttachmentStrip(parent);
+        for (size_t i = 0; i < vis.size(); ++i) {
+            const MailAttachment &a = *vis[i];
+            int thumb = 0;
+            if (a.mime.rfind("image/", 0) == 0 && !a.data.empty()) {
+                std::string key = "att:" + std::to_string(i) + ":" + a.filename;
+                thumb = create_image_texture(key, a.data);
+            }
+            auto *chip = new AttachmentChip(strip, a, thumb);
+            chip->on_open = [this, chip] { open_attachment(chip->attachment()); };
+            chip->on_save = [this, chip] { save_attachment(chip->attachment()); };
+            chip->on_menu = [this, chip](const Vector2i &p) {
+                show_attachment_menu(chip, p);
+            };
+        }
+        return strip;
+    }
+
+    void hide_att_popup() {
+        if (!m_att_popup) return;
+        m_att_popup->set_visible(false);
+        if (Screen *s = screen()) {
+            /* Leave it parented; next right-click rebuilds the rows. */
+            (void)s;
+        }
+    }
+
+    void show_attachment_menu(AttachmentChip *chip, const Vector2i &screen_pos) {
+        if (!chip) return;
+        Screen *s = screen();
+        Window *w = chip->window();
+        if (!s || !w) return;
+        if (!m_att_popup)
+            m_att_popup = new PopupMenu(s, w, nullptr, false);
+        while (m_att_popup->child_count() > 0)
+            m_att_popup->remove_child_at(m_att_popup->child_count() - 1);
+
+        const MailAttachment att = chip->attachment();
+        const bool can_open = !attachment_is_exec(att) &&
+                              !attachment_is_archive(att) &&
+                              is_open_allowlisted(attachment_ext(att));
+        auto *open_item = new MenuItem(m_att_popup, "Open");
+        open_item->set_enabled(can_open);
+        open_item->set_callback([this, att] {
+            hide_att_popup();
+            open_attachment(att);
+        });
+        auto *save_item = new MenuItem(m_att_popup, "Save As\u2026");
+        save_item->set_callback([this, att] {
+            hide_att_popup();
+            save_attachment(att);
+        });
+
+        NVGcontext *ctx = s->nvg_context();
+        Vector2i pref = m_att_popup->preferred_size(ctx);
+        m_att_popup->set_size(pref);
+        m_att_popup->perform_layout(ctx);
+        Vector2i pos = visual_screen_pos(chip, screen_pos);
+        pos.x() = std::min(pos.x(), std::max(0, s->width() - pref.x()));
+        if (pos.y() + pref.y() > s->height())
+            pos.y() = std::max(0, pos.y() - pref.y());
+        m_att_popup->set_position(pos);
+        m_att_popup->set_visible(true);
+        s->set_popup_visible(m_att_popup);
+        redraw();
+    }
+
+    void cleanup_att_temps() {
+        for (const AttTemp &t : m_att_temps) {
+#ifndef _WIN32
+            ::unlink(t.file.c_str());
+            if (!t.dir.empty()) ::rmdir(t.dir.c_str());
+#else
+            DeleteFileA(t.file.c_str());
+            if (!t.dir.empty()) RemoveDirectoryA(t.dir.c_str());
+#endif
+        }
+        m_att_temps.clear();
+    }
+
+    bool write_temp_attachment(const MailAttachment &att, std::string &path_out,
+                               std::string &err) {
+        const std::string ext = attachment_ext(att);
+        const std::string name = sanitize_filename(att.filename, ext);
+#ifdef _WIN32
+        char tmp[MAX_PATH];
+        if (!GetTempPathA(MAX_PATH, tmp)) {
+            err = "no temp directory";
+            return false;
+        }
+        char dir[MAX_PATH];
+        std::snprintf(dir, sizeof(dir), "%snmail-att-%u", tmp, (unsigned)GetTickCount());
+        if (!CreateDirectoryA(dir, nullptr) && GetLastError() != ERROR_ALREADY_EXISTS) {
+            err = "could not create temp folder";
+            return false;
+        }
+        std::string path = std::string(dir) + "\\" + name;
+#else
+        char tmpl[] = "/tmp/nmail-att-XXXXXX";
+        if (!mkdtemp(tmpl)) {
+            err = "could not create temp folder";
+            return false;
+        }
+        std::string path = std::string(tmpl) + "/" + name;
+#endif
+        std::ofstream out(path, std::ios::binary | std::ios::trunc);
+        if (!out) {
+            err = "could not write " + path;
+            return false;
+        }
+        out.write(att.data.data(), (std::streamsize)att.data.size());
+        out.close();
+        if (!out) {
+            err = "could not write " + path;
+            return false;
+        }
+#ifndef _WIN32
+        ::chmod(path.c_str(), S_IRUSR | S_IWUSR);
+#endif
+        m_att_temps.push_back({ path,
+#ifdef _WIN32
+            dir
+#else
+            tmpl
+#endif
+        });
+        path_out = path;
+        return true;
+    }
+
+    bool desktop_open_file(const std::string &path) {
+        if (path.empty()) return false;
+        for (unsigned char c : path)
+            if (c < 32) return false;
+#ifndef _WIN32
+        if (path.front() != '/') return false;
+        pid_t pid = fork();
+        if (pid == 0) {
+            setsid();
+            int fd = open("/dev/null", O_RDWR);
+            if (fd >= 0) { dup2(fd, 0); dup2(fd, 1); dup2(fd, 2); if (fd > 2) close(fd); }
+#ifdef __APPLE__
+            execlp("open", "open", path.c_str(), (char *)nullptr);
+#else
+            execlp("xdg-open", "xdg-open", path.c_str(), (char *)nullptr);
+            execlp("gio", "gio", "open", path.c_str(), (char *)nullptr);
+#endif
+            _exit(127);
+        }
+        return pid > 0;
+#else
+        return (int)(intptr_t)ShellExecuteA(NULL, "open", path.c_str(),
+                                            NULL, NULL, SW_SHOWNORMAL) > 32;
+#endif
+    }
+
+    void open_attachment(const MailAttachment &att) {
+        if (attachment_is_exec(att)) {
+            auto *dlg = new MessageDialog(this, MessageDialog::Type::Warning,
+                "Blocked",
+                "This file looks like a program or script and will not be opened.",
+                "OK", "", false);
+            dlg->center();
+            return;
+        }
+        if (attachment_is_archive(att)) {
+            auto *dlg = new MessageDialog(this, MessageDialog::Type::Warning,
+                "Archive",
+                "Archive files are not opened automatically. Save it instead?",
+                "Save As\u2026", "Cancel", true);
+            dlg->set_callback([this, att](int i) {
+                if (i == 0) save_attachment(att);
+            });
+            dlg->center();
+            return;
+        }
+        const std::string ext = attachment_ext(att);
+        if (!is_open_allowlisted(ext)) {
+            auto *dlg = new MessageDialog(this, MessageDialog::Type::Warning,
+                "Can't open",
+                "This file type is not opened automatically. Save it instead?",
+                "Save As\u2026", "Cancel", true);
+            dlg->set_callback([this, att](int i) {
+                if (i == 0) save_attachment(att);
+            });
+            dlg->center();
+            return;
+        }
+        std::string path, err;
+        if (!write_temp_attachment(att, path, err)) {
+            auto *dlg = new MessageDialog(this, MessageDialog::Type::Warning,
+                "Open failed", err, "OK", "", false);
+            dlg->center();
+            return;
+        }
+        if (!desktop_open_file(path)) {
+            auto *dlg = new MessageDialog(this, MessageDialog::Type::Warning,
+                "Open failed", "Could not open " + att_display_name(att),
+                "OK", "", false);
+            dlg->center();
+        }
+    }
+
+    void save_attachment(const MailAttachment &att) {
+        const std::string ext = attachment_ext(att);
+        std::string name = sanitize_filename(att.filename, ext);
+        if (attachment_is_exec(att)) {
+            if (name.size() < 9 || name.compare(name.size() - 9, 9, ".download") != 0)
+                name += ".download";
+            auto *dlg = new MessageDialog(this, MessageDialog::Type::Warning,
+                "Executable",
+                "This file looks like a program or script. It will be saved with a "
+                ".download suffix so it is not run by accident.",
+                "Save As\u2026", "Cancel", true);
+            dlg->set_callback([this, att, name, ext](int i) {
+                if (i == 0) save_attachment_to(att, name, ext.empty() ? "bin" : ext);
+            });
+            dlg->center();
+            return;
+        }
+        if (attachment_is_archive(att)) {
+            auto *dlg = new MessageDialog(this, MessageDialog::Type::Question,
+                "Save archive",
+                "Save " + att_display_name(att) + " to disk?",
+                "Save As\u2026", "Cancel", true);
+            dlg->set_callback([this, att, name, ext](int i) {
+                if (i == 0) save_attachment_to(att, name, ext.empty() ? "zip" : ext);
+            });
+            dlg->center();
+            return;
+        }
+        save_attachment_to(att, name, ext.empty() ? "dat" : ext);
+    }
+
+    void save_attachment_to(const MailAttachment &att, const std::string &name,
+                            const std::string &ext) {
+        auto paths = file_dialog(
+            { { ext, att.mime.empty() ? ext : att.mime } },
+            true, false, "");
+        if (paths.empty() || paths[0].empty())
+            return;
+        std::string path = paths[0];
+        std::string low = att_lower(path);
+        std::string suffix = "." + att_lower(ext);
+        if (low.size() < suffix.size() ||
+            low.compare(low.size() - suffix.size(), suffix.size(), suffix) != 0)
+            path += suffix;
+        (void)name;
+        std::ofstream out(path, std::ios::binary | std::ios::trunc);
+        if (!out) {
+            auto *dlg = new MessageDialog(this, MessageDialog::Type::Warning,
+                "Save failed", "Could not write " + path, "OK", "", false);
+            dlg->center();
+            return;
+        }
+        out.write(att.data.data(), (std::streamsize)att.data.size());
+        if (!out) {
+            auto *dlg = new MessageDialog(this, MessageDialog::Type::Warning,
+                "Save failed", "Could not write " + path, "OK", "", false);
+            dlg->center();
+        }
     }
 
     void save_current_email() {

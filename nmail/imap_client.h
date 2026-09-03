@@ -53,6 +53,13 @@ struct MailImage {
     std::string data;         // decoded image bytes (PNG/JPEG/GIF)
 };
 
+struct MailAttachment {
+    std::string filename;     // display name (may be empty)
+    std::string mime;         // e.g. "application/pdf"
+    std::string cid;          // Content-ID without brackets ("" if none)
+    std::string data;         // decoded payload
+};
+
 struct MailMessage {
     std::string from;
     std::string from_addr;     // bare address of the sender (for replies)
@@ -65,6 +72,7 @@ struct MailMessage {
     bool body_markdown = false; // text part declared markup=markdown
                                 // (MailMate convention) or text/markdown
     std::vector<MailImage> images;   // inline image/* parts (for cid: srcs)
+    std::vector<MailAttachment> attachments; // non-body MIME parts
 };
 
 /* Derive a collapsed preview snippet (<=160 chars) from a fully fetched
