@@ -471,7 +471,18 @@ bool PopupMenu::mouse_button_event(const Vector2i &p, int button, bool down, int
                 }
                 else
                 {
-                    parent_window->request_focus();
+                    /* Skip focus if the recorded parent was a dialog that
+                     * is already gone, or a floating window: raising it
+                     * here mutates Screen::m_children while the click is
+                     * still iterating that list. */
+                    Screen *s = screen();
+                    bool live = false;
+                    if (s) {
+                        for (Widget *c : s->children())
+                            if (c == parent_window) { live = true; break; }
+                    }
+                    if (live && parent_window->is_root())
+                        parent_window->request_focus();
                     parent_window = nullptr;
                 }
             }
@@ -498,8 +509,10 @@ bool PopupMenu::keyboard_event(int key, int scancode, int action, int modifiers)
             {
                 set_visible(false);
                 set_highlighted_index(-1);
-                m_parent_window->request_focus();
-                parent()->request_focus();
+                if (m_parent_window && m_parent_window->is_root())
+                    m_parent_window->request_focus();
+                else if (parent())
+                    parent()->request_focus();
                 return true;
             }
             else if (key == GLFW_KEY_ENTER || key == GLFW_KEY_KP_ENTER || key == GLFW_KEY_SPACE)
@@ -518,7 +531,14 @@ bool PopupMenu::keyboard_event(int key, int scancode, int action, int modifiers)
                     }
                     else
                     {
-                        parent_window->request_focus();
+                        Screen *s = screen();
+                        bool live = false;
+                        if (s) {
+                            for (Widget *c : s->children())
+                                if (c == parent_window) { live = true; break; }
+                        }
+                        if (live && parent_window->is_root())
+                            parent_window->request_focus();
                         parent_window = nullptr;
                     }
                 }

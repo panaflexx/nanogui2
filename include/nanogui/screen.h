@@ -262,20 +262,30 @@ public:
     }
 
 	void notify_widget_destroyed(Widget* widget) {
-		// Clear drag widget if it's being destroyed
-		if (m_drag_widget == widget) {
+		auto under = [widget](Widget* w) {
+			for (; w; w = w->parent())
+				if (w == widget) return true;
+			return false;
+		};
+
+		// Drag may target a descendant (chip, HtmlText) of the removed node.
+		if (m_drag_widget && under(m_drag_widget)) {
 			m_drag_widget = nullptr;
 			m_drag_active = false;
 		}
 
-		// Also clear from focus path
-		auto it = std::find(m_focus_path.begin(), m_focus_path.end(), widget);
-		if (it != m_focus_path.end()) {
-			m_focus_path.erase(it);
-		}
+		m_focus_path.erase(
+			std::remove_if(m_focus_path.begin(), m_focus_path.end(),
+						   [&](Widget* w) { return under(w); }),
+			m_focus_path.end());
 
-		// Ensure a destroyed widget never lingers in the animation registry
-		m_active_animations.erase(widget);
+		for (auto it = m_active_animations.begin();
+			 it != m_active_animations.end(); ) {
+			if (under(*it))
+				it = m_active_animations.erase(it);
+			else
+				++it;
+		}
 	}
 
 public:

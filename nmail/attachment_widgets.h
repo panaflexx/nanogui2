@@ -10,6 +10,7 @@
 #include <nanogui/layout.h>
 #include <nanogui/theme.h>
 #include <nanogui/screen.h>
+#include <nanogui/popup.h>
 #include <nanogui/opengl.h>
 #include <GLFW/glfw3.h>
 
@@ -85,6 +86,33 @@ inline std::string mime_ext_guess(const std::string &mime) {
     if (mime.rfind("audio/", 0) == 0) return "audio";
     if (mime.rfind("video/", 0) == 0) return "video";
     return "";
+}
+
+inline std::string mime_from_ext(const std::string &ext) {
+    if (ext == "pdf") return "application/pdf";
+    if (ext == "jpg" || ext == "jpeg") return "image/jpeg";
+    if (ext == "png")  return "image/png";
+    if (ext == "gif")  return "image/gif";
+    if (ext == "webp") return "image/webp";
+    if (ext == "tif" || ext == "tiff") return "image/tiff";
+    if (ext == "txt")  return "text/plain";
+    if (ext == "html" || ext == "htm") return "text/html";
+    if (ext == "csv")  return "text/csv";
+    if (ext == "ics")  return "text/calendar";
+    if (ext == "rtf")  return "application/rtf";
+    if (ext == "zip")  return "application/zip";
+    if (ext == "doc")  return "application/msword";
+    if (ext == "docx") return "application/vnd.openxmlformats-officedocument.wordprocessingml.document";
+    if (ext == "xls")  return "application/vnd.ms-excel";
+    if (ext == "xlsx") return "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet";
+    if (ext == "ppt")  return "application/vnd.ms-powerpoint";
+    if (ext == "pptx") return "application/vnd.openxmlformats-officedocument.presentationml.presentation";
+    if (ext == "json") return "application/json";
+    if (ext == "xml")  return "application/xml";
+    if (ext == "vcf")  return "text/vcard";
+    if (ext == "mp3")  return "audio/mpeg";
+    if (ext == "mp4")  return "video/mp4";
+    return "application/octet-stream";
 }
 
 inline std::string attachment_ext(const MailAttachment &a) {
@@ -340,10 +368,13 @@ class AttachmentChip : public Widget {
 public:
     std::function<void()> on_open;
     std::function<void()> on_save;
+    std::function<void()> on_remove;
     std::function<void(const Vector2i &screen_pos)> on_menu;
 
-    AttachmentChip(Widget *parent, const MailAttachment &att, int thumb)
-        : Widget(parent), m_att(att), m_thumb(thumb) {
+    AttachmentChip(Widget *parent, const MailAttachment &att, int thumb,
+                   float scale = 1.0f)
+        : Widget(parent), m_att(att), m_thumb(thumb),
+          m_scale(std::clamp(scale, 0.4f, 1.5f)) {
         set_live(true);
         set_cursor(Cursor::Hand);
         std::string tip = att_display_name(att) + "\n" +
@@ -367,7 +398,8 @@ public:
     bool selected() const { return m_selected; }
 
     virtual Vector2i preferred_size(NVGcontext *) const override {
-        return Vector2i(kChipW, kChipH);
+        return Vector2i((int)std::lround(kChipW * m_scale),
+                        (int)std::lround(kChipH * m_scale));
     }
 
     virtual bool mouse_enter_event(const Vector2i &p, bool enter) override {
@@ -377,8 +409,18 @@ public:
     }
 
     virtual bool focus_event(bool focused) override {
-        if (!focused)
-            set_selected(false);
+        if (!focused) {
+            /* A context menu is a Screen-parented Popup; it stealing
+             * focus must not clear the chip highlight. */
+            bool menu_up = false;
+            if (Screen *s = screen()) {
+                for (Widget *c : s->children())
+                    if (auto *p = dynamic_cast<Popup *>(c))
+                        if (p->visible()) { menu_up = true; break; }
+            }
+            if (!menu_up)
+                set_selected(false);
+        }
         return Widget::focus_event(focused);
     }
 
@@ -388,7 +430,6 @@ public:
         if (!contains(p)) return false;
         if (button == GLFW_MOUSE_BUTTON_RIGHT && down) {
             select_only();
-            request_focus();
             if (on_menu) on_menu(absolute_position() + (p - m_pos));
             return true;
         }
@@ -412,18 +453,19 @@ public:
             dark = (t->m_text_color.r() + t->m_text_color.g() +
                     t->m_text_color.b()) > 1.5f;
 
+        const float sc = m_scale;
         if (m_hover || m_selected) {
             nvgBeginPath(ctx);
-            nvgRoundedRect(ctx, x, y, w, h, 8.0f);
+            nvgRoundedRect(ctx, x, y, w, h, 8.0f * sc);
             nvgFillColor(ctx, m_selected
                 ? (dark ? nvgRGBA(80, 110, 180, 50) : nvgRGBA(40, 90, 180, 28))
                 : (dark ? nvgRGBA(255, 255, 255, 18) : nvgRGBA(0, 0, 0, 12)));
             nvgFill(ctx);
         }
 
-        const float pw = 56.0f, ph = 72.0f, fold = 13.0f, rad = 3.5f;
+        const float pw = 56.0f * sc, ph = 72.0f * sc, fold = 13.0f * sc, rad = 3.5f * sc;
         const float px = x + (w - pw) * 0.5f;
-        const float py = y + 8.0f;
+        const float py = y + 8.0f * sc;
         NVGcolor paper = dark ? nvgRGB(58, 59, 68) : nvgRGB(248, 246, 240);
         NVGcolor edge  = dark ? nvgRGB(110, 112, 124) : nvgRGB(196, 188, 172);
         NVGcolor foldc = dark ? nvgRGB(72, 74, 84) : nvgRGB(232, 226, 214);
@@ -441,7 +483,7 @@ public:
         nvgClosePath(ctx);
         nvgFillColor(ctx, paper);
         nvgFill(ctx);
-        nvgStrokeWidth(ctx, 1.15f);
+        nvgStrokeWidth(ctx, std::max(0.8f, 1.15f * sc));
         nvgStrokeColor(ctx, edge);
         nvgStroke(ctx);
 
@@ -461,37 +503,38 @@ public:
 
         if (m_thumb > 0) {
             nvgSave(ctx);
-            nvgIntersectScissor(ctx, px + 1, py + fold + 1,
-                                pw - 2, ph - fold - 7);
+            nvgIntersectScissor(ctx, px + 1 * sc, py + fold + 1 * sc,
+                                pw - 2 * sc, ph - fold - 7 * sc);
             int iw = 0, ih = 0;
             nvgImageSize(ctx, m_thumb, &iw, &ih);
             float tw = (float)std::max(iw, 1), th = (float)std::max(ih, 1);
-            float scale = std::max((pw - 2) / tw, (ph - fold - 7) / th);
-            float dw = tw * scale, dh = th * scale;
-            float ox = px + 1 + ((pw - 2) - dw) * 0.5f;
-            float oy = py + fold + 1 + ((ph - fold - 7) - dh) * 0.5f;
+            float isc = std::max((pw - 2 * sc) / tw, (ph - fold - 7 * sc) / th);
+            float dw = tw * isc, dh = th * isc;
+            float ox = px + 1 * sc + ((pw - 2 * sc) - dw) * 0.5f;
+            float oy = py + fold + 1 * sc + ((ph - fold - 7 * sc) - dh) * 0.5f;
             NVGpaint paint = nvgImagePattern(ctx, ox, oy, dw, dh, 0.0f,
                                              m_thumb, 1.0f);
             nvgBeginPath(ctx);
-            nvgRect(ctx, px + 1, py + fold + 1, pw - 2, ph - fold - 7);
+            nvgRect(ctx, px + 1 * sc, py + fold + 1 * sc,
+                    pw - 2 * sc, ph - fold - 7 * sc);
             nvgFillPaint(ctx, paint);
             nvgFill(ctx);
             nvgRestore(ctx);
         }
 
         nvgBeginPath(ctx);
-        nvgRect(ctx, px, py + ph - 5.0f, pw, 5.0f);
+        nvgRect(ctx, px, py + ph - 5.0f * sc, pw, 5.0f * sc);
         nvgFillColor(ctx, m_accent);
         nvgFill(ctx);
 
         if (!m_badge.empty() && m_thumb <= 0) {
             nvgFontFace(ctx, "sans-bold");
-            nvgFontSize(ctx, 9.0f);
+            nvgFontSize(ctx, std::max(7.0f, 9.0f * sc));
             float bw = nvgTextBounds(ctx, 0, 0, m_badge.c_str(), nullptr, nullptr);
-            float bh = 13.0f, pad = 5.0f;
-            float bx = px + 5.0f, by = py + ph - 22.0f;
+            float bh = 13.0f * sc, pad = 5.0f * sc;
+            float bx = px + 5.0f * sc, by = py + ph - 22.0f * sc;
             nvgBeginPath(ctx);
-            nvgRoundedRect(ctx, bx, by, bw + pad * 2, bh, 2.5f);
+            nvgRoundedRect(ctx, bx, by, bw + pad * 2, bh, 2.5f * sc);
             nvgFillColor(ctx, m_accent);
             nvgFill(ctx);
             nvgFillColor(ctx, nvgRGB(255, 255, 255));
@@ -502,14 +545,14 @@ public:
         NVGcolor ink = dark ? nvgRGB(226, 227, 233) : nvgRGB(32, 32, 38);
         NVGcolor meta = dark ? nvgRGB(150, 152, 166) : nvgRGB(110, 110, 125);
         nvgFontFace(ctx, "sans");
-        nvgFontSize(ctx, 11.5f);
+        nvgFontSize(ctx, std::max(9.0f, 11.5f * sc));
         nvgFillColor(ctx, ink);
         nvgTextAlign(ctx, NVG_ALIGN_CENTER | NVG_ALIGN_TOP);
-        std::string shown = ellipsize(ctx, m_name, w - 8.0f);
-        nvgText(ctx, x + w * 0.5f, py + ph + 6.0f, shown.c_str(), nullptr);
-        nvgFontSize(ctx, 10.0f);
+        std::string shown = ellipsize(ctx, m_name, w - 8.0f * sc);
+        nvgText(ctx, x + w * 0.5f, py + ph + 6.0f * sc, shown.c_str(), nullptr);
+        nvgFontSize(ctx, std::max(8.0f, 10.0f * sc));
         nvgFillColor(ctx, meta);
-        nvgText(ctx, x + w * 0.5f, py + ph + 20.0f, m_size_label.c_str(), nullptr);
+        nvgText(ctx, x + w * 0.5f, py + ph + 20.0f * sc, m_size_label.c_str(), nullptr);
     }
 
 private:
@@ -517,6 +560,7 @@ private:
     static constexpr int kChipH = 118;
     MailAttachment m_att;
     int            m_thumb = 0;
+    float          m_scale = 1.0f;
     std::string    m_ext, m_name, m_size_label, m_badge;
     NVGcolor       m_accent{};
     bool           m_hover = false;
@@ -532,6 +576,85 @@ private:
             set_selected(true);
         }
     }
+};
+
+/* Dashed "add file" tile, sized to match AttachmentChip at the same scale. */
+class AddAttachmentChip : public Widget {
+public:
+    std::function<void()> on_click;
+
+    explicit AddAttachmentChip(Widget *parent, float scale = 0.5f)
+        : Widget(parent), m_scale(std::clamp(scale, 0.4f, 1.5f)) {
+        set_live(true);
+        set_cursor(Cursor::Hand);
+        set_tooltip("Attach a file");
+    }
+
+    virtual Vector2i preferred_size(NVGcontext *) const override {
+        return Vector2i((int)std::lround(88 * m_scale),
+                        (int)std::lround(118 * m_scale));
+    }
+
+    virtual bool mouse_enter_event(const Vector2i &p, bool enter) override {
+        m_hover = enter;
+        if (Screen *s = screen()) s->redraw();
+        return Widget::mouse_enter_event(p, enter);
+    }
+
+    virtual bool mouse_button_event(const Vector2i &p, int button, bool down,
+                                    int) override {
+        if (!contains(p)) return false;
+        if (button == GLFW_MOUSE_BUTTON_1 && down) {
+            if (on_click) on_click();
+            return true;
+        }
+        return false;
+    }
+
+    virtual void draw(NVGcontext *ctx) override {
+        const float x = (float)m_pos.x(), y = (float)m_pos.y();
+        const float w = (float)m_size.x(), h = (float)m_size.y();
+        const float sc = m_scale;
+        bool dark = false;
+        if (Theme *t = theme())
+            dark = (t->m_text_color.r() + t->m_text_color.g() +
+                    t->m_text_color.b()) > 1.5f;
+        if (m_hover) {
+            nvgBeginPath(ctx);
+            nvgRoundedRect(ctx, x, y, w, h, 8.0f * sc);
+            nvgFillColor(ctx, dark ? nvgRGBA(255, 255, 255, 18)
+                                   : nvgRGBA(0, 0, 0, 12));
+            nvgFill(ctx);
+        }
+        const float pw = 56.0f * sc, ph = 72.0f * sc, rad = 4.0f * sc;
+        const float px = x + (w - pw) * 0.5f;
+        const float py = y + 8.0f * sc;
+        NVGcolor edge = dark ? nvgRGB(130, 132, 148) : nvgRGB(160, 154, 142);
+        nvgBeginPath(ctx);
+        nvgRoundedRect(ctx, px, py, pw, ph, rad);
+        nvgStrokeWidth(ctx, std::max(1.0f, 1.4f * sc));
+        nvgStrokeColor(ctx, edge);
+        nvgStroke(ctx);
+        const float plus = 14.0f * sc;
+        const float cx = px + pw * 0.5f, cy = py + ph * 0.5f;
+        nvgBeginPath(ctx);
+        nvgMoveTo(ctx, cx - plus, cy);
+        nvgLineTo(ctx, cx + plus, cy);
+        nvgMoveTo(ctx, cx, cy - plus);
+        nvgLineTo(ctx, cx, cy + plus);
+        nvgStrokeWidth(ctx, std::max(1.4f, 2.0f * sc));
+        nvgStrokeColor(ctx, edge);
+        nvgStroke(ctx);
+        nvgFontFace(ctx, "sans");
+        nvgFontSize(ctx, std::max(9.0f, 11.5f * sc));
+        nvgFillColor(ctx, dark ? nvgRGB(180, 182, 196) : nvgRGB(110, 110, 125));
+        nvgTextAlign(ctx, NVG_ALIGN_CENTER | NVG_ALIGN_TOP);
+        nvgText(ctx, x + w * 0.5f, py + ph + 6.0f * sc, "Add", nullptr);
+    }
+
+private:
+    float m_scale = 0.5f;
+    bool  m_hover = false;
 };
 
 class AttachmentStrip : public Widget {

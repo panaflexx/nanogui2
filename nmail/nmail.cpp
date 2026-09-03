@@ -30,6 +30,7 @@
 #include <iostream>
 #include <fstream>
 #include <functional>
+#include <iterator>
 #include <vector>
 #include <string>
 #include <sstream>
@@ -2961,6 +2962,7 @@ public:
     Button       *m_theme_btn   = nullptr;
     Button       *m_compose_btn = nullptr;
     Button       *m_reply_btn   = nullptr;
+    Button       *m_fwd_btn     = nullptr;
     Button       *m_save_btn    = nullptr;
     Button       *m_images_btn  = nullptr;
     Button       *m_trash_btn   = nullptr;
@@ -3050,6 +3052,7 @@ public:
         if (id == "nmail-prefs")   { icon = FA_SLIDERS_H; tip = "Preferences";  return true; }
         if (id == "nmail-compose") { icon = FA_PEN;       tip = "New Message";  return true; }
         if (id == "nmail-reply")   { icon = FA_REPLY;     tip = "Reply";        return true; }
+        if (id == "nmail-forward") { icon = FA_SHARE;     tip = "Forward";      return true; }
         return false;
     }
 
@@ -3330,6 +3333,7 @@ public:
             m_has_message = false;
             m_rendered_seq = -1;
             m_reply_btn->set_enabled(false);
+            if (m_fwd_btn) m_fwd_btn->set_enabled(false);
             if (m_save_btn) m_save_btn->set_enabled(false);
             m_images_btn->set_enabled(m_show_remote_images);
             Document doc;
@@ -3403,6 +3407,10 @@ public:
         m_reply_btn = make_button_tool(FA_REPLY, "Reply to this message");
         m_reply_btn->set_enabled(false);
         m_reply_btn->set_callback([this]() { show_compose(true); });
+
+        m_fwd_btn = make_button_tool(FA_SHARE, "Forward this message");
+        m_fwd_btn->set_enabled(false);
+        m_fwd_btn->set_callback([this]() { show_compose(false, true); });
 
         m_save_btn = make_button_tool(FA_SAVE,
             "Save this email as an .eml file (Ctrl+S)");
@@ -3968,6 +3976,7 @@ public:
         m_expanded_addrs.clear();   // reveals belong to the message shown
         arm_read_timer(seq);
         m_reply_btn->set_enabled(true);
+        if (m_fwd_btn) m_fwd_btn->set_enabled(true);
         if (m_save_btn) m_save_btn->set_enabled(true);
         render_current();
     }
@@ -4193,6 +4202,7 @@ public:
             m_rendered_seq    = seq;
             m_expanded_addrs.clear();
             m_reply_btn->set_enabled(true);
+            if (m_fwd_btn) m_fwd_btn->set_enabled(true);
             if (m_save_btn) m_save_btn->set_enabled(true);
             render_current();
             arm_read_timer(seq);
@@ -4453,7 +4463,11 @@ public:
     }
 
     Widget *make_attachment_strip(Widget *parent) {
-        auto vis = visible_attachments(m_current_message);
+        return make_attachment_strip(parent, m_current_message);
+    }
+
+    Widget *make_attachment_strip(Widget *parent, const MailMessage &msg) {
+        auto vis = visible_attachments(msg);
         if (vis.empty() || !parent) return nullptr;
         auto *strip = new AttachmentStrip(parent);
         for (size_t i = 0; i < vis.size(); ++i) {
@@ -4482,11 +4496,27 @@ public:
         }
     }
 
+    Window *root_window() {
+        for (Widget *c : children())
+            if (auto *w = dynamic_cast<Window *>(c))
+                if (w->is_root()) return w;
+        return nullptr;
+    }
+
     void show_attachment_menu(AttachmentChip *chip, const Vector2i &screen_pos) {
         if (!chip) return;
         Screen *s = screen();
-        Window *w = chip->window();
+        /* Always hang the menu off the root window. A floating compose
+         * dialog as PopupMenu's parent_window makes click-to-close call
+         * move_window_to_front() while Screen is still iterating children. */
+        Window *w = root_window();
+        if (!w) w = chip->window();
         if (!s || !w) return;
+        if (m_att_popup && m_att_popup->parent_window() != w) {
+            m_att_popup->set_visible(false);
+            m_att_popup->dispose();
+            m_att_popup = nullptr;
+        }
         if (!m_att_popup)
             m_att_popup = new PopupMenu(s, w, nullptr, false);
         while (m_att_popup->child_count() > 0)
@@ -4497,29 +4527,48 @@ public:
         const bool can_open = can_view ||
             (!attachment_is_exec(att) && !attachment_is_archive(att) &&
              is_open_allowlisted(attachment_ext(att)));
+        auto alive = m_alive;
         auto *open_item = new MenuItem(m_att_popup, "Open");
         open_item->set_enabled(can_open);
-        open_item->set_callback([this, att] {
+        open_item->set_callback([this, att, alive] {
             hide_att_popup();
-            open_attachment(att);
+            nanogui::async([this, att, alive] {
+                if (*alive) open_attachment(att);
+            });
         });
         auto *browser_item = new MenuItem(m_att_popup, "Open in browser");
         browser_item->set_enabled(attachment_opens_in_browser(att));
-        browser_item->set_callback([this, att] {
+        browser_item->set_callback([this, att, alive] {
             hide_att_popup();
-            open_attachment_in_browser(att);
+            nanogui::async([this, att, alive] {
+                if (*alive) open_attachment_in_browser(att);
+            });
         });
         auto *save_item = new MenuItem(m_att_popup, "Save As\u2026");
-        save_item->set_callback([this, att] {
+        save_item->set_callback([this, att, alive] {
             hide_att_popup();
-            save_attachment(att);
+            nanogui::async([this, att, alive] {
+                if (*alive) save_attachment(att);
+            });
         });
         auto *dl_item = new MenuItem(m_att_popup, "Save to Downloads");
         dl_item->set_enabled(!att.data.empty());
-        dl_item->set_callback([this, att] {
+        dl_item->set_callback([this, att, alive] {
             hide_att_popup();
-            save_attachment_to_downloads(att);
+            nanogui::async([this, att, alive] {
+                if (*alive) save_attachment_to_downloads(att);
+            });
         });
+        if (chip->on_remove) {
+            auto rmfn = chip->on_remove;
+            auto *rm = new MenuItem(m_att_popup, "Remove");
+            rm->set_callback([this, rmfn, alive] {
+                hide_att_popup();
+                nanogui::async([rmfn, alive] {
+                    if (*alive && rmfn) rmfn();
+                });
+            });
+        }
 
         NVGcontext *ctx = s->nvg_context();
         Vector2i pref = m_att_popup->preferred_size(ctx);
@@ -4532,6 +4581,13 @@ public:
         m_att_popup->set_position(pos);
         m_att_popup->set_visible(true);
         s->set_popup_visible(m_att_popup);
+        int first = 0;
+        for (int i = 0; i < m_att_popup->child_count(); ++i) {
+            if (auto *mi = m_att_popup->item(i))
+                if (mi->visible() && mi->enabled()) { first = i; break; }
+        }
+        m_att_popup->set_highlighted_index(first);
+        m_att_popup->request_focus();
         redraw();
     }
 
@@ -5042,22 +5098,29 @@ public:
         win->request_focus();
     }
 
-    /* ---- Reply compose window ---- */
-    /* reply=false: compose a fresh message (empty To/Subject, no quote). */
-    void show_compose(bool reply = true) {
-        if (reply && !m_has_message) return;
-        const MailMessage orig = reply ? m_current_message : MailMessage{};
+    /* ---- Reply / Forward / New compose window ---- */
+    /* reply: quote original, To = sender.  forward: quote original, empty To,
+     * Fwd: subject, original attachments.  neither: blank new message. */
+    void show_compose(bool reply = true, bool forward = false) {
+        if ((reply || forward) && !m_has_message) return;
+        const MailMessage orig = (reply || forward) ? m_current_message
+                                                    : MailMessage{};
 
-        Window *win = new Window(this, reply ? "Reply" : "New Message", true);
-        win->set_id(reply ? "nmail-reply" : "nmail-compose");
+        Window *win = new Window(this,
+            forward ? "Forward" : reply ? "Reply" : "New Message", true);
+        win->set_id(forward ? "nmail-forward"
+                  : reply   ? "nmail-reply"
+                            : "nmail-compose");
         win->set_close_callback([this, win] { close_dialog(win); });
         /* A single-column AdvancedGridLayout instead of a Vertical BoxLayout:
          * BoxLayout never grows children past their preferred size on the
          * main axis, so the message body would stay a fixed height no
          * matter how tall the window got. Row 4 (the body) is the only row
          * with stretch, so it alone absorbs extra height on resize.  Row 6
-         * is the send-status row (hidden until a send starts). */
-        auto *win_layout = new AdvancedGridLayout({0}, {0, 10, 0, 10, 0, 8, 0, 8, 0}, 12);
+         * is the attachment chip well.  Row 8 is the send-status row
+         * (hidden until a send starts). */
+        auto *win_layout = new AdvancedGridLayout(
+            {0}, {0, 10, 0, 10, 0, 4, 0, 4, 0, 8, 0}, 12);
         win_layout->set_col_stretch(0, 1.0f);
         win_layout->set_row_stretch(4, 1.0f);
         win->set_layout(win_layout);
@@ -5105,10 +5168,18 @@ public:
 
         Label *subj_lbl = new Label(form, "Subject:", "sans-bold");
         TextBox *subj = new TextBox(form);
-        std::string s = reply ? orig.subject : "";
+        std::string s = (reply || forward) ? orig.subject : "";
         if (reply && (s.size() < 3 || (s[0] != 'R' && s[0] != 'r') ||
             (s[1] != 'e' && s[1] != 'E') || s[2] != ':'))
             s = "Re: " + s;
+        if (forward) {
+            bool has_fwd = s.size() >= 4 &&
+                (s[0] == 'F' || s[0] == 'f') &&
+                (s[1] == 'W' || s[1] == 'w') &&
+                (s[2] == 'D' || s[2] == 'd') && s[3] == ':';
+            if (!has_fwd)
+                s = "Fwd: " + s;
+        }
         subj->set_value(s);
         subj->set_editable(true);
         form_layout->set_anchor(subj_lbl,
@@ -5141,12 +5212,81 @@ public:
         Spinner *spinner = new Spinner(win, "Sending...");
         win_layout->set_anchor(spinner, AdvancedGridLayout::Anchor(0, 4));
 
+        /* Attachment well: compact chips + an Add tile.  Reply/Forward
+         * start with the original's files (user can Remove). */
+        auto compose_atts = std::make_shared<std::vector<MailAttachment>>();
+        if (reply || forward) {
+            for (const MailAttachment *a : visible_attachments(orig))
+                compose_atts->push_back(*a);
+        }
+        auto *att_strip = new AttachmentStrip(win);
+        win_layout->set_anchor(att_strip, AdvancedGridLayout::Anchor(0, 6));
+        auto rebuild_atts = std::make_shared<std::function<void()>>();
+        *rebuild_atts = [this, att_strip, compose_atts, rebuild_atts, win]() {
+            hide_att_popup();
+            while (att_strip->child_count() > 0)
+                att_strip->remove_child_at(att_strip->child_count() - 1);
+            for (size_t i = 0; i < compose_atts->size(); ++i) {
+                const MailAttachment &a = (*compose_atts)[i];
+                int thumb = 0;
+                if (a.mime.rfind("image/", 0) == 0 && !a.data.empty())
+                    thumb = create_image_texture(
+                        "compose-att:" + std::to_string(i) + ":" + a.filename,
+                        a.data);
+                auto *chip = new AttachmentChip(att_strip, a, thumb, 0.5f);
+                chip->on_open = [this, chip] { open_attachment(chip->attachment()); };
+                chip->on_save = [this, chip] { save_attachment(chip->attachment()); };
+                chip->on_menu = [this, chip](const Vector2i &p) {
+                    show_attachment_menu(chip, p);
+                };
+                chip->on_remove = [compose_atts, rebuild_atts, i]() {
+                    if (i < compose_atts->size())
+                        compose_atts->erase(compose_atts->begin() +
+                                            (std::ptrdiff_t)i);
+                    (*rebuild_atts)();
+                };
+            }
+            auto *add = new AddAttachmentChip(att_strip, 0.5f);
+            add->on_click = [this, compose_atts, rebuild_atts]() {
+                auto paths = file_dialog(
+                    { {"pdf", "PDF"}, {"png", "PNG image"}, {"jpg", "JPEG image"},
+                      {"txt", "Text"}, {"html", "HTML"}, {"zip", "Zip archive"},
+                      {"*", "All files"} },
+                    false, true, "");
+                for (const std::string &path : paths) {
+                    if (path.empty()) continue;
+                    std::ifstream in(path, std::ios::binary);
+                    if (!in) continue;
+                    MailAttachment a;
+                    size_t slash = path.find_last_of("/\\");
+                    a.filename = slash == std::string::npos ? path
+                                 : path.substr(slash + 1);
+                    a.data.assign((std::istreambuf_iterator<char>(in)),
+                                  std::istreambuf_iterator<char>());
+                    std::string ext;
+                    size_t dot = a.filename.find_last_of('.');
+                    if (dot != std::string::npos)
+                        ext = att_lower(a.filename.substr(dot + 1));
+                    a.mime = mime_from_ext(ext);
+                    if (!a.data.empty())
+                        compose_atts->push_back(std::move(a));
+                }
+                (*rebuild_atts)();
+            };
+            if (Screen *s = screen()) {
+                s->perform_layout();
+                s->redraw();
+            }
+            (void)win;
+        };
+        (*rebuild_atts)();
+
         /* Send-status row: label + indeterminate bar, hidden until needed. */
         Widget *status_row = new Widget(win);
         status_row->set_layout(new BoxLayout(Orientation::Horizontal,
                                              Alignment::Middle, 0, 8));
         win_layout->set_anchor(status_row,
-                               AdvancedGridLayout::Anchor(0, 6));
+                               AdvancedGridLayout::Anchor(0, 8));
         new Label(status_row, "Sending...", "sans", 14);
         IndeterminateBar *send_bar = new IndeterminateBar(status_row);
         send_bar->set_fixed_size(Vector2i(140, 10));
@@ -5277,12 +5417,24 @@ public:
             doc->paragraphs.clear();
             doc->addParagraph();   // reply goes here
 
-            if (reply) {
+            if (reply || forward) {
                 doc->addParagraph();   // spacer
 
                 Style meta_s = bs; meta_s.fgColor = meta_color();
-                doc->addParagraph("On " + orig.date + ", " + orig.from +
-                                  " wrote:", meta_s);
+                if (forward) {
+                    doc->addParagraph("---------- Forwarded message ----------",
+                                      meta_s);
+                    if (!orig.from.empty())
+                        doc->addParagraph("From: " + orig.from, meta_s);
+                    if (!orig.date.empty())
+                        doc->addParagraph("Date: " + orig.date, meta_s);
+                    if (!orig.subject.empty())
+                        doc->addParagraph("Subject: " + orig.subject, meta_s);
+                    doc->addParagraph();
+                } else {
+                    doc->addParagraph("On " + orig.date + ", " + orig.from +
+                                      " wrote:", meta_s);
+                }
 
                 std::istringstream iss(orig.body);
                 std::string qline;
@@ -5305,7 +5457,7 @@ public:
         auto *buttons_layout = new AdvancedGridLayout({0, 0, 0}, {0}, 0);
         buttons_layout->set_col_stretch(1, 1.0f);
         buttons->set_layout(buttons_layout);
-        win_layout->set_anchor(buttons, AdvancedGridLayout::Anchor(0, 8));
+        win_layout->set_anchor(buttons, AdvancedGridLayout::Anchor(0, 10));
 
         Widget *fmt_group = new Widget(buttons);
         fmt_group->set_layout(new BoxLayout(Orientation::Horizontal,
@@ -5339,7 +5491,7 @@ public:
 
         Button *send = new Button(action_group, "Send", FA_PAPER_PLANE);
         send->set_callback([this, win, send, to, subj, body, fmt_box, spinner,
-                           status_row, send_bar,
+                           status_row, send_bar, compose_atts,
                            irt = reply ? orig.message_id : ""]() {
             std::string to_s  = to->value();
             std::string sub_s = subj->value();
@@ -5368,7 +5520,9 @@ public:
                              : fmt == 2 ? document_to_html(*body->document())
                                         : document_to_markdown(*body->document());
             send_reply(win, send, spinner, status_row, send_bar, to, subj, body,
-                       to_s, sub_s, text, irt, format);
+                       to_s, sub_s, text, irt, format,
+                       compose_atts ? *compose_atts
+                                    : std::vector<MailAttachment>{});
         });
 
         Button *cancel = new Button(action_group, "Cancel", FA_TIMES);
@@ -5386,7 +5540,8 @@ public:
                     TextEditor *editor,
                     const std::string &to, const std::string &subject,
                     const std::string &body, const std::string &irt,
-                    MailFormat format) {
+                    MailFormat format,
+                    std::vector<MailAttachment> attachments) {
         SmtpConfig sc;
         sc.host     = m_config.smtp_host.empty() ? m_config.host
                                                  : m_config.smtp_host;
@@ -5398,11 +5553,11 @@ public:
         set_status("Sending...");
         std::thread([this, win, send_btn, spinner, status_row, send_bar, to_box,
                      subj_box, editor, sc, from, to, subject, body,
-                     irt, format]() {
+                     irt, format, attachments]() {
             SmtpClient smtp;
             std::string err;
             bool ok = smtp.send(sc, from, to, subject, body, irt, format,
-                                err);
+                                err, attachments);
             nanogui::async(std::function<void()>(
                 [this, win, send_btn, spinner, status_row, send_bar, to_box,
                  subj_box, editor, ok, err]() {

@@ -177,13 +177,33 @@ bool SmtpClient::command(const std::string &cmd, int expect_class,
 // The send pipeline
 // ---------------------------------------------------------------------------
 
+static void append_b64_lines(std::string &msg, const std::string &raw) {
+    std::string b64 = base64_encode(raw);
+    for (size_t i = 0; i < b64.size(); i += 76) {
+        msg += b64.substr(i, 76);
+        msg += "\r\n";
+    }
+}
+
+static std::string mime_filename_token(const std::string &name) {
+    std::string out;
+    for (unsigned char c : name) {
+        if (c < 32 || c == '"' || c == '\\' || c == '\r' || c == '\n')
+            out += '_';
+        else
+            out += (char)c;
+    }
+    return out.empty() ? "attachment" : out;
+}
+
 bool SmtpClient::send(const SmtpConfig &cfg,
                       const std::string &from, const std::string &to,
                       const std::string &subject,
                       const std::string &body_text,
                       const std::string &in_reply_to,
                       MailFormat format,
-                      std::string &err) {
+                      std::string &err,
+                      const std::vector<MailAttachment> &attachments) {
     close();
     char ebuf[512] = {0};
     m_fd = nmail_sock_connect(cfg.host.c_str(), cfg.port, ebuf, sizeof(ebuf));
@@ -357,37 +377,68 @@ bool SmtpClient::send(const SmtpConfig &cfg,
         msg += "References: " + in_reply_to + "\r\n";
     }
     msg += "MIME-Version: 1.0\r\n";
-    switch (format) {
-        case MailFormat::Markdown:
-            msg += "Content-Type: text/plain; charset=UTF-8; "
-                   "markup=markdown\r\n";
-            break;
-        case MailFormat::Html:
-            msg += "Content-Type: text/html; charset=UTF-8\r\n";
-            break;
-        case MailFormat::Plain:
-        default:
-            msg += "Content-Type: text/plain; charset=UTF-8\r\n";
-            break;
-    }
-    msg += "Content-Transfer-Encoding: 8bit\r\n";
-    msg += "\r\n";
 
-    /* Body: normalize newlines to CRLF, dot-stuff leading dots. */
-    bool at_line_start = true;
-    for (size_t i = 0; i < body_text.size(); ++i) {
-        char c = body_text[i];
-        if (c == '\r') continue;                 // rebuilt as CRLF below
-        if (at_line_start && c == '.') msg += '.';
-        if (c == '\n') {
-            msg += "\r\n";
-            at_line_start = true;
-        } else {
-            msg += c;
-            at_line_start = false;
+    auto append_crlf_body = [&](const std::string &text) {
+        bool at_line_start = true;
+        for (size_t i = 0; i < text.size(); ++i) {
+            char c = text[i];
+            if (c == '\r') continue;
+            if (at_line_start && c == '.') msg += '.';
+            if (c == '\n') {
+                msg += "\r\n";
+                at_line_start = true;
+            } else {
+                msg += c;
+                at_line_start = false;
+            }
         }
+        if (!at_line_start) msg += "\r\n";
+    };
+
+    auto text_content_type = [&]() -> std::string {
+        switch (format) {
+            case MailFormat::Markdown:
+                return "text/plain; charset=UTF-8; markup=markdown";
+            case MailFormat::Html:
+                return "text/html; charset=UTF-8";
+            case MailFormat::Plain:
+            default:
+                return "text/plain; charset=UTF-8";
+        }
+    };
+
+    if (attachments.empty()) {
+        msg += "Content-Type: " + text_content_type() + "\r\n";
+        msg += "Content-Transfer-Encoding: 8bit\r\n";
+        msg += "\r\n";
+        append_crlf_body(body_text);
+    } else {
+        char bbuf[80];
+        std::snprintf(bbuf, sizeof(bbuf), "----=_nmail_%ld_%d",
+                      (long)time(nullptr), (int)getpid());
+        const std::string boundary = bbuf;
+        msg += "Content-Type: multipart/mixed; boundary=\"" + boundary + "\"\r\n";
+        msg += "\r\n";
+        msg += "This is a multi-part message in MIME format.\r\n";
+        msg += "--" + boundary + "\r\n";
+        msg += "Content-Type: " + text_content_type() + "\r\n";
+        msg += "Content-Transfer-Encoding: 8bit\r\n";
+        msg += "\r\n";
+        append_crlf_body(body_text);
+        for (const MailAttachment &a : attachments) {
+            if (a.data.empty()) continue;
+            std::string fn = mime_filename_token(
+                a.filename.empty() ? "attachment" : a.filename);
+            std::string ct = a.mime.empty() ? "application/octet-stream" : a.mime;
+            msg += "--" + boundary + "\r\n";
+            msg += "Content-Type: " + ct + "; name=\"" + fn + "\"\r\n";
+            msg += "Content-Disposition: attachment; filename=\"" + fn + "\"\r\n";
+            msg += "Content-Transfer-Encoding: base64\r\n";
+            msg += "\r\n";
+            append_b64_lines(msg, a.data);
+        }
+        msg += "--" + boundary + "--\r\n";
     }
-    if (!at_line_start) msg += "\r\n";
     msg += ".\r\n";
 
     if (nmail_sock_send(m_fd, msg.data(), (int)msg.size()) < 0) {

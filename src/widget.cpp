@@ -250,6 +250,8 @@ bool Widget::mouse_drag_event(const Vector2i& p, const Vector2i& rel, int button
     Screen* CanICastSreen = dynamic_cast<Screen*>(this);
     if (CanICastSreen != NULL)return false;
 
+    if (!parent())
+        return false;
     if (parent()->mouse_drag_event(p, rel, button, modifiers))
         return true;
 
@@ -305,6 +307,12 @@ void Widget::add_child(Widget* widget) {
 }
 
 void Widget::remove_child(const Widget* widget) {
+    // Scrub Screen drag/focus before unparenting: destructor cannot
+    // find the Screen once m_parent is null, and a live drag would
+    // then walk parent() into a nullptr.
+    if (Screen* sc = screen())
+        sc->notify_widget_destroyed(const_cast<Widget*>(widget));
+
     // Immediate removal from the tree (so child_count/iteration see the change)
     m_children.erase(std::remove(m_children.begin(), m_children.end(), widget),
                      m_children.end());
@@ -322,6 +330,8 @@ void Widget::remove_child_at(int index) {
     if (index < 0 || index >= (int)m_children.size())
         throw std::runtime_error("Widget::remove_child_at(): out of bounds!");
     Widget* widget = m_children[index];
+    if (Screen* sc = screen())
+        sc->notify_widget_destroyed(widget);
     // Immediate removal from the tree
     m_children.erase(m_children.begin() + index);
     widget->set_parent(nullptr);

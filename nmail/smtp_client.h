@@ -8,7 +8,9 @@
 #ifndef SMTP_CLIENT_H
 #define SMTP_CLIENT_H
 
+#include "imap_client.h"
 #include <string>
+#include <vector>
 
 struct SmtpConfig {
     std::string host;
@@ -42,7 +44,8 @@ public:
               const std::string &from, const std::string &to,
               const std::string &subject, const std::string &body_text,
               const std::string &in_reply_to, MailFormat format,
-              std::string &err);
+              std::string &err,
+              const std::vector<MailAttachment> &attachments = {});
 
 private:
     int m_fd = -1;

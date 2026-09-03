@@ -386,6 +386,13 @@ public:
         m_att_popup->set_position(pos);
         m_att_popup->set_visible(true);
         s->set_popup_visible(m_att_popup);
+        int first = 0;
+        for (int i = 0; i < m_att_popup->child_count(); ++i) {
+            if (auto *mi = m_att_popup->item(i))
+                if (mi->visible() && mi->enabled()) { first = i; break; }
+        }
+        m_att_popup->set_highlighted_index(first);
+        m_att_popup->request_focus();
         redraw();
     }
 

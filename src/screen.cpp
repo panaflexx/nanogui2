@@ -1359,9 +1359,15 @@ void Screen::cursor_pos_callback_event(double x, double y) {
                 glfwSetCursor(m_glfw_window, m_cursors[(int)m_cursor]);
             }
         } else {
-            ret = m_drag_widget->mouse_drag_event(
-                p - m_drag_widget->parent()->absolute_position(), p - m_mouse_pos,
-                m_mouse_state, m_modifiers);
+            if (!m_drag_widget ||
+                (!m_drag_widget->parent() && m_drag_widget != this)) {
+                m_drag_active = false;
+                m_drag_widget = nullptr;
+            } else {
+                ret = m_drag_widget->mouse_drag_event(
+                    p - m_drag_widget->parent()->absolute_position(), p - m_mouse_pos,
+                    m_mouse_state, m_modifiers);
+            }
         }
 
         if (!ret)
