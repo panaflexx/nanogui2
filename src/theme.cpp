@@ -347,10 +347,12 @@ void Theme::load_fonts(NVGcontext *ctx) {
      * No italic Roboto variant is vendored, so alias them to the upright
      * faces — italic text must at least be VISIBLE (an unknown face name
      * makes fontstash silently skip the glyphs). */
-    m_font_sans_italic = nvgCreateFontMem(ctx, "sans-italic", (uint8_t *) roboto_regular_ttf,
-                                          roboto_regular_ttf_size, 0);
-    m_font_sans_bolditalic = nvgCreateFontMem(ctx, "sans-bolditalic", (uint8_t *) roboto_bold_ttf,
-                                              roboto_bold_ttf_size, 0);
+    //m_font_sans_italic = nvgCreateFontMem(ctx, "sans-italic", (uint8_t *) roboto_regular_ttf,
+    //                                      roboto_regular_ttf_size, 0);
+    m_font_sans_italic = nvgCreateFont(ctx, "sans-italic", "resources/Roboto-Italic.ttf");
+    //m_font_sans_bolditalic = nvgCreateFontMem(ctx, "sans-bolditalic", (uint8_t *) roboto_bold_ttf,
+    //                                          roboto_bold_ttf_size, 0);
+    m_font_sans_bolditalic = nvgCreateFont(ctx, "sans-bolditalic", "resources/Roboto-BoldItalic.ttf");
     m_font_icons = nvgCreateFontMem(ctx, "icons", (uint8_t *) fontawesome_solid_ttf,
                                     fontawesome_solid_ttf_size, 0);
     m_font_mono_regular = nvgCreateFontMem(ctx, "mono", (uint8_t *) inconsolata_regular_ttf,
