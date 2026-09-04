@@ -467,18 +467,33 @@ public:
             return has("<html", "<HTML") || has("<body", "<BODY");
         };
 
+        /* Same parchment header card as nmail's reading pane.  Fragments
+         * and text/plain need it; a full HTML document already has its
+         * own chrome. */
         std::string h;
         const bool fragment = msg.html.empty() || !is_full_doc(msg.html);
         if (fragment && (!msg.subject.empty() || !msg.from.empty())) {
-            h += "<p><span style=\"font-size:24px\"><b>" +
-                 html_esc(msg.subject) + "</b></span></p>";
+            h += "<div style=\"background-color:#f4ecd8;border:1px solid #ddd0b0;"
+                 "border-radius:8px;padding:14px 16px;color:#2b2418\">";
+            h += "<p style=\"font-size:24px;color:#1f1a12\"><b>" +
+                 html_esc(msg.subject) + "</b></p>";
+            auto label = [](const char *l) {
+                return std::string("<p style=\"font-size:15px\">"
+                                   "<b style=\"color:#756040\">") + l + " </b>";
+            };
             if (!msg.from.empty())
-                h += "<p><b>From: </b>" + html_esc(msg.from) + "</p>";
+                h += label("From:") +
+                     "<span style=\"color:#2b2418\">" + html_esc(msg.from) +
+                     "</span></p>";
             if (!msg.to.empty())
-                h += "<p><b>To: </b>" + html_esc(msg.to) + "</p>";
+                h += label("To:") +
+                     "<span style=\"color:#2b2418\">" + html_esc(msg.to) +
+                     "</span></p>";
             if (!msg.date.empty())
-                h += "<p><b>Date: </b>" + html_esc(msg.date) + "</p>";
-            h += "<hr>";
+                h += label("Date:") +
+                     "<span style=\"color:#6b5d45\">" + html_esc(msg.date) +
+                     "</span></p>";
+            h += "</div><div style=\"height:12px\"></div>";
         }
 
         if (!msg.html.empty()) {
@@ -488,6 +503,7 @@ public:
             if (!msg.body.empty()) {
                 std::string p;
                 for (char c : html_esc(msg.body)) {
+                    if (c == '\r') continue;
                     if (c == '\n') p += "<br>";
                     else p += c;
                 }

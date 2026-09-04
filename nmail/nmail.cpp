@@ -2705,8 +2705,8 @@ static std::string html_inline(const Paragraph &para, bool in_heading = false) {
     return out;
 }
 
-static std::string document_to_html(const Document &doc) {
-    std::string out = "<!DOCTYPE html>\n<html><body>\n";
+static std::string paragraphs_to_html(const Document &doc) {
+    std::string out;
     int  list_depth = 0;   // number of open <ul> elements
     bool in_pre     = false;
 
@@ -2772,14 +2772,15 @@ static std::string document_to_html(const Document &doc) {
     }
     close_pre();
     close_lists();
-    out += "</body></html>\n";
     return out;
 }
 
+static std::string document_to_html(const Document &doc) {
+    return "<!DOCTYPE html>\n<html><body>\n" + paragraphs_to_html(doc) +
+           "</body></html>\n";
+}
 
-/* Render a fetched message into a reading-pane Document.  Used for
- * Markdown and plain-text bodies; text/html bodies go straight to
- * HtmlDocument::set_html (see render_current). */
+
 /* ---------------------------------------------------------------------------
  * Message header card.
  *
@@ -2873,58 +2874,28 @@ static std::string header_html(const MailMessage &msg,
     return h;
 }
 
-static void render_message(Document &doc, const MailMessage &msg,
-                           NVGcolor text_color, NVGcolor meta_color) {
-    doc.paragraphs.clear();
-
-    Style normal; normal.fontSize = 17.0f; normal.fgColor = text_color;
-    Style bold   = normal; bold.bold = true;
-    Style subj   = normal; subj.fontSize = 24.0f; subj.bold = true;
-    Style meta   = normal; meta.fgColor = meta_color;
-
-    doc.addParagraph()->addText(msg.subject, subj);
-
-    auto *pf = doc.addParagraph();
-    pf->addText("From: ", bold);
-    pf->addText(msg.from, normal);
-
-    if (!msg.to.empty()) {
-        auto *pt = doc.addParagraph();
-        pt->addText("To: ", bold);
-        pt->addText(msg.to, normal);
-    }
-    if (!msg.date.empty()) {
-        auto *pd = doc.addParagraph();
-        pd->addText("Date: ", bold);
-        pd->addText(msg.date, meta);
-    }
-
-    auto *rule = doc.addParagraph();
-    rule->isRule = true;
-
+/* Plain / Markdown body as an HTML fragment so it can share header_html()
+ * with text/html mail.  Newlines stay as <br> (bounce reports, signatures);
+ * Markdown goes through parse_markdown then paragraphs_to_html. */
+static std::string body_as_html(const MailMessage &msg) {
+    if (msg.body.empty())
+        return {};
     if (msg.body_markdown) {
-        /* MailMate-style markup=markdown (or text/markdown): render the
-         * plain body as Markdown.  parse_markdown() clears its target, so
-         * parse into a scratch document and move the paragraphs over. */
         Document tmp;
-        parse_markdown(tmp, msg.body, text_color, 17.0f);
-        for (auto &p : tmp.paragraphs)
-            doc.paragraphs.push_back(std::move(p));
-    } else {
-        // Plain paragraphs for the body (no markup interpretation).
-        std::istringstream iss(msg.body);
-        std::string line;
-        Paragraph *cur = nullptr;
-        while (std::getline(iss, line)) {
-            if (!line.empty() && line.back() == '\r') line.pop_back();
-            if (line.empty()) { cur = nullptr; continue; }
-            if (!cur) cur = doc.addParagraph();
-            else      cur->addText(" ", normal);
-            cur->addText(line, normal);
-        }
+        parse_markdown(tmp, msg.body);
+        return paragraphs_to_html(tmp);
     }
-    if (doc.paragraphs.empty())
-        doc.addParagraph();
+    std::string esc = html_escape(msg.body);
+    std::string out;
+    out.reserve(esc.size() + 16);
+    out += "<p>";
+    for (char c : esc) {
+        if (c == '\r') continue;
+        if (c == '\n') out += "<br>";
+        else           out += c;
+    }
+    out += "</p>";
+    return out;
 }
 
 // ---------------------------------------------------------------------------
@@ -4090,38 +4061,29 @@ public:
         /* Cancel now rather than waiting for the preview to settle, so a
          * near-expired timer on the previous message cannot still fire. */
         if (d.seq != m_rendered_seq) m_worker.cancel_seen();
-        const bool switched = (d.seq != m_rendered_seq);
+        //const bool switched = (d.seq != m_rendered_seq);
         m_pending_seq       = d.seq;
         m_pending_email     = d;
         m_preview_settle_at = glfwGetTime() + kPreviewSettleSec;
-        if (switched)
-            show_preview_stub(d);
+        //if (switched)
+        //    show_preview_stub(d);
         redraw();
     }
 
-    void show_preview_stub(const EmailData &d) {
-        // Keep header/body styling identical to render_message() so the
-        // preview does not visually jump when the full message arrives.
-        Document doc;
-        Style normal; normal.fontSize = 17.0f; normal.fgColor = text_color();
-        Style bold   = normal; bold.bold = true;
-        Style subj   = normal; subj.fontSize = 24.0f; subj.bold = true;
-        Style meta   = normal; meta.fgColor = meta_color();
-        doc.addParagraph()->addText(d.subject.empty() ? "(no subject)"
-                                                      : d.subject, subj);
-        auto *pf = doc.addParagraph();
-        pf->addText("From: ", bold);
-        pf->addText(d.sender, normal);
-        if (!d.date.empty()) {
-            auto *pd = doc.addParagraph();
-            pd->addText("Date: ", bold);
-            pd->addText(d.date, meta);
-        }
-        auto *rule = doc.addParagraph();
-        rule->isRule = true;
+    /* Same parchment card as render_current() so the preview does not
+     * jump when the full message arrives.  `loading` appends a subtle
+     * "Loading…" row under the envelope snippet while FETCH is in flight. */
+    void apply_preview_stub(const EmailData &d, bool loading) {
+        MailMessage stub;
+        stub.subject = d.subject.empty() ? "(no subject)" : d.subject;
+        stub.from = d.sender;
+        stub.date = d.date;
+        std::string html = header_html(stub, m_expanded_addrs);
         if (!d.preview.empty())
-            doc.addParagraph()->addText(d.preview, normal);
-        m_view->set_document(std::move(doc));
+            html += "<p>" + html_escape(d.preview) + "</p>";
+        if (loading)
+            html += "<p style=\"font-size:14px\"><em>Loading message\u2026</em></p>";
+        m_view->set_html(html);
         m_has_message = false;
         m_att_preview = false;
         m_reply_btn->set_enabled(false);
@@ -4129,38 +4091,12 @@ public:
         m_view_scroll->set_scroll(0.0f);
     }
 
-    // Build a stub doc that appends a subtle "Loading…" row to the same
-    // header/preview content that show_preview_stub shows, so the user
-    // still sees what they selected while the FETCH is in flight.
+    void show_preview_stub(const EmailData &d) {
+        apply_preview_stub(d, false);
+    }
+
     void show_preview_stub_with_loading(const EmailData &d) {
-        Document doc;
-        Style normal; normal.fontSize = 17.0f; normal.fgColor = text_color();
-        Style bold   = normal; bold.bold = true;
-        Style subj   = normal; subj.fontSize = 24.0f; subj.bold = true;
-        Style meta   = normal; meta.fgColor = meta_color();
-        Style loading = meta; loading.italic = true;
-        loading.fontSize = 14.0f;
-        doc.addParagraph()->addText(d.subject.empty() ? "(no subject)"
-                                                      : d.subject, subj);
-        auto *pf = doc.addParagraph();
-        pf->addText("From: ", bold);
-        pf->addText(d.sender, normal);
-        if (!d.date.empty()) {
-            auto *pd = doc.addParagraph();
-            pd->addText("Date: ", bold);
-            pd->addText(d.date, meta);
-        }
-        auto *rule = doc.addParagraph(); rule->isRule = true;
-        if (!d.preview.empty()) doc.addParagraph()->addText(d.preview, normal);
-        auto *rule2 = doc.addParagraph(); rule2->isRule = true;
-        doc.addParagraph()->addText("Loading message\u2026", loading);
-        m_view->set_document(std::move(doc));
-        m_has_message = false;
-        m_att_preview = false;
-        m_reply_btn->set_enabled(false);
-        if (m_save_btn) m_save_btn->set_enabled(false);
-        // Keep scroll at top — the stub is the loading view, not a separate page.
-        m_view_scroll->set_scroll(0.0f);
+        apply_preview_stub(d, true);
     }
 
     /* Start the read clock for the message now on screen.  Already-read mail
@@ -4439,20 +4375,12 @@ public:
         m_has_remote_images = false;
         m_doc_remotes.clear();
         const MailMessage &msg = m_current_message;
-        if (!msg.html.empty()) {
-            /* Rich render of the HTML part (preferred, like other
-             * clients), with the header fields as a small HTML fragment
-             * on top. */
-            m_view->set_html(with_attachment_slots(
-                header_html(msg, m_expanded_addrs) + msg.html, msg));
-            m_has_remote_images = m_view->has_remote_images();
-        } else {
-            Document doc;
-            render_message(doc, msg, text_color(), meta_color());
-            m_view->set_document(std::move(doc));
-            if (make_attachment_strip(m_view))
-                m_view->relayout();
-        }
+        /* HTML and plain/Markdown both go through HtmlDocument so the
+         * parchment header card is the same chrome on every message. */
+        std::string html = header_html(msg, m_expanded_addrs);
+        html += msg.html.empty() ? body_as_html(msg) : msg.html;
+        m_view->set_html(with_attachment_slots(html, msg));
+        m_has_remote_images = m_view->has_remote_images();
         /* Enabled when this message has remote images, or whenever loading
          * is on so it can always be switched back off.  The pushed state
          * follows the global opt-in, not the message. */
