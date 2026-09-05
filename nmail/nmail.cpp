@@ -91,6 +91,7 @@
 #include "nmail_config.h"
 #include "mail_worker.h"
 #include "mail_widgets.h"
+#include "nmail_toolbar.h"
 #include "mail_format.h"
 
 using namespace nanogui;
@@ -697,42 +698,35 @@ public:
         RootWindow *window = new RootWindow(this, root_flex);
 
         // ---- Toolbar ----
-        Widget *toolbar = new Widget(window);
-        toolbar->set_min_height(60);
-        toolbar->set_height(60);
-        toolbar->set_min_size(Vector2i(0, 60));
-        toolbar->set_height_flex(SizeMode::Fixed);
-        toolbar->set_layout(
-            new BoxLayout(Orientation::Horizontal, Alignment::Middle, 0, 0));
+        // A macOS-Mail-style unified toolbar: a flat glass strip holding
+        // rounded "pill" clusters of related buttons instead of one long
+        // row of identical icons. See nmail_toolbar.h.
+        MailToolbar *toolbar = new MailToolbar(window);
 
-        auto make_button_tool = [&](int icon, const std::string &tip) {
-            Button *btn = new Button(toolbar, "", icon);
-            btn->set_font_size(52);
-            btn->set_transparent(true);
-            btn->set_tooltip(tip);
-            return btn;
-        };
-
-        Button *refresh_btn = make_button_tool(FA_SYNC, "Refresh");
+        MailToolbarGroup *refresh_group = toolbar->add_group();
+        Button *refresh_btn = refresh_group->add_button(FA_SYNC, "Refresh");
         refresh_btn->set_callback([this]() { do_refresh(); });
 
-        m_compose_btn = make_button_tool(FA_PEN, "Compose a new message");
+        MailToolbarGroup *compose_group = toolbar->add_group();
+        m_compose_btn = compose_group->add_button(FA_PEN, "Compose a new message");
         m_compose_btn->set_callback([this]() { show_compose(false); });
 
-        m_reply_btn = make_button_tool(FA_REPLY, "Reply to this message");
+        MailToolbarGroup *reply_group = toolbar->add_group();
+        m_reply_btn = reply_group->add_button(FA_REPLY, "Reply to this message");
         m_reply_btn->set_enabled(false);
         m_reply_btn->set_callback([this]() { show_compose(true); });
 
-        m_fwd_btn = make_button_tool(FA_SHARE, "Forward this message");
+        m_fwd_btn = reply_group->add_button(FA_SHARE, "Forward this message");
         m_fwd_btn->set_enabled(false);
         m_fwd_btn->set_callback([this]() { show_compose(false, true); });
 
-        m_save_btn = make_button_tool(FA_SAVE,
+        MailToolbarGroup *message_group = toolbar->add_group();
+        m_save_btn = message_group->add_button(FA_SAVE,
             "Save this email as an .eml file (Ctrl+S)");
         m_save_btn->set_enabled(false);
         m_save_btn->set_callback([this]() { save_current_email(); });
 
-        m_images_btn = make_button_tool(FA_IMAGE,
+        m_images_btn = message_group->add_button(FA_IMAGE,
             "Load remote images (off by default to block tracking pixels)");
         m_images_btn->set_flags(Button::ToggleButton);
         m_images_btn->set_enabled(false);
@@ -768,32 +762,32 @@ public:
             redraw();
         });
 
-        m_trash_btn = make_button_tool(FA_TRASH, "Move to Trash (Delete)");
+        MailToolbarGroup *move_group = toolbar->add_group();
+        m_trash_btn = move_group->add_button(FA_TRASH, "Move to Trash (Delete)");
         m_trash_btn->set_enabled(false);
         m_trash_btn->set_callback([this]() { move_selected_to("Trash"); });
 
-        m_junk_btn = make_button_tool(FA_BROOM, "Move to Junk / Spam");
+        m_junk_btn = move_group->add_button(FA_BROOM, "Move to Junk / Spam");
         m_junk_btn->set_enabled(false);
         m_junk_btn->set_callback([this]() { move_selected_to("Junk"); });
 
         /* Shown in place of trash/junk while viewing Trash or Junk. */
-        m_restore_btn = make_button_tool(FA_ARROW_UP, "Move back to Inbox");
+        m_restore_btn = move_group->add_button(FA_ARROW_UP, "Move back to Inbox");
         m_restore_btn->set_enabled(false);
         m_restore_btn->set_visible(false);
         m_restore_btn->set_callback([this]() { move_selected_to("Inbox"); });
 
-        Button *prefs_btn = make_button_tool(FA_COG, "Preferences");
+        MailToolbarGroup *settings_group = toolbar->add_group();
+        Button *prefs_btn = settings_group->add_button(FA_COG, "Preferences");
         prefs_btn->set_callback([this]() { show_preferences(); });
 
-        m_theme_btn = make_button_tool(FA_MOON, "Toggle dark mode (Ctrl+T)");
+        m_theme_btn = settings_group->add_button(FA_MOON, "Toggle dark mode (Ctrl+T)");
         m_theme_btn->set_callback([this]() {
             apply_theme_mode(m_dark ? ThemeMode::Light : ThemeMode::Dark);
         });
 
-        // Spacer
-        Widget *spacer = new Widget(toolbar);
-        spacer->set_min_width(10);
-        spacer->set_width(10);
+        // Flexible gap pushes the search box to the right edge of the bar.
+        toolbar->add_flex_spacer();
 
         // Search box — press Enter to filter the message list
         TextBox *search_box = new TextBox(toolbar);
