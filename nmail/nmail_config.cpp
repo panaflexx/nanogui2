@@ -209,6 +209,59 @@ static std::string config_get_str(const DictValue *root, const char *key) {
                ? v->string_value : "";
 }
 
+static int config_get_int(const DictValue *root, const char *key, int fallback) {
+    const DictValue *v = dict_object_get(root, key);
+    if (v && v->type == DICT_INT64)  return (int)v->int64_value;
+    if (v && v->type == DICT_NUMBER) return (int)v->number_value;
+    return fallback;
+}
+
+static bool config_get_bool(const DictValue *root, const char *key, bool fallback) {
+    const DictValue *v = dict_object_get(root, key);
+    return (v && v->type == DICT_BOOL) ? (v->bool_value != 0) : fallback;
+}
+
+/* One account object -> MailAccount, decrypting password_enc when present. */
+static MailAccount parse_account(const DictValue *obj) {
+    MailAccount a;
+    a.name       = config_get_str(obj, "name");
+    a.host       = config_get_str(obj, "host");
+    a.port       = config_get_int(obj, "port", 143);
+    a.username   = config_get_str(obj, "username");
+    a.password   = config_get_str(obj, "password");   /* legacy plain text */
+    a.smtp_host  = config_get_str(obj, "smtp_host");
+    a.smtp_port  = config_get_int(obj, "smtp_port", 587);
+    const std::string enc = config_get_str(obj, "password_enc");
+    if (!enc.empty()) {
+        std::string plain;
+        if (decrypt_secret(enc, plain))
+            a.password = plain;
+        else
+            std::cerr << "[nmail] could not decrypt the stored password for "
+                      << (a.name.empty() ? a.username : a.name) << " ("
+                      << config_file("amail.key")
+                      << " missing or stale); re-enter it in Preferences"
+                      << std::endl;
+    }
+    return a;
+}
+
+static DictValue *serialize_account(const MailAccount &a) {
+    DictValue *obj = dict_create_object();
+    dict_object_set(obj, "name",     dict_create_string(a.name.c_str()));
+    dict_object_set(obj, "host",     dict_create_string(a.host.c_str()));
+    dict_object_set(obj, "port",     dict_create_int64(a.port));
+    dict_object_set(obj, "username", dict_create_string(a.username.c_str()));
+    std::string enc;
+    if (encrypt_secret(a.password, enc))
+        dict_object_set(obj, "password_enc", dict_create_string(enc.c_str()));
+    else
+        dict_object_set(obj, "password", dict_create_string(a.password.c_str()));
+    dict_object_set(obj, "smtp_host", dict_create_string(a.smtp_host.c_str()));
+    dict_object_set(obj, "smtp_port", dict_create_int64(a.smtp_port));
+    return obj;
+}
+
 bool load_config(MailConfig &c) {
     std::ifstream in(config_path(), std::ios::binary);
     if (!in) {
@@ -231,62 +284,46 @@ bool load_config(MailConfig &c) {
                   << err << std::endl;
         return false;
     }
-    c.host     = config_get_str(root, "host");
-    c.username = config_get_str(root, "username");
-    c.password = config_get_str(root, "password");   /* legacy plain text */
-    const std::string enc = config_get_str(root, "password_enc");
-    if (!enc.empty()) {
-        std::string plain;
-        if (decrypt_secret(enc, plain))
-            c.password = plain;
-        else
-            std::cerr << "[nmail] could not decrypt the stored password ("
-                      << config_file("amail.key")
-                      << " missing or stale); re-enter it in Preferences"
-                      << std::endl;
+
+    c.accounts.clear();
+    const DictValue *accounts = dict_object_get(root, "accounts");
+    if (accounts && accounts->type == DICT_ARRAY) {
+        for (size_t i = 0; i < accounts->array_value.length; ++i) {
+            const DictValue *obj = accounts->array_value.items[i];
+            if (obj && obj->type == DICT_OBJECT)
+                c.accounts.push_back(parse_account(obj));
+        }
+    } else {
+        /* Legacy single-account config: top-level host/username/... with no
+         * "accounts" array. Migrate it into a one-element accounts vector. */
+        MailAccount a = parse_account(root);
+        if (!a.host.empty())
+            c.accounts.push_back(a);
     }
-    c.smtp_host = config_get_str(root, "smtp_host");
-    const DictValue *p = dict_object_get(root, "port");
-    if (p && p->type == DICT_INT64)  c.port = (int)p->int64_value;
-    if (p && p->type == DICT_NUMBER) c.port = (int)p->number_value;
-    const DictValue *sp = dict_object_get(root, "smtp_port");
-    if (sp && sp->type == DICT_INT64)  c.smtp_port = (int)sp->int64_value;
-    if (sp && sp->type == DICT_NUMBER) c.smtp_port = (int)sp->number_value;
-    const DictValue *dm = dict_object_get(root, "dark_mode");
-    if (dm && dm->type == DICT_BOOL) c.dark_mode = dm->bool_value != 0;
-    const DictValue *sc = dict_object_get(root, "save_contacts");
-    if (sc && sc->type == DICT_BOOL) c.save_contacts = sc->bool_value != 0;
-    const DictValue *ci = dict_object_get(root, "check_interval_min");
-    if (ci && ci->type == DICT_INT64)  c.check_interval_min = (int)ci->int64_value;
-    if (ci && ci->type == DICT_NUMBER) c.check_interval_min = (int)ci->number_value;
-    const DictValue *fs = dict_object_get(root, "compose_font_size");
-    if (fs && fs->type == DICT_INT64)  c.compose_font_size = (int)fs->int64_value;
-    if (fs && fs->type == DICT_NUMBER) c.compose_font_size = (int)fs->number_value;
+
+    c.dark_mode          = config_get_bool(root, "dark_mode", false);
+    c.save_contacts      = config_get_bool(root, "save_contacts", false);
+    c.check_interval_min = config_get_int(root, "check_interval_min", 15);
+    c.compose_font_size  = config_get_int(root, "compose_font_size", 16);
     dict_destroy(root);
-    return !c.host.empty();
+    return !c.accounts.empty();
 }
 
 bool save_config(const MailConfig &c) {
     DictValue *root = dict_create_object();
-    dict_object_set(root, "host",     dict_create_string(c.host.c_str()));
-    dict_object_set(root, "port",     dict_create_int64(c.port));
-    dict_object_set(root, "username", dict_create_string(c.username.c_str()));
-    std::string enc;
-    if (encrypt_secret(c.password, enc))
-        dict_object_set(root, "password_enc", dict_create_string(enc.c_str()));
-    else
-        dict_object_set(root, "password", dict_create_string(c.password.c_str()));
-    dict_object_set(root, "smtp_host", dict_create_string(c.smtp_host.c_str()));
-    dict_object_set(root, "smtp_port", dict_create_int64(c.smtp_port));
+    DictValue *accounts = dict_create_array();
+    for (const MailAccount &a : c.accounts)
+        dict_array_append(accounts, serialize_account(a));
+    dict_object_set(root, "accounts", accounts);
     dict_object_set(root, "dark_mode", dict_create_bool(c.dark_mode ? 1 : 0));
     dict_object_set(root, "save_contacts",
                     dict_create_bool(c.save_contacts ? 1 : 0));
     dict_object_set(root, "check_interval_min", dict_create_int64(c.check_interval_min));
     dict_object_set(root, "compose_font_size", dict_create_int64(c.compose_font_size));
 
-    char buf[8192];
     bool ok = false;
-    if (dict_serialize_json(root, buf, sizeof(buf), /*pretty=*/1)) {
+    char *buf = dict_serialize_json_heap(root, /*pretty=*/1);
+    if (buf) {
         std::ofstream out(config_path(), std::ios::binary | std::ios::trunc);
         if (out) {
             out << buf;
@@ -295,6 +332,7 @@ bool save_config(const MailConfig &c) {
 #ifndef _WIN32
         if (ok) ::chmod(config_path().c_str(), S_IRUSR | S_IWUSR);
 #endif
+        free(buf);
     }
     dict_destroy(root);
     return ok;

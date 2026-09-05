@@ -11,14 +11,32 @@
 #pragma once
 
 #include <string>
+#include <vector>
 
-struct MailConfig {
+/* One IMAP/SMTP account.  Several of these can be configured at once; every
+ * one connects and polls simultaneously (see MailApp::m_accounts). */
+struct MailAccount {
+    std::string name;           // display label ("iCloud", "Work Gmail"); defaults to username
     std::string host;
     int         port = 143;
     std::string username;
     std::string password;
     std::string smtp_host;      // empty -> fall back to the IMAP host
     int         smtp_port = 587;
+
+    /* Stable-enough key for this account: not stored, derived on demand so
+     * renaming `name` never invalidates anything keyed off it (QRESYNC
+     * state, per-account caches, ...). Changing host/username does change
+     * the id -- same as today's QRESYNC key, which derives from the same
+     * two fields. */
+    std::string id() const { return username + "@" + host; }
+
+    std::string display_name() const { return name.empty() ? username : name; }
+};
+
+struct MailConfig {
+    std::vector<MailAccount> accounts;
+
     bool        dark_mode = false;
     /* Off by default: harvested addresses stay in memory for the session
      * unless the user opts into keeping them on disk. */
@@ -39,8 +57,10 @@ std::string config_file(const char *name);
 /* config_file("amail.config"). */
 const std::string &config_path();
 
-/* Load the account config; returns false when no usable config exists
- * (or no host is set).  Migrates a legacy ./amail.config if found. */
+/* Load the account config; returns false when no usable config exists (or
+ * it has no accounts). Migrates a legacy ./amail.config, and migrates a
+ * legacy single-account config (top-level host/username/... with no
+ * "accounts" array) into a one-element accounts vector. */
 bool load_config(MailConfig &c);
 
 /* Write the config (JSON, mode 0600 on POSIX). */

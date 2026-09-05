@@ -20,9 +20,14 @@
 #include <cstring>
 #include <cstdlib>
 
-void MailWorker::set_config(const MailConfig &c) {
+void MailWorker::set_config(const MailAccount &c) {
     std::lock_guard<std::mutex> lock(m_mutex);
     m_config = c;
+}
+
+void MailWorker::set_check_interval_min(int minutes) {
+    std::lock_guard<std::mutex> lock(m_mutex);
+    m_check_interval_min = minutes;
 }
 
 bool MailWorker::is_compressed() const { return m_imap.is_compressed(); }
@@ -32,7 +37,7 @@ std::string MailWorker::qresync_file_path() const {
     return config_file("qresync.json");
 }
 std::string MailWorker::qresync_key(const std::string &folder) const {
-    MailConfig cfg;
+    MailAccount cfg;
     {
         std::lock_guard<std::mutex> lock(m_mutex);
         cfg = m_config;
@@ -80,9 +85,17 @@ std::vector<uint32_t> MailWorker::seqset_to_uids_vec(const std::string &seqset) 
     }
     return out;
 }
+/* qresync.json is one file shared by every account's MailWorker (each keyed
+ * by its own qresync_key()). With a single worker this read-modify-write was
+ * never concurrent; with one thread per account it is, so every access is
+ * serialized through this process-wide mutex to avoid one account's save
+ * clobbering another's concurrent read/write of the same file. */
+static std::mutex g_qresync_file_mutex;
+
 bool MailWorker::load_qresync_state(const std::string &folder,
                                     ImapClient::QResyncState &out_state,
                                     std::vector<uint32_t> &out_uids) {
+    std::lock_guard<std::mutex> file_lock(g_qresync_file_mutex);
     out_state = {};
     out_uids.clear();
     std::string path = qresync_file_path();
@@ -139,6 +152,7 @@ bool MailWorker::load_qresync_state(const std::string &folder,
 bool MailWorker::save_qresync_state(const std::string &folder,
                                     const ImapClient::QResyncState &state,
                                     const std::vector<uint32_t> &uids) {
+    std::lock_guard<std::mutex> file_lock(g_qresync_file_mutex);
     std::string path = qresync_file_path();
     std::string key = qresync_key(folder);
     DictValue *root = nullptr;
@@ -426,7 +440,7 @@ bool MailWorker::ensure_connected() {
 }
 
 bool MailWorker::do_connect() {
-    MailConfig cfg;
+    MailAccount cfg;
     {
         std::lock_guard<std::mutex> lock(m_mutex);
         cfg = m_config;
@@ -1525,7 +1539,7 @@ void MailWorker::run() {
                     m_seen_uid = 0;
                     m_seen_modseq = 0;
                 } else if (now >= next_check) {
-                    int interval_min = std::max(1, m_config.check_interval_min);
+                    int interval_min = std::max(1, m_check_interval_min);
                     next_check = now + std::chrono::minutes(interval_min);
                     if (m_config.host.empty() ||
                         (m_wanted_folder.empty() && m_selected_folder.empty()))

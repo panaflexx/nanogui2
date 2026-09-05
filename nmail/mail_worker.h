@@ -56,7 +56,11 @@ public:
     /* FETCH summaries progress (worker thread marshals via deliver). */
     std::function<void(const std::string &, int done, int total)> cb_progress;
 
-    void set_config(const MailConfig &c);
+    /* One MailWorker == one account's connection: its own host/port/
+     * username/password/smtp settings. Shared app-level settings
+     * (check_interval_min) are set separately, below. */
+    void set_config(const MailAccount &c);
+    void set_check_interval_min(int minutes);
 
     void start();
     void stop();
@@ -173,7 +177,8 @@ private:
     std::condition_variable m_cv;
     std::deque<Cmd>         m_queue;
     bool                    m_quit = false;
-    MailConfig              m_config;
+    MailAccount             m_config;
+    int                     m_check_interval_min = 15;
     ImapClient              m_imap;
     std::string             m_selected_folder;
     /* Latest folder the GUI asked to open.  Distinct from m_selected_folder

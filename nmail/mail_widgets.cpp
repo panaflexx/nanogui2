@@ -56,7 +56,7 @@ FolderItem::FolderItem(Widget *parent, const std::string &caption, int icon,
     set_height(row_h);
 }
 
-bool FolderItem::selected() const { return g_selected_item == this; }
+bool FolderItem::selected() const { return !m_header && g_selected_item == this; }
 
 Widget *FolderItem::ensure_children_container() {
     if (!m_children_container) {
@@ -81,10 +81,13 @@ bool FolderItem::mouse_button_event(const Vector2i &p, int button,
         if (m_expandable && m_children_container) {
             toggle_expand();
         }
-        // Select this item
-        g_selected_item = this;
-        if (m_select_callback)
-            m_select_callback(this);
+        // Select this item -- a header row (account name) only ever
+        // toggles its children; it's never "the selected folder".
+        if (!m_header) {
+            g_selected_item = this;
+            if (m_select_callback)
+                m_select_callback(this);
+        }
         return true;
     }
     return Widget::mouse_button_event(p, button, down, modifiers);
@@ -159,7 +162,7 @@ void FolderItem::draw(NVGcontext *ctx) {
 
     float text_x = icon_x + fs * 1.1f;
     nvgFontSize(ctx, fs);
-    nvgFontFace(ctx, "sans");
+    nvgFontFace(ctx, m_header ? "sans-bold" : "sans");
     nvgFillColor(ctx, text_col);
     nvgTextAlign(ctx, NVG_ALIGN_LEFT | NVG_ALIGN_MIDDLE);
     {
@@ -202,35 +205,10 @@ void FolderItem::draw(NVGcontext *ctx) {
 }
 
 // ---------------------------------------------------------------------------
-// SectionHeader
+// FolderView — one collapsible account section per configured account
 // ---------------------------------------------------------------------------
-SectionHeader::SectionHeader(Widget *parent, const std::string &title)
-    : Widget(parent), m_title(title) {
-    int row_h = (int)(font_size() * 1.8f);
-    set_min_height(row_h);
-    set_height(row_h);
-}
-
-void SectionHeader::draw(NVGcontext *ctx) {
-    float fs = (float)font_size();
-    float x = (float)m_pos.x();
-    float y = (float)m_pos.y();
-    float h = (float)m_size.y();
-
-    nvgFontSize(ctx, fs);
-    nvgFontFace(ctx, "sans-bold");
-    nvgFillColor(ctx, m_theme->m_disabled_text_color);
-    nvgTextAlign(ctx, NVG_ALIGN_LEFT | NVG_ALIGN_MIDDLE);
-    nvgText(ctx, x + fs * 0.9f, y + h * 0.5f + 2.0f,
-            m_title.c_str(), nullptr);
-
-    Widget::draw(ctx);
-}
-
-// ---------------------------------------------------------------------------
-// FolderView
-// ---------------------------------------------------------------------------
-FolderView::FolderView(Widget *parent, std::function<void(FolderItem *)> on_select)
+FolderView::FolderView(Widget *parent,
+                       std::function<void(const std::string &, FolderItem *)> on_select)
     : Widget(parent), m_on_select(on_select)
 {
     set_layout(new BoxLayout(Orientation::Vertical, Alignment::Fill, 0, 0));
@@ -242,6 +220,10 @@ FolderView::FolderView(Widget *parent, std::function<void(FolderItem *)> on_sele
     m_container = new FolderContainer(m_scroll);
     m_container->set_layout(
         new BoxLayout(Orientation::Vertical, Alignment::Fill, 10, 0));
+
+    auto *top_spacer = new Widget(m_container);
+    top_spacer->set_min_height(6);
+    top_spacer->set_height(6);
 }
 
 void FolderView::draw(NVGcontext *ctx) {
@@ -253,34 +235,79 @@ void FolderView::draw(NVGcontext *ctx) {
     Widget::draw(ctx);
 }
 
-void FolderView::rebuild(const std::string &account,
-                         const std::vector<MailFolder> &folders,
-                         const std::string &selected_name) {
-    g_selected_item = nullptr;
-    while (!m_container->children().empty())
-        m_container->remove_child_at(0);
-    m_scroll->set_scroll(0.0f);
+void FolderView::add_account(const std::string &account_id, const std::string &label) {
+    if (m_sections.count(account_id)) return;   // already added
 
-    auto *top_spacer = new Widget(m_container);
-    top_spacer->set_min_height(6);
-    top_spacer->set_height(6);
+    AccountSection sec;
+    sec.header = new FolderItem(m_container, label, FA_ENVELOPE, 0, 0,
+                                /*expandable=*/true);
+    sec.header->set_header(true);
+    sec.header->ensure_children_container();
+    sec.header->toggle_expand();   // start expanded, like Apple Mail
+    sec.children = sec.header->children_container();
 
-    new SectionHeader(m_container, account);
+    auto *placeholder = new FolderItem(sec.children, "Connecting...", FA_SYNC, 1);
+    placeholder->set_enabled(false);
+
+    m_sections[account_id] = sec;
+    m_account_order.push_back(account_id);
+    if (screen()) screen()->perform_layout();
+}
+
+void FolderView::update_account(const std::string &account_id, const std::string &label,
+                                const std::vector<MailFolder> &folders,
+                                const std::string &selected_name) {
+    auto it = m_sections.find(account_id);
+    if (it == m_sections.end()) {
+        add_account(account_id, label);
+        it = m_sections.find(account_id);
+    }
+    AccountSection &sec = it->second;
+    sec.header->set_caption(label);
+
+    int unseen_total = 0;
+    for (const MailFolder &f : folders) unseen_total += f.unseen;
+    sec.header->set_badge(unseen_total);
+
+    // Selection safety: if the item about to be destroyed is the globally
+    // selected one, clear the pointer before it dangles.
+    for (Widget *child : sec.children->children())
+        if (child == g_selected_item) { g_selected_item = nullptr; break; }
+
+    while (!sec.children->children().empty())
+        sec.children->remove_child_at(0);
 
     for (const MailFolder &f : folders) {
-        auto *item = new FolderItem(m_container, display_name(f.name),
-                                    folder_icon(f.name), 0, f.unseen);
-        item->set_select_callback(m_on_select);
+        auto *item = new FolderItem(sec.children, display_name(f.name),
+                                    folder_icon(f.name), 1, f.unseen);
+        item->set_select_callback([this, account_id](FolderItem *it2) {
+            if (m_on_select) m_on_select(account_id, it2);
+        });
         item->set_tooltip(f.name);
         if (!selected_name.empty() && f.name == selected_name)
             g_selected_item = item;
     }
 
-    auto *bot_spacer = new Widget(m_container);
-    bot_spacer->set_min_height(20);
-    bot_spacer->set_height(20);
+    if (screen()) screen()->perform_layout();
+}
 
-    screen()->perform_layout();
+void FolderView::remove_account(const std::string &account_id) {
+    auto it = m_sections.find(account_id);
+    if (it == m_sections.end()) return;
+
+    AccountSection &sec = it->second;
+    for (Widget *child : sec.children->children())
+        if (child == g_selected_item) { g_selected_item = nullptr; break; }
+    if (sec.header == g_selected_item) g_selected_item = nullptr;
+
+    m_container->remove_child(sec.children);
+    m_container->remove_child(sec.header);
+
+    m_sections.erase(it);
+    m_account_order.erase(std::remove(m_account_order.begin(),
+                                      m_account_order.end(), account_id),
+                          m_account_order.end());
+    if (screen()) screen()->perform_layout();
 }
 
 std::string FolderView::display_name(const std::string &name) {

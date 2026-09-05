@@ -25,6 +25,7 @@ struct MailFolder {
     std::string name;
     int messages = 0;
     int unseen   = 0;
+    std::string delimiter;   // server's hierarchy delimiter for this LIST entry ("/", ".", ...)
 };
 
 struct MailSummary {

@@ -1752,7 +1752,8 @@ bool ImapClient::list_folders(std::vector<MailFolder> &out, std::string &err) {
         if (to_lower(flags).find("\\noselect") != std::string::npos)
             continue;
         cur.skip_ws();
-        if (cur.peek() == '"') cur.read_quoted();            // delimiter
+        std::string delimiter;
+        if (cur.peek() == '"') delimiter = cur.read_quoted();
         else while (!cur.eof() && cur.peek() != ' ') ++cur.pos; // NIL
         cur.skip_ws();
         std::string name = (cur.peek() == '"')
@@ -1760,6 +1761,7 @@ bool ImapClient::list_folders(std::vector<MailFolder> &out, std::string &err) {
         if (name.empty()) continue;
         MailFolder f;
         f.name = name;
+        f.delimiter = delimiter;
         out.push_back(f);
     }
 

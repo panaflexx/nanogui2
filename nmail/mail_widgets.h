@@ -1,8 +1,9 @@
 /*
  * nmail/mail_widgets.h — custom NanoGUI widgets for the mail client:
- * the folder sidebar (FolderView / FolderItem / SectionHeader) and the
- * virtual-scrolling message list (EmailListView).  Pure GUI code; the
- * only mail dependency is the MailFolder struct used by FolderView::rebuild.
+ * the folder sidebar (FolderView / FolderItem, one collapsible section per
+ * account) and the virtual-scrolling message list (EmailListView).  Pure
+ * GUI code; the only mail dependency is the MailFolder struct used by
+ * FolderView::update_account.
  */
 #pragma once
 
@@ -18,6 +19,7 @@
 #include <vector>
 
 #include <cstdint>
+#include <unordered_map>
 #include "imap_client.h"   // MailFolder
 
 class FolderItem;
@@ -59,6 +61,12 @@ public:
         m_select_callback = cb;
     }
 
+    /* An account header row: expands/collapses like any other expandable
+     * item, but never becomes "the selected folder" (no blue highlight, no
+     * select callback) -- clicking it toggles its children, nothing else. */
+    void set_header(bool h) { m_header = h; }
+    bool header() const { return m_header; }
+
     /* ---- Children container for expandable items ---- */
     nanogui::Widget *children_container() const { return m_children_container; }
     nanogui::Widget *ensure_children_container();
@@ -85,49 +93,55 @@ private:
     bool m_expandable;
     bool m_expanded;
     bool m_hovered;
+    bool m_header = false;
     nanogui::Widget *m_children_container;
     std::function<void(FolderItem *)> m_select_callback;
 };
 
 // ---------------------------------------------------------------------------
-// SectionHeader — a small gray header (account name)
-// ---------------------------------------------------------------------------
-class SectionHeader : public nanogui::Widget {
-public:
-    SectionHeader(nanogui::Widget *parent, const std::string &title);
-
-    nanogui::Vector2i preferred_size(NVGcontext *) const override {
-        int row_h = (int)(font_size() * 1.8f);
-        return nanogui::Vector2i(m_min_size.x() > 0 ? m_min_size.x() : 100, row_h);
-    }
-
-    void draw(NVGcontext *ctx) override;
-
-private:
-    std::string m_title;
-};
-
-// ---------------------------------------------------------------------------
-// FolderView — the sidebar widget, populated from the IMAP server
+// FolderView — the sidebar widget: one collapsible section per account, each
+// holding that account's flat folder list, all populated independently as
+// each account's IMAP connection reports in.
 // ---------------------------------------------------------------------------
 class FolderView : public nanogui::Widget {
 public:
-    FolderView(nanogui::Widget *parent, std::function<void(FolderItem *)> on_select);
+    /* `on_select(account_id, item)` -- account_id identifies which
+     * account's MailWorker should service the click; `item` is the
+     * FolderItem the user clicked (its tooltip() carries the full IMAP
+     * folder name, as before). */
+    FolderView(nanogui::Widget *parent,
+              std::function<void(const std::string &, FolderItem *)> on_select);
 
     void draw(NVGcontext *ctx) override;
 
-    /* Rebuild the sidebar from the server's folder list.
-     * `selected_name` (full IMAP name) is re-highlighted without firing
-     * the select callback, so a LIST/refresh does not drop the current
-     * folder selection. */
-    void rebuild(const std::string &account,
-                 const std::vector<MailFolder> &folders,
-                 const std::string &selected_name = "");
+    /* Create an account's section (header + empty children container), in
+     * the order accounts are added -- call once per configured account at
+     * startup so sidebar ordering stays stable regardless of which
+     * account's IMAP connection answers first. */
+    void add_account(const std::string &account_id, const std::string &label);
+
+    /* Repopulate one account's folder list in place, leaving every other
+     * account's section untouched. `selected_name` (full IMAP name) is
+     * re-highlighted without firing the select callback, so a LIST/refresh
+     * does not drop the current folder selection. */
+    void update_account(const std::string &account_id, const std::string &label,
+                        const std::vector<MailFolder> &folders,
+                        const std::string &selected_name = "");
+
+    /* Drop an account's section entirely (account removed in Preferences). */
+    void remove_account(const std::string &account_id);
 
 private:
+    struct AccountSection {
+        FolderItem *header = nullptr;
+        nanogui::Widget *children = nullptr;
+    };
+
     nanogui::ScrollPanel *m_scroll;
     nanogui::Widget *m_container;
-    std::function<void(FolderItem *)> m_on_select;
+    std::function<void(const std::string &, FolderItem *)> m_on_select;
+    std::unordered_map<std::string, AccountSection> m_sections;
+    std::vector<std::string> m_account_order;
 
     /* Leaf name after the last hierarchy delimiter for display. */
     static std::string display_name(const std::string &name);
