@@ -169,6 +169,7 @@ public:
     ZoomScrollPanel *m_view_scroll = nullptr;
     HtmlDocument *m_view        = nullptr;
     Label        *m_status      = nullptr;
+    Label        *m_compress_label = nullptr;
     IndeterminateBar *m_load_bar = nullptr;
     Button       *m_theme_btn   = nullptr;
     Button       *m_compose_btn = nullptr;
@@ -221,6 +222,78 @@ public:
     /* Session-only caches; dropped on Refresh or reconnect. */
     std::map<std::string, std::vector<MailSummary>> m_summary_cache;
     std::map<std::string, MailMessage>              m_body_cache;
+    // UID-aware body cache key: "folder|U<uid>" when uid!=0 else "folder|S<seq>".
+    // Keeps seq path working when uid==0 (server without CONDSTORE/QRESYNC).
+    static std::string body_key(const std::string &folder, uint32_t uid, int seq) {
+        if (uid) return folder + "|U" + std::to_string(uid);
+        return folder + "|S" + std::to_string(seq);
+    }
+    static std::string body_key(const std::string &folder, const MailSummary &s) {
+        return body_key(folder, s.uid, s.seq);
+    }
+    static std::string body_key(const std::string &folder, const EmailData &d) {
+        return body_key(folder, d.uid, d.seq);
+    }
+    // Resolve uid for a seq via current summaries/cache (for on_body/on_prefetched where only seq is known).
+    uint32_t uid_for_seq(const std::string &folder, int seq) const {
+        if (seq <= 0) return 0;
+        if (folder == m_current_folder) {
+            for (auto &s : m_summaries) if (s.seq == seq && s.uid) return s.uid;
+        }
+        auto it = m_summary_cache.find(folder);
+        if (it != m_summary_cache.end())
+            for (auto &s : it->second) if (s.seq == seq && s.uid) return s.uid;
+        // also try reverse: if seq==0 but we are asked via uid path, not needed here
+        return 0;
+    }
+    uint32_t uid_for_seq_any(int seq) const { return uid_for_seq(m_current_folder, seq); }
+    // Dual-read helper: check UID key first (authoritative on QRESYNC), then SEQ key, then legacy ":" key.
+    bool body_has(const std::string &folder, uint32_t uid, int seq) const {
+        if (uid) {
+            if (m_body_cache.find(body_key(folder, uid, 0)) != m_body_cache.end()) return true;
+            // fallback to seq key if seq is known (dual-write period)
+            if (seq && m_body_cache.find(body_key(folder, 0, seq)) != m_body_cache.end()) return true;
+            if (seq && m_body_cache.find(folder + ":" + std::to_string(seq)) != m_body_cache.end()) return true;
+            return false;
+        }
+        if (m_body_cache.find(body_key(folder, 0, seq)) != m_body_cache.end()) return true;
+        if (m_body_cache.find(folder + ":" + std::to_string(seq)) != m_body_cache.end()) return true;
+        return false;
+    }
+    bool body_has(const std::string &folder, const EmailData &d) const { return body_has(folder, d.uid, d.seq); }
+    auto body_find(const std::string &folder, uint32_t uid, int seq) const {
+        if (uid) {
+            auto it = m_body_cache.find(body_key(folder, uid, 0));
+            if (it != m_body_cache.end()) return it;
+            if (seq) {
+                it = m_body_cache.find(body_key(folder, 0, seq));
+                if (it != m_body_cache.end()) return it;
+                it = m_body_cache.find(folder + ":" + std::to_string(seq));
+                if (it != m_body_cache.end()) return it;
+            }
+            return m_body_cache.end();
+        }
+        auto it = m_body_cache.find(body_key(folder, 0, seq));
+        if (it != m_body_cache.end()) return it;
+        it = m_body_cache.find(folder + ":" + std::to_string(seq));
+        return it;
+    }
+    auto body_find(const std::string &folder, const EmailData &d) const { return body_find(folder, d.uid, d.seq); }
+    void body_put(const std::string &folder, uint32_t uid, int seq, const MailMessage &msg) {
+        if (m_body_cache.size() > 256) m_body_cache.clear();
+        if (uid) {
+            m_body_cache[body_key(folder, uid, 0)] = msg;
+            if (seq) {
+                // dual-write for transition: keep seq key so old lookups still hit
+                m_body_cache[body_key(folder, 0, seq)] = msg;
+                m_body_cache[folder + ":" + std::to_string(seq)] = msg;
+            }
+        } else if (seq) {
+            m_body_cache[body_key(folder, 0, seq)] = msg;
+            m_body_cache[folder + ":" + std::to_string(seq)] = msg;
+        }
+    }
+    void body_put(const std::string &folder, const EmailData &d, const MailMessage &msg) { body_put(folder, d.uid, d.seq, msg); }
     std::vector<MailFolder> m_folders;
     bool m_move_inflight = false;
     std::string m_status_base;
@@ -416,6 +489,23 @@ public:
         m_status_base = s;
         if (m_hover_url.empty() && m_status) m_status->set_caption(s);
     }
+    std::string compressSuffix() const {
+        return m_worker.is_compressed() ? " \u00B7 DEFLATE" : "";
+    }
+    void update_compress_badge() {
+        bool comp = m_worker.is_compressed();
+        if (m_compress_label) {
+            m_compress_label->set_visible(comp);
+            if (comp) {
+                m_compress_label->set_caption("DEFLATE");
+                m_compress_label->set_color(Color(40, 160, 60, 255));
+            } else {
+                m_compress_label->set_caption("");
+            }
+            // re-layout statusbar if visibility changed
+            if (m_compress_label->parent()) perform_layout();
+        }
+    }
     /* Folder-open busy flag + optional status-bar indeterminate bar. */
     void set_folder_busy(bool busy, const std::string &msg = "") {
         m_folder_loading = busy;
@@ -512,27 +602,38 @@ public:
     }
     void on_moved(const std::string &folder, int seq, const std::string &dest) {
         m_move_inflight = false;
+        uint32_t moved_uid = uid_for_seq(folder, seq);
         auto remove_from_vec = [&](std::vector<MailSummary> &vec){
-            vec.erase(std::remove_if(vec.begin(), vec.end(),
-                [&](const MailSummary &s){ return s.seq == seq; }), vec.end());
+            if (moved_uid) {
+                vec.erase(std::remove_if(vec.begin(), vec.end(),
+                    [&](const MailSummary &s){ return s.uid == moved_uid; }), vec.end());
+            } else {
+                vec.erase(std::remove_if(vec.begin(), vec.end(),
+                    [&](const MailSummary &s){ return s.seq == seq; }), vec.end());
+            }
         };
         const bool viewing_source =
             folder == m_wanted_folder && folder == m_current_folder;
         if (viewing_source) {
             remove_from_vec(m_summaries);
-            for (auto &s : m_summaries)
-                if (s.seq > seq) --s.seq;
+            // On QRESYNC (uid present) seqs are unstable only after EXPUNGE;
+            // decrement is legacy behavior for non-UID servers. Keep but only
+            // when uid not available to avoid corrupting seqs that will be
+            // refreshed on next SELECT.
+            if (!moved_uid) for (auto &s : m_summaries) if (s.seq > seq) --s.seq;
         }
         auto it = m_summary_cache.find(folder);
         if (it != m_summary_cache.end()) {
             remove_from_vec(it->second);
-            for (auto &s : it->second)
-                if (s.seq > seq) --s.seq;
+            if (!moved_uid) for (auto &s : it->second) if (s.seq > seq) --s.seq;
         }
-        // body caches use seq numbers, which shift after EXPUNGE -> drop all for folder
+        // body caches use stable UIDs on QRESYNC; legacy seq keys shift after EXPUNGE.
+        // If uid present, only that message needs dropping — but to stay conservative, drop all for folder.
         std::vector<std::string> drop;
+        std::string p1 = folder + "|";
+        std::string p2 = folder + ":";
         for (auto &kv : m_body_cache)
-            if (kv.first.rfind(folder + ":", 0) == 0) drop.push_back(kv.first);
+            if (kv.first.rfind(p1, 0) == 0 || kv.first.rfind(p2, 0) == 0) drop.push_back(kv.first);
         for (auto &k : drop) m_body_cache.erase(k);
         if (!viewing_source) {
             set_status("Moved to " + dest);
@@ -551,15 +652,18 @@ public:
             parse_markdown(doc, "*Message moved to " + dest + "*", text_color(), 18.f);
             m_view->set_document(std::move(doc));
             m_view_scroll->set_scroll(0.0f);
-        } else if (m_rendered_seq > seq) {
+        } else if (!moved_uid && m_rendered_seq > seq) {
             --m_rendered_seq;
         }
         if (m_loading_seq == seq) m_loading_seq = -1;
-        else if (m_loading_seq > seq) --m_loading_seq;
+        else if (!moved_uid && m_loading_seq > seq) --m_loading_seq;
         if (m_pending_seq == seq) { m_pending_seq = -1; m_preview_settle_at = 0; }
-        else if (m_pending_seq > seq) { --m_pending_seq; --m_pending_email.seq; }
+        else if (!moved_uid && m_pending_seq > seq) { --m_pending_seq; --m_pending_email.seq; }
         bool removed = false;
-        if (m_email_list) removed = m_email_list->remove_seq(seq);
+        if (m_email_list) {
+            if (moved_uid) removed = m_email_list->remove_by_uid(moved_uid);
+            if (!removed) removed = m_email_list->remove_seq(seq);
+        }
         if (removed && m_email_list) {
             const EmailData* nd = m_email_list->selected_data();
             if (nd) {
@@ -728,18 +832,23 @@ public:
         m_email_list->set_on_hit_bottom([this]() { maybe_fetch_older(); });
         m_email_list->on_viewport_changed = [this]() {
             if (m_current_folder.empty() || !m_email_list) return;
-            // debounce: only throttle with a flag — draw() already limits rate
             static double last = 0; double now = glfwGetTime();
             if (now - last < 0.15 && m_email_list->visible_seqs().size() < 30) return;
             last = now;
-            // skip prefetch for rows already cached
-            auto seqs = m_email_list->visible_seqs(6);
-            std::vector<int> need; need.reserve(seqs.size());
-            for (int s : seqs) {
-                if (m_body_cache.find(m_current_folder + ":" + std::to_string(s)) != m_body_cache.end()) continue;
-                need.push_back(s);
+            auto rows = m_email_list->emails();
+            auto vr = m_email_list->visible_range();
+            int a = std::max(0, vr.first - 6);
+            int b = std::min((int)rows.size(), vr.second + 6);
+            std::vector<int> need_seq; need_seq.reserve(b-a);
+            std::vector<uint32_t> need_uid; need_uid.reserve(b-a);
+            for (int i=a;i<b;++i) {
+                const EmailData &d = rows[i];
+                if (body_has(m_current_folder, d)) continue;
+                if (d.uid) need_uid.push_back(d.uid);
+                else if (d.seq) need_seq.push_back(d.seq);
             }
-            if (!need.empty()) m_worker.ensure_visible_cached(m_current_folder, need);
+            if (!need_uid.empty()) m_worker.ensure_visible_cached_uid(m_current_folder, need_uid);
+            if (!need_seq.empty()) m_worker.ensure_visible_cached(m_current_folder, need_seq);
         };
 
         // ---- Right: message area ----
@@ -798,6 +907,9 @@ public:
         m_load_bar = new IndeterminateBar(status_left);
         m_load_bar->set_fixed_size(Vector2i(180, 8));
         m_load_bar->set_visible(false);
+        m_compress_label = new Label(status_left, "", "sans", 13);
+        m_compress_label->set_color(Color(40, 160, 60, 255));
+        m_compress_label->set_visible(false);
         m_taskbar = new Widget(statusbar);
         m_taskbar->set_layout(new BoxLayout(Orientation::Horizontal,
                                             Alignment::Middle, 0, 4));
@@ -848,14 +960,17 @@ public:
                 return;
             if (m_folder_loading && folder.empty())
                 return;
-            set_status(msg);
+            std::string out = msg;
+            if (m_worker.is_compressed() && msg.rfind("Connected",0)==0) out += " \u00B7 DEFLATE";
+            set_status(out);
+            update_compress_badge();
         };
         m_worker.cb_progress = [this](const std::string &folder, int done, int total) {
             if (folder != m_wanted_folder || !m_folder_loading) return;
             if (m_load_bar && total > 0)
                 m_load_bar->set_progress((float)done / (float)total);
             set_status(folder + ": " + std::to_string(done) + " / " +
-                       std::to_string(total));
+                       std::to_string(total) + compressSuffix());
             redraw();
         };
         m_worker.cb_seen = [this](const std::string &folder, int seq) {
@@ -949,6 +1064,7 @@ public:
         m_summary_cache.clear();
         m_body_cache.clear();
         update_move_buttons();
+        update_compress_badge();
 
         std::string account = m_config.username.empty()
             ? m_config.host
@@ -985,19 +1101,92 @@ public:
         if (folder != m_wanted_folder) {
             /* Stale: INBOX headers arriving after a Trash click.  Keep the
              * cache for that folder unless the payload is empty and we
-             * already have a better list. */
+             * already have a better list.
+             * For QRESYNC (Option A): MailWorker already patched
+             * m_summaries_cache[folder] by removing vanished UIDs before
+             * delivering cb_summaries — but MailApp's m_summary_cache is
+             * separate. So even stale deliveries honor the patched list
+             * (vanished removed) when empty check would otherwise mask it.
+             * The empty guard here only applies when we already have a
+             * non-empty cache and the delivery is literally empty (not a
+             * patched smaller list).
+             */
             if (!sums.empty() || m_summary_cache.find(folder) == m_summary_cache.end())
                 m_summary_cache[folder] = sums;
+            // Body cache for stale folder: evict vanished UIDs defensively
+            {
+                auto itc = m_summary_cache.find(folder);
+                if (itc != m_summary_cache.end() && !itc->second.empty() && !sums.empty()) {
+                    std::unordered_set<uint32_t> new_uids;
+                    new_uids.reserve(sums.size());
+                    bool any = false;
+                    for (auto &s : sums) if (s.uid) { new_uids.insert(s.uid); any = true; }
+                    if (any) {
+                        for (auto &s : itc->second) {
+                            if (s.uid && new_uids.find(s.uid)==new_uids.end()) {
+                                m_body_cache.erase(body_key(folder, s.uid, s.seq));
+                                if (s.seq) m_body_cache.erase(folder + ":" + std::to_string(s.seq));
+                            }
+                        }
+                    }
+                }
+            }
             return;
         }
 
         /* A SELECT that missed EXISTS used to replace a good cached list
-         * with nothing ("flash then clear").  Keep what we have and say so. */
+         * with nothing ("flash then clear").  Keep what we have and say so.
+         * BUT: if MailWorker delivered a QRESYNC-patched list (vanished UIDs
+         * removed), do not mask it — honor the smaller list and evict body
+         * cache entries for the vanished UIDs (MailWorker already stripped
+         * m_summaries_cache[folder]; MailApp must follow through on m_body_cache
+         * and selection).  When uid==0 (no CONDSTORE/QRESYNC) this degenerates to
+         * the old behaviour. */
         if (sums.empty() && !m_summaries.empty() && m_current_folder == folder) {
+            // Detect genuine vanished vs. empty-fetch: if m_summary_cache[folder]
+            // was intentionally replaced with a smaller list by QRESYNC delta,
+            // sums would not be what we would cache — but here sums IS empty so
+            // it's not a QRESYNC delta delivery. Keep cached.
             set_folder_busy(false, folder + ": keeping " +
                 std::to_string(m_summaries.size()) +
-                " cached (server sent none)");
+                " cached (server sent none)" + compressSuffix());
+            update_compress_badge();
             return;
+        }
+        // Vanished handling (Option B): evict Body cache for UIDs that disappeared
+        // between the previous list and this delivery.  MailWorker already patched
+        // m_summaries_cache[folder] by removing vanished UIDs before delivering
+        // cb_summaries, but m_body_cache still has stale UID keys. Also covers
+        // direct server expunge without QRESYNC (seq-shift) when m_summaries not empty.
+        if (!m_summaries.empty() || m_summary_cache.find(folder) != m_summary_cache.end()) {
+            const std::vector<MailSummary> *prev_ptr = nullptr;
+            if (!m_summaries.empty() && m_current_folder == folder) prev_ptr = &m_summaries;
+            else {
+                auto itc = m_summary_cache.find(folder);
+                if (itc != m_summary_cache.end()) prev_ptr = &itc->second;
+            }
+            if (prev_ptr) {
+                const auto &prev = *prev_ptr;
+                std::unordered_set<uint32_t> new_uids;
+                new_uids.reserve(sums.size());
+                std::unordered_set<int> new_seqs;
+                new_seqs.reserve(sums.size());
+                bool any_new_uid = false;
+                for (auto &s : sums) { if (s.uid) { new_uids.insert(s.uid); any_new_uid = true; } new_seqs.insert(s.seq); }
+                std::vector<std::string> body_evict_keys;
+                for (auto &s : prev) {
+                    bool gone = false;
+                    if (s.uid && any_new_uid) gone = (new_uids.find(s.uid) == new_uids.end());
+                    else if (!s.uid || !any_new_uid) gone = (new_seqs.find(s.seq) == new_seqs.end());
+                    else gone = (new_uids.find(s.uid) == new_uids.end());
+                    if (gone) {
+                        body_evict_keys.push_back(body_key(folder, s.uid, s.seq));
+                        // also evict legacy ":" key if present
+                        if (s.seq) body_evict_keys.push_back(folder + ":" + std::to_string(s.seq));
+                    }
+                }
+                for (auto &k : body_evict_keys) m_body_cache.erase(k);
+            }
         }
         m_summary_cache[folder] = sums;
 
@@ -1010,19 +1199,29 @@ public:
         update_move_buttons();
         set_folder_busy(false,
             folder + ": " + std::to_string(sums.size()) +
-            (sums.size() == 1 ? " message" : " messages"));
+            (sums.size() == 1 ? " message" : " messages") + compressSuffix());
+        update_compress_badge();
         // after layout, kick viewport prefetch so rows actually on screen win
         redraw();
         nanogui::async([this, folder]() {
             if (folder != m_wanted_folder || folder != m_current_folder ||
                 !m_email_list)
                 return;
-            auto seqs = m_email_list->visible_seqs(6);
-            std::vector<int> need; need.reserve(seqs.size());
-            for (int s : seqs)
-                if (m_body_cache.find(folder + ":" + std::to_string(s)) == m_body_cache.end())
-                    need.push_back(s);
-            if (!need.empty()) m_worker.ensure_visible_cached(folder, need);
+            // UID-aware need check: prefer UID key when present, route via UID prefetch
+            auto rows = m_email_list->emails();
+            auto vr = m_email_list->visible_range();
+            int a = std::max(0, vr.first - 6);
+            int b = std::min((int)rows.size(), vr.second + 6);
+            std::vector<int> need_seq; need_seq.reserve(b-a);
+            std::vector<uint32_t> need_uid; need_uid.reserve(b-a);
+            for (int i=a;i<b;++i) {
+                const EmailData &d = rows[i];
+                if (body_has(folder, d)) continue;
+                if (d.uid) need_uid.push_back(d.uid);
+                else if (d.seq) need_seq.push_back(d.seq);
+            }
+            if (!need_uid.empty()) m_worker.ensure_visible_cached_uid(folder, need_uid);
+            if (!need_seq.empty()) m_worker.ensure_visible_cached(folder, need_seq);
         });
         glfwPostEmptyEvent();
     }
@@ -1040,13 +1239,19 @@ public:
         // otherwise an INBOX auto-check would pollute the Trash list.
         auto merge_fresh = [](std::vector<MailSummary> &dst,
                               const std::vector<MailSummary> &incoming) {
-            std::unordered_set<int> known;
-            known.reserve(dst.size());
-            for (const MailSummary &s : dst) known.insert(s.seq);
+            std::unordered_set<int> known_seq;
+            std::unordered_set<uint32_t> known_uid;
+            known_seq.reserve(dst.size());
+            known_uid.reserve(dst.size());
+            for (const MailSummary &s : dst) { known_seq.insert(s.seq); if (s.uid) known_uid.insert(s.uid); }
             std::vector<MailSummary> fresh;
             fresh.reserve(incoming.size());
-            for (const MailSummary &s : incoming)
-                if (!known.count(s.seq)) fresh.push_back(s);
+            for (const MailSummary &s : incoming) {
+                if (s.uid && known_uid.count(s.uid)) continue;
+                if (!s.uid && known_seq.count(s.seq)) continue;
+                // if uid present but seq zero (QRESYNC) treat uid as authoritative
+                fresh.push_back(s);
+            }
             if (!fresh.empty())
                 dst.insert(dst.begin(), fresh.begin(), fresh.end());
             return fresh;
@@ -1062,6 +1267,14 @@ public:
         auto fresh = merge_fresh(m_summaries, sums);
         m_summary_cache[folder] = m_summaries;
         harvest(fresh);
+        // Vanished on auto-refresh: MailWorker patched its per-folder cache but
+        // MailApp may still hold stale body entries for vanished UIDs. When
+        // on_auto_summaries is not used for QRESYNC delta (auto path fetches only
+        // new messages), we still defensively handle stale body keys if the
+        // background worker later delivers a QRESYNC-style delta via cb_auto_summaries
+        // (or if another client expunged messages between auto checks).
+        // For now just ensure compress badge is fresh if this is the wanted folder.
+        if (!fresh.empty()) update_compress_badge();
         if (fresh.empty()) return;
         if (folder != m_current_folder) return;   // not looking at this folder
 
@@ -1080,6 +1293,8 @@ public:
             }
             EmailData d;
             d.seq     = s.seq;
+            d.uid     = s.uid;
+            d.modseq  = s.modseq;
             d.sender  = s.from;
             d.subject = s.subject;
             d.preview = s.preview;
@@ -1091,7 +1306,8 @@ public:
             m_email_list->prepend_emails(std::move(rows));
 
         set_status(std::to_string(fresh.size()) + " New email" +
-                  (fresh.size() == 1 ? "" : "s"));
+                  (fresh.size() == 1 ? "" : "s") + compressSuffix());
+        update_compress_badge();
         glfwPostEmptyEvent();
     }
 
@@ -1122,9 +1338,11 @@ public:
         harvest(sums);
         // make newly paged-in older rows eligible for viewport prefetch too
         {
+            std::vector<uint32_t> uids; uids.reserve(sums.size());
             std::vector<int> seqs; seqs.reserve(sums.size());
-            for (auto &s : sums) seqs.push_back(s.seq);
-            m_worker.ensure_visible_cached(folder, seqs);
+            for (auto &s : sums) { if (s.uid) uids.push_back(s.uid); else seqs.push_back(s.seq); }
+            if (!uids.empty()) m_worker.ensure_visible_cached_uid(folder, uids);
+            if (!seqs.empty()) m_worker.ensure_visible_cached(folder, seqs);
         }
 
         /* Append only the rows passing the active filter; unlike
@@ -1141,6 +1359,8 @@ public:
             }
             EmailData d;
             d.seq     = s.seq;
+            d.uid     = s.uid;
+            d.modseq  = s.modseq;
             d.sender  = s.from;
             d.subject = s.subject;
             d.preview = s.preview;
@@ -1151,31 +1371,42 @@ public:
         m_email_list->append_emails(std::move(rows));
         set_status(folder + ": showing " +
                               std::to_string(m_summaries.size()) +
-                              " messages");
+                              " messages" + compressSuffix());
+        update_compress_badge();
         redraw();
     }
 
     void on_body(const std::string &folder, int seq, const MailMessage &msg) {
         harvest(msg);
         std::string key_folder = folder.empty() ? m_wanted_folder : folder;
+        // Resolve UID before preview patch so VANISHED/QRESYNC seq-0 still matches.
+        uint32_t uid = uid_for_seq(key_folder, seq);
         // Always enrich the preview + cache, even if this wasn't the
         // foreground fetch — background prefetches land here too when
         // the user happens to be looking at that message.
         std::string preview = message_preview(msg);
         if (!preview.empty() && key_folder == m_current_folder) {
-            for (auto &s : m_summaries)
-                if (s.seq == seq && s.preview != preview) { s.preview = preview; break; }
+            for (auto &s : m_summaries) {
+                if ((uid && s.uid == uid) || (!uid && s.seq == seq)) {
+                    if (s.preview != preview) s.preview = preview;
+                    break;
+                }
+            }
             auto it = m_summary_cache.find(key_folder);
             if (it != m_summary_cache.end())
                 for (auto &s : it->second)
-                    if (s.seq == seq && s.preview != preview) { s.preview = preview; break; }
-            if (m_email_list) m_email_list->update_preview(seq, preview);
+                    if ((uid && s.uid == uid) || (!uid && s.seq == seq)) {
+                        if (s.preview != preview) s.preview = preview;
+                        break;
+                    }
+            if (m_email_list) {
+                if (uid) m_email_list->update_preview_by_uid(uid, preview);
+                // dual-write: seq lookup still works for legacy path
+                m_email_list->update_preview(seq, preview);
+            }
         }
-        if (m_body_cache.size() > 256) m_body_cache.clear();
-        // every full fetch is cacheable; on_prefetched also caches, so this
-        // is idempotent — just keep the freshest copy
         if (!key_folder.empty())
-            m_body_cache[key_folder + ":" + std::to_string(seq)] = msg;
+            body_put(key_folder, uid, seq, msg);
         if (key_folder != m_wanted_folder) return;
         if (seq != m_loading_seq) return;   // not the foreground fetch
         if (m_pending_seq >= 0 && seq != m_pending_seq)
@@ -1194,24 +1425,45 @@ public:
 
     void on_prefetched(const std::string &folder, int seq,
                        const MailMessage &msg, const std::string &preview) {
-        if (m_body_cache.size() > 256) m_body_cache.clear();
-        m_body_cache[folder + ":" + std::to_string(seq)] = msg;
+        // Prefetch may arrive via UID path (seq==0 when seq stale); resolve uid via cache
+        uint32_t uid = 0;
+        if (seq) uid = uid_for_seq(folder, seq);
+        // If seq==0 (UID prefetch), try to harvest uid from body cache already? msg has no uid.
+        // Body cache key will use uid if we can infer it; otherwise seq key.
+        // For UID prefetch path we already popped uid queue; deliver carries resolved seq.
+        // Still try uid resolution: if seq==0, scan summaries for any uid that matches body?
+        // Instead prefer: if uid==0 and seq==0 we cannot key by UID — still store by seq 0 is noop.
+        // Worker delivers seq_for_cb looked up in its summaries_cache, so seq should be non-zero
+        // when UID had a known seq. Keep fallback to uid lookup via m_summaries.
+        if (!uid && seq == 0) {
+            // Attempt to find the message's uid by matching that this prefetch was the only one
+            // outstanding — not reliable, just keep seq path. Body cache will store under seq.
+        }
+        body_put(folder, uid, seq, msg);
+        // Also ensure UID key exists when uid known but delivered seq doesn't give it:
+        // if we resolved uid, dual-write already happened via body_put above.
         harvest(msg);
         if (folder != m_wanted_folder || folder != m_current_folder) return;
         // only enrich empty/thin previews — never clobber a real one with
         // a shorter derived snippet from a failed decode edge case
         bool enriched = false;
         for (auto &s : m_summaries) {
-            if (s.seq != seq) continue;
+            bool match = uid ? (s.uid == uid) : (s.seq == seq);
+            if (!match) continue;
             if (preview.size() > s.preview.size()) { s.preview = preview; enriched = true; }
             break;
         }
         auto it = m_summary_cache.find(folder);
         if (it != m_summary_cache.end())
-            for (auto &s : it->second)
-                if (s.seq == seq && preview.size() > s.preview.size()) { s.preview = preview; break; }
-        if (enriched && m_email_list && preview.size() > 0)
+            for (auto &s : it->second) {
+                bool match = uid ? (s.uid == uid) : (s.seq == seq);
+                if (!match) continue;
+                if (preview.size() > s.preview.size()) { s.preview = preview; break; }
+            }
+        if (enriched && m_email_list && preview.size() > 0) {
+            if (uid) m_email_list->update_preview_by_uid(uid, preview);
             m_email_list->update_preview(seq, preview);
+        }
     }
 
     void on_worker_error(const std::string &title, const std::string &msg) {
@@ -1262,15 +1514,16 @@ public:
             apply_filter();
             set_folder_busy(true, folder + ": " +
                 std::to_string(m_summaries.size()) +
-                " cached, fetching latest...");
+                " cached, fetching latest..." + compressSuffix());
         } else {
             m_summaries.clear();
             m_email_list->set_emails({});
             Document doc;
             parse_markdown(doc, "*Loading " + folder + "...*", text_color(), 18.0f);
             m_view->set_document(std::move(doc));
-            set_folder_busy(true, "Opening " + folder + "...");
+            set_folder_busy(true, "Opening " + folder + "..." + compressSuffix());
         }
+        update_compress_badge();
         update_move_buttons();
         redraw();
         m_worker.select_folder(folder);
@@ -1287,15 +1540,18 @@ public:
         // speculatively prioritize neighbors of the selection — the user is
         // walking the list sequentially, so ±6 around idx are most likely next.
         if (m_email_list && idx >= 0) {
-            std::vector<int> around; around.reserve(13);
+            std::vector<int> around_seq; around_seq.reserve(13);
+            std::vector<uint32_t> around_uid; around_uid.reserve(13);
             auto &rows = m_email_list->emails();
             for (int i = std::max(0, idx-6); i <= std::min((int)rows.size()-1, idx+6); ++i) {
-                int s = rows[i].seq;
-                if (s == d.seq) continue;
-                if (m_body_cache.find(m_current_folder + ":" + std::to_string(s)) != m_body_cache.end()) continue;
-                around.push_back(s);
+                const EmailData &r = rows[i];
+                if (r.seq == d.seq && r.uid == d.uid) continue;
+                if (body_has(m_current_folder, r)) continue;
+                if (r.uid) around_uid.push_back(r.uid);
+                else if (r.seq) around_seq.push_back(r.seq);
             }
-            if (!around.empty()) m_worker.ensure_visible_cached(m_current_folder, around);
+            if (!around_uid.empty()) m_worker.ensure_visible_cached_uid(m_current_folder, around_uid);
+            if (!around_seq.empty()) m_worker.ensure_visible_cached(m_current_folder, around_seq);
         }
         m_loading_seq = -1;   // drop in-flight body for a previous seq
         /* Cancel now rather than waiting for the preview to settle, so a
@@ -1343,9 +1599,20 @@ public:
      * needs no STORE, and a message with no folder cannot be addressed. */
     void arm_read_timer(int seq) {
         if (seq <= 0 || m_current_folder.empty()) { m_worker.cancel_seen(); return; }
-        for (const MailSummary &s : m_summaries)
-            if (s.seq == seq && s.seen) { m_worker.cancel_seen(); return; }
-        m_worker.schedule_seen(m_current_folder, seq, kMarkReadSec);
+        uint32_t uid = 0;
+        uint64_t modseq = 0;
+        for (const MailSummary &s : m_summaries) if (s.seq == seq) {
+            if (s.seen) { m_worker.cancel_seen(); return; }
+            uid = s.uid;
+            modseq = s.modseq;
+            break;
+        }
+        if (uid != 0)
+            m_worker.schedule_seen_uid(m_current_folder, seq, uid, modseq, kMarkReadSec);
+        else if (modseq != 0)
+            m_worker.schedule_seen(m_current_folder, seq, modseq, kMarkReadSec);
+        else
+            m_worker.schedule_seen(m_current_folder, seq, kMarkReadSec);
     }
 
     /* The server confirmed the flag: mirror it locally so the row stops
@@ -1359,7 +1626,13 @@ public:
         if (it != m_summary_cache.end()) mark(it->second);
         if (folder != m_wanted_folder || folder != m_current_folder) return;
         mark(m_summaries);
-        if (m_email_list) m_email_list->set_seen(seq, true);
+        // Try UID first (QRESYNC path where seq may be 0), then fallback to seq
+        bool done = false;
+        if (m_email_list) {
+            uint32_t uid = uid_for_seq(folder, seq);
+            if (uid) done = m_email_list->set_seen_by_uid(uid, true);
+            if (!done) done = m_email_list->set_seen(seq, true);
+        }
         redraw();
     }
 
@@ -1369,8 +1642,7 @@ public:
         const EmailData d = m_pending_email;
         const int seq = m_pending_seq;
         m_pending_seq = -1;
-        auto cached = m_body_cache.find(m_current_folder + ":" +
-                                        std::to_string(seq));
+        auto cached = body_find(m_current_folder, d);
         if (cached != m_body_cache.end()) {
             m_loading_seq     = -1;
             m_current_message = cached->second;
@@ -1412,10 +1684,11 @@ public:
         m_body_cache.clear();
         m_worker.cancel_seen();   // seqs may renumber; don't flag a stranger
         if (!m_wanted_folder.empty())
-            set_folder_busy(true, "Refreshing " + m_wanted_folder + "...");
+            set_folder_busy(true, "Refreshing " + m_wanted_folder + "..." + compressSuffix());
         else
-            set_folder_busy(true, "Refreshing folders...");
+            set_folder_busy(true, "Refreshing folders..." + compressSuffix());
         m_worker.refresh();
+        update_compress_badge();
     }
 
     /* Filter the current folder's summaries into the list widget. */
@@ -1433,6 +1706,8 @@ public:
             }
             EmailData d;
             d.seq     = s.seq;
+            d.uid     = s.uid;
+            d.modseq  = s.modseq;
             d.sender  = s.from;
             d.subject = s.subject;
             d.preview = s.preview;

@@ -683,6 +683,11 @@ if (NANOGUI_BUILD_EXAMPLES)
     set(NMAIL_SYS_LIBS pthread)
   endif()
 
+  # Vendored miniz (RFC 1951 DEFLATE for IMAP COMPRESS=DEFLATE, RFC 4978)
+  add_library(miniz STATIC ext/miniz/miniz.c ext/miniz/miniz_tdef.c ext/miniz/miniz_tinfl.c)
+  target_include_directories(miniz PUBLIC ext/miniz)
+  set_target_properties(miniz PROPERTIES POSITION_INDEPENDENT_CODE ON)
+
   add_executable(nmail         nmail/nmail.cpp nmail/nmail_config.cpp nmail/mail_worker.cpp nmail/mail_widgets.cpp nmail/mail_format.cpp nmail/imap_client.cpp nmail/smtp_client.cpp nmail/contacts.cpp ${NMAIL_SOCKET} nmail/htmldocument.cpp)
   add_executable(nmail_view    nmail/nmail_view.cpp nmail/htmldocument.cpp nmail/imap_client.cpp ${NMAIL_SOCKET})
   if(EXISTS ${CMAKE_CURRENT_SOURCE_DIR}/nmail/sketch/htmldoc_test.cpp)
@@ -738,8 +743,8 @@ if (NANOGUI_BUILD_EXAMPLES)
   target_include_directories(nmail_view PRIVATE
       nmail/
       ${CMAKE_CURRENT_SOURCE_DIR})
-  target_link_libraries(nmail         nanogui ${NMAIL_SYS_LIBS} gumbo ${NANOGUI_LIBS})
-  target_link_libraries(nmail_view    nanogui ${NMAIL_SYS_LIBS} gumbo ${NANOGUI_LIBS})
+  target_link_libraries(nmail         nanogui ${NMAIL_SYS_LIBS} gumbo miniz ${NANOGUI_LIBS})
+  target_link_libraries(nmail_view    nanogui ${NMAIL_SYS_LIBS} gumbo miniz ${NANOGUI_LIBS})
 
   # Keep in step with the -DNMAIL_VERSION passed to makensis by build_win_pkg.ps1.
   set(NMAIL_VERSION "0.1.0" CACHE STRING "nmail version (Info.plist, installer)")

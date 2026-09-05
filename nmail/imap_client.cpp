@@ -15,7 +15,10 @@
 #include <cstring>
 #include <map>
 #include <sstream>
+#include <vector>
 #include <chrono>
+
+#include "miniz.h"
 
 #if NMAIL_IMAP_DEBUG
 static void imap_dbg(const char *fmt, ...) {
@@ -1003,14 +1006,53 @@ bool ImapClient::mark_seen(int seq, std::string &err) {
                untagged, err);
 }
 
+bool ImapClient::is_modified_error(const std::string &err) {
+    // RFC 4551 §3.3 / RFC 7162: server returns NO [MODIFIED <seqset>] when
+    // UNCHANGEDSINCE guard fails.  Check case-insensitively.
+    std::string l = to_lower(err);
+    return l.find("[modified") != std::string::npos;
+}
+
+bool ImapClient::mark_seen_uid(uint32_t uid, uint64_t modseq, std::string &err) {
+    if (uid == 0) { err = "invalid uid"; return false; }
+    if (m_fd < 0)  { err = "not connected"; return false; }
+    std::vector<std::string> untagged;
+    std::string cmd;
+    if (has_condstore() && modseq != 0) {
+        // RFC 4551 §3.3: STORE modifier must appear before the sequence set.
+        // Use UID variant so the uid is stable across EXPUNGE resequencing.
+        cmd = "UID STORE " + std::to_string(uid) +
+              " (UNCHANGEDSINCE " + std::to_string(modseq) + ") +FLAGS.SILENT (\\Seen)";
+    } else {
+        cmd = "UID STORE " + std::to_string(uid) + " +FLAGS.SILENT (\\Seen)";
+    }
+    bool ok = run(cmd, untagged, err);
+    if (!ok && is_modified_error(err)) {
+        // Another client modified the message since modseq; the FETCH
+        // response already reflects current \Seen — don't surface as error.
+        // Caller may re-fetch MODSEQ if it wants to reconcile.
+        imap_dbg("STORE UNCHANGEDSINCE MODIFIED (benign): %s", err.c_str());
+        return true;
+    }
+    return ok;
+}
+
 void ImapClient::close() {
-    imap_dbg("close fd=%d selected='%s'", m_fd, m_selected_folder.c_str());
+    imap_dbg("close fd=%d selected='%s' compressed=%d", m_fd, m_selected_folder.c_str(), (int)m_compressed);
+    if (m_compressed) {
+        if (m_inflate_state) { mz_inflateEnd((mz_stream*)m_inflate_state); delete (mz_stream*)m_inflate_state; m_inflate_state = nullptr; }
+        if (m_deflate_state) { mz_deflateEnd((mz_stream*)m_deflate_state); delete (mz_stream*)m_deflate_state; m_deflate_state = nullptr; }
+        m_compressed = false;
+    }
     if (m_fd >= 0) {
         nmail_sock_close(m_fd);
         m_fd = -1;
     }
     m_rbuf.clear();
+    m_compress_rbuf.clear();
     m_selected_folder.clear();
+    m_qresync = {};
+    m_qresync_enabled = false;
 }
 
 bool ImapClient::is_connection_error(const std::string &err) {
@@ -1026,6 +1068,148 @@ bool ImapClient::is_connection_error(const std::string &err) {
 
 bool ImapClient::is_cancelled_error(const std::string &err) {
     return to_lower(err).find("cancelled") != std::string::npos;
+}
+
+// ── Capability helpers ───────────────────────────────────────────────────
+bool ImapClient::has_compress_deflate() const {
+    for (auto &c : m_caps) {
+        // capability is literally "COMPRESS=DEFLATE" (sometimes comma-list)
+        std::string u = c;
+        for (char &ch : u) ch = (char)std::toupper((unsigned char)ch);
+        if (u == "COMPRESS=DEFLATE") return true;
+        if (u.find("COMPRESS=DEFLATE") != std::string::npos) return true;
+    }
+    return false;
+}
+bool ImapClient::enable_qresync(std::string &err) {
+    if (m_qresync_enabled) return true;
+    if (!has_enable()) { imap_dbg("ENABLE QRESYNC skipped: server lacks ENABLE"); err = "server does not advertise ENABLE"; return false; }
+    if (!has_qresync()) { imap_dbg("ENABLE QRESYNC skipped: server lacks QRESYNC/CONDSTORE caps %s", err.c_str()); err = "server does not advertise QRESYNC"; return false; }
+    std::vector<std::string> un;
+    if (!run_once("ENABLE QRESYNC", un, err)) return false;
+    // Server must respond "* ENABLED QRESYNC" + OK; CAPABILITY may gain QRESYNC-dependent caps, so refresh.
+    m_qresync_enabled = true;
+    imap_dbg("ENABLE QRESYNC OK");
+    // Re-query CAPABILITY (some servers suppress post-ENABLE caps until asked).
+    {
+        std::vector<std::string> cu; std::string ce;
+        if (run_once("CAPABILITY", cu, ce)) {
+            m_caps.clear();
+            for (auto &line : cu) if (starts_with(line, "* CAPABILITY")) {
+                std::istringstream iss(line.substr(12)); std::string tok;
+                while (iss >> tok) { for (char &c:tok) c=(char)std::toupper((unsigned char)c); m_caps.insert(tok); }
+            }
+        }
+    }
+    return true;
+}
+bool ImapClient::enable_condstore(std::string &err) {
+    if (!has_enable()) { imap_dbg("ENABLE CONDSTORE skipped: no ENABLE cap"); err = "no ENABLE"; return false; }
+    std::vector<std::string> un;
+    if (!run_once("ENABLE CONDSTORE", un, err)) return false;
+    imap_dbg("ENABLE CONDSTORE OK");
+    return true;
+}
+// --- RFC 4978 COMPRESS=DEFLATE helpers ---
+bool ImapClient::deflate_and_send(const std::string &wire, std::string &err) {
+    if (!m_compressed || !m_deflate_state) {
+        int n = nmail_sock_send(m_fd, wire.data(), (int)wire.size());
+        if (n < 0) { err = "failed to send command (connection lost)"; return false; }
+        return true;
+    }
+    mz_stream *strm = (mz_stream*)m_deflate_state;
+    strm->next_in = (const unsigned char*)wire.data();
+    strm->avail_in = (unsigned int)wire.size();
+    unsigned char outbuf[16384];
+    // Use MZ_SYNC_FLUSH so the peer can inflate incrementally per-IMAP-line.
+    while (strm->avail_in > 0) {
+        strm->next_out = outbuf;
+        strm->avail_out = sizeof(outbuf);
+        int rc = mz_deflate(strm, MZ_SYNC_FLUSH);
+        if (rc != MZ_OK && rc != MZ_BUF_ERROR) {
+            err = std::string("deflate failed: ") + mz_error(rc);
+            return false;
+        }
+        size_t have = sizeof(outbuf) - strm->avail_out;
+        if (have) {
+            if (nmail_sock_send(m_fd, (const char*)outbuf, (int)have) < 0) {
+                err = "failed to send compressed data";
+                return false;
+            }
+        }
+        if (rc == MZ_BUF_ERROR && have == 0) break;
+    }
+    // Ensure the SYNC_FLUSH actually emitted bytes even when avail_in==0 on entry
+    if (strm->avail_in == 0) {
+        strm->next_out = outbuf;
+        strm->avail_out = sizeof(outbuf);
+        int rc = mz_deflate(strm, MZ_SYNC_FLUSH);
+        size_t have = sizeof(outbuf) - strm->avail_out;
+        if (have) {
+            if (nmail_sock_send(m_fd, (const char*)outbuf, (int)have) < 0) {
+                err = "failed to flush compressed data";
+                return false;
+            }
+        }
+        (void)rc;
+    }
+    return true;
+}
+bool ImapClient::inflate_more(std::string &err) {
+    if (!m_compressed || !m_inflate_state) {
+        char buf[16384];
+        int r = nmail_sock_recv(m_fd, buf, sizeof(buf));
+        if (r == -2) { err = "timed out waiting for the server"; return false; }
+        if (r <= 0) { err = "connection to the server was lost"; return false; }
+        m_rbuf.append(buf, (size_t)r);
+        return true;
+    }
+    char cbuf[16384];
+    int r = nmail_sock_recv(m_fd, cbuf, sizeof(cbuf));
+    if (r == -2) { err = "timed out waiting for the server"; return false; }
+    if (r <= 0) { err = "connection to the server was lost"; return false; }
+    mz_stream *strm = (mz_stream*)m_inflate_state;
+    strm->next_in = (const unsigned char*)cbuf;
+    strm->avail_in = (unsigned int)r;
+    unsigned char outbuf[16384];
+    while (strm->avail_in > 0) {
+        strm->next_out = outbuf;
+        strm->avail_out = sizeof(outbuf);
+        int rc = mz_inflate(strm, MZ_SYNC_FLUSH);
+        if (rc != MZ_OK && rc != MZ_BUF_ERROR && rc != MZ_STREAM_END) {
+            err = std::string("inflate failed: ") + mz_error(rc);
+            return false;
+        }
+        size_t have = sizeof(outbuf) - strm->avail_out;
+        if (have) m_rbuf.append((char*)outbuf, have);
+        if (rc == MZ_BUF_ERROR && have == 0) break;
+        if (have == 0 && strm->avail_in > 0) continue;
+        if (strm->avail_in == 0) break;
+    }
+    // If we consumed all compressed bytes but produced nothing (deflate overhead),
+    // let caller loop and read again — but avoid tight spin by checking rbuf.
+    return true;
+}
+bool ImapClient::compress_deflate(std::string &err) {
+    if (m_compressed) return true;
+    if (!has_compress_deflate()) { imap_dbg("COMPRESS skipped: server lacks COMPRESS=DEFLATE"); err = "server does not advertise COMPRESS=DEFLATE"; return false; }
+    if (m_selected_folder.size()) { err = "COMPRESS must be issued before first SELECT (RFC 4978)"; return false; }
+    std::vector<std::string> un;
+    if (!run_once("COMPRESS DEFLATE", un, err)) return false;
+    // RFC 4978 §3: DEFLATE is RFC 1951 raw deflate (no zlib wrapper). Use -15.
+    m_inflate_state = new mz_stream{};
+    m_deflate_state = new mz_stream{};
+    if (mz_inflateInit2((mz_stream*)m_inflate_state, -MZ_DEFAULT_WINDOW_BITS) != MZ_OK ||
+        mz_deflateInit2((mz_stream*)m_deflate_state, MZ_DEFAULT_COMPRESSION, MZ_DEFLATED, -MZ_DEFAULT_WINDOW_BITS, 9, MZ_DEFAULT_STRATEGY) != MZ_OK) {
+        err = "miniz init failed";
+        if (m_inflate_state) { mz_inflateEnd((mz_stream*)m_inflate_state); delete (mz_stream*)m_inflate_state; m_inflate_state=nullptr; }
+        if (m_deflate_state){ mz_deflateEnd((mz_stream*)m_deflate_state); delete (mz_stream*)m_deflate_state; m_deflate_state=nullptr; }
+        return false;
+    }
+    m_compressed = true;
+    m_rbuf.clear(); m_compress_rbuf.clear();
+    imap_dbg("COMPRESS DEFLATE negotiated (raw deflate, -15)");
+    return true;
 }
 
 bool ImapClient::reconnect(std::string &err, bool reselect) {
@@ -1076,11 +1260,20 @@ bool ImapClient::reconnect(std::string &err, bool reselect) {
         if (!starts_with(greeting, "* PREAUTH")) {
             if (!authenticate(m_user, m_pass, e)) { close(); err = e; return false; }
         }
+        if (has_qresync() && has_enable()) {
+            std::string qe; enable_qresync(qe);
+        }
+        if (has_compress_deflate() && !m_compressed) {
+            std::string ce; if (!compress_deflate(ce)) imap_dbg("reconnect COMPRESS failed: %s", ce.c_str());
+        }
     }
     if (reselect && !saved_folder.empty()) {
         std::vector<std::string> un; std::string se;
         if (run_once("SELECT " + quote(saved_folder), un, se))
             m_selected_folder = saved_folder;
+        else if (has_compress_deflate() || has_qresync()) {
+            // On reconnect the server capabilities may have changed; try plain SELECT fallback already handled by select_folder.
+        }
     } else {
         m_selected_folder.clear();
     }
@@ -1125,11 +1318,15 @@ bool ImapClient::read_bytes(size_t n, std::string &out, std::string &err) {
             m_rbuf.erase(0, take);
             continue;
         }
-        char buf[16384];
-        int r = nmail_sock_recv(m_fd, buf, sizeof(buf));
-        if (r == -2) { err = "timed out waiting for the server"; return false; }
-        if (r <= 0)  { err = "connection to the server was lost"; return false; }
-        m_rbuf.append(buf, (size_t)r);
+        if (m_compressed) {
+            if (!inflate_more(err)) return false;
+        } else {
+            char buf[16384];
+            int r = nmail_sock_recv(m_fd, buf, sizeof(buf));
+            if (r == -2) { err = "timed out waiting for the server"; return false; }
+            if (r <= 0)  { err = "connection to the server was lost"; return false; }
+            m_rbuf.append(buf, (size_t)r);
+        }
     }
     return true;
 }
@@ -1143,11 +1340,15 @@ bool ImapClient::read_crlf_line(std::string &out, std::string &err) {
             if (!out.empty() && out.back() == '\r') out.pop_back();
             return true;
         }
-        char buf[16384];
-        int r = nmail_sock_recv(m_fd, buf, sizeof(buf));
-        if (r == -2) { err = "timed out waiting for the server"; return false; }
-        if (r <= 0)  { err = "connection to the server was lost"; return false; }
-        m_rbuf.append(buf, (size_t)r);
+        if (m_compressed) {
+            if (!inflate_more(err)) return false;
+        } else {
+            char buf[16384];
+            int r = nmail_sock_recv(m_fd, buf, sizeof(buf));
+            if (r == -2) { err = "timed out waiting for the server"; return false; }
+            if (r <= 0)  { err = "connection to the server was lost"; return false; }
+            m_rbuf.append(buf, (size_t)r);
+        }
     }
 }
 
@@ -1188,11 +1389,19 @@ std::string ImapClient::send_with_tag(const std::string &cmd) {
     std::string shown = cmd;
     if (starts_with(shown, "LOGIN "))
         shown = "LOGIN (redacted)";
-    imap_dbg(">> %s %s  (fd=%d gen=%llu)", tag.c_str(), shown.c_str(),
-             m_fd, (unsigned long long)m_op_gen.load(std::memory_order_acquire));
-    if (nmail_sock_send(m_fd, wire.data(), (int)wire.size()) < 0) {
-        imap_dbg("SEND FAILED tag=%s", tag.c_str());
-        return "";
+    imap_dbg(">> %s %s  (fd=%d gen=%llu com=%d)", tag.c_str(), shown.c_str(),
+             m_fd, (unsigned long long)m_op_gen.load(std::memory_order_acquire), (int)m_compressed);
+    if (m_compressed && m_deflate_state) {
+        std::string defl_err;
+        if (!deflate_and_send(wire, defl_err)) {
+            imap_dbg("SEND COMPRESSED FAILED tag=%s err=%s", tag.c_str(), defl_err.c_str());
+            return "";
+        }
+    } else {
+        if (nmail_sock_send(m_fd, wire.data(), (int)wire.size()) < 0) {
+            imap_dbg("SEND FAILED tag=%s", tag.c_str());
+            return "";
+        }
     }
     return tag;
 }
@@ -1373,9 +1582,13 @@ bool ImapClient::auth_mechanism(const std::string &mech,
         }
         std::string challenge = trim(line.substr(1));
         std::string resp = step(challenge) + "\r\n";
-        if (nmail_sock_send(m_fd, resp.data(), (int)resp.size()) < 0) {
-            err = "connection lost";
-            return false;
+        if (m_compressed && m_deflate_state) {
+            std::string de; if (!deflate_and_send(resp, de)) { err = "connection lost"; return false; }
+        } else {
+            if (nmail_sock_send(m_fd, resp.data(), (int)resp.size()) < 0) {
+                err = "connection lost";
+                return false;
+            }
         }
     }
     std::vector<std::string> un;
@@ -1489,6 +1702,16 @@ bool ImapClient::open(const std::string &host, int port,
     if (starts_with(greeting, "* PREAUTH")) {
         m_host = host; m_port = port; m_user = user; m_pass = pass;
         m_selected_folder.clear();
+        // Still try opportunistic post-auth extensions (before first SELECT).
+        if (has_qresync() && has_enable()) {
+            std::string qe;
+            enable_qresync(qe);
+        }
+        if (has_compress_deflate() && !m_compressed) {
+            std::string ce;
+            if (!compress_deflate(ce))
+                imap_dbg("COMPRESS DEFLATE opportunistic failed: %s", ce.c_str());
+        }
         return true;
     }
 
@@ -1498,6 +1721,19 @@ bool ImapClient::open(const std::string &host, int port,
     }
     m_host = host; m_port = port; m_user = user; m_pass = pass;
     m_selected_folder.clear();
+    // RFC 5161 ENABLE and RFC 4978 COMPRESS must happen after auth, before first SELECT.
+    // Order per RFC 4978: ENABLE (requires authenticated) -> COMPRESS. TLS is already above (STARTTLS/imaps).
+    if (has_qresync() && has_enable()) {
+        std::string qe;
+        if (!enable_qresync(qe))
+            imap_dbg("ENABLE QRESYNC post-auth failed: %s", qe.c_str());
+    }
+    if (has_compress_deflate() && !m_compressed) {
+        std::string ce;
+        if (!compress_deflate(ce))
+            imap_dbg("COMPRESS DEFLATE post-auth failed: %s", ce.c_str());
+        // Not fatal — fall through without compression.
+    }
     return true;
 }
 
@@ -1566,13 +1802,72 @@ bool ImapClient::list_folders(std::vector<MailFolder> &out, std::string &err) {
     return true;
 }
 
+static bool extract_bracket(const std::string &line, const char *key, std::string &out_val) {
+    std::string needle = std::string("[") + key;
+    size_t p = line.find(needle);
+    if (p == std::string::npos) return false;
+    p += needle.size();
+    // skip single space if present before value
+    if (p < line.size() && line[p] == ' ') ++p;
+    size_t e = line.find(']', p);
+    if (e == std::string::npos) return false;
+    out_val = line.substr(p, e - p);
+    // value is first token before space/]
+    size_t sp = out_val.find(' ');
+    if (sp != std::string::npos) out_val = out_val.substr(0, sp);
+    // trim
+    size_t a = 0; while (a < out_val.size() && isspace((unsigned char)out_val[a])) ++a;
+    size_t b = out_val.size(); while (b > a && isspace((unsigned char)out_val[b-1])) --b;
+    out_val = out_val.substr(a, b - a);
+    return !out_val.empty();
+}
+bool ImapClient::extract_code_number(const std::string &line, const char *code, uint64_t &out) {
+    std::string v;
+    if (!extract_bracket(line, code, v)) return false;
+    // v may be like "HIGHESTMODSEQ 42" — we already took first token; handle "HIGHESTMODSEQ 123" specially
+    // extract_bracket takes first token after "[CODE ", so re-parse raw bracket content
+    std::string needle = std::string("[") + code;
+    size_t p = line.find(needle);
+    if (p == std::string::npos) return false;
+    p += needle.size();
+    if (p < line.size() && line[p] == ' ') ++p;
+    size_t e = line.find(']', p);
+    if (e == std::string::npos) return false;
+    std::string inner = line.substr(p, e - p);
+    // inner is e.g. "HIGHESTMODSEQ 123" or "UIDVALIDITY 1"
+    size_t sp = inner.rfind(' ');
+    std::string num = (sp == std::string::npos) ? inner : inner.substr(sp + 1);
+    if (num.empty() || !isdigit((unsigned char)num[0])) return false;
+    try { out = std::stoull(num); } catch(...) { return false; }
+    return true;
+}
+void ImapClient::update_qresync_from_select(const std::vector<std::string> &untagged, int exists) {
+    // Parse UIDVALIDITY, UIDNEXT, HIGHESTMODSEQ from untagged + OK [..] line.
+    uint64_t v = 0;
+    for (auto &line : untagged) {
+        if (extract_code_number(line, "UIDVALIDITY", v)) m_qresync.uidvalidity = (uint32_t)v;
+        if (extract_code_number(line, "UIDNEXT", v)) m_qresync.uidnext = (uint32_t)v;
+        if (extract_code_number(line, "HIGHESTMODSEQ", v)) m_qresync.highestmodseq = v;
+        if (extract_code_number(line, "HIGHESTMODSEQ", v)) {} // keep above
+    }
+    m_qresync.messages = (uint32_t)(exists > 0 ? exists : 0);
+    imap_dbg("SELECT qresync state uidvalidity=%u uidnext=%u modseq=%llu exists=%d",
+             m_qresync.uidvalidity, m_qresync.uidnext, (unsigned long long)m_qresync.highestmodseq, exists);
+}
 bool ImapClient::select_folder(const std::string &name, int &exists,
                                std::string &err) {
     exists = 0;
-    imap_dbg("SELECT begin name='%s' currently='%s'",
-             name.c_str(), m_selected_folder.c_str());
+    imap_dbg("SELECT begin name='%s' currently='%s' condstore=%d qresync_en=%d",
+             name.c_str(), m_selected_folder.c_str(), (int)has_condstore(), (int)m_qresync_enabled);
     std::vector<std::string> untagged;
-    if (!run("SELECT " + quote(name), untagged, err)) {
+    std::string cmd = "SELECT " + quote(name);
+    // RFC 4551 §3.1: SELECT (CONDSTORE) advertises CONDSTORE support per-mailbox.
+    // Only add when ENABLE QRESYNC hasn't already implied it, and server supports it.
+    if (has_condstore() && !m_qresync_enabled) {
+        cmd += " (CONDSTORE)";
+        imap_dbg("SELECT with CONDSTORE");
+    }
+    if (!run(cmd, untagged, err)) {
         imap_dbg("SELECT '%s' FAILED: %s", name.c_str(), err.c_str());
         return false;
     }
@@ -1592,6 +1887,7 @@ bool ImapClient::select_folder(const std::string &name, int &exists,
             exists = n;
     }
     m_selected_folder = name;
+    update_qresync_from_select(untagged, exists);
     imap_dbg("SELECT '%s' OK exists=%d untagged=%d",
              name.c_str(), exists, (int)untagged.size());
     return true;
@@ -1641,6 +1937,14 @@ static bool parse_summaries(const std::vector<std::string> &untagged,
             if (key == "FLAGS") {
                 if (to_lower(val).find("\\seen") != std::string::npos)
                     sum.seen = true;
+            } else if (key == "UID") {
+                try { sum.uid = (uint32_t)std::stoul(val); } catch(...) {}
+            } else if (key == "MODSEQ") {
+                // MODSEQ is "(12345)" per RFC 4551 — strip parens
+                std::string v = val;
+                if (!v.empty() && v.front() == '(') v = v.substr(1);
+                if (!v.empty() && v.back() == ')') v.pop_back();
+                try { sum.modseq = std::stoull(trim(v)); } catch(...) {}
             } else if (key == "INTERNALDATE") {
                 sum.date = format_internaldate(val);
             } else if (starts_with(key, "BODY[HEADER")) {
@@ -1680,24 +1984,27 @@ bool ImapClient::fetch_summaries(int first, int last,
     if (on_progress)
         on_progress(0, m_progress_total);
     std::vector<std::string> untagged;
-    /* Some servers reject partial body fetches; fall back if needed. */
-    if (!run("FETCH " + range +
-             " (FLAGS INTERNALDATE BODY.PEEK[HEADER.FIELDS (FROM SUBJECT DATE)]"
-             " BODY.PEEK[TEXT]<0.512>)", untagged, err)) {
-        imap_dbg("FETCH+TEXT %s failed (%s), falling back to headers",
-                 range.c_str(), err.c_str());
+    // When CONDSTORE/QRESYNC is active, include MODSEQ so MailWorker can maintain sync anchors.
+    bool with_modseq = has_condstore() || m_qresync_enabled;
+    std::string base = " (FLAGS INTERNALDATE";
+    if (with_modseq) base += " MODSEQ";
+    base += " UID BODY.PEEK[HEADER.FIELDS (FROM SUBJECT DATE)]";
+    // RFC 4551 MODSEQ is per-message; UID lets us correlate VANISHED.
+    std::string primary = "FETCH " + range + base + " BODY.PEEK[TEXT]<0.512>)";
+    std::string fallback = "FETCH " + range + base + ")";
+    if (!run(primary, untagged, err)) {
+        imap_dbg("FETCH+TEXT %s failed (%s), falling back to headers", range.c_str(), err.c_str());
         err.clear();
-        if (!run("FETCH " + range +
-                 " (FLAGS INTERNALDATE BODY.PEEK[HEADER.FIELDS (FROM SUBJECT DATE)])",
-                 untagged, err)) {
+        if (!run(fallback, untagged, err)) {
             imap_dbg("FETCH headers %s FAILED: %s", range.c_str(), err.c_str());
             clear_progress();
             return false;
         }
     }
     bool ok = parse_summaries(untagged, out);
-    imap_dbg("FETCH summaries %s parsed %d of %d untagged",
-             range.c_str(), (int)out.size(), (int)untagged.size());
+    // Update highestmodseq from FETCH MODSEQs (keep max).
+    for (auto &s : out) if (s.modseq > m_qresync.highestmodseq) m_qresync.highestmodseq = s.modseq;
+    imap_dbg("FETCH summaries %s parsed %d of %d untagged", range.c_str(), (int)out.size(), (int)untagged.size());
     if (ok && on_progress && m_progress_total > 0)
         on_progress(m_progress_total, m_progress_total);
     clear_progress();
@@ -1758,6 +2065,56 @@ bool ImapClient::fetch_message(int seq, MailMessage &msg, std::string &err,
         return false;
     }
     imap_dbg("FETCH seq=%d raw=%zu bytes, MIME decode", seq, raw.size());
+    return parse_rfc822_message(raw, msg);
+}
+
+bool ImapClient::body_size_guess_uid(uint32_t uid, size_t &bytes, std::string &err) {
+    bytes = 0;
+    std::vector<std::string> untagged;
+    if (!run("UID FETCH " + std::to_string(uid) + " (RFC822.SIZE)", untagged, err))
+        return false;
+    for (auto &line : untagged) {
+        for (auto &kv : parse_fetch_items(line))
+            if (kv.first == "RFC822.SIZE") { bytes = (size_t)std::stoul(kv.second); return true; }
+        for (auto &kv : parse_fetch_items(line))
+            if (starts_with(kv.first, "RFC822.SIZE")) { bytes = (size_t)std::stoul(kv.second); return true; }
+    }
+    return true;
+}
+
+bool ImapClient::fetch_message_by_uid(uint32_t uid, MailMessage &msg, std::string &err,
+                                      const std::function<bool()> &still_wanted) {
+    {
+        size_t sz = 0; std::string se;
+        if (body_size_guess_uid(uid, sz, se) && sz > kMaxBodyBytes) {
+            imap_dbg("UID FETCH uid=%u SKIP huge size=%zu > %zu", uid, sz, kMaxBodyBytes);
+            err = "message too large (" + std::to_string(sz/1024/1024) + " MiB) — preview only; open in webmail for attachments";
+            return false;
+        }
+    }
+    std::vector<std::string> untagged;
+    if (!run("UID FETCH " + std::to_string(uid) + " (BODY.PEEK[])", untagged, err))
+        return false;
+    if (still_wanted && !still_wanted()) {
+        imap_dbg("UID FETCH uid=%u dropped after IMAP (folder switched)", uid);
+        err = "cancelled";
+        return false;
+    }
+    imap_dbg("UID FETCH uid=%u IMAP done, parsing %d untagged", uid, (int)untagged.size());
+    std::string raw;
+    for (const std::string &line : untagged) {
+        if (!starts_with(line, "* ") || line.find(" FETCH") == std::string::npos)
+            continue;
+        for (auto &kv : parse_fetch_items(line)) {
+            if (starts_with(kv.first, "BODY[")) { raw = kv.second; break; }
+        }
+        if (!raw.empty()) break;
+    }
+    if (raw.empty()) {
+        err = "the server returned no message data";
+        return false;
+    }
+    imap_dbg("UID FETCH uid=%u raw=%zu bytes, MIME decode", uid, raw.size());
     return parse_rfc822_message(raw, msg);
 }
 
@@ -1867,5 +2224,249 @@ bool ImapClient::move_message(int seq, const std::string &dest_folder,
         // callers should refresh summaries afterwards.
     }
     err.clear();
+    return true;
+}
+
+// ── RFC 7162 QRESYNC helpers ─────────────────────────────────────────────
+std::string ImapClient::uids_to_seqset(const std::vector<uint32_t> &uids) {
+    if (uids.empty()) return "";
+    std::vector<uint32_t> s = uids;
+    std::sort(s.begin(), s.end());
+    s.erase(std::unique(s.begin(), s.end()), s.end());
+    std::string out;
+    size_t i = 0;
+    while (i < s.size()) {
+        size_t j = i + 1;
+        while (j < s.size() && s[j] == s[j-1] + 1) ++j;
+        if (!out.empty()) out += ",";
+        if (j - i == 1) out += std::to_string(s[i]);
+        else out += std::to_string(s[i]) + ":" + std::to_string(s[j-1]);
+        i = j;
+    }
+    return out;
+}
+std::vector<uint32_t> ImapClient::seqset_to_uids(const std::string &seqset) {
+    std::vector<uint32_t> out;
+    size_t p = 0;
+    while (p < seqset.size()) {
+        while (p < seqset.size() && (seqset[p] == ',' || isspace((unsigned char)seqset[p]))) ++p;
+        if (p >= seqset.size()) break;
+        size_t q = p;
+        while (q < seqset.size() && isdigit((unsigned char)seqset[q])) ++q;
+        if (q == p) { ++p; continue; }
+        uint32_t a = (uint32_t)std::stoul(seqset.substr(p, q - p));
+        p = q;
+        if (p < seqset.size() && seqset[p] == ':') {
+            ++p;
+            size_t r = p;
+            while (r < seqset.size() && isdigit((unsigned char)seqset[r])) ++r;
+            if (r > p) {
+                uint32_t b = (uint32_t)std::stoul(seqset.substr(p, r - p));
+                for (uint32_t v = a; v <= b; ++v) out.push_back(v);
+                p = r;
+            } else out.push_back(a);
+        } else out.push_back(a);
+    }
+    return out;
+}
+bool ImapClient::parse_vanished_line(const std::string &line, std::vector<uint32_t> &out, bool &earlier) {
+    earlier = false;
+    if (line.find("VANISHED") == std::string::npos) return false;
+    earlier = (line.find("(EARLIER)") != std::string::npos);
+    size_t lp = line.rfind(')');
+    std::string seq;
+    if (lp != std::string::npos) seq = trim(line.substr(lp + 1));
+    else {
+        size_t p = line.find("VANISHED");
+        if (p != std::string::npos) seq = trim(line.substr(p + 8));
+    }
+    if (seq.empty()) return false;
+    out = seqset_to_uids(seq);
+    return !out.empty();
+}
+bool ImapClient::select_qresync(const std::string &name, const QResyncState &known,
+                                const std::vector<uint32_t> &known_uids,
+                                QResyncState &out_state, QResyncDelta &out_delta,
+                                std::string &err) {
+    out_state = {};
+    out_delta = {};
+    if (!has_enable() || !has_qresync()) {
+        imap_dbg("select_qresync: caps missing (ENABLE=%d QRESYNC=%d), falling back to plain SELECT",
+                 (int)has_enable(), (int)has_qresync());
+        int exists = 0;
+        if (!select_folder(name, exists, err)) return false;
+        out_state = m_qresync;
+        return true;
+    }
+    if (!m_qresync_enabled) {
+        std::string qe;
+        if (!enable_qresync(qe)) {
+            imap_dbg("select_qresync: ENABLE QRESYNC failed (%s), fallback SELECT", qe.c_str());
+            int exists = 0;
+            if (!select_folder(name, exists, err)) return false;
+            out_state = m_qresync;
+            return true;
+        }
+    }
+    if (known.uidvalidity == 0 || known.highestmodseq == 0 || known_uids.empty()) {
+        imap_dbg("select_qresync: empty known state, using plain SELECT (CONDSTORE)");
+        int exists = 0;
+        if (!select_folder(name, exists, err)) return false;
+        out_state = m_qresync;
+        return true;
+    }
+    std::string known_set = uids_to_seqset(known_uids);
+    if (known_set.empty()) known_set = "1:" + std::to_string(known_uids.back());
+    std::string cmd = "SELECT " + quote(name) + " (QRESYNC (" + std::to_string(known.uidvalidity) + " " +
+          std::to_string(known.highestmodseq) + " " + known_set + "))";
+    imap_dbg("SELECT QRESYNC: %s", cmd.c_str());
+    std::vector<std::string> untagged;
+    if (!run(cmd, untagged, err)) {
+        std::string low = to_lower(err);
+        if (low.find("qresync") != std::string::npos || low.find("bad") != std::string::npos ||
+            low.find("no") != std::string::npos || low.find("unknown") != std::string::npos ||
+            low.find("invalid") != std::string::npos) {
+            imap_dbg("SELECT QRESYNC rejected (%s), falling back to plain SELECT", err.c_str());
+            err.clear();
+            int exists = 0;
+            if (!select_folder(name, exists, err)) return false;
+            out_state = m_qresync;
+            return true;
+        }
+        imap_dbg("SELECT QRESYNC failed non-fallback: %s", err.c_str());
+        return false;
+    }
+    int exists = 0;
+    for (auto &line : untagged) {
+        if (line.size() >= 2 && line[0] == '*' && isdigit((unsigned char)line[2])) {
+            const char *p = line.c_str() + 1; while (*p == ' ') ++p;
+            if (isdigit((unsigned char)*p)) {
+                int n = atoi(p); while (isdigit((unsigned char)*p)) ++p;
+                if (*p == ' ' && strncmp(p+1, "EXISTS", 6) == 0) exists = n;
+            }
+        }
+        std::vector<uint32_t> v; bool ear = false;
+        if (parse_vanished_line(line, v, ear)) {
+            out_delta.vanished.insert(out_delta.vanished.end(), v.begin(), v.end());
+        }
+        if (line.find(" FETCH") != std::string::npos) {
+            uint32_t uid = 0; uint64_t ms = 0;
+            std::vector<std::string> flags;
+            for (auto &kv : parse_fetch_items(line)) {
+                if (kv.first == "UID") { try { uid = (uint32_t)std::stoul(kv.second);} catch(...){} }
+                if (kv.first == "MODSEQ") {
+                    std::string vv = kv.second;
+                    if (!vv.empty() && vv.front() == '(') vv = vv.substr(1);
+                    if (!vv.empty() && vv.back() == ')') vv.pop_back();
+                    try { ms = std::stoull(trim(vv)); } catch(...){}
+                }
+                if (kv.first == "FLAGS") {
+                    std::string f = kv.second;
+                    size_t a = f.find('('), b = f.rfind(')');
+                    if (a != std::string::npos && b != std::string::npos && b > a) {
+                        std::string inner = f.substr(a+1, b-a-1);
+                        std::istringstream iss(inner);
+                        std::string tok; while (iss >> tok) flags.push_back(tok);
+                    }
+                }
+            }
+            if (uid) {
+                if (!flags.empty()) out_delta.changed_flags[uid] = flags;
+                if (ms) out_delta.modseqs[uid] = ms;
+            }
+        }
+    }
+    update_qresync_from_select(untagged, exists);
+    out_state = m_qresync;
+    imap_dbg("select_qresync OK '%s' exists=%d vanished=%zu changed=%zu modseq=%llu",
+             name.c_str(), exists, out_delta.vanished.size(), out_delta.changed_flags.size(), (unsigned long long)out_state.highestmodseq);
+    m_selected_folder = name;
+    return true;
+}
+bool ImapClient::qresync_delta(uint64_t since_modseq, QResyncDelta &out, std::string &err) {
+    out = {};
+    if (!m_qresync_enabled || !has_condstore()) {
+        imap_dbg("qresync_delta skipped: not enabled (qresync_en=%d condstore=%d)", (int)m_qresync_enabled, (int)has_condstore());
+        err = "QRESYNC not enabled";
+        return false;
+    }
+    if (m_selected_folder.empty()) { err = "no folder selected"; return false; }
+    if (since_modseq == 0) { err = "since_modseq is 0"; return false; }
+    std::string cmd = "FETCH 1:* (FLAGS MODSEQ) CHANGEDSINCE " + std::to_string(since_modseq) + " VANISHED";
+    std::vector<std::string> untagged;
+    std::string run_err;
+    bool ok = run(cmd, untagged, run_err);
+    if (!ok) {
+        std::string uid_cmd = "UID " + cmd;
+        imap_dbg("qresync_delta FETCH failed (%s), retrying UID FETCH", run_err.c_str());
+        untagged.clear();
+        if (!run(uid_cmd, untagged, err)) {
+            imap_dbg("qresync_delta UID FETCH also failed: %s", err.c_str());
+            return false;
+        }
+    }
+    for (auto &line : untagged) {
+        std::vector<uint32_t> v; bool ear = false;
+        if (parse_vanished_line(line, v, ear)) {
+            out.vanished.insert(out.vanished.end(), v.begin(), v.end());
+            continue;
+        }
+        if (line.find(" FETCH") != std::string::npos) {
+            uint32_t uid = 0; uint64_t ms = 0;
+            std::vector<std::string> flags;
+            for (auto &kv : parse_fetch_items(line)) {
+                if (kv.first == "UID") { try { uid = (uint32_t)std::stoul(kv.second);} catch(...){} }
+                if (kv.first == "MODSEQ") {
+                    std::string vv = kv.second;
+                    if (!vv.empty() && vv.front() == '(') vv = vv.substr(1);
+                    if (!vv.empty() && vv.back() == ')') vv.pop_back();
+                    try { ms = std::stoull(trim(vv)); } catch(...){}
+                }
+                if (kv.first == "FLAGS") {
+                    std::string f = kv.second;
+                    size_t a = f.find('('), b = f.rfind(')');
+                    if (a != std::string::npos && b != std::string::npos && b > a) {
+                        std::string inner = f.substr(a+1, b-a-1);
+                        std::istringstream iss(inner);
+                        std::string tok; while (iss >> tok) flags.push_back(tok);
+                    }
+                }
+            }
+            if (uid) {
+                if (!flags.empty()) out.changed_flags[uid] = flags;
+                if (ms) out.modseqs[uid] = ms;
+            }
+        }
+    }
+    for (auto &kv : out.modseqs) if (kv.second > m_qresync.highestmodseq) m_qresync.highestmodseq = kv.second;
+    imap_dbg("qresync_delta since=%llu vanished=%zu changed=%zu", (unsigned long long)since_modseq, out.vanished.size(), out.changed_flags.size());
+    return true;
+}
+bool ImapClient::fetch_flags_uid(const std::vector<uint32_t> &uids,
+                                 std::unordered_map<uint32_t, std::vector<std::string>> &out,
+                                 std::string &err) {
+    out.clear();
+    if (uids.empty()) return true;
+    std::string set = uids_to_seqset(uids);
+    std::vector<std::string> untagged;
+    if (!run("UID FETCH " + set + " (FLAGS MODSEQ UID)", untagged, err)) return false;
+    for (auto &line : untagged) {
+        if (line.find(" FETCH") == std::string::npos) continue;
+        uint32_t uid = 0;
+        std::vector<std::string> flags;
+        for (auto &kv : parse_fetch_items(line)) {
+            if (kv.first == "UID") { try { uid = (uint32_t)std::stoul(kv.second);} catch(...){} }
+            if (kv.first == "FLAGS") {
+                std::string f = kv.second;
+                size_t a = f.find('('), b = f.rfind(')');
+                if (a != std::string::npos && b != std::string::npos && b > a) {
+                    std::string inner = f.substr(a+1, b-a-1);
+                    std::istringstream iss(inner);
+                    std::string tok; while (iss >> tok) flags.push_back(tok);
+                }
+            }
+        }
+        if (uid) out[uid] = flags;
+    }
     return true;
 }

@@ -17,6 +17,7 @@
 #include <utility>
 #include <vector>
 
+#include <cstdint>
 #include "imap_client.h"   // MailFolder
 
 class FolderItem;
@@ -137,7 +138,9 @@ private:
 // EmailData — plain struct describing one message in the list
 // ---------------------------------------------------------------------------
 struct EmailData {
-    int         seq = 0;           // IMAP message sequence number
+    int         seq = 0;           // IMAP message sequence number (0 on QRESYNC when UID is authoritative)
+    uint32_t    uid = 0;           // UID when CONDSTORE/QRESYNC available, 0 otherwise
+    uint64_t    modseq = 0;        // MODSEQ when CONDSTORE available
     std::string sender;
     std::string subject;
     std::string preview;
@@ -206,6 +209,7 @@ public:
 
     /* Update the preview text for an already-listed row in place. */
     void update_preview(int seq, const std::string &preview);
+    void update_preview_by_uid(uint32_t uid, const std::string &preview);
 
     // viewport helpers — used by MailApp to prioritize prefetch
     std::pair<int,int> visible_range() const {
@@ -220,6 +224,14 @@ public:
         int b = std::min((int)m_emails.size(), last + pad);
         std::vector<int> out; out.reserve(b-a);
         for (int i=a;i<b;++i) out.push_back(m_emails[i].seq);
+        return out;
+    }
+    std::vector<uint32_t> visible_uids(int pad = 6) const {
+        auto [first,last] = visible_range();
+        int a = std::max(0, first - pad);
+        int b = std::min((int)m_emails.size(), last + pad);
+        std::vector<uint32_t> out; out.reserve(b-a);
+        for (int i=a;i<b;++i) out.push_back(m_emails[i].uid);
         return out;
     }
     const std::vector<EmailData>& emails() const { return m_emails; }
@@ -271,12 +283,24 @@ public:
             }
         return false;
     }
+    bool set_seen_by_uid(uint32_t uid, bool seen) {
+        if (uid == 0) return false;
+        for (EmailData &e : m_emails)
+            if (e.uid == uid) {
+                if (e.seen == seen) return true;
+                e.seen = seen;
+                return true;
+            }
+        return false;
+    }
 
     // Remove a row by seq, preserving scroll position and viewport.
     // Selects the message below the deleted one, or the last if at end.
     // IMAP sequence numbers shift after EXPUNGE, so remaining seqs > deleted
     // are decremented to stay in sync without a full refresh.
     bool remove_seq(int seq);
+    // UID-based removal for QRESYNC: UIDs are stable, so no seq shifting.
+    bool remove_by_uid(uint32_t uid);
 
     void clear_selection();
 

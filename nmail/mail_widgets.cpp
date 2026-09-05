@@ -486,7 +486,18 @@ void EmailListView::update_preview(int seq, const std::string &preview) {
     for (auto &e : m_emails) {
         if (e.seq == seq && e.preview != preview) {
             e.preview = preview;
-            screen()->redraw();
+            if (screen()) screen()->redraw();
+            break;
+        }
+    }
+}
+
+void EmailListView::update_preview_by_uid(uint32_t uid, const std::string &preview) {
+    if (uid == 0) return;
+    for (auto &e : m_emails) {
+        if (e.uid == uid && e.preview != preview) {
+            e.preview = preview;
+            if (screen()) screen()->redraw();
             break;
         }
     }
@@ -541,6 +552,31 @@ bool EmailListView::remove_seq(int seq) {
         m_emails.erase(m_emails.begin() + i);
         for (auto &e : m_emails)
             if (e.seq > seq) --e.seq;
+        if (m_selected == i) {
+            if (i < (int)m_emails.size())
+                m_selected = i;
+            else
+                m_selected = (int)m_emails.size() - 1;
+            m_hovered = -1;
+        } else if (m_selected > i) {
+            --m_selected;
+            if (m_hovered > i) --m_hovered;
+        } else if (m_hovered > i) {
+            --m_hovered;
+        }
+        m_scroll = std::clamp(m_scroll, 0.0f, max_scroll());
+        if (screen()) screen()->redraw();
+        return true;
+    }
+    return false;
+}
+
+bool EmailListView::remove_by_uid(uint32_t uid) {
+    if (uid == 0) return false;
+    for (int i = 0; i < (int)m_emails.size(); ++i) {
+        if (m_emails[i].uid != uid) continue;
+        m_emails.erase(m_emails.begin() + i);
+        // UIDs are stable (QRESYNC) — no shifting of remaining uids/seqs.
         if (m_selected == i) {
             if (i < (int)m_emails.size())
                 m_selected = i;

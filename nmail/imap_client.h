@@ -16,6 +16,7 @@
 #include <string>
 #include <vector>
 #include <set>
+#include <unordered_map>
 #include <functional>
 #include <atomic>
 #include <cstdint>
@@ -28,6 +29,8 @@ struct MailFolder {
 
 struct MailSummary {
     int seq = 0;               // IMAP message sequence number
+    uint32_t uid = 0;          // UID (when CONDSTORE/QRESYNC available)
+    uint64_t modseq = 0;       // MODSEQ (RFC 4551)
     std::string from;          // display name, or the address if none was given
     std::string from_addr;     // bare address of the sender
     std::string subject;
@@ -119,9 +122,13 @@ public:
      * or BODY.PEEK[TEXT]<0.N> chunked reads for huge messages. */
     bool fetch_message(int seq, MailMessage &msg, std::string &err,
                        const std::function<bool()> &still_wanted = {});
+    // UID variant for QRESYNC: stable identifier, uses UID FETCH.
+    bool fetch_message_by_uid(uint32_t uid, MailMessage &msg, std::string &err,
+                              const std::function<bool()> &still_wanted = {});
     // Cheap RFC822.SIZE probe (no body transfer).  Use to decide whether to
     // fetch_message() or show "too large" placeholder.
     bool body_size_guess(int seq, size_t &bytes, std::string &err);
+    bool body_size_guess_uid(uint32_t uid, size_t &bytes, std::string &err);
     static constexpr size_t kMaxBodyBytes = 20ull * 1024 * 1024; // 20 MiB
     static constexpr size_t kPeekLimit    = 512; // preview-only_bytes in FETCH summaries
 
@@ -138,6 +145,14 @@ public:
      * numbers shift on EXPUNGE, so only call this with a seq known current
      * for the selected mailbox. */
     bool mark_seen(int seq, std::string &err);
+    /* UID variant with optional CONDSTORE UNCHANGEDSINCE.  When modseq != 0
+     * and the server advertises CONDSTORE, sends
+     *   UID STORE uid (UNCHANGEDSINCE modseq) +FLAGS.SILENT (\\Seen)
+     * per RFC 4551 §3.3 so a concurrent flag change is not clobbered.
+     * A NO [MODIFIED ...] response means the modseq guard failed — the
+     * message was already modified elsewhere; treat as benign success. */
+    bool mark_seen_uid(uint32_t uid, uint64_t modseq, std::string &err);
+    static bool is_modified_error(const std::string &err);
 
     void close();
     bool is_open() const { return m_fd >= 0; }
@@ -168,11 +183,66 @@ public:
     void expect_progress(int total) { m_progress_total = total; m_progress_done = 0; }
     void clear_progress() { m_progress_total = 0; m_progress_done = 0; }
 
+    // ── RFC 4551 CONDSTORE / RFC 7162 QRESYNC / RFC 4978 COMPRESS=DEFLATE ──
+    bool has_compress_deflate() const;
+    bool has_condstore() const { return m_caps.count("CONDSTORE"); }
+    // QRESYNC requires CONDSTORE + QRESYNC in CAPABILITY and ENABLE QRESYNC
+    // in Authenticated state before first SELECT (RFC 7162 §3.1, RFC 5161).
+    bool has_qresync() const { return m_caps.count("QRESYNC") && has_condstore(); }
+    bool has_enable() const { return m_caps.count("ENABLE"); }
+    bool enable_qresync(std::string &err); // idempotent; NO-OP after first OK
+    bool enable_condstore(std::string &err);
+    bool compress_deflate(std::string &err); // one-shot per connection, before first SELECT
+    bool is_compressed() const { return m_compressed; }
+
+    struct QResyncState {
+        uint32_t uidvalidity = 0;
+        uint64_t highestmodseq = 0;
+        uint32_t uidnext = 0;
+        uint32_t messages = 0;
+    };
+    struct QResyncDelta {
+        std::vector<uint32_t> vanished;                         // VANISHED (EARLIER)
+        std::unordered_map<uint32_t, std::vector<std::string>> // UID -> flag list
+            changed_flags;
+        std::unordered_map<uint32_t, uint64_t> modseqs; // UID -> MODSEQ
+        std::vector<uint32_t> known_uids_missing; // UIDs we thought existed but server dropped without VANISHED (fallback)
+    };
+    // Persisted per-folder sync anchor.  Pass 0/bad state to fall back to plain SELECT.
+    bool select_qresync(const std::string &name,
+                        const QResyncState &known,
+                        const std::vector<uint32_t> &known_uids,
+                        QResyncState &out_state, QResyncDelta &out_delta,
+                        std::string &err);
+    // Cheap incremental sync after IDLE/NOOP: ask for VANISHED + changed since modseq.
+    bool qresync_delta(uint64_t since_modseq, QResyncDelta &out, std::string &err);
+    bool fetch_flags_uid(const std::vector<uint32_t> &uids,
+                         std::unordered_map<uint32_t, std::vector<std::string>> &out,
+                         std::string &err);
+    uint32_t uidvalidity() const { return m_qresync.uidvalidity; }
+    uint64_t highestmodseq() const { return m_qresync.highestmodseq; }
+    const QResyncState& qresync_state() const { return m_qresync; }
+
 private:
     int m_fd = -1;
     int m_tag = 0;
-    std::string m_rbuf;        // pending bytes from the socket
+    std::string m_rbuf;        // pending bytes from the socket (decompressed if m_compressed)
+    std::string m_compress_rbuf; // raw deflated bytes waiting to inflate (unused, kept for compat)
     std::set<std::string> m_caps;  // server capabilities (uppercase)
+    // RFC 4978 COMPRESS=DEFLATE (miniz inflate/deflate state; valid only when m_compressed)
+    void *m_inflate_state = nullptr;  // mz_stream*
+    void *m_deflate_state = nullptr;
+    bool m_compressed = false;
+    bool m_qresync_enabled = false;
+    QResyncState m_qresync; // last SELECT's UIDVALIDITY/HIGHESTMODSEQ
+    // COMPRESS=DEFLATE helpers (raw DEFLATE, RFC 4978)
+    bool deflate_and_send(const std::string &wire, std::string &err);
+    bool inflate_more(std::string &err); // read compressed chunk and inflate into m_rbuf
+    static std::string uids_to_seqset(const std::vector<uint32_t> &uids);
+    static std::vector<uint32_t> seqset_to_uids(const std::string &seqset);
+    static bool parse_vanished_line(const std::string &line, std::vector<uint32_t> &out, bool &earlier);
+    static bool extract_code_number(const std::string &line, const char *code, uint64_t &out);
+    void update_qresync_from_select(const std::vector<std::string> &untagged, int exists);
     // Credentials from the last successful open(), kept to allow a
     // silent reconnect after an idle timeout / server BYE.
     std::string m_host;
