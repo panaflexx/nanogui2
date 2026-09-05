@@ -104,15 +104,26 @@ public:
     bool status_counts(const std::string &name, int &messages, int &unseen,
                        std::string &err);
 
-    /* FETCH header summaries + a small text preview for seq [first, last]. */
+    /* FETCH header summaries + a small text preview for seq [first, last].
+     * Uses BODY.PEEK[HEADER.FIELDS ...] + BODY.PEEK[TEXT]<0.512> so a 2 GB
+     * attachment is never fetched — only 512 bytes for preview.  Callers
+     * that need the full body should use fetch_message(). */
     bool fetch_summaries(int first, int last,
                          std::vector<MailSummary> &out, std::string &err);
 
     /* FETCH the full raw message and extract a readable plain-text body.
      * If `still_wanted` is set, it is checked after the IMAP round-trip
-     * and before MIME decode — so a folder switch can skip a large body. */
+     * and before MIME decode — so a folder switch can skip a large body.
+     * Caps: messages larger than kMaxBodyBytes return an error instead of
+     * OOMing the UI; use body_size_guess()/fetch_message_peek() for preview,
+     * or BODY.PEEK[TEXT]<0.N> chunked reads for huge messages. */
     bool fetch_message(int seq, MailMessage &msg, std::string &err,
                        const std::function<bool()> &still_wanted = {});
+    // Cheap RFC822.SIZE probe (no body transfer).  Use to decide whether to
+    // fetch_message() or show "too large" placeholder.
+    bool body_size_guess(int seq, size_t &bytes, std::string &err);
+    static constexpr size_t kMaxBodyBytes = 20ull * 1024 * 1024; // 20 MiB
+    static constexpr size_t kPeekLimit    = 512; // preview-only_bytes in FETCH summaries
 
     /* Move a single message (by sequence number) to another folder.
      * Tries IMAP MOVE when advertised, otherwise falls back to

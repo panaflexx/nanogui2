@@ -659,27 +659,45 @@ struct ImapCursor {
     }
 
     /* Literal "{n}\r\n<bytes>", quoted string, parenthesized list, NIL,
-     * or bare atom. */
+     * or bare atom.  Robust against LITERAL+/LITERAL- ("{n+}") and bare-LF
+     * servers, and consumes the optional CRLF after the literal data so the
+     * cursor sits at the next token.  The assembled logical line from
+     * read_logical_line is "{n}\r\n<bytes>tail" with tail directly after
+     * the bytes, but defensive CRLF consume handles both forms. */
     std::string read_value() {
         skip_ws();
         char c = peek();
         if (c == '"') return read_quoted();
         if (c == '(') return read_parens();
         if (c == '{') {
+            size_t start = pos;
             ++pos;
             size_t n = 0;
-            while (pos < s.size() && std::isdigit((unsigned char)s[pos]))
+            bool has_digit = false;
+            while (pos < s.size() && std::isdigit((unsigned char)s[pos])) {
+                has_digit = true;
                 n = n * 10 + (size_t)(s[pos++] - '0');
+            }
+            if (!has_digit) return "";
+            // LITERAL+ / LITERAL- extension: "{123+}" — treat as literal.
+            if (pos < s.size() && (s[pos] == '+' || s[pos] == '-')) ++pos;
             if (!expect('}')) return "";
-            if (!expect('\r')) return "";
-            if (!expect('\n')) return "";
+            // Require CRLF after the marker, but tolerate bare LF.
+            if (pos < s.size() && s[pos] == '\r') ++pos;
+            if (pos < s.size() && s[pos] == '\n') ++pos;
+            else if (pos > start + 1) return ""; // missing line break
             if (pos + n > s.size()) n = s.size() - pos;
             std::string out = s.substr(pos, n);
             pos += n;
+            // Optional CRLF terminating the literal content (some re-assembly
+            // paths leave it; some don't). Consume if present so next token
+            // is not seen as "\r".
+            if (pos + 1 < s.size() && s[pos] == '\r' && s[pos+1] == '\n') pos += 2;
+            else if (pos < s.size() && (s[pos] == '\r' || s[pos] == '\n')) ++pos;
             return out;
         }
         size_t start = pos;
-        while (pos < s.size() && s[pos] != ' ' && s[pos] != ')') ++pos;
+        while (pos < s.size() && s[pos] != ' ' && s[pos] != ')' && s[pos] != '\r' && s[pos] != '\n') ++pos;
         return s.substr(start, pos - start);
     }
 
@@ -1089,8 +1107,18 @@ std::string ImapClient::quote(const std::string &s) {
 }
 
 bool ImapClient::read_bytes(size_t n, std::string &out, std::string &err) {
+    // Cap literals so a malicious/oversized server cannot allocate 2 GB in one
+    // read_logical_line.  fetch_summaries already uses BODY.PEEK[TEXT]<0.512>,
+    // but BODY.PEEK[] for a 2 GB attachment would still land here.  If the
+    // server claims a literal larger than kMaxBodyBytes, fail fast; the caller
+    // (fetch_message) already probes RFC822.SIZE before asking for BODY.
+    if (n > kMaxBodyBytes + 8192) { // slack for headers+encoding
+        err = "literal too large (" + std::to_string(n) + " bytes) — message too large for preview";
+        return false;
+    }
     out.clear();
     while (out.size() < n) {
+    
         if (!m_rbuf.empty()) {
             size_t take = std::min(n - out.size(), m_rbuf.size());
             out += m_rbuf.substr(0, take);
@@ -1676,8 +1704,34 @@ bool ImapClient::fetch_summaries(int first, int last,
     return ok;
 }
 
+bool ImapClient::body_size_guess(int seq, size_t &bytes, std::string &err) {
+    bytes = 0;
+    std::vector<std::string> untagged;
+    if (!run("FETCH " + std::to_string(seq) + " (RFC822.SIZE)", untagged, err))
+        return false;
+    for (auto &line : untagged) {
+        for (auto &kv : parse_fetch_items(line))
+            if (kv.first == "RFC822.SIZE") { bytes = (size_t)std::stoul(kv.second); return true; }
+        // Fallback: some servers use BODY[] literal on RFC822.SIZE — still parse.
+        for (auto &kv : parse_fetch_items(line))
+            if (starts_with(kv.first, "RFC822.SIZE")) { bytes = (size_t)std::stoul(kv.second); return true; }
+    }
+    // No RFC822.SIZE — not fatal, caller treats as unknown.
+    return true;
+}
+
 bool ImapClient::fetch_message(int seq, MailMessage &msg, std::string &err,
                                const std::function<bool()> &still_wanted) {
+    // Cheap size gate before transferring a 2 GB BODY.PEEK[] over the wire.
+    // Allows folder switches to cancel quickly and avoids OOMing the worker.
+    {
+        size_t sz = 0; std::string se;
+        if (body_size_guess(seq, sz, se) && sz > kMaxBodyBytes) {
+            imap_dbg("FETCH seq=%d SKIP huge size=%zu > %zu", seq, sz, kMaxBodyBytes);
+            err = "message too large (" + std::to_string(sz/1024/1024) + " MiB) — preview only; open in webmail for attachments";
+            return false;
+        }
+    }
     std::vector<std::string> untagged;
     if (!run("FETCH " + std::to_string(seq) + " (BODY.PEEK[])",
              untagged, err))
