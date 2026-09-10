@@ -685,7 +685,18 @@ if (NANOGUI_BUILD_EXAMPLES)
 
   # Vendored miniz (RFC 1951 DEFLATE for IMAP COMPRESS=DEFLATE, RFC 4978)
   add_library(miniz STATIC ext/miniz/miniz.c ext/miniz/miniz_tdef.c ext/miniz/miniz_tinfl.c)
-  target_include_directories(miniz PUBLIC ext/miniz)
+  # Upstream generates miniz_export.h via generate_export_header(); for this
+  # static build the empty-decoration equivalent is all miniz.h needs.
+  file(WRITE "${CMAKE_CURRENT_BINARY_DIR}/miniz_gen/miniz_export.h"
+"#ifndef MINIZ_EXPORT_H\n"
+"#define MINIZ_EXPORT_H\n"
+"#define MINIZ_EXPORT\n"
+"#define MINIZ_NO_EXPORT\n"
+"#define MINIZ_DEPRECATED\n"
+"#define MINIZ_DEPRECATED_EXPORT MINIZ_EXPORT\n"
+"#define MINIZ_DEPRECATED_NO_EXPORT MINIZ_NO_EXPORT\n"
+"#endif\n")
+  target_include_directories(miniz PUBLIC ext/miniz "${CMAKE_CURRENT_BINARY_DIR}/miniz_gen")
   set_target_properties(miniz PROPERTIES POSITION_INDEPENDENT_CODE ON)
 
   add_executable(nmail         nmail/nmail.cpp nmail/nmail_config.cpp nmail/mail_worker.cpp nmail/mail_widgets.cpp nmail/nmail_toolbar.cpp nmail/mail_format.cpp nmail/imap_client.cpp nmail/smtp_client.cpp nmail/contacts.cpp ${NMAIL_SOCKET} nmail/htmldocument.cpp)
