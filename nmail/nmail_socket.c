@@ -9,6 +9,7 @@
 #define STRINGBUF_IMPLEMENTATION  /* one TU must provide stringbuf's impl */
 #include "socket_server.h"
 #include <pthread.h>
+#include <poll.h>
 #include <sys/time.h>
 #include <sys/socket.h>
 
@@ -166,6 +167,32 @@ int nmail_sock_starttls_host(int fd, const char *hostname,
     snprintf(errbuf, (size_t)errlen, "this build has no TLS support");
     return -1;
 #endif
+}
+
+int nmail_sock_wait_readable(int fd, int timeout_ms) {
+    if (fd < 0)
+        return -1;
+#ifdef HAVE_OPENSSL
+    /* Decrypted bytes sitting in OpenSSL's buffer do not show up in poll(). */
+    int idx = get_conn(fd);
+    if (idx >= 0 && clients[idx].ssl && SSL_pending(clients[idx].ssl) > 0)
+        return 1;
+#endif
+    struct pollfd pfd;
+    pfd.fd = fd;
+    pfd.events = POLLIN;
+    pfd.revents = 0;
+    int r;
+    do {
+        r = poll(&pfd, 1, timeout_ms);
+    } while (r < 0 && errno == EINTR);
+    if (r < 0)
+        return -1;
+    if (r == 0)
+        return 0;
+    if (pfd.revents & (POLLERR | POLLHUP | POLLNVAL))
+        return -1;
+    return 1;
 }
 
 void nmail_sock_abort(int fd) {

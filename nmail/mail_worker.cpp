@@ -457,6 +457,7 @@ bool MailWorker::do_connect() {
     m_selected_folder.clear();
     m_first_loaded = 0;
     m_last_known_exists = 0;
+    m_idle_disabled = false;   // a fresh connection may accept IDLE
     return do_list_folders();
 }
 
@@ -1495,6 +1496,7 @@ void MailWorker::run() {
     auto next_check = std::chrono::steady_clock::now();
     for (;;) {
         Cmd cmd;
+        bool idle_now = false;
         {
             std::unique_lock<std::mutex> lock(m_mutex);
             /* Sleep until there is work: a queued command, shutdown, or
@@ -1515,6 +1517,15 @@ void MailWorker::run() {
                  * UI stayed on "Opening Trash...". */
                 if (m_quit || !m_queue.empty())
                     break;
+                /* Server advertises IDLE and the wanted mailbox is SELECTed:
+                 * park on the socket instead of the CV so the server can
+                 * push flag/expunge/new-mail events instantly (RFC 2177). */
+                if (!m_idle_disabled && m_imap.is_open() &&
+                    m_imap.has_idle() && !m_wanted_folder.empty() &&
+                    m_wanted_folder == m_imap.selected_folder()) {
+                    idle_now = true;
+                    break;
+                }
                 auto deadline = next_check;
                 if (m_seen_seq > 0 && m_seen_at < deadline)
                     deadline = m_seen_at;
@@ -1526,36 +1537,43 @@ void MailWorker::run() {
                  * empty queue: loop to recompute the deadline. */
             }
             if (m_quit) return;
-            bool got_cmd = !m_queue.empty();
-            if (!got_cmd) {
-                auto now = std::chrono::steady_clock::now();
-                if (m_seen_seq > 0 && now >= m_seen_at) {
-                    cmd.type   = Type::MarkSeen;
-                    cmd.folder = m_seen_folder;
-                    cmd.seq    = m_seen_seq;
-                    cmd.uid    = m_seen_uid;
-                    cmd.modseq = m_seen_modseq;
-                    m_seen_seq = 0;             // consume the request
-                    m_seen_uid = 0;
-                    m_seen_modseq = 0;
-                } else if (now >= next_check) {
-                    int interval_min = std::max(1, m_check_interval_min);
-                    next_check = now + std::chrono::minutes(interval_min);
-                    if (m_config.host.empty() ||
-                        (m_wanted_folder.empty() && m_selected_folder.empty()))
-                        continue;   // nothing configured/selected to check yet
-                    cmd.type = Type::AutoRefresh;
-                    cmd.folder = m_wanted_folder.empty() ? m_selected_folder
-                                                         : m_wanted_folder;
+            if (!idle_now) {
+                bool got_cmd = !m_queue.empty();
+                if (!got_cmd) {
+                    auto now = std::chrono::steady_clock::now();
+                    if (m_seen_seq > 0 && now >= m_seen_at) {
+                        cmd.type   = Type::MarkSeen;
+                        cmd.folder = m_seen_folder;
+                        cmd.seq    = m_seen_seq;
+                        cmd.uid    = m_seen_uid;
+                        cmd.modseq = m_seen_modseq;
+                        m_seen_seq = 0;             // consume the request
+                        m_seen_uid = 0;
+                        m_seen_modseq = 0;
+                    } else if (now >= next_check) {
+                        int interval_min = std::max(1, m_check_interval_min);
+                        next_check = now + std::chrono::minutes(interval_min);
+                        if (m_config.host.empty() ||
+                            (m_wanted_folder.empty() && m_selected_folder.empty()))
+                            continue;   // nothing configured/selected to check yet
+                        cmd.type = Type::AutoRefresh;
+                        cmd.folder = m_wanted_folder.empty() ? m_selected_folder
+                                                             : m_wanted_folder;
+                    } else {
+                        continue;       // woke early; nothing due yet
+                    }
                 } else {
-                    continue;       // woke early; nothing due yet
+                    cmd = m_queue.front();
+                    m_queue.pop_front();
                 }
-            } else {
-                cmd = m_queue.front();
-                m_queue.pop_front();
+                m_inflight = cmd.type;
+                m_busy = true;
             }
-            m_inflight = cmd.type;
-            m_busy = true;
+        }
+
+        if (idle_now) {
+            run_idle(next_check);
+            continue;
         }
 
         switch (cmd.type) {
@@ -1712,4 +1730,135 @@ void MailWorker::run() {
             m_busy = false;
         }
     }
+}
+
+void MailWorker::run_idle(const std::chrono::steady_clock::time_point &next_check) {
+    std::string folder;
+    {
+        std::lock_guard<std::mutex> lock(m_mutex);
+        folder = m_wanted_folder;
+    }
+    mail_dbg("[mail] IDLE begin on '%s'\n", folder.c_str());
+    std::string err;
+    if (!m_imap.idle_begin(err)) {
+        mail_dbg("[mail] IDLE begin failed: %s\n", err.c_str());
+        if (ImapClient::is_connection_error(err)) {
+            m_imap.close();   // next command reconnects
+        } else {
+            /* Server refused IDLE (NO/BAD): stop trying on this connection
+             * or the run loop would spin begin/fail forever. */
+            m_idle_disabled = true;
+        }
+        /* Don't hot-loop: brief CV nap before the loop picks a wait mode. */
+        std::unique_lock<std::mutex> lock(m_mutex);
+        m_cv.wait_for(lock, std::chrono::seconds(2));
+        return;
+    }
+    /* RFC 2177 §3: re-issue IDLE at least every 29 minutes (also doubles
+     * as the NAT/firewall keepalive). */
+    const auto rearm = std::chrono::steady_clock::now() + std::chrono::minutes(29);
+    bool resync_delta = false;   // new mail: fetch the delta (AutoRefresh)
+    bool resync_full  = false;   // removals we cannot number: full Refresh
+    bool reconnect    = false;   // BYE / connection dropped
+    for (;;) {
+        {
+            std::lock_guard<std::mutex> lock(m_mutex);
+            if (m_quit || !m_queue.empty())
+                break;   // work posted -> DONE and back to the run loop
+        }
+        /* Wait in short quanta so GUI-posted commands (which notify the CV
+         * the run loop is no longer sleeping on) are seen promptly, and so
+         * the mark-seen / auto-check deadlines fire on time. */
+        int wait_ms = 250;
+        {
+            std::lock_guard<std::mutex> lock(m_mutex);
+            auto now = std::chrono::steady_clock::now();
+            auto deadline = next_check;
+            if (m_seen_seq > 0 && m_seen_at < deadline)
+                deadline = m_seen_at;
+            if (rearm < deadline)
+                deadline = rearm;
+            long long ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+                               deadline - now).count();
+            if (ms <= 0) break;   // a timer is due right now
+            wait_ms = (int)std::min<long long>(wait_ms, ms);
+        }
+        std::vector<ImapClient::IdleEvent> events;
+        std::string werr;
+        if (!m_imap.idle_wait(events, wait_ms, werr)) {
+            mail_dbg("[mail] IDLE wait failed: %s\n", werr.c_str());
+            reconnect = true;
+            break;
+        }
+        for (const auto &ev : events) {
+            switch (ev.kind) {
+            case ImapClient::IdleEvent::Kind::Flags: {
+                /* Another session changed flags (e.g. marked read on the
+                 * phone): update the row live. */
+                bool seen = ev.flags.find("\\Seen") != std::string::npos;
+                std::string f = folder;
+                int seq = ev.seq;
+                mail_dbg("[mail] IDLE push: FLAGS seq=%d %s\n", seq,
+                         ev.flags.c_str());
+                deliver([this, f, seq, seen]() {
+                    if (cb_flag_seen) cb_flag_seen(f, seq, seen);
+                });
+                break;
+            }
+            case ImapClient::IdleEvent::Kind::Expunge: {
+                std::string f = folder;
+                int seq = ev.seq;
+                mail_dbg("[mail] IDLE push: EXPUNGE seq=%d\n", seq);
+                {
+                    std::lock_guard<std::mutex> lock(m_mutex);
+                    /* Sequence numbers above the expunged one shift down. */
+                    if (m_last_known_exists > 0) --m_last_known_exists;
+                    if (m_first_loaded > seq)    --m_first_loaded;
+                    m_seen_seq = 0;   // any pending mark-read seq is stale
+                    cancel_prefetch_locked();
+                }
+                deliver([this, f, seq]() {
+                    if (cb_expunged) cb_expunged(f, seq);
+                });
+                break;
+            }
+            case ImapClient::IdleEvent::Kind::Exists:
+                mail_dbg("[mail] IDLE push: EXISTS %d\n", ev.count);
+                resync_delta = true;   // new mail -> fetch the delta
+                break;
+            case ImapClient::IdleEvent::Kind::Recent:
+                break;   // informational only
+            case ImapClient::IdleEvent::Kind::Bye:
+                mail_dbg("[mail] IDLE push: BYE\n");
+                reconnect = true;
+                break;
+            case ImapClient::IdleEvent::Kind::Other:
+                if (ev.raw.find("VANISHED") != std::string::npos) {
+                    mail_dbg("[mail] IDLE push: %s\n", ev.raw.c_str());
+                    resync_full = true;   // QRESYNC removal, no seq to map
+                }
+                break;
+            }
+        }
+        if (resync_delta || resync_full || reconnect)
+            break;
+    }
+    if (!m_imap.idle_done(err)) {
+        mail_dbg("[mail] IDLE DONE failed: %s\n", err.c_str());
+        reconnect = true;
+    }
+    {
+        std::lock_guard<std::mutex> lock(m_mutex);
+        if (reconnect) {
+            m_imap.close();
+            /* Reconnect + resync promptly instead of waiting out the
+             * periodic timer. */
+            m_queue.push_back({Type::AutoRefresh, folder, 0, "", m_epoch});
+        } else if (resync_full) {
+            m_queue.push_back({Type::Refresh, folder, 0, "", m_epoch});
+        } else if (resync_delta) {
+            m_queue.push_back({Type::AutoRefresh, folder, 0, "", m_epoch});
+        }
+    }
+    m_cv.notify_one();
 }

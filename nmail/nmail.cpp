@@ -820,6 +820,13 @@ public:
         w.cb_seen = [this, id](const std::string &folder, int seq) {
             on_seen(id, folder, seq);
         };
+        w.cb_flag_seen = [this, id](const std::string &folder, int seq,
+                                    bool seen) {
+            on_remote_seen(id, folder, seq, seen);
+        };
+        w.cb_expunged = [this, id](const std::string &folder, int seq) {
+            on_expunged(id, folder, seq);
+        };
         w.cb_moved = [this, id](const std::string &folder, int seq,
                                 const std::string &dest) {
             on_moved(id, folder, seq, dest);
@@ -1803,6 +1810,110 @@ public:
             if (uid) done = m_email_list->set_seen_by_uid(uid, true);
             if (!done) done = m_email_list->set_seen(seq, true);
         }
+        redraw();
+    }
+
+    /* IDLE push: another session (phone, webmail, ...) flipped a message's
+     * \Seen flag.  Same bookkeeping as on_seen, but honors the pushed state
+     * in both directions (read AND unread). */
+    void on_remote_seen(const std::string &account_id, const std::string &folder,
+                        int seq, bool seen) {
+        AccountSession *acct_ptr = account(account_id);
+        if (!acct_ptr) return;
+        AccountSession &acct = *acct_ptr;
+        auto mark = [seq, seen](std::vector<MailSummary> &v) {
+            for (MailSummary &s : v)
+                if (s.seq == seq) { s.seen = seen; break; }
+        };
+        auto it = acct.summary_cache.find(folder);
+        if (it != acct.summary_cache.end()) mark(it->second);
+        if (account_id != m_current_account_id ||
+            folder != acct.wanted_folder || folder != acct.current_folder) return;
+        mark(m_summaries);
+        bool done = false;
+        if (m_email_list) {
+            uint32_t uid = uid_for_seq(acct, folder, seq);
+            if (uid) done = m_email_list->set_seen_by_uid(uid, seen);
+            if (!done) done = m_email_list->set_seen(seq, seen);
+        }
+        redraw();
+    }
+
+    /* IDLE push: a message was expunged from the folder by another session.
+     * Mirrors on_moved's removal path (uid-aware, seq renumber fallback). */
+    void on_expunged(const std::string &account_id, const std::string &folder, int seq) {
+        AccountSession *acct_ptr = account(account_id);
+        if (!acct_ptr) return;
+        AccountSession &acct = *acct_ptr;
+        uint32_t gone_uid = uid_for_seq(acct, folder, seq);
+        auto remove_from_vec = [&](std::vector<MailSummary> &vec){
+            if (gone_uid) {
+                vec.erase(std::remove_if(vec.begin(), vec.end(),
+                    [&](const MailSummary &s){ return s.uid == gone_uid; }), vec.end());
+            } else {
+                vec.erase(std::remove_if(vec.begin(), vec.end(),
+                    [&](const MailSummary &s){ return s.seq == seq; }), vec.end());
+                for (auto &s : vec) if (s.seq > seq) --s.seq;
+            }
+        };
+        auto it = acct.summary_cache.find(folder);
+        if (it != acct.summary_cache.end())
+            remove_from_vec(it->second);
+        /* Body caches are uid-keyed (stable across EXPUNGE) or seq-keyed
+         * (shifted) -- conservative drop for the folder, as in on_moved. */
+        std::vector<std::string> drop;
+        std::string p1 = folder + "|";
+        std::string p2 = folder + ":";
+        for (auto &kv : acct.body_cache)
+            if (kv.first.rfind(p1, 0) == 0 || kv.first.rfind(p2, 0) == 0)
+                drop.push_back(kv.first);
+        for (auto &k : drop) acct.body_cache.erase(k);
+        const bool viewing =
+            account_id == m_current_account_id &&
+            folder == acct.wanted_folder && folder == acct.current_folder;
+        if (!viewing) {
+            redraw();
+            return;
+        }
+        remove_from_vec(m_summaries);
+        if (m_rendered_seq == seq) {
+            m_has_message = false;
+            m_rendered_seq = -1;
+            m_reply_btn->set_enabled(false);
+            if (m_fwd_btn) m_fwd_btn->set_enabled(false);
+            if (m_save_btn) m_save_btn->set_enabled(false);
+            Document doc;
+            parse_markdown(doc, "*Message deleted*", text_color(), 18.f);
+            m_view->set_document(std::move(doc));
+            m_view_scroll->set_scroll(0.0f);
+        } else if (!gone_uid && m_rendered_seq > seq) {
+            --m_rendered_seq;
+        }
+        if (m_loading_seq == seq) m_loading_seq = -1;
+        else if (!gone_uid && m_loading_seq > seq) --m_loading_seq;
+        if (m_pending_seq == seq) { m_pending_seq = -1; m_preview_settle_at = 0; }
+        else if (!gone_uid && m_pending_seq > seq) { --m_pending_seq; --m_pending_email.seq; }
+        bool removed = false;
+        if (m_email_list) {
+            if (gone_uid) removed = m_email_list->remove_by_uid(gone_uid);
+            if (!removed) removed = m_email_list->remove_seq(seq);
+        }
+        if (removed && m_email_list) {
+            const EmailData* nd = m_email_list->selected_data();
+            if (nd) {
+                int nidx = m_email_list->selected_index();
+                on_email_selected(nidx, *nd);
+            }
+        }
+        if (m_email_list && m_email_list->emails().empty()) {
+            m_has_message = false;
+            m_rendered_seq = -1;
+            m_pending_seq = -1;
+            Document doc;
+            parse_markdown(doc, "*No messages*", text_color(), 18.f);
+            m_view->set_document(std::move(doc));
+        }
+        update_move_buttons();
         redraw();
     }
 

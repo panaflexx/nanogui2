@@ -20,6 +20,13 @@ int  nmail_sock_send(int fd, const char *buf, int len);
 /* Blocking read.  Returns bytes read (> 0), 0 on orderly close, -1 on error. */
 int  nmail_sock_recv(int fd, char *buf, int maxlen);
 
+/* Wait until the socket has data to read (or is closed by the peer).
+ * Returns 1 when readable, 0 on timeout, -1 on error/hangup.  Unlike
+ * nmail_sock_abort() this is non-destructive: the connection stays usable,
+ * so IMAP IDLE can park on it.  For TLS connections, decrypted-but-unread
+ * bytes buffered by OpenSSL count as readable. */
+int  nmail_sock_wait_readable(int fd, int timeout_ms);
+
 /* Shut the socket down without closing it; wakes a recv() blocked in
  * another thread so a worker can be stopped promptly. */
 void nmail_sock_abort(int fd);

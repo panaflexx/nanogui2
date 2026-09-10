@@ -315,6 +315,29 @@ int nmail_sock_starttls_host(int fd, const char *hostname,
 #endif
 }
 
+int nmail_sock_wait_readable(int fd, int timeout_ms) {
+    if (fd < 0)
+        return -1;
+#ifdef HAVE_OPENSSL
+    /* Decrypted bytes sitting in OpenSSL's buffer do not show up in select(). */
+    SSL *ssl = tls_get(fd);
+    if (ssl && SSL_pending(ssl) > 0)
+        return 1;
+#endif
+    fd_set rfds;
+    FD_ZERO(&rfds);
+    FD_SET((SOCKET)fd, &rfds);
+    struct timeval tv;
+    tv.tv_sec = timeout_ms / 1000;
+    tv.tv_usec = (timeout_ms % 1000) * 1000;
+    int r = select(0, &rfds, NULL, NULL, &tv);
+    if (r == SOCKET_ERROR)
+        return -1;
+    if (r == 0)
+        return 0;
+    return 1;
+}
+
 void nmail_sock_abort(int fd) {
     if (fd < 0)
         return;

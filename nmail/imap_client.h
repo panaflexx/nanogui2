@@ -224,6 +224,33 @@ public:
     uint64_t highestmodseq() const { return m_qresync.highestmodseq; }
     const QResyncState& qresync_state() const { return m_qresync; }
 
+    // ── RFC 2177 IDLE ────────────────────────────────────────────────────
+    bool has_idle() const { return m_caps.count("IDLE"); }
+
+    /* One unsolicited response received while idling. */
+    struct IdleEvent {
+        enum class Kind { Flags, Expunge, Exists, Recent, Bye, Other } kind = Kind::Other;
+        int seq = 0;              // Flags / Expunge
+        int count = 0;            // Exists / Recent
+        std::string flags;        // raw parenthesized flag list (Flags)
+        std::string raw;          // the original line (debug / VANISHED check)
+    };
+
+    /* Send IDLE and wait for the "+ idling" continuation.  A mailbox must be
+     * SELECTed.  False on NO/BAD (server refused) or I/O error.  Untagged
+     * responses that arrive before the continuation are kept and returned by
+     * the next idle_wait(). */
+    bool idle_begin(std::string &err);
+    /* Wait up to timeout_ms for server pushes while idling.  True on success
+     * (events may still be empty on timeout), false on connection loss/BYE.
+     * Only valid between idle_begin() and idle_done(). */
+    bool idle_wait(std::vector<IdleEvent> &events, int timeout_ms,
+                   std::string &err);
+    /* Send DONE and wait for the IDLE command's tagged completion.  Untagged
+     * responses seen while leaving are kept for the next idle_wait(). */
+    bool idle_done(std::string &err);
+    bool idling() const { return !m_idle_tag.empty(); }
+
 private:
     int m_fd = -1;
     int m_tag = 0;
@@ -254,6 +281,11 @@ private:
     std::atomic<uint64_t> m_op_gen{0}; // bumped by cancel() to drop in-flight cmds
     int m_progress_total = 0;
     int m_progress_done = 0;
+    std::string m_idle_tag;   // tag of the in-progress IDLE ("" = not idling)
+    /* Untagged responses seen while entering/leaving IDLE, prepended to the
+     * next idle_wait() result so no push is lost. */
+    std::vector<IdleEvent> m_idle_pending;
+    static IdleEvent parse_idle_line(const std::string &line);
 
     /* Send a tagged command, collect untagged responses until the tagged
      * completion.  Returns false on NO/BAD or I/O error (err explains).

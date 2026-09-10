@@ -1053,6 +1053,8 @@ void ImapClient::close() {
     m_selected_folder.clear();
     m_qresync = {};
     m_qresync_enabled = false;
+    m_idle_tag.clear();
+    m_idle_pending.clear();
 }
 
 bool ImapClient::is_connection_error(const std::string &err) {
@@ -1081,6 +1083,132 @@ bool ImapClient::has_compress_deflate() const {
     }
     return false;
 }
+
+// ── RFC 2177 IDLE ────────────────────────────────────────────────────────
+ImapClient::IdleEvent ImapClient::parse_idle_line(const std::string &line) {
+    IdleEvent ev;
+    ev.raw = line;
+    if (starts_with(line, "* BYE")) { ev.kind = IdleEvent::Kind::Bye; return ev; }
+    if (line.size() < 3 || line[0] != '*' || line[1] != ' ')
+        return ev;
+    /* "* 23 FETCH (FLAGS (\Seen))" / "* 12 EXPUNGE" / "* 48 EXISTS" / "* 3 RECENT".
+     * QRESYNC's "* VANISHED 2:4" has no numeric prefix -> Kind::Other; the
+     * caller resyncs on ev.raw containing "VANISHED". */
+    size_t p = 2;
+    long num = 0;
+    bool digits = false;
+    while (p < line.size() && std::isdigit((unsigned char)line[p])) {
+        num = num * 10 + (line[p] - '0');
+        digits = true;
+        ++p;
+    }
+    if (!digits || p >= line.size() || line[p] != ' ')
+        return ev;
+    size_t w0 = ++p;
+    std::string word;
+    while (p < line.size() && line[p] != ' ') word += line[p++];
+    for (char &c : word) c = (char)std::toupper((unsigned char)c);
+    if (word == "FETCH") {
+        ev.kind = IdleEvent::Kind::Flags;
+        ev.seq = (int)num;
+        size_t f = line.find("FLAGS", w0);
+        if (f != std::string::npos) {
+            size_t ob = line.find('(', f), cb = line.find(')', f);
+            if (ob != std::string::npos && cb != std::string::npos && cb > ob)
+                ev.flags = line.substr(ob, cb - ob + 1);
+        }
+    } else if (word == "EXPUNGE") {
+        ev.kind = IdleEvent::Kind::Expunge;
+        ev.seq = (int)num;
+    } else if (word == "EXISTS") {
+        ev.kind = IdleEvent::Kind::Exists;
+        ev.count = (int)num;
+    } else if (word == "RECENT") {
+        ev.kind = IdleEvent::Kind::Recent;
+        ev.count = (int)num;
+    }
+    return ev;
+}
+
+bool ImapClient::idle_begin(std::string &err) {
+    if (m_fd < 0) { err = "not connected"; return false; }
+    if (!m_idle_tag.empty()) return true;   // already idling
+    std::string tag = send_with_tag("IDLE");
+    if (tag.empty()) {
+        err = "failed to send IDLE (connection lost)";
+        return false;
+    }
+    /* The "+ idling" continuation should arrive first, but untagged
+     * responses may legally precede it — keep them for the next idle_wait(). */
+    for (;;) {
+        std::string line;
+        if (!read_logical_line(line, err))
+            return false;
+        if (!line.empty() && line[0] == '+') {
+            m_idle_tag = tag;
+            imap_dbg("IDLE begun (tag=%s)", tag.c_str());
+            return true;
+        }
+        if (starts_with(line, tag + " ")) {
+            err = line.substr(tag.size() + 1);   // NO / BAD — server refused
+            return false;
+        }
+        m_idle_pending.push_back(parse_idle_line(line));
+    }
+}
+
+bool ImapClient::idle_wait(std::vector<IdleEvent> &events, int timeout_ms,
+                           std::string &err) {
+    events = m_idle_pending;
+    m_idle_pending.clear();
+    if (m_idle_tag.empty()) { err = "not idling"; return false; }
+    /* Drain complete lines already buffered (decompressed plaintext) before
+     * parking on the socket. */
+    while (m_rbuf.find('\n') != std::string::npos) {
+        std::string line;
+        if (!read_logical_line(line, err)) return false;
+        events.push_back(parse_idle_line(line));
+    }
+    int r = nmail_sock_wait_readable(m_fd, timeout_ms);
+    if (r < 0) { err = "connection to the server was lost"; return false; }
+    if (r == 0) return true;   // timeout, no events
+    for (;;) {
+        std::string line;
+        if (!read_logical_line(line, err)) return false;
+        events.push_back(parse_idle_line(line));
+        if (m_rbuf.find('\n') != std::string::npos) continue;
+        if (nmail_sock_wait_readable(m_fd, 0) == 1) continue;
+        break;
+    }
+    return true;
+}
+
+bool ImapClient::idle_done(std::string &err) {
+    if (m_idle_tag.empty()) return true;   // wasn't idling
+    std::string tag = m_idle_tag;
+    m_idle_tag.clear();
+    imap_dbg(">> DONE");
+    const char wire[] = "DONE\r\n";
+    bool sent;
+    if (m_compressed && m_deflate_state) {
+        std::string derr;
+        sent = deflate_and_send(wire, derr);
+    } else {
+        sent = nmail_sock_send(m_fd, wire, (int)sizeof(wire) - 1) >= 0;
+    }
+    if (!sent) {
+        err = "failed to send DONE (connection lost)";
+        return false;
+    }
+    std::vector<std::string> untagged;
+    if (!wait_tagged(tag, untagged, err))
+        return false;
+    /* Pushes that raced the DONE are kept for the next idle_wait()/sync. */
+    for (auto &line : untagged)
+        m_idle_pending.push_back(parse_idle_line(line));
+    return true;
+}
+
 bool ImapClient::enable_qresync(std::string &err) {
     if (m_qresync_enabled) return true;
     if (!has_enable()) { imap_dbg("ENABLE QRESYNC skipped: server lacks ENABLE"); err = "server does not advertise ENABLE"; return false; }
@@ -1873,6 +2001,9 @@ bool ImapClient::select_folder(const std::string &name, int &exists,
         imap_dbg("SELECT '%s' FAILED: %s", name.c_str(), err.c_str());
         return false;
     }
+    /* Any IDLE pushes collected before this SELECT belong to the previous
+     * mailbox — drop them rather than attribute them to the new one. */
+    m_idle_pending.clear();
     for (const std::string &line : untagged) {
         /* RFC 3501: "* <n> EXISTS" — require EXISTS as its own token so a
          * stray "EXISTS" inside another atom cannot clobber the count. */

@@ -53,6 +53,12 @@ public:
                        const std::string &)>                    cb_moved;
     /* A message was flagged \Seen on the server. */
     std::function<void(const std::string &, int)>               cb_seen;
+    /* IDLE push: another session changed a message's \Seen flag
+     * (folder, seq, new state). */
+    std::function<void(const std::string &, int, bool)>         cb_flag_seen;
+    /* IDLE push: a message was expunged (folder, seq; higher seqs shift
+     * down by one). */
+    std::function<void(const std::string &, int)>               cb_expunged;
     /* FETCH summaries progress (worker thread marshals via deliver). */
     std::function<void(const std::string &, int done, int total)> cb_progress;
 
@@ -158,6 +164,11 @@ private:
     void do_prefetch(const Cmd &cmd);
     void do_prefetch_uid(const Cmd &cmd);
     void run();
+    /* Park in IMAP IDLE (RFC 2177) until the server pushes an event, a
+     * command is posted, or a timer (auto-check, mark-seen, 29-min IDLE
+     * re-arm) comes due.  Dispatches pushes via cb_flag_seen / cb_expunged
+     * and queues resync commands for new mail / removals. */
+    void run_idle(const std::chrono::steady_clock::time_point &next_check);
 
     // QRESYNC persistence (RFC 7162).  Per-folder anchor stored at
     // config_dir()/qresync.json keyed by host|username|folder.
@@ -224,4 +235,7 @@ private:
     ImapClient::QResyncState m_pending_qresync_state{};
     std::string m_pending_qresync_folder;
     bool m_qresync_pending = false;
+    /* Set when the server refuses IDLE (NO/BAD) so we stop retrying it on
+     * this connection; cleared on (re)connect. */
+    bool m_idle_disabled = false;
 };
