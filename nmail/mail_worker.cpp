@@ -1256,14 +1256,27 @@ bool MailWorker::do_move(const Cmd &cmd) {
 }
 
 void MailWorker::do_mark_seen(const Cmd &cmd) {
-    if (cmd.seq <= 0 || cmd.folder.empty() || !m_imap.is_open())
+    mail_dbg("[mail] MarkSeen folder='%s' seq=%d uid=%u modseq=%llu\n",
+             cmd.folder.c_str(), cmd.seq, cmd.uid,
+             (unsigned long long)cmd.modseq);
+    if (cmd.folder.empty() || !m_imap.is_open()) {
+        mail_dbg("[mail] MarkSeen skipped: not connected or no folder\n");
         return;
-    if (!folder_wanted(cmd.folder))
+    }
+    if (cmd.seq <= 0 && cmd.uid == 0) {
+        mail_dbg("[mail] MarkSeen skipped: no seq/uid\n");
+        return;
+    }
+    if (!folder_wanted(cmd.folder)) {
+        mail_dbg("[mail] MarkSeen skipped: folder no longer wanted\n");
         return;   // don't SELECT a mailbox the user just left
+    }
     std::string err;
     if (m_imap.selected_folder() != cmd.folder &&
-        !m_imap.ensure_selected(cmd.folder, err))
+        !m_imap.ensure_selected(cmd.folder, err)) {
+        mail_dbg("[mail] MarkSeen SELECT failed: %s\n", err.c_str());
         return;
+    }
 
     // Resolve UID/MODSEQ for the CONDSTORE path from the summaries cache.
     // The timer may have been armed with an explicit uid/modseq; otherwise
@@ -1282,12 +1295,12 @@ void MailWorker::do_mark_seen(const Cmd &cmd) {
         }
     }
 
-    bool use_uid = (uid != 0 && (m_imap.has_condstore() || m_imap.has_qresync()));
-    // If we have a UID path, prefer UID STORE (stable across EXPUNGE).
+    // Prefer UID STORE whenever we have a UID (stable across EXPUNGE).
     // When CONDSTORE is available and modseq != 0, UNCHANGEDSINCE is added
     // and a [MODIFIED] response is treated as success inside mark_seen_uid.
     auto do_store = [&]() -> bool {
-        if (use_uid) return m_imap.mark_seen_uid(uid, modseq, err);
+        if (uid != 0) return m_imap.mark_seen_uid(uid, modseq, err);
+        if (cmd.seq <= 0) { err = "no seq/uid"; return false; }
         return m_imap.mark_seen(cmd.seq, err);
     };
 
@@ -1296,20 +1309,25 @@ void MailWorker::do_mark_seen(const Cmd &cmd) {
             // Benign: concurrent modification reported as error by
             // a non-CONDSTORE path (should not happen via mark_seen_uid
             // which already converts it to success), but handle anyway.
-        } else if (!ImapClient::is_connection_error(err))
+        } else if (!ImapClient::is_connection_error(err)) {
+            mail_dbg("[mail] MarkSeen STORE failed: %s\n", err.c_str());
             return;
-        else {
+        } else {
             std::string re;
             if (!m_imap.reconnect(re) ||
                 !m_imap.ensure_selected(cmd.folder, err) ||
                 !do_store()) {
                 if (ImapClient::is_modified_error(err)) {
                     // fall through to success
-                } else
+                } else {
+                    mail_dbg("[mail] MarkSeen STORE failed after reconnect: %s\n",
+                             err.c_str());
                     return;
+                }
             }
         }
     }
+    mail_dbg("[mail] MarkSeen ok seq=%d uid=%u\n", cmd.seq, uid);
     std::string folder = cmd.folder;
     int seq = cmd.seq;
     deliver([this, folder, seq]() { if (cb_seen) cb_seen(folder, seq); });
@@ -1516,6 +1534,14 @@ void MailWorker::run() {
                  * first slept until check_interval (minutes) and the
                  * UI stayed on "Opening Trash...". */
                 if (m_quit || !m_queue.empty())
+                    break;
+                /* A due timer is work.  Do not park in IDLE or STORE \Seen
+                 * never runs: IDLE exits when the mark-read / auto-check
+                 * deadline fires, then this loop used to pick IDLE again
+                 * and spin IDLE/DONE without ever synthesizing MarkSeen. */
+                auto now_wait = std::chrono::steady_clock::now();
+                if ((m_seen_seq > 0 && now_wait >= m_seen_at) ||
+                    now_wait >= next_check)
                     break;
                 /* Server advertises IDLE and the wanted mailbox is SELECTed:
                  * park on the socket instead of the CV so the server can

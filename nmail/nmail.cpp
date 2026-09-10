@@ -248,7 +248,7 @@ public:
     EmailData                m_pending_email;
     static constexpr double  kPreviewSettleSec = 0.10;
     /* Dwell time before a viewed message is flagged \Seen on the server. */
-    static constexpr double  kMarkReadSec = 5.0;
+    static constexpr double  kMarkReadSec = 2.0;
 
     /* ---- inline/remote images in the reading pane ---- */
     std::unordered_map<std::string, int>         m_img_tex;        // src -> nvg id
