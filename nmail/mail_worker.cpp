@@ -1592,8 +1592,14 @@ void MailWorker::run() {
                 std::string err;
                 int exists = 0;
                 if (m_imap.select_folder(want, exists, err) &&
-                    folder_wanted(want))
-                    do_fetch_summaries(want, exists, /*is_auto=*/true);
+                    folder_wanted(want)) {
+                    /* Mailbox SHRANK since the last check: messages were
+                     * removed elsewhere — a delta fetch (new seqs only)
+                     * cannot see removals, so refetch the whole loaded
+                     * window to reconcile. */
+                    do_fetch_summaries(want, exists,
+                        /*is_auto=*/exists >= m_last_known_exists);
+                }
             }
             break;
         }
@@ -1793,13 +1799,27 @@ void MailWorker::run_idle(const std::chrono::steady_clock::time_point &next_chec
         for (const auto &ev : events) {
             switch (ev.kind) {
             case ImapClient::IdleEvent::Kind::Flags: {
-                /* Another session changed flags (e.g. marked read on the
-                 * phone): update the row live. */
-                bool seen = ev.flags.find("\\Seen") != std::string::npos;
+                if (ev.flags.empty())
+                    break;   // no flag list -> nothing reliable to apply
                 std::string f = folder;
                 int seq = ev.seq;
                 mail_dbg("[mail] IDLE push: FLAGS seq=%d %s\n", seq,
                          ev.flags.c_str());
+                if (ev.flags.find("\\Deleted") != std::string::npos) {
+                    /* Another client marked the message \Deleted but has not
+                     * expunged it yet (Apple Mail "erase deleted messages:
+                     * later" does exactly this — no EXPUNGE push ever
+                     * comes).  Hide the row now, as if the EXPUNGE had
+                     * arrived; mailbox counts stay untouched until the real
+                     * expunge. */
+                    deliver([this, f, seq]() {
+                        if (cb_expunged) cb_expunged(f, seq);
+                    });
+                    break;
+                }
+                /* Another session changed flags (e.g. marked read on the
+                 * phone): update the row live. */
+                bool seen = ev.flags.find("\\Seen") != std::string::npos;
                 deliver([this, f, seq, seen]() {
                     if (cb_flag_seen) cb_flag_seen(f, seq, seen);
                 });

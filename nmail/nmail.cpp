@@ -1846,14 +1846,22 @@ public:
         if (!acct_ptr) return;
         AccountSession &acct = *acct_ptr;
         uint32_t gone_uid = uid_for_seq(acct, folder, seq);
+        /* A duplicate push (e.g. the EXPUNGE echo of our own MOVE arriving
+         * after on_moved already cleaned up) must not renumber a second
+         * time -- only adjust seqs when this event actually removed a row. */
+        bool removed_any = false;
         auto remove_from_vec = [&](std::vector<MailSummary> &vec){
+            size_t before = vec.size();
             if (gone_uid) {
                 vec.erase(std::remove_if(vec.begin(), vec.end(),
                     [&](const MailSummary &s){ return s.uid == gone_uid; }), vec.end());
             } else {
                 vec.erase(std::remove_if(vec.begin(), vec.end(),
                     [&](const MailSummary &s){ return s.seq == seq; }), vec.end());
-                for (auto &s : vec) if (s.seq > seq) --s.seq;
+            }
+            if (vec.size() != before) {
+                removed_any = true;
+                if (!gone_uid) for (auto &s : vec) if (s.seq > seq) --s.seq;
             }
         };
         auto it = acct.summary_cache.find(folder);
@@ -1876,6 +1884,17 @@ public:
             return;
         }
         remove_from_vec(m_summaries);
+        bool removed = false;
+        if (m_email_list) {
+            if (gone_uid) removed = m_email_list->remove_by_uid(gone_uid);
+            if (!removed) removed = m_email_list->remove_seq(seq);
+        }
+        if (!removed_any && !removed) {
+            /* Stale/duplicate push: nothing was removed anywhere, so none of
+             * the seq-dependent state may be adjusted. */
+            redraw();
+            return;
+        }
         if (m_rendered_seq == seq) {
             m_has_message = false;
             m_rendered_seq = -1;
@@ -1893,11 +1912,6 @@ public:
         else if (!gone_uid && m_loading_seq > seq) --m_loading_seq;
         if (m_pending_seq == seq) { m_pending_seq = -1; m_preview_settle_at = 0; }
         else if (!gone_uid && m_pending_seq > seq) { --m_pending_seq; --m_pending_email.seq; }
-        bool removed = false;
-        if (m_email_list) {
-            if (gone_uid) removed = m_email_list->remove_by_uid(gone_uid);
-            if (!removed) removed = m_email_list->remove_seq(seq);
-        }
         if (removed && m_email_list) {
             const EmailData* nd = m_email_list->selected_data();
             if (nd) {
