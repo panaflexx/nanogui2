@@ -9,7 +9,8 @@
 static std::function<void(double, int, int)> g_macosZoomCallback;
 
 @interface _NanoGUIPinchTarget : NSObject
-+ (void)handleMagnify:(NSMagnificationGestureRecognizer *)recognizer;
++ (_NanoGUIPinchTarget *)sharedInstance;
+- (void)handleMagnify:(NSMagnificationGestureRecognizer *)recognizer;
 @end
 
 @implementation _NanoGUIPinchTarget
@@ -24,8 +25,16 @@ static std::function<void(double, int, int)> g_macosZoomCallback;
 
 - (void)handleMagnify:(NSMagnificationGestureRecognizer *)recognizer {
     if (!g_macosZoomCallback) return;
+    if (recognizer.state != NSGestureRecognizerStateChanged)
+        return;
 
+    // magnification is cumulative from gesture-begin. Reset after reading
+    // so each callback gets an incremental delta (0.0 = no change).
     double mag = [recognizer magnification];
+    recognizer.magnification = 0.0;
+    if (mag == 0.0)
+        return;
+
     NSPoint loc = [recognizer locationInView:recognizer.view];
 
     // Flip Y to match NanoGUI coordinate system (origin top-left)
@@ -106,7 +115,7 @@ void enable_macos_pinch_zoom(void *nswindow) {
 
     NSMagnificationGestureRecognizer *recognizer =
         [[NSMagnificationGestureRecognizer alloc]
-         initWithTarget:[_NanoGUIPinchTarget class]
+         initWithTarget:[_NanoGUIPinchTarget sharedInstance]
          action:@selector(handleMagnify:)];
 
     [view addGestureRecognizer:recognizer];

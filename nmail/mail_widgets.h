@@ -51,7 +51,11 @@ public:
     void set_caption(const std::string &c) { m_caption = c; }
 
     int badge() const { return m_badge; }
-    void set_badge(int b) { m_badge = b; }
+    void set_badge(int b) {
+        if (m_badge == b) return;
+        m_badge = b;
+        propagate_cache_dirty();
+    }
 
     bool selected() const;
 
@@ -127,6 +131,11 @@ public:
     void update_account(const std::string &account_id, const std::string &label,
                         const std::vector<MailFolder> &folders,
                         const std::string &selected_name = "");
+
+    /* Set one folder's unread badge and recompute the account header total.
+     * `folder` is the full IMAP name (FolderItem tooltip). */
+    void set_folder_unseen(const std::string &account_id, const std::string &folder,
+                           int unseen);
 
     /* Drop an account's section entirely (account removed in Preferences). */
     void remove_account(const std::string &account_id);

@@ -661,6 +661,7 @@ public:
         acct.move_inflight = true;
         update_move_buttons();
         set_status("Moving to " + dest + "...");
+        acct.worker->cancel_seen();
         acct.worker->move_message(acct.current_folder, seq, dest);
     }
     void on_moved(const std::string &account_id, const std::string &folder, int seq,
@@ -670,6 +671,10 @@ public:
         AccountSession &acct = *acct_ptr;
         acct.move_inflight = false;
         uint32_t moved_uid = uid_for_seq(acct, folder, seq);
+        if (is_unseen(acct, folder, seq, moved_uid)) {
+            bump_folder_unseen(acct, account_id, folder, -1);
+            bump_folder_unseen(acct, account_id, dest, +1);
+        }
         auto remove_from_vec = [&](std::vector<MailSummary> &vec){
             if (moved_uid) {
                 vec.erase(std::remove_if(vec.begin(), vec.end(),
@@ -1788,21 +1793,51 @@ public:
             acct.worker->schedule_seen(acct.current_folder, seq, kMarkReadSec);
     }
 
+    bool is_unseen(const AccountSession &acct, const std::string &folder,
+                   int seq, uint32_t uid) const {
+        auto match = [&](const MailSummary &s) {
+            return uid ? s.uid == uid : s.seq == seq;
+        };
+        auto it = acct.summary_cache.find(folder);
+        if (it != acct.summary_cache.end())
+            for (const MailSummary &s : it->second)
+                if (match(s)) return !s.seen;
+        if (folder == acct.current_folder)
+            for (const MailSummary &s : m_summaries)
+                if (match(s)) return !s.seen;
+        return false;
+    }
+
+    void bump_folder_unseen(AccountSession &acct, const std::string &account_id,
+                            const std::string &folder, int delta) {
+        if (!delta) return;
+        for (MailFolder &f : acct.folders) {
+            if (f.name != folder) continue;
+            f.unseen = std::max(0, f.unseen + delta);
+            if (m_folder_view)
+                m_folder_view->set_folder_unseen(account_id, folder, f.unseen);
+            return;
+        }
+    }
+
     /* The server confirmed the flag: mirror it locally so the row stops
      * rendering as unread. */
     void on_seen(const std::string &account_id, const std::string &folder, int seq) {
         AccountSession *acct_ptr = account(account_id);
         if (!acct_ptr) return;
         AccountSession &acct = *acct_ptr;
-        auto mark = [seq](std::vector<MailSummary> &v) {
+        bool already = false;
+        auto mark = [seq, &already](std::vector<MailSummary> &v) {
             for (MailSummary &s : v)
-                if (s.seq == seq) { s.seen = true; break; }
+                if (s.seq == seq) { already = already || s.seen; s.seen = true; break; }
         };
         auto it = acct.summary_cache.find(folder);
         if (it != acct.summary_cache.end()) mark(it->second);
-        if (account_id != m_current_account_id ||
-            folder != acct.wanted_folder || folder != acct.current_folder) return;
-        mark(m_summaries);
+        const bool viewing = account_id == m_current_account_id &&
+            folder == acct.wanted_folder && folder == acct.current_folder;
+        if (viewing) mark(m_summaries);
+        if (!already) bump_folder_unseen(acct, account_id, folder, -1);
+        if (!viewing) { redraw(); return; }
         // Try UID first (QRESYNC path where seq may be 0), then fallback to seq
         bool done = false;
         if (m_email_list) {
@@ -1821,15 +1856,23 @@ public:
         AccountSession *acct_ptr = account(account_id);
         if (!acct_ptr) return;
         AccountSession &acct = *acct_ptr;
-        auto mark = [seq, seen](std::vector<MailSummary> &v) {
+        bool found = false, was = false;
+        auto mark = [seq, seen, &found, &was](std::vector<MailSummary> &v) {
             for (MailSummary &s : v)
-                if (s.seq == seq) { s.seen = seen; break; }
+                if (s.seq == seq) {
+                    if (!found) { found = true; was = s.seen; }
+                    s.seen = seen;
+                    break;
+                }
         };
         auto it = acct.summary_cache.find(folder);
         if (it != acct.summary_cache.end()) mark(it->second);
-        if (account_id != m_current_account_id ||
-            folder != acct.wanted_folder || folder != acct.current_folder) return;
-        mark(m_summaries);
+        const bool viewing = account_id == m_current_account_id &&
+            folder == acct.wanted_folder && folder == acct.current_folder;
+        if (viewing) mark(m_summaries);
+        if (found && was != seen)
+            bump_folder_unseen(acct, account_id, folder, seen ? -1 : 1);
+        if (!viewing) { redraw(); return; }
         bool done = false;
         if (m_email_list) {
             uint32_t uid = uid_for_seq(acct, folder, seq);
@@ -1846,6 +1889,8 @@ public:
         if (!acct_ptr) return;
         AccountSession &acct = *acct_ptr;
         uint32_t gone_uid = uid_for_seq(acct, folder, seq);
+        if (is_unseen(acct, folder, seq, gone_uid))
+            bump_folder_unseen(acct, account_id, folder, -1);
         /* A duplicate push (e.g. the EXPUNGE echo of our own MOVE arriving
          * after on_moved already cleaned up) must not renumber a second
          * time -- only adjust seqs when this event actually removed a row. */

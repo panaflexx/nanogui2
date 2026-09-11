@@ -291,6 +291,21 @@ void FolderView::update_account(const std::string &account_id, const std::string
     if (screen()) screen()->perform_layout();
 }
 
+void FolderView::set_folder_unseen(const std::string &account_id,
+                                   const std::string &folder, int unseen) {
+    auto it = m_sections.find(account_id);
+    if (it == m_sections.end()) return;
+    AccountSection &sec = it->second;
+    int total = 0;
+    for (Widget *child : sec.children->children()) {
+        auto *item = static_cast<FolderItem *>(child);
+        if (item->tooltip() == folder)
+            item->set_badge(unseen);
+        total += std::max(0, item->badge());
+    }
+    sec.header->set_badge(total);
+}
+
 void FolderView::remove_account(const std::string &account_id) {
     auto it = m_sections.find(account_id);
     if (it == m_sections.end()) return;
