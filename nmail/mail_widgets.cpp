@@ -617,8 +617,12 @@ bool EmailListView::remove_by_uid(uint32_t uid) {
     if (uid == 0) return false;
     for (int i = 0; i < (int)m_emails.size(); ++i) {
         if (m_emails[i].uid != uid) continue;
+        int gone_seq = m_emails[i].seq;
         m_emails.erase(m_emails.begin() + i);
-        // UIDs are stable (QRESYNC) — no shifting of remaining uids/seqs.
+        // UIDs are stable; IMAP sequence numbers still shift after EXPUNGE.
+        if (gone_seq > 0)
+            for (auto &e : m_emails)
+                if (e.seq > gone_seq) --e.seq;
         if (m_selected == i) {
             if (i < (int)m_emails.size())
                 m_selected = i;

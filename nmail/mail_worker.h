@@ -77,7 +77,7 @@ public:
      * all key off this so an in-flight INBOX fetch cannot clobber Trash. */
     void select_folder(const std::string &name);
     void fetch_body(int seq);
-    void fetch_body(const std::string &folder, int seq) { post(Type::FetchBody, folder, seq); }
+    void fetch_body(const std::string &folder, int seq, uint32_t uid = 0);
     void fetch_older(const std::string &folder)         { post(Type::FetchOlder, folder); }
     /* Flag `seq` in `folder` as \Seen once `delay_sec` has passed without a
      * newer request.  Calling again replaces the pending one, so moving to a
@@ -96,7 +96,7 @@ public:
     // UID-aware prefetch: stable across QRESYNC seq shifts; uses UID FETCH.
     void ensure_visible_cached_uid(const std::string &folder,
                                    const std::vector<uint32_t> &uids);
-    // UID body fetch (foreground path uses seq; bg uses uid when available).
+    // UID body fetch (foreground and prefetch use this when a UID is known).
     bool fetch_message_by_uid(uint32_t uid, MailMessage &msg, std::string &err,
                               std::function<bool()> still_wanted = {});
     bool is_compressed() const;

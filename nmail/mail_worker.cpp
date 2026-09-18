@@ -248,7 +248,21 @@ void MailWorker::fetch_body(int seq) {
     std::string folder;
     { std::lock_guard<std::mutex> l(m_mutex); folder = m_wanted_folder.empty()
           ? m_selected_folder : m_wanted_folder; }
-    post(Type::FetchBody, folder, seq);
+    fetch_body(folder, seq, 0);
+}
+
+void MailWorker::fetch_body(const std::string &folder, int seq, uint32_t uid) {
+    {
+        std::lock_guard<std::mutex> lock(m_mutex);
+        Cmd c;
+        c.type   = Type::FetchBody;
+        c.folder = folder;
+        c.seq    = seq;
+        c.uid    = uid;
+        c.epoch  = m_epoch;
+        m_queue.push_back(c);
+    }
+    m_cv.notify_one();
 }
 
 void MailWorker::schedule_seen(const std::string &folder, int seq, double delay_sec) {
@@ -1217,6 +1231,9 @@ bool MailWorker::do_move(const Cmd &cmd) {
                 if (c.folder != folder) return false;
                 if (c.type == Type::Prefetch && c.seq == seq) return true;
                 if (c.type == Type::PrefetchUid && uid_moving && c.uid == uid_moving) return true;
+                if (c.type == Type::FetchBody &&
+                    ((seq && c.seq == seq) || (uid_moving && c.uid == uid_moving)))
+                    return true;
                 return false;
             }),
             m_queue.end());
@@ -1238,11 +1255,28 @@ bool MailWorker::do_move(const Cmd &cmd) {
         report_status("Ready");
         return false;
     }
-    // Invalidate body/prefetch caches for this folder — sequence numbers
-    // shift after EXPUNGE, so any stale seq->body mapping is wrong.
+    // Sequence numbers shift after EXPUNGE; drop seq-based prefetch and
+    // keep the worker's idea of EXISTS in step with the mailbox.
     {
         std::lock_guard<std::mutex> lock(m_mutex);
         cancel_prefetch_locked();
+        if (m_last_known_exists > 0) --m_last_known_exists;
+        if (m_first_loaded > seq)    --m_first_loaded;
+        auto itc = m_summaries_cache.find(folder);
+        if (itc != m_summaries_cache.end()) {
+            uint32_t uid_moved = 0;
+            for (auto &s : itc->second)
+                if (s.seq == seq && s.uid) { uid_moved = s.uid; break; }
+            auto &v = itc->second;
+            if (uid_moved)
+                v.erase(std::remove_if(v.begin(), v.end(),
+                    [&](const MailSummary &s){ return s.uid == uid_moved; }), v.end());
+            else
+                v.erase(std::remove_if(v.begin(), v.end(),
+                    [&](const MailSummary &s){ return s.seq == seq; }), v.end());
+            if (seq > 0)
+                for (auto &s : v) if (s.seq > seq) --s.seq;
+        }
     }
     report_status("Moved to " + dest);
     deliver([this, folder, seq, dest]() {
@@ -1705,7 +1739,12 @@ void MailWorker::run() {
             report_status("Fetching message...", want_folder);
             MailMessage msg;
             std::string err;
-            if (!m_imap.fetch_message(cmd.seq, msg, err)) {
+            auto do_fetch = [&]() {
+                if (cmd.uid)
+                    return m_imap.fetch_message_by_uid(cmd.uid, msg, err);
+                return m_imap.fetch_message(cmd.seq, msg, err);
+            };
+            if (!do_fetch()) {
                 if (is_stale_err(err) || !folder_wanted(want_folder))
                     break;
                 if (ImapClient::is_connection_error(err)) {
@@ -1714,7 +1753,7 @@ void MailWorker::run() {
                         if (!want_folder.empty())
                             m_imap.ensure_selected(want_folder, re);
                         err.clear();
-                        if (m_imap.fetch_message(cmd.seq, msg, err)) {
+                        if (do_fetch()) {
                             report_status("Ready (reconnected)", want_folder);
                             deliver([this, folder = want_folder, seq = cmd.seq, msg]() {
                                 if (cb_body) cb_body(folder, seq, msg);

@@ -322,7 +322,8 @@ public:
     // IMAP sequence numbers shift after EXPUNGE, so remaining seqs > deleted
     // are decremented to stay in sync without a full refresh.
     bool remove_seq(int seq);
-    // UID-based removal for QRESYNC: UIDs are stable, so no seq shifting.
+    // UID-based removal: UIDs stay put, but IMAP sequence numbers still
+    // shift after EXPUNGE, so remaining seqs > the removed row are decremented.
     bool remove_by_uid(uint32_t uid);
 
     void clear_selection();

@@ -1,6 +1,7 @@
 *.exe
 *.lib
 *.cmake
+!resources/*.cmake
 .DS_Store
 ext_build
 nanogui_resources.*

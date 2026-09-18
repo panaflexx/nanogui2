@@ -177,6 +177,10 @@ struct AccountSession {
     bool                     folder_loading = false;
     bool                     older_inflight = false;
     bool                     move_inflight  = false;
+    /* Seq of a message we just MOVE'd.  The server's EXPUNGE echo of that
+     * MOVE must not run on_expunged after we have already resequenced. */
+    std::string              local_expunge_folder;
+    int                      local_expunge_seq = 0;
     /* Session-only caches; dropped on Refresh or reconnect. */
     std::map<std::string, std::vector<MailSummary>> summary_cache;
     std::map<std::string, MailMessage>              body_cache;
@@ -356,6 +360,24 @@ public:
         body_put(current_acct(), folder, uid, seq, msg);
     }
     void body_put(const std::string &folder, const EmailData &d, const MailMessage &msg) { body_put(folder, d.uid, d.seq, msg); }
+
+    /* After EXPUNGE/MOVE: drop the vanished UID key and every seq-keyed
+     * body for this folder (those numbers just shifted). Other UID keys
+     * stay — they are stable and the next click should not re-FETCH. */
+    void drop_expunged_bodies(AccountSession &acct, const std::string &folder,
+                              int seq, uint32_t uid) {
+        std::vector<std::string> drop;
+        const std::string gone_u = uid ? body_key(folder, uid, 0) : "";
+        const std::string s_prefix = folder + "|S";
+        const std::string l_prefix = folder + ":";
+        for (auto &kv : acct.body_cache) {
+            const std::string &k = kv.first;
+            if (!gone_u.empty() && k == gone_u) { drop.push_back(k); continue; }
+            if (k.rfind(s_prefix, 0) == 0 || k.rfind(l_prefix, 0) == 0)
+                drop.push_back(k);
+        }
+        for (auto &k : drop) acct.body_cache.erase(k);
+    }
     std::string m_status_base;
 
     ContactStore m_contacts;
@@ -689,25 +711,19 @@ public:
             folder == acct.wanted_folder && folder == acct.current_folder;
         if (viewing_source) {
             remove_from_vec(m_summaries);
-            // On QRESYNC (uid present) seqs are unstable only after EXPUNGE;
-            // decrement is legacy behavior for non-UID servers. Keep but only
-            // when uid not available to avoid corrupting seqs that will be
-            // refreshed on next SELECT.
-            if (!moved_uid) for (auto &s : m_summaries) if (s.seq > seq) --s.seq;
+            // MOVE/EXPUNGE always renumbers IMAP sequence numbers, even
+            // when UIDs are stable. Skipping this left FETCH seq pointing
+            // past EXISTS ("NO No messages matched") for later rows.
+            if (seq > 0) for (auto &s : m_summaries) if (s.seq > seq) --s.seq;
         }
         auto it = acct.summary_cache.find(folder);
         if (it != acct.summary_cache.end()) {
             remove_from_vec(it->second);
-            if (!moved_uid) for (auto &s : it->second) if (s.seq > seq) --s.seq;
+            if (seq > 0) for (auto &s : it->second) if (s.seq > seq) --s.seq;
         }
-        // body caches use stable UIDs on QRESYNC; legacy seq keys shift after EXPUNGE.
-        // If uid present, only that message needs dropping — but to stay conservative, drop all for folder.
-        std::vector<std::string> drop;
-        std::string p1 = folder + "|";
-        std::string p2 = folder + ":";
-        for (auto &kv : acct.body_cache)
-            if (kv.first.rfind(p1, 0) == 0 || kv.first.rfind(p2, 0) == 0) drop.push_back(kv.first);
-        for (auto &k : drop) acct.body_cache.erase(k);
+        drop_expunged_bodies(acct, folder, seq, moved_uid);
+        acct.local_expunge_folder = folder;
+        acct.local_expunge_seq = seq;
         if (!viewing_source) {
             set_status("Moved to " + dest);
             update_move_buttons();
@@ -725,13 +741,13 @@ public:
             parse_markdown(doc, "*Message moved to " + dest + "*", text_color(), 18.f);
             m_view->set_document(std::move(doc));
             m_view_scroll->set_scroll(0.0f);
-        } else if (!moved_uid && m_rendered_seq > seq) {
+        } else if (seq > 0 && m_rendered_seq > seq) {
             --m_rendered_seq;
         }
         if (m_loading_seq == seq) m_loading_seq = -1;
-        else if (!moved_uid && m_loading_seq > seq) --m_loading_seq;
+        else if (seq > 0 && m_loading_seq > seq) --m_loading_seq;
         if (m_pending_seq == seq) { m_pending_seq = -1; m_preview_settle_at = 0; }
-        else if (!moved_uid && m_pending_seq > seq) { --m_pending_seq; --m_pending_email.seq; }
+        else if (seq > 0 && m_pending_seq > seq) { --m_pending_seq; --m_pending_email.seq; }
         bool removed = false;
         if (m_email_list) {
             if (moved_uid) removed = m_email_list->remove_by_uid(moved_uid);
@@ -1908,6 +1924,15 @@ public:
         AccountSession *acct_ptr = account(account_id);
         if (!acct_ptr) return;
         AccountSession &acct = *acct_ptr;
+        /* EXPUNGE echo of our own MOVE: on_moved already removed the row
+         * and decremented higher seqs.  After that shift, `seq` now names
+         * a different message — applying this event would delete it too. */
+        if (folder == acct.local_expunge_folder && seq == acct.local_expunge_seq) {
+            acct.local_expunge_folder.clear();
+            acct.local_expunge_seq = 0;
+            redraw();
+            return;
+        }
         uint32_t gone_uid = uid_for_seq(acct, folder, seq);
         if (is_unseen(acct, folder, seq, gone_uid))
             bump_folder_unseen(acct, account_id, folder, -1);
@@ -1926,21 +1951,13 @@ public:
             }
             if (vec.size() != before) {
                 removed_any = true;
-                if (!gone_uid) for (auto &s : vec) if (s.seq > seq) --s.seq;
+                if (seq > 0) for (auto &s : vec) if (s.seq > seq) --s.seq;
             }
         };
         auto it = acct.summary_cache.find(folder);
         if (it != acct.summary_cache.end())
             remove_from_vec(it->second);
-        /* Body caches are uid-keyed (stable across EXPUNGE) or seq-keyed
-         * (shifted) -- conservative drop for the folder, as in on_moved. */
-        std::vector<std::string> drop;
-        std::string p1 = folder + "|";
-        std::string p2 = folder + ":";
-        for (auto &kv : acct.body_cache)
-            if (kv.first.rfind(p1, 0) == 0 || kv.first.rfind(p2, 0) == 0)
-                drop.push_back(kv.first);
-        for (auto &k : drop) acct.body_cache.erase(k);
+        drop_expunged_bodies(acct, folder, seq, gone_uid);
         const bool viewing =
             account_id == m_current_account_id &&
             folder == acct.wanted_folder && folder == acct.current_folder;
@@ -1970,13 +1987,13 @@ public:
             parse_markdown(doc, "*Message deleted*", text_color(), 18.f);
             m_view->set_document(std::move(doc));
             m_view_scroll->set_scroll(0.0f);
-        } else if (!gone_uid && m_rendered_seq > seq) {
+        } else if (seq > 0 && m_rendered_seq > seq) {
             --m_rendered_seq;
         }
         if (m_loading_seq == seq) m_loading_seq = -1;
-        else if (!gone_uid && m_loading_seq > seq) --m_loading_seq;
+        else if (seq > 0 && m_loading_seq > seq) --m_loading_seq;
         if (m_pending_seq == seq) { m_pending_seq = -1; m_preview_settle_at = 0; }
-        else if (!gone_uid && m_pending_seq > seq) { --m_pending_seq; --m_pending_email.seq; }
+        else if (seq > 0 && m_pending_seq > seq) { --m_pending_seq; --m_pending_email.seq; }
         if (removed && m_email_list) {
             const EmailData* nd = m_email_list->selected_data();
             if (nd) {
@@ -2019,7 +2036,7 @@ public:
         }
         m_loading_seq = seq;
         show_preview_stub_with_loading(d);
-        acct.worker->fetch_body(seq);
+        acct.worker->fetch_body(acct.current_folder, seq, d.uid);
         redraw();
     }
 
