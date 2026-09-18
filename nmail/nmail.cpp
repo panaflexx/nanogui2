@@ -1405,26 +1405,39 @@ public:
             return fresh;
         };
 
+        auto apply_new_unseen = [&](const std::vector<MailSummary> &fresh) {
+            int n = 0;
+            for (const MailSummary &s : fresh)
+                if (!s.seen) ++n;
+            if (n)
+                bump_folder_unseen(acct, account_id, folder, n);
+        };
+
         if (folder != acct.wanted_folder || !viewing_this_account) {
             auto &cache = acct.summary_cache[folder];
             auto fresh = merge_fresh(cache, sums);
             harvest(fresh);
+            apply_new_unseen(fresh);
+            redraw();
             return;
         }
 
         auto fresh = merge_fresh(m_summaries, sums);
         acct.summary_cache[folder] = m_summaries;
         harvest(fresh);
+        apply_new_unseen(fresh);
         // Vanished on auto-refresh: MailWorker patched its per-folder cache but
         // MailApp may still hold stale body entries for vanished UIDs. When
         // on_auto_summaries is not used for QRESYNC delta (auto path fetches only
         // new messages), we still defensively handle stale body keys if the
         // background worker later delivers a QRESYNC-style delta via cb_auto_summaries
         // (or if another client expunged messages between auto checks).
-        // For now just ensure compress badge is fresh if this is the wanted folder.
         if (!fresh.empty()) update_compress_badge();
         if (fresh.empty()) return;
-        if (folder != acct.current_folder) return;   // not looking at this folder
+        if (folder != acct.current_folder) {   // not looking at this folder
+            redraw();
+            return;
+        }
 
         /* Splice in only the rows passing the active filter; unlike
            apply_filter() this leaves scroll position and selection alone
@@ -1456,6 +1469,7 @@ public:
         set_status(std::to_string(fresh.size()) + " New email" +
                   (fresh.size() == 1 ? "" : "s") + compressSuffix());
         update_compress_badge();
+        redraw();
         glfwPostEmptyEvent();
     }
 
@@ -1640,8 +1654,14 @@ public:
         }
         std::string shown_title = (acct && m_accounts.size() > 1)
             ? acct->config.display_name() + ": " + title : title;
+        /* Auto-reconnect / periodic check can fail on every attempt.  One
+         * dialog is enough; skip while the previous one is still open. */
+        for (Widget *c : children())
+            if (c->id() == "nmail-imap-error")
+                return;
         auto *dlg = new MessageDialog(this, MessageDialog::Type::Warning,
                                       shown_title, msg, "OK", "", false);
+        dlg->set_id("nmail-imap-error");
         dlg->center();
     }
 

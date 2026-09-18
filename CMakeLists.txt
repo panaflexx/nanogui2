@@ -1,5 +1,48 @@
 cmake_minimum_required (VERSION 3.13..3.18)
 
+# Before project(): CMake's Darwin module runs `xcrun --sdk macosx --show-sdk-path`,
+# which picks the highest-numbered SDK, not the one that matches clang/ld.
+# A leftover newer SDK (e.g. MacOSX27.0) ships TBD files with architectures
+# (arm64e.x1) that the current CLT linker cannot parse, so the compiler ABI
+# check fails. Prefer the MacOSX.sdk symlink, which tracks the installed tools.
+if (CMAKE_HOST_SYSTEM_NAME STREQUAL "Darwin")
+  set(_nanogui_macos_sdk "")
+  foreach(_cand
+      "/Library/Developer/CommandLineTools/SDKs/MacOSX.sdk"
+      "/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk")
+    if (IS_DIRECTORY "${_cand}")
+      set(_nanogui_macos_sdk "${_cand}")
+      break()
+    endif()
+  endforeach()
+  if (_nanogui_macos_sdk)
+    get_filename_component(_nanogui_macos_sdk "${_nanogui_macos_sdk}" REALPATH)
+    set(_nanogui_req_sdk "")
+    if (CMAKE_OSX_SYSROOT)
+      set(_nanogui_req_sdk "${CMAKE_OSX_SYSROOT}")
+    elseif (DEFINED ENV{SDKROOT} AND NOT "$ENV{SDKROOT}" STREQUAL "")
+      set(_nanogui_req_sdk "$ENV{SDKROOT}")
+    endif()
+    set(_nanogui_sdk_unusable TRUE)
+    if (_nanogui_req_sdk AND EXISTS "${_nanogui_req_sdk}/usr/lib/libSystem.B.tbd")
+      file(READ "${_nanogui_req_sdk}/usr/lib/libSystem.B.tbd" _nanogui_tbd LIMIT 800)
+      if (NOT _nanogui_tbd MATCHES "arm64e\\.x1")
+        set(_nanogui_sdk_unusable FALSE)
+      endif()
+      unset(_nanogui_tbd)
+    endif()
+    if (_nanogui_sdk_unusable)
+      message(STATUS "NanoGUI: using macOS SDK ${_nanogui_macos_sdk} (matches installed clang/ld)")
+      set(CMAKE_OSX_SYSROOT "${_nanogui_macos_sdk}" CACHE PATH
+        "The product will be built against the headers and libraries located inside the indicated SDK." FORCE)
+      set(ENV{SDKROOT} "${_nanogui_macos_sdk}")
+    endif()
+    unset(_nanogui_req_sdk)
+    unset(_nanogui_sdk_unusable)
+  endif()
+  unset(_nanogui_macos_sdk)
+endif()
+
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON CACHE INTERNAL "")
 project(nanogui
   DESCRIPTION
@@ -785,7 +828,9 @@ if (NANOGUI_BUILD_EXAMPLES)
       MACOSX_BUNDLE_GUI_IDENTIFIER "org.adamantine.nmail"
       MACOSX_BUNDLE_ICON_FILE "nmail.icns"
       MACOSX_BUNDLE_SHORT_VERSION_STRING "${NMAIL_VERSION}"
-      MACOSX_BUNDLE_BUNDLE_VERSION "${NMAIL_VERSION}")
+      MACOSX_BUNDLE_BUNDLE_VERSION "${NMAIL_VERSION}"
+      BUILD_WITH_INSTALL_RPATH TRUE
+      INSTALL_RPATH "@executable_path/../Frameworks")
 
     # Contents/Resources/nmail.icns
     target_sources(nmail PRIVATE resources/nmail.icns)
@@ -800,6 +845,19 @@ if (NANOGUI_BUILD_EXAMPLES)
     set_source_files_properties(${NMAIL_BUNDLE_FONTS} PROPERTIES
       MACOSX_PACKAGE_LOCATION "Resources/resources"
       HEADER_FILE_ONLY TRUE)
+
+    # Copy libnanogui plus Homebrew deps (freetype, openssl, libpng, …) into
+    # Contents/Frameworks and rewrite install names to @rpath so the .app
+    # runs on machines without those prefixes.
+    add_custom_command(TARGET nmail POST_BUILD
+      COMMAND ${CMAKE_COMMAND}
+        -DAPP=$<TARGET_BUNDLE_DIR:nmail>
+        -DEXE=$<TARGET_FILE:nmail>
+        -DSEARCH_DIRS=$<TARGET_FILE_DIR:nanogui>
+        -P ${CMAKE_CURRENT_SOURCE_DIR}/resources/macos_bundle_dylibs.cmake
+      VERBATIM)
+    set_property(TARGET nmail APPEND PROPERTY LINK_DEPENDS
+      "${CMAKE_CURRENT_SOURCE_DIR}/resources/macos_bundle_dylibs.cmake")
   else()
     # Freedesktop launcher entry; Icon=nmail resolves through the hicolor theme.
     install(TARGETS nmail RUNTIME DESTINATION bin)
