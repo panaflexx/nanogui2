@@ -40,12 +40,15 @@ public:
      * replies to (sets In-Reply-To and References).  format selects the
      * Content-Type (see MailFormat).  Returns false with a
      * human-readable err on failure. */
+    /* rfc822_out, when set, receives the exact message bytes (no SMTP
+     * dot-stuffing) so the caller can IMAP APPEND a Sent copy. */
     bool send(const SmtpConfig &cfg,
               const std::string &from, const std::string &to,
               const std::string &subject, const std::string &body_text,
               const std::string &in_reply_to, MailFormat format,
               std::string &err,
-              const std::vector<MailAttachment> &attachments = {});
+              const std::vector<MailAttachment> &attachments = {},
+              std::string *rfc822_out = nullptr);
 
 private:
     int m_fd = -1;

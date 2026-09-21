@@ -3829,20 +3829,75 @@ public:
         sc.username = ma.username;
         sc.password = ma.password;
         std::string from = ma.username;
+        std::string imap_host = ma.host;
+        int imap_port = ma.port;
+        /* Maddy does not file a copy. Prefer an existing Sent mailbox;
+         * otherwise APPEND creates "Sent Messages". */
+        std::string sent_folder = "Sent Messages";
+        if (acct) {
+            auto lower = [](std::string s) {
+                for (char &c : s) c = (char)std::tolower((unsigned char)c);
+                return s;
+            };
+            const MailFolder *exact = nullptr;
+            const MailFolder *other = nullptr;
+            for (const MailFolder &f : acct->folders) {
+                std::string n = lower(f.name);
+                if (n == "sent messages") { exact = &f; break; }
+                if (!other && (n == "sent" || n == "sent mail" || n == "sent items"))
+                    other = &f;
+            }
+            if (exact) sent_folder = exact->name;
+            else if (other) sent_folder = other->name;
+        }
 
         set_status("Sending...");
         std::thread([this, win, send_btn, spinner, status_row, send_bar, to_box,
                      subj_box, editor, sc, from, to, subject, body,
-                     irt, format, attachments]() {
+                     irt, format, attachments, imap_host, imap_port,
+                     sent_folder]() mutable {
             SmtpClient smtp;
-            std::string err;
+            std::string err, raw, save_err;
             bool ok = smtp.send(sc, from, to, subject, body, irt, format,
-                                err, attachments);
+                                err, attachments, &raw);
+            bool saved = false;
+            if (ok) {
+                ImapClient imap;
+                imap.set_use_compress(false);
+                std::string oerr;
+                if (!imap.open(imap_host, imap_port, sc.username, sc.password, oerr)) {
+                    save_err = oerr;
+                } else {
+                    std::string folder = sent_folder;
+                    std::string special, se;
+                    if (imap.special_use_mailbox("\\Sent", special, se) &&
+                        !special.empty())
+                        folder = special;
+                    if (!imap.append_message(folder, raw, save_err)) {
+                        if (save_err.empty()) save_err = "could not save a copy";
+                    } else {
+                        saved = true;
+                    }
+                    sent_folder = folder;
+                }
+                imap.close();
+            }
             nanogui::async(std::function<void()>(
                 [this, win, send_btn, spinner, status_row, send_bar, to_box,
-                 subj_box, editor, ok, err]() {
+                 subj_box, editor, ok, err, saved, save_err, sent_folder]() {
                     if (ok) {
-                        set_status("Sent");
+                        if (saved) {
+                            set_status("Sent");
+                        } else {
+                            set_status("Sent, not saved to " + sent_folder);
+                            auto *dlg = new MessageDialog(this,
+                                MessageDialog::Type::Warning,
+                                "Sent, but not saved",
+                                "The message was delivered, but saving a copy to "
+                                + sent_folder + " failed.\n\n" + save_err,
+                                "OK", "", false);
+                            dlg->center();
+                        }
                         win->dispose();
                         sync_taskbar();     // drop its taskbar button
                         redraw();

@@ -144,6 +144,22 @@ public:
     bool move_message(int seq, const std::string &dest_folder,
                       std::string &err);
 
+    /* Upload one RFC822 message into `folder`, flagged \Seen. Creates the
+     * mailbox when the server answers [TRYCREATE]. Does not SELECT it.
+     * Uses LITERAL+ when the server advertises it. */
+    bool append_message(const std::string &folder, const std::string &rfc822,
+                        std::string &err);
+
+    /* LIST and return the mailbox flagged \Sent, \Trash, \Drafts, ...
+     * `use` is the attribute including the backslash, e.g. "\\Sent". */
+    bool special_use_mailbox(const std::string &use, std::string &name,
+                             std::string &err);
+
+    /* The one-shot Sent upload must not turn on COMPRESS=DEFLATE: a large
+     * APPEND literal through the deflate stream never completes on some
+     * servers (maddy). Call before open(). */
+    void set_use_compress(bool on) { m_use_compress = on; }
+
     /* STORE +FLAGS.SILENT (\Seen) on one message, marking it read on the
      * server.  Caller must have the containing folder SELECTed.  Sequence
      * numbers shift on EXPUNGE, so only call this with a seq known current
@@ -264,6 +280,7 @@ private:
     void *m_inflate_state = nullptr;  // mz_stream*
     void *m_deflate_state = nullptr;
     bool m_compressed = false;
+    bool m_use_compress = true;
     bool m_qresync_enabled = false;
     QResyncState m_qresync; // last SELECT's UIDVALIDITY/HIGHESTMODSEQ
     // COMPRESS=DEFLATE helpers (raw DEFLATE, RFC 4978)

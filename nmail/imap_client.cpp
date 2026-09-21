@@ -1619,6 +1619,99 @@ std::string ImapClient::quote(const std::string &s) {
     return out + '"';
 }
 
+bool ImapClient::append_message(const std::string &folder,
+                                const std::string &rfc822, std::string &err) {
+    if (!is_open()) { err = "not connected"; return false; }
+    if (folder.empty()) { err = "no Sent folder"; return false; }
+    if (rfc822.size() > kMaxBodyBytes) {
+        err = "message is too large to save";
+        return false;
+    }
+
+    auto send_bytes = [&](const std::string &bytes) -> bool {
+        if (m_compressed && m_deflate_state) {
+            std::string de;
+            if (!deflate_and_send(bytes, de)) {
+                err = de.empty() ? "connection lost" : de;
+                return false;
+            }
+            return true;
+        }
+        if (nmail_sock_send(m_fd, bytes.data(), (int)bytes.size()) < 0) {
+            err = "connection lost while saving the message";
+            return false;
+        }
+        return true;
+    };
+
+    auto once = [&]() -> bool {
+        /* LITERAL+ (maddy advertises it): the literal follows the command
+         * immediately and the server does not send a '+' continuation.
+         * Waiting for one deadlocks — we block, the server blocks. */
+        const bool plus = m_caps.count("LITERAL+");
+        std::string cmd = "APPEND " + quote(folder) + " (\\Seen) {" +
+                          std::to_string(rfc822.size()) + (plus ? "+}" : "}");
+        std::string tag = send_with_tag(cmd);
+        if (tag.empty()) { err = "connection lost"; return false; }
+        if (plus) {
+            if (!send_bytes(rfc822)) return false;
+        } else {
+            for (;;) {
+                std::string line;
+                if (!read_logical_line(line, err)) return false;
+                if (starts_with(line, tag + " ")) {
+                    err = line.substr(tag.size() + 1);
+                    return false;
+                }
+                if (!line.empty() && line[0] == '+') break;
+            }
+            if (!send_bytes(rfc822)) return false;
+        }
+        /* go-imap (maddy) treats the literal as an argument and still
+         * expects the command's closing CRLF after those exact bytes.
+         * Without it the server waits, and so do we, until the timeout. */
+        if (!send_bytes("\r\n")) return false;
+        std::vector<std::string> un;
+        return wait_tagged(tag, un, err);
+    };
+
+    if (once()) return true;
+    std::string low = to_lower(err);
+    if (low.find("[trycreate]") == std::string::npos) return false;
+    std::vector<std::string> un;
+    std::string ce;
+    if (!run("CREATE " + quote(folder), un, ce)) {
+        err = ce.empty() ? err : ce;
+        return false;
+    }
+    err.clear();
+    return once();
+}
+
+bool ImapClient::special_use_mailbox(const std::string &use, std::string &name,
+                                     std::string &err) {
+    name.clear();
+    std::string want = to_lower(use);
+    std::vector<std::string> untagged;
+    if (!run("LIST \"\" *", untagged, err)) return false;
+    for (const std::string &line : untagged) {
+        if (!starts_with(line, "* LIST")) continue;
+        ImapCursor cur(line);
+        cur.skip_ws(); cur.expect('*'); cur.skip_ws();
+        while (!cur.eof() && cur.peek() != ' ') ++cur.pos;
+        cur.skip_ws();
+        std::string flags = to_lower(cur.read_parens());
+        if (flags.find(want) == std::string::npos) continue;
+        cur.skip_ws();
+        if (cur.peek() == '"') cur.read_quoted();
+        else while (!cur.eof() && cur.peek() != ' ') ++cur.pos;
+        cur.skip_ws();
+        name = (cur.peek() == '"') ? cur.read_quoted() : trim(line.substr(cur.pos));
+        if (!name.empty()) return true;
+    }
+    return false;
+}
+
 bool ImapClient::read_bytes(size_t n, std::string &out, std::string &err) {
     // Cap literals so a malicious/oversized server cannot allocate 2 GB in one
     // read_logical_line.  fetch_summaries already uses BODY.PEEK[TEXT]<0.512>,
@@ -2027,7 +2120,7 @@ bool ImapClient::open(const std::string &host, int port,
             std::string qe;
             enable_qresync(qe);
         }
-        if (has_compress_deflate() && !m_compressed) {
+        if (m_use_compress && has_compress_deflate() && !m_compressed) {
             std::string ce;
             if (!compress_deflate(ce))
                 imap_dbg("COMPRESS DEFLATE opportunistic failed: %s", ce.c_str());
@@ -2048,7 +2141,7 @@ bool ImapClient::open(const std::string &host, int port,
         if (!enable_qresync(qe))
             imap_dbg("ENABLE QRESYNC post-auth failed: %s", qe.c_str());
     }
-    if (has_compress_deflate() && !m_compressed) {
+    if (m_use_compress && has_compress_deflate() && !m_compressed) {
         std::string ce;
         if (!compress_deflate(ce))
             imap_dbg("COMPRESS DEFLATE post-auth failed: %s", ce.c_str());
