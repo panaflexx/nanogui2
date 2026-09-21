@@ -36,6 +36,9 @@ struct MailSummary {
     std::string from_addr;     // bare address of the sender
     std::string subject;
     std::string date;          // formatted for display
+    int64_t     date_utc = 0;  // INTERNALDATE as UTC seconds; 0 if unknown
+    size_t      bytes = 0;     // RFC822.SIZE; 0 if the server omitted it
+    bool        has_attachment = false;
     std::string preview;
     bool seen = false;
 };

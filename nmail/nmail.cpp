@@ -205,6 +205,17 @@ public:
     Button       *m_trash_btn   = nullptr;
     Button       *m_junk_btn    = nullptr;
     Button       *m_restore_btn = nullptr;
+    /* Message-list filter bar. Date and Attachment are exclusive sort
+     * keys; Unread composes with either. VIP is a placeholder. */
+    Button       *m_sort_date_btn   = nullptr;
+    Button       *m_sort_unread_btn = nullptr;
+    Button       *m_sort_attach_btn = nullptr;
+    Button       *m_sort_vip_btn    = nullptr;
+    Button       *m_sort_dir_btn    = nullptr;
+    bool         m_sort_by_size     = false;
+    bool         m_filter_unread    = false;
+    bool         m_filter_attach    = false;
+    bool         m_sort_desc        = true;
 
     MailConfig  m_config;
     bool        m_config_loaded = false;
@@ -995,7 +1006,7 @@ public:
         search_box->set_placeholder("Search sender or subject...");
         search_box->set_callback([this](const std::string &value) {
             m_filter = value;
-            apply_filter();
+            apply_filter(true);
             return true;
         });
 
@@ -1018,10 +1029,85 @@ public:
         inner_split->set_max_size({2048, 2048});
         inner_split->set_keep_size_on_resize(true);
 
-        // ---- Middle: email list ----
-        m_email_list = new EmailListView(inner_split,
+        // ---- Middle: filter bar + email list ----
+        Widget *list_pane = new Widget(inner_split);
+        list_pane->set_min_width(280);
+        auto *list_flex = new FlexLayout(FlexDirection::Column,
+                                         JustifyContent::FlexStart,
+                                         AlignItems::Stretch, 0, 0);
+        list_pane->set_layout(list_flex);
+
+        MailToolbar *list_bar = new MailToolbar(list_pane, 36);
+        list_bar->set_gap(6);
+        list_bar->set_padding(8, 0);
+        list_bar->set_height_flex(SizeMode::Fixed);
+
+        auto compact = [](Button *b) {
+            b->set_font_size(16);
+            b->set_fixed_size(Vector2i(28, 28));
+        };
+
+        MailToolbarGroup *filter_group = list_bar->add_group();
+        m_sort_date_btn = filter_group->add_button(FA_CLOCK, "Sort by date");
+        compact(m_sort_date_btn);
+        m_sort_date_btn->set_flags(Button::ToggleButton);
+        m_sort_date_btn->set_pushed(true);
+        m_sort_date_btn->set_change_callback([this](bool on) {
+            if (!on) { m_sort_date_btn->set_pushed(true); return; }
+            m_sort_by_size = false;
+            m_filter_attach = false;
+            m_sort_attach_btn->set_pushed(false);
+            sync_list_filter_bar();
+            apply_filter(true);
+            redraw();
+        });
+
+        m_sort_unread_btn = filter_group->add_button(FA_ENVELOPE, "Show unread only");
+        compact(m_sort_unread_btn);
+        m_sort_unread_btn->set_flags(Button::ToggleButton);
+        m_sort_unread_btn->set_change_callback([this](bool on) {
+            m_filter_unread = on;
+            sync_list_filter_bar();
+            apply_filter(true);
+            redraw();
+        });
+
+        m_sort_attach_btn = filter_group->add_button(FA_PAPERCLIP,
+            "Attachments only, sorted by size");
+        compact(m_sort_attach_btn);
+        m_sort_attach_btn->set_flags(Button::ToggleButton);
+        m_sort_attach_btn->set_change_callback([this](bool on) {
+            if (!on) { m_sort_attach_btn->set_pushed(true); return; }
+            m_sort_by_size = true;
+            m_filter_attach = true;
+            m_sort_date_btn->set_pushed(false);
+            sync_list_filter_bar();
+            apply_filter(true);
+            redraw();
+        });
+
+        m_sort_vip_btn = filter_group->add_button(FA_FLAG,
+            "VIP contacts (coming soon)");
+        compact(m_sort_vip_btn);
+        m_sort_vip_btn->set_enabled(false);
+
+        list_bar->add_flex_spacer();
+
+        MailToolbarGroup *dir_group = list_bar->add_group();
+        m_sort_dir_btn = dir_group->add_button(FA_ARROW_DOWN, "Newest first");
+        compact(m_sort_dir_btn);
+        m_sort_dir_btn->set_callback([this]() {
+            m_sort_desc = !m_sort_desc;
+            sync_list_filter_bar();
+            apply_filter(true);
+            redraw();
+        });
+        sync_list_filter_bar();
+
+        m_email_list = new EmailListView(list_pane,
             [this](int idx, const EmailData &d) { on_email_selected(idx, d); });
-        m_email_list->set_min_width(280);
+        m_email_list->set_height_flex(SizeMode::Expanding);
+        list_flex->set_flex_item(m_email_list, FlexLayout::FlexItem(1.0f, 1.0f, 0));
         m_email_list->set_font_size(26);
         m_email_list->set_on_hit_bottom([this]() { maybe_fetch_older(); });
         m_email_list->on_viewport_changed = [this]() {
@@ -1455,35 +1541,22 @@ public:
             return;
         }
 
-        /* Splice in only the rows passing the active filter; unlike
-           apply_filter() this leaves scroll position and selection alone
-           (see EmailListView::prepend_emails). */
+        /* Rebuild through the active filter and sort so new mail does not
+         * always land at the top (oldest-first and size sort). */
         std::string needle = m_filter;
         for (char &c : needle) c = (char)std::tolower((unsigned char)c);
-        std::vector<EmailData> rows;
-        rows.reserve(fresh.size());
-        for (const MailSummary &s : fresh) {
-            if (!needle.empty()) {
-                std::string hay = s.from + "\n" + s.subject;
-                for (char &c : hay) c = (char)std::tolower((unsigned char)c);
-                if (hay.find(needle) == std::string::npos) continue;
-            }
-            EmailData d;
-            d.seq     = s.seq;
-            d.uid     = s.uid;
-            d.modseq  = s.modseq;
-            d.sender  = s.from;
-            d.subject = s.subject;
-            d.preview = s.preview;
-            d.date    = s.date;
-            d.seen    = s.seen;
-            rows.push_back(d);
+        int shown = 0;
+        for (const MailSummary &s : fresh)
+            if (summary_visible(s, needle)) ++shown;
+        apply_filter(true);
+        if (shown == 0) {
+            update_compress_badge();
+            redraw();
+            glfwPostEmptyEvent();
+            return;
         }
-        if (!rows.empty())
-            m_email_list->prepend_emails(std::move(rows));
-
-        set_status(std::to_string(fresh.size()) + " New email" +
-                  (fresh.size() == 1 ? "" : "s") + compressSuffix());
+        set_status(std::to_string(shown) + " New email" +
+                  (shown == 1 ? "" : "s") + compressSuffix());
         update_compress_badge();
         redraw();
         glfwPostEmptyEvent();
@@ -1528,30 +1601,8 @@ public:
             if (!seqs.empty()) acct.worker->ensure_visible_cached(folder, seqs);
         }
 
-        /* Append only the rows passing the active filter; unlike
-           apply_filter() this leaves scroll position and selection alone. */
-        std::string needle = m_filter;
-        for (char &c : needle) c = (char)std::tolower((unsigned char)c);
-        std::vector<EmailData> rows;
-        rows.reserve(sums.size());
-        for (const MailSummary &s : sums) {
-            if (!needle.empty()) {
-                std::string hay = s.from + "\n" + s.subject;
-                for (char &c : hay) c = (char)std::tolower((unsigned char)c);
-                if (hay.find(needle) == std::string::npos) continue;
-            }
-            EmailData d;
-            d.seq     = s.seq;
-            d.uid     = s.uid;
-            d.modseq  = s.modseq;
-            d.sender  = s.from;
-            d.subject = s.subject;
-            d.preview = s.preview;
-            d.date    = s.date;
-            d.seen    = s.seen;
-            rows.push_back(d);
-        }
-        m_email_list->append_emails(std::move(rows));
+        /* Older pages join the same filter and sort as the rows already shown. */
+        apply_filter(true);
         set_status(folder + ": showing " +
                               std::to_string(m_summaries.size()) +
                               " messages" + compressSuffix());
@@ -1874,6 +1925,11 @@ public:
         if (viewing) mark(m_summaries);
         if (!already) bump_folder_unseen(acct, account_id, folder, -1);
         if (!viewing) { redraw(); return; }
+        if (m_filter_unread) {
+            apply_filter(true);
+            redraw();
+            return;
+        }
         // Try UID first (QRESYNC path where seq may be 0), then fallback to seq
         bool done = false;
         if (m_email_list) {
@@ -1909,6 +1965,11 @@ public:
         if (found && was != seen)
             bump_folder_unseen(acct, account_id, folder, seen ? -1 : 1);
         if (!viewing) { redraw(); return; }
+        if (m_filter_unread) {
+            apply_filter(true);
+            redraw();
+            return;
+        }
         bool done = false;
         if (m_email_list) {
             uint32_t uid = uid_for_seq(acct, folder, seq);
@@ -2071,31 +2132,84 @@ public:
         update_compress_badge();
     }
 
-    /* Filter the current folder's summaries into the list widget. */
-    void apply_filter() {
+    /* Active filter glyphs turn red. The arrow stays on the right and
+     * only tracks direction. */
+    void sync_list_filter_bar() {
+        auto tint = [](Button *b, bool on) {
+            if (!b) return;
+            b->set_text_color(on ? Color(200, 40, 40, 255) : Color(0, 0, 0, 0));
+        };
+        tint(m_sort_date_btn, !m_sort_by_size);
+        tint(m_sort_unread_btn, m_filter_unread);
+        tint(m_sort_attach_btn, m_sort_by_size);
+        if (!m_sort_dir_btn) return;
+        m_sort_dir_btn->set_icon(m_sort_desc ? FA_ARROW_DOWN : FA_ARROW_UP);
+        if (m_sort_by_size)
+            m_sort_dir_btn->set_tooltip(m_sort_desc ? "Largest first" : "Smallest first");
+        else
+            m_sort_dir_btn->set_tooltip(m_sort_desc ? "Newest first" : "Oldest first");
+    }
+
+    EmailData summary_row(const MailSummary &s) const {
+        EmailData d;
+        d.seq            = s.seq;
+        d.uid            = s.uid;
+        d.modseq         = s.modseq;
+        d.sender         = s.from;
+        d.subject        = s.subject;
+        d.preview        = s.preview;
+        d.date           = s.date;
+        d.date_utc       = s.date_utc;
+        d.bytes          = s.bytes;
+        d.has_attachment = s.has_attachment;
+        d.seen           = s.seen;
+        return d;
+    }
+
+    /* needle is already lowercased. Empty needle matches everything. */
+    bool summary_visible(const MailSummary &s, const std::string &needle) const {
+        if (!needle.empty()) {
+            std::string hay = s.from + "\n" + s.subject;
+            for (char &c : hay) c = (char)std::tolower((unsigned char)c);
+            if (hay.find(needle) == std::string::npos) return false;
+        }
+        if (m_filter_unread && s.seen) return false;
+        if (m_filter_attach && !s.has_attachment) return false;
+        return true;
+    }
+
+    void sort_visible(std::vector<EmailData> &rows) const {
+        const bool desc = m_sort_desc;
+        const bool by_size = m_sort_by_size;
+        std::stable_sort(rows.begin(), rows.end(),
+            [&](const EmailData &a, const EmailData &b) {
+                if (by_size) {
+                    if (a.bytes != b.bytes)
+                        return desc ? a.bytes > b.bytes : a.bytes < b.bytes;
+                } else if (a.date_utc != b.date_utc && (a.date_utc || b.date_utc)) {
+                    return desc ? a.date_utc > b.date_utc : a.date_utc < b.date_utc;
+                }
+                if (a.uid && b.uid && a.uid != b.uid)
+                    return desc ? a.uid > b.uid : a.uid < b.uid;
+                return desc ? a.seq > b.seq : a.seq < b.seq;
+            });
+    }
+
+    /* Filter and sort the current folder's summaries into the list.
+     * keep_place retains scroll and the selected message when it still
+     * passes; folder changes pass false and jump back to the top. */
+    void apply_filter(bool keep_place = false) {
         std::string needle = m_filter;
         for (char &c : needle) c = (char)std::tolower((unsigned char)c);
 
         std::vector<EmailData> rows;
         rows.reserve(m_summaries.size());
-        for (const MailSummary &s : m_summaries) {
-            if (!needle.empty()) {
-                std::string hay = s.from + "\n" + s.subject;
-                for (char &c : hay) c = (char)std::tolower((unsigned char)c);
-                if (hay.find(needle) == std::string::npos) continue;
-            }
-            EmailData d;
-            d.seq     = s.seq;
-            d.uid     = s.uid;
-            d.modseq  = s.modseq;
-            d.sender  = s.from;
-            d.subject = s.subject;
-            d.preview = s.preview;
-            d.date    = s.date;
-            d.seen    = s.seen;
-            rows.push_back(d);
-        }
-        m_email_list->set_emails(std::move(rows));
+        for (const MailSummary &s : m_summaries)
+            if (summary_visible(s, needle))
+                rows.push_back(summary_row(s));
+        sort_visible(rows);
+        if (m_email_list)
+            m_email_list->set_emails(std::move(rows), keep_place);
         update_move_buttons();
     }
 

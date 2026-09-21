@@ -34,6 +34,10 @@ public:
     // (e.g. the search box) to the right edge of the bar.
     nanogui::Widget *add_flex_spacer();
 
+    // The main window bar uses a wide gap; the message-list bar is tighter.
+    void set_gap(int gap);
+    void set_padding(int pad_x, int pad_y);
+
     void draw(NVGcontext *ctx) override;
 
 private:

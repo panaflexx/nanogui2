@@ -17,6 +17,7 @@
 #include <sstream>
 #include <vector>
 #include <chrono>
+#include <ctime>
 
 #include "miniz.h"
 
@@ -746,21 +747,212 @@ parse_fetch_items(const std::string &line) {
     return items;
 }
 
-/* "01-Feb-2024 12:34:56 +0000" -> "2/1/24" */
-static std::string format_internaldate(const std::string &s) {
+/* "01-Feb-2024 12:34:56 +0000" -> display "2/1/24" and UTC epoch. */
+struct InternalDate {
+    std::string display;
+    int64_t utc = 0;
+};
+
+static InternalDate parse_internaldate(const std::string &raw) {
+    InternalDate d;
+    std::string s = raw;
+    if (s.size() >= 2 && s.front() == '"' && s.back() == '"')
+        s = s.substr(1, s.size() - 2);
+    int day = 0, year = 0, hh = 0, mm = 0, ss = 0, tz = 0;
+    char mon[8] = {0};
+    char sign = '+';
+    int n = std::sscanf(s.c_str(), "%d-%3[A-Za-z]-%d %d:%d:%d %c%d",
+                        &day, mon, &year, &hh, &mm, &ss, &sign, &tz);
+    if (n < 3) { d.display = s; return d; }
     static const char *months[] = { "Jan","Feb","Mar","Apr","May","Jun",
                                     "Jul","Aug","Sep","Oct","Nov","Dec" };
-    int day = 0, year = 0;
-    char mon[8] = {0};
-    if (std::sscanf(s.c_str(), "%d-%3[^-]-%d", &day, mon, &year) != 3)
-        return s;
     int month = 0;
     for (int i = 0; i < 12; ++i)
         if (starts_with(mon, months[i])) { month = i + 1; break; }
-    if (!month) return s;
+    if (!month) { d.display = s; return d; }
     char buf[16];
     std::snprintf(buf, sizeof(buf), "%d/%d/%02d", month, day, year % 100);
-    return buf;
+    d.display = buf;
+    if (n < 6) return d;
+    std::tm tm{};
+    tm.tm_year = year - 1900;
+    tm.tm_mon  = month - 1;
+    tm.tm_mday = day;
+    tm.tm_hour = hh;
+    tm.tm_min  = mm;
+    tm.tm_sec  = ss;
+#if defined(_WIN32)
+    time_t utc = _mkgmtime(&tm);
+#else
+    time_t utc = timegm(&tm);
+#endif
+    if (utc == (time_t)-1) return d;
+    int off = 0;
+    if (n >= 8) {
+        int tzh = tz / 100;
+        int tzm = tz % 100;
+        off = (sign == '-' ? -1 : 1) * (tzh * 3600 + tzm * 60);
+    }
+    d.utc = (int64_t)utc - off;
+    return d;
+}
+
+/* BODYSTRUCTURE walk. A part counts as an attachment when its
+ * disposition is "attachment", or it carries a filename and is not an
+ * inline image. */
+struct BsScan {
+    const std::string &s;
+    size_t i = 0;
+    void skip() {
+        while (i < s.size() && std::isspace((unsigned char)s[i])) ++i;
+    }
+    char peek() { skip(); return i < s.size() ? s[i] : 0; }
+    bool eat(char c) { if (peek() != c) return false; ++i; return true; }
+    std::string read_tok() {
+        skip();
+        if (i >= s.size()) return "";
+        if (s[i] == '"') {
+            ++i;
+            std::string o;
+            while (i < s.size() && s[i] != '"') {
+                if (s[i] == '\\' && i + 1 < s.size()) { o.push_back(s[++i]); ++i; }
+                else o.push_back(s[i++]);
+            }
+            if (i < s.size() && s[i] == '"') ++i;
+            return o;
+        }
+        if (s[i] == '(') return "";
+        size_t st = i;
+        while (i < s.size() && !std::isspace((unsigned char)s[i]) &&
+               s[i] != ')' && s[i] != '(')
+            ++i;
+        return s.substr(st, i - st);
+    }
+    std::string read_list() {
+        skip();
+        if (i >= s.size() || s[i] != '(') return "";
+        size_t st = i;
+        int depth = 0;
+        bool in_str = false;
+        while (i < s.size()) {
+            char c = s[i++];
+            if (in_str) {
+                if (c == '\\' && i < s.size()) { ++i; continue; }
+                if (c == '"') in_str = false;
+                continue;
+            }
+            if (c == '"') { in_str = true; continue; }
+            if (c == '(') ++depth;
+            else if (c == ')' && --depth == 0) break;
+        }
+        return s.substr(st, i - st);
+    }
+    void skip_value() {
+        skip();
+        if (i >= s.size()) return;
+        if (s[i] == '(') { read_list(); return; }
+        read_tok();
+    }
+};
+
+static std::string bs_lower(std::string s) {
+    for (char &c : s) c = (char)std::tolower((unsigned char)c);
+    return s;
+}
+
+static bool is_media_type(const std::string &t) {
+    return t == "text" || t == "image" || t == "audio" || t == "video" ||
+           t == "application" || t == "message" || t == "multipart";
+}
+
+static bool list_has_filename(const std::string &list) {
+    BsScan c{list};
+    if (!c.eat('(')) return false;
+    while (c.peek() && c.peek() != ')') {
+        if (c.peek() == '(') {
+            if (list_has_filename(c.read_list())) return true;
+            continue;
+        }
+        std::string k = bs_lower(c.read_tok());
+        if (c.peek() == '(') {
+            if (list_has_filename(c.read_list())) return true;
+            continue;
+        }
+        std::string v = bs_lower(c.read_tok());
+        if ((k == "name" || k == "filename") && !v.empty() && v != "nil")
+            return true;
+    }
+    return false;
+}
+
+static std::string disposition_kind(const std::string &list) {
+    BsScan c{list};
+    if (!c.eat('(')) return "";
+    return bs_lower(c.read_tok());
+}
+
+static bool scan_body(BsScan &c);
+
+static bool scan_nested_blob(const std::string &blob) {
+    std::string kind = disposition_kind(blob);
+    if (kind == "attachment") return true;
+    if (blob.size() > 1 && blob[1] == '(') {
+        BsScan nested{blob};
+        if (scan_body(nested)) return true;
+    } else if (is_media_type(kind)) {
+        BsScan nested{blob};
+        if (scan_body(nested)) return true;
+    }
+    return false;
+}
+
+static bool scan_body(BsScan &c) {
+    if (!c.eat('(')) return false;
+    if (c.peek() == '(') {
+        bool found = false;
+        while (c.peek() == '(') {
+            if (scan_body(c)) found = true;
+        }
+        c.read_tok();
+        while (c.peek() && c.peek() != ')') {
+            if (c.peek() == '(') {
+                if (scan_nested_blob(c.read_list())) found = true;
+            } else c.skip_value();
+        }
+        c.eat(')');
+        return found;
+    }
+    std::string type = bs_lower(c.read_tok());
+    c.read_tok();
+    bool named = false;
+    bool inline_disp = false;
+    bool attach_disp = false;
+    if (c.peek() == '(') named = list_has_filename(c.read_list());
+    else c.skip_value();
+    c.skip_value(); c.skip_value(); c.skip_value(); c.skip_value();
+    if (type == "text") c.skip_value();
+    while (c.peek() && c.peek() != ')') {
+        if (c.peek() == '(') {
+            std::string blob = c.read_list();
+            std::string kind = disposition_kind(blob);
+            if (kind == "attachment") attach_disp = true;
+            else if (kind == "inline") inline_disp = true;
+            if (list_has_filename(blob)) named = true;
+            if (scan_nested_blob(blob)) attach_disp = true;
+        } else c.skip_value();
+    }
+    c.eat(')');
+    if (attach_disp) return true;
+    if (named && !(type == "image" && inline_disp)) return true;
+    return false;
+}
+
+static bool bodystructure_has_attachment(const std::string &bs) {
+    if (bs.empty()) return false;
+    std::string low = bs_lower(bs);
+    if (low == "nil") return false;
+    BsScan c{bs};
+    return scan_body(c);
 }
 
 /* Reduce an HTML snippet to plain text for previews: drop <!...> and
@@ -2079,7 +2271,13 @@ static bool parse_summaries(const std::vector<std::string> &untagged,
                 if (!v.empty() && v.back() == ')') v.pop_back();
                 try { sum.modseq = std::stoull(trim(v)); } catch(...) {}
             } else if (key == "INTERNALDATE") {
-                sum.date = format_internaldate(val);
+                InternalDate id = parse_internaldate(val);
+                sum.date = id.display;
+                sum.date_utc = id.utc;
+            } else if (key == "RFC822.SIZE") {
+                try { sum.bytes = (size_t)std::stoull(val); } catch (...) {}
+            } else if (key == "BODYSTRUCTURE") {
+                sum.has_attachment = bodystructure_has_attachment(val);
             } else if (starts_with(key, "BODY[HEADER")) {
                 headers = val;
             } else if (starts_with(key, "BODY[TEXT")) {
@@ -2119,19 +2317,32 @@ bool ImapClient::fetch_summaries(int first, int last,
     std::vector<std::string> untagged;
     // When CONDSTORE/QRESYNC is active, include MODSEQ so MailWorker can maintain sync anchors.
     bool with_modseq = has_condstore() || m_qresync_enabled;
-    std::string base = " (FLAGS INTERNALDATE";
-    if (with_modseq) base += " MODSEQ";
-    base += " UID BODY.PEEK[HEADER.FIELDS (FROM SUBJECT DATE)]";
-    // RFC 4551 MODSEQ is per-message; UID lets us correlate VANISHED.
-    std::string primary = "FETCH " + range + base + " BODY.PEEK[TEXT]<0.512>)";
-    std::string fallback = "FETCH " + range + base + ")";
-    if (!run(primary, untagged, err)) {
-        imap_dbg("FETCH+TEXT %s failed (%s), falling back to headers", range.c_str(), err.c_str());
+    std::string modseq = with_modseq ? " MODSEQ" : "";
+    // RFC822.SIZE + BODYSTRUCTURE feed the list's size sort and attachment
+    // filter. Servers that reject them fall back to the header-only FETCH.
+    std::string rich = " (FLAGS INTERNALDATE RFC822.SIZE" + modseq +
+        " UID BODYSTRUCTURE BODY.PEEK[HEADER.FIELDS (FROM SUBJECT DATE)]";
+    std::string sized = " (FLAGS INTERNALDATE RFC822.SIZE" + modseq +
+        " UID BODY.PEEK[HEADER.FIELDS (FROM SUBJECT DATE)]";
+    std::string plain = " (FLAGS INTERNALDATE" + modseq +
+        " UID BODY.PEEK[HEADER.FIELDS (FROM SUBJECT DATE)]";
+    auto try_fetch = [&](const std::string &cmd) {
+        untagged.clear();
         err.clear();
-        if (!run(fallback, untagged, err)) {
-            imap_dbg("FETCH headers %s FAILED: %s", range.c_str(), err.c_str());
-            clear_progress();
-            return false;
+        return run(cmd, untagged, err);
+    };
+    if (!try_fetch("FETCH " + range + rich + " BODY.PEEK[TEXT]<0.512>)")) {
+        imap_dbg("FETCH+STRUCTURE %s failed (%s), retrying without BODYSTRUCTURE",
+                 range.c_str(), err.c_str());
+        if (!try_fetch("FETCH " + range + sized + " BODY.PEEK[TEXT]<0.512>)")) {
+            imap_dbg("FETCH+SIZE %s failed (%s), falling back to headers",
+                     range.c_str(), err.c_str());
+            if (!try_fetch("FETCH " + range + plain + " BODY.PEEK[TEXT]<0.512>)") &&
+                !try_fetch("FETCH " + range + plain + ")")) {
+                imap_dbg("FETCH headers %s FAILED: %s", range.c_str(), err.c_str());
+                clear_progress();
+                return false;
+            }
         }
     }
     bool ok = parse_summaries(untagged, out);

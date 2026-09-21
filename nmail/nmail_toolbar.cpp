@@ -47,6 +47,14 @@ Widget *MailToolbar::add_flex_spacer() {
     return sp;
 }
 
+void MailToolbar::set_gap(int gap) {
+    if (m_flex) m_flex->set_gap(gap);
+}
+
+void MailToolbar::set_padding(int pad_x, int pad_y) {
+    if (m_flex) m_flex->set_padding(pad_x, pad_y);
+}
+
 void MailToolbar::draw(NVGcontext *ctx) {
     float x = (float)m_pos.x(), y = (float)m_pos.y();
     float w = (float)m_size.x(), h = (float)m_size.y();

@@ -168,6 +168,8 @@ struct EmailData {
     std::string subject;
     std::string preview;
     std::string date;
+    int64_t     date_utc = 0;
+    size_t      bytes = 0;
     bool        has_attachment = false;
     bool        seen = true;
 };
@@ -196,6 +198,7 @@ public:
     };
     inline static const Indicator kIndicators[] = {
         { &EmailData::seen, false, "\xEF\x84\x91" /* FA_CIRCLE */, nanogui::Color(60, 180, 75, 255) },
+        { &EmailData::has_attachment, true, "\xEF\x83\x86" /* FA_PAPERCLIP */, nanogui::Color(120, 120, 120, 255) },
     };
     static constexpr float IND_FONT_SCALE = 0.45f;  // of the sender font size
     static constexpr float IND_GAP        = 5.0f;
@@ -260,7 +263,9 @@ public:
     const std::vector<EmailData>& emails() const { return m_emails; }
 
     /* ---- data ---- */
-    void set_emails(std::vector<EmailData> emails);
+    /* keep_place: retain scroll and re-select the same uid/seq when it
+     * is still in the new rows (filter/sort). Otherwise jump to the top. */
+    void set_emails(std::vector<EmailData> emails, bool keep_place = false);
 
     /* Append older rows (from a "load more" fetch) without resetting
        scroll or selection. */

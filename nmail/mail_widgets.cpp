@@ -545,13 +545,38 @@ void EmailListView::update_preview_by_uid(uint32_t uid, const std::string &previ
     }
 }
 
-void EmailListView::set_emails(std::vector<EmailData> emails) {
+void EmailListView::set_emails(std::vector<EmailData> emails, bool keep_place) {
+    uint32_t keep_uid = 0;
+    int keep_seq = -1;
+    float scroll = m_scroll;
+    if (keep_place && m_selected >= 0 && m_selected < (int)m_emails.size()) {
+        keep_uid = m_emails[m_selected].uid;
+        keep_seq = m_emails[m_selected].seq;
+    }
     m_emails   = std::move(emails);
-    m_selected = -1;
     m_hovered  = -1;
-    m_scroll   = 0.0f;
     m_vel      = 0.0f;
-    screen()->redraw();
+    m_selected = -1;
+    if (!keep_place) {
+        m_scroll = 0.0f;
+    } else {
+        if (keep_uid) {
+            for (int i = 0; i < (int)m_emails.size(); ++i)
+                if (m_emails[i].uid == keep_uid) { m_selected = i; break; }
+        }
+        if (m_selected < 0 && keep_seq > 0) {
+            for (int i = 0; i < (int)m_emails.size(); ++i)
+                if (m_emails[i].seq == keep_seq) { m_selected = i; break; }
+        }
+        m_scroll = std::clamp(scroll, 0.0f, max_scroll());
+        if (m_selected >= 0) {
+            float y = (float)m_selected * row_h();
+            float bot = m_scroll + (float)m_size.y();
+            if (y < m_scroll || y + row_h() > bot)
+                scroll_to_show(m_selected);
+        }
+    }
+    if (screen()) screen()->redraw();
 }
 
 void EmailListView::append_emails(std::vector<EmailData> more) {

@@ -315,7 +315,9 @@ void Button::draw(NVGcontext* ctx) {
     Vector2f text_pos(center.x() - tw * 0.5f, center.y());
     NVGcolor text_color =
         m_text_color.w() == 0 ? m_theme->m_text_color : m_text_color;
-    NVGcolor icon_color = m_theme->m_icon_color;
+    /* An explicit text color tints icon-only buttons too (filter glyphs). */
+    NVGcolor icon_color = m_text_color.w() == 0 ? m_theme->m_icon_color
+                                                : m_text_color;
 
     // Auto-contrast caption when a solid background color is set and the
     // caller has not overridden text color. Prefer light text on dark fills.
