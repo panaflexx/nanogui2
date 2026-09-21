@@ -418,6 +418,12 @@ public:
     bool     m_att_preview = false;
     Vector2f m_att_preview_scroll{0.f, 0.f};
     std::string m_att_preview_name;
+    struct GalleryItem {
+        size_t att_index = 0;
+        bool   decodable = false;
+    };
+    std::vector<GalleryItem> m_gallery;
+    int m_gallery_sel = -1;
 
     /* Taskbar: one button per open dialog, bottom-right of the root window.
      * Windows opt in by carrying one of the ids below. */
@@ -1165,6 +1171,8 @@ public:
                 -> Widget * {
             if (spec.id == "nmail-att-preview-bar")
                 return make_att_preview_bar(parent);
+            if (spec.id == "nmail-att-gallery")
+                return make_gallery_strip(parent);
             if (spec.id != "nmail-attachments" || m_att_preview)
                 return nullptr;
             return make_attachment_strip(parent);
@@ -2263,6 +2271,15 @@ public:
             return HtmlImageInfo{};
         }
 
+        /* Gallery: att:<index> is a file attachment, not a cid part. */
+        if (src.rfind("att:", 0) == 0) {
+            size_t n = (size_t)std::atoi(src.c_str() + 4);
+            const auto &atts = m_current_message.attachments;
+            if (n < atts.size() && image_bytes_decodable(atts[n].data))
+                return make_image_info(create_image_texture(src, atts[n].data));
+            return HtmlImageInfo{};
+        }
+
         if (src.rfind("http://", 0) == 0 || src.rfind("https://", 0) == 0) {
             m_has_remote_images = true;
             m_doc_remotes.insert(src);
@@ -2379,6 +2396,8 @@ public:
     void render_current() {
         if (!m_has_message) return;
         m_att_preview = false;
+        m_gallery.clear();
+        m_gallery_sel = -1;
         hide_att_popup();
         clear_image_textures();
         m_has_remote_images = false;
@@ -2409,13 +2428,21 @@ public:
         auto *strip = new AttachmentStrip(parent);
         for (size_t i = 0; i < vis.size(); ++i) {
             const MailAttachment &a = *vis[i];
+            size_t idx = (size_t)(vis[i] - msg.attachments.data());
             int thumb = 0;
-            if (a.mime.rfind("image/", 0) == 0 && !a.data.empty()) {
-                std::string key = "att:" + std::to_string(i) + ":" + a.filename;
+            if (attachment_is_photo(a) && image_bytes_decodable(a.data)) {
+                std::string key = "attthumb:" + std::to_string(idx) + ":" + a.filename;
                 thumb = create_image_texture(key, a.data);
             }
             auto *chip = new AttachmentChip(strip, a, thumb);
-            chip->on_open = [this, chip] { open_attachment(chip->attachment()); };
+            auto alive = m_alive;
+            chip->on_open = [this, idx, alive] {
+                nanogui::async([this, idx, alive] {
+                    if (*alive) open_photo_at(idx);
+                });
+            };
+            if (attachment_is_photo(a))
+                chip->on_activate = chip->on_open;
             chip->on_save = [this, chip] { save_attachment(chip->attachment()); };
             chip->on_menu = [this, chip](const Vector2i &p) {
                 show_attachment_menu(chip, p);
@@ -2627,20 +2654,138 @@ public:
         Button *back = new Button(bar, "Back", FA_ARROW_LEFT);
         back->set_callback([this] { close_attachment_preview(); });
         new Label(bar, m_att_preview_name, "sans-bold", 18);
+        if (m_gallery_sel >= 0 && m_gallery_sel < (int)m_gallery.size() &&
+            !m_gallery[(size_t)m_gallery_sel].decodable) {
+            Button *ext = new Button(bar, "Open externally");
+            ext->set_callback([this] { open_gallery_external(); });
+        }
         return bar;
     }
 
     void close_attachment_preview() {
         Vector2f keep = m_att_preview_scroll;
         m_att_preview = false;
+        m_gallery.clear();
+        m_gallery_sel = -1;
         if (m_has_message)
             render_current();
         if (m_view_scroll)
             m_view_scroll->set_scroll(keep);
     }
 
+    /* stb_image (via nvgCreateImageMem) decodes JPEG/PNG/GIF/BMP, not HEIC. */
+    bool image_bytes_decodable(const std::string &data) const {
+        if (data.size() < 16) return false;
+        int w = 0, h = 0, n = 0;
+        return stbi_info_from_memory(
+            (const unsigned char *)data.data(), (int)data.size(),
+            &w, &h, &n) != 0;
+    }
+
+    /* Photos that are not already shown inline in the HTML. False when
+     * none of them can be decoded — caller opens the file externally. */
+    bool show_image_gallery(size_t att_index) {
+        const auto &atts = m_current_message.attachments;
+        if (att_index >= atts.size()) return false;
+        auto vis = visible_attachments(m_current_message);
+        std::vector<GalleryItem> items;
+        int sel = -1;
+        bool any = false;
+        for (const MailAttachment *p : vis) {
+            if (!attachment_is_photo(*p)) continue;
+            size_t idx = (size_t)(p - atts.data());
+            bool dec = image_bytes_decodable(p->data);
+            if (dec) any = true;
+            if (idx == att_index) sel = (int)items.size();
+            items.push_back({idx, dec});
+        }
+        if (!any || sel < 0) return false;
+
+        if (!m_att_preview) {
+            m_att_preview_scroll = m_view_scroll ? m_view_scroll->scroll()
+                                                 : Vector2f(0.f, 0.f);
+        }
+        m_gallery = std::move(items);
+        m_gallery_sel = sel;
+        m_att_preview = true;
+        const MailAttachment &att = atts[m_gallery[(size_t)sel].att_index];
+        m_att_preview_name = att_display_name(att);
+        hide_att_popup();
+        clear_image_textures();
+        m_has_remote_images = false;
+        m_doc_remotes.clear();
+
+        std::string html =
+            "<nmail-widget id=\"nmail-att-preview-bar\"></nmail-widget>";
+        if (m_gallery[(size_t)sel].decodable) {
+            html += "<img src=\"att:" + std::to_string(att_index) + "\" alt=\"\">";
+        } else {
+            std::string ext = attachment_ext(att);
+            for (char &c : ext) c = (char)std::toupper((unsigned char)c);
+            if (ext.empty()) ext = "This image";
+            html += "<p>" + att_html_escape(ext) +
+                    " can't be previewed in the app. "
+                    "Use Open externally.</p>";
+        }
+        html += "<div style=\"height:12px\"></div>"
+                "<nmail-widget id=\"nmail-att-gallery\"></nmail-widget>";
+        m_view->set_html(html);
+        m_images_btn->set_enabled(m_show_remote_images);
+        m_images_btn->set_pushed(m_show_remote_images);
+        if (m_view_scroll) m_view_scroll->set_scroll(0.0f);
+        set_status(m_att_preview_name);
+        redraw();
+        return true;
+    }
+
+    void open_photo_at(size_t idx) {
+        if (idx >= m_current_message.attachments.size()) return;
+        const MailAttachment &att = m_current_message.attachments[idx];
+        if (attachment_is_photo(att) && show_image_gallery(idx))
+            return;
+        open_attachment(att);
+    }
+
+    void open_gallery_external() {
+        if (m_gallery_sel < 0 || m_gallery_sel >= (int)m_gallery.size()) return;
+        size_t idx = m_gallery[(size_t)m_gallery_sel].att_index;
+        if (idx >= m_current_message.attachments.size()) return;
+        open_attachment_external(m_current_message.attachments[idx]);
+    }
+
+    Widget *make_gallery_strip(Widget *parent) {
+        if (m_gallery.empty() || !parent) return nullptr;
+        auto *strip = new AttachmentStrip(parent);
+        const auto &atts = m_current_message.attachments;
+        for (int i = 0; i < (int)m_gallery.size(); ++i) {
+            const GalleryItem &g = m_gallery[(size_t)i];
+            if (g.att_index >= atts.size()) continue;
+            const MailAttachment &a = atts[g.att_index];
+            int thumb = 0;
+            if (g.decodable) {
+                std::string key = "galthumb:" + std::to_string(g.att_index);
+                thumb = create_image_texture(key, a.data);
+            }
+            auto *chip = new AttachmentChip(strip, a, thumb, 0.55f);
+            if (i == m_gallery_sel) chip->set_selected(true);
+            auto alive = m_alive;
+            size_t idx = g.att_index;
+            chip->on_activate = [this, idx, alive] {
+                nanogui::async([this, idx, alive] {
+                    if (*alive) show_image_gallery(idx);
+                });
+            };
+            chip->on_menu = [this, chip](const Vector2i &p) {
+                show_attachment_menu(chip, p);
+            };
+        }
+        return strip;
+    }
+
     void show_attachment_preview(const MailAttachment &att) {
         hide_att_popup();
+        m_gallery.clear();
+        m_gallery_sel = -1;
         m_att_preview_scroll = m_view_scroll ? m_view_scroll->scroll()
                                              : Vector2f(0.f, 0.f);
         m_att_preview = true;
@@ -2753,10 +2898,39 @@ public:
         set_status("Saved " + path);
     }
 
+    void open_attachment_external(const MailAttachment &att) {
+        std::string path, err;
+        if (!write_temp_attachment(att, path, err)) {
+            auto *dlg = new MessageDialog(this, MessageDialog::Type::Warning,
+                "Open failed", err, "OK", "", false);
+            dlg->center();
+            return;
+        }
+        if (!desktop_open_file(path)) {
+            auto *dlg = new MessageDialog(this, MessageDialog::Type::Warning,
+                "Open failed", "Could not open " + att_display_name(att),
+                "OK", "", false);
+            dlg->center();
+        }
+    }
+
     void open_attachment(const MailAttachment &att) {
         if (attachment_is_inpane_preview(att)) {
             show_attachment_preview(att);
             return;
+        }
+        if (attachment_is_photo(att)) {
+            int idx = -1;
+            const auto &atts = m_current_message.attachments;
+            for (size_t i = 0; i < atts.size(); ++i) {
+                if (atts[i].mime == att.mime && atts[i].filename == att.filename &&
+                    atts[i].cid == att.cid && atts[i].data.size() == att.data.size()) {
+                    idx = (int)i;
+                    break;
+                }
+            }
+            if (idx >= 0 && show_image_gallery((size_t)idx))
+                return;
         }
         if (attachment_is_exec(att)) {
             auto *dlg = new MessageDialog(this, MessageDialog::Type::Warning,
@@ -2789,19 +2963,7 @@ public:
             dlg->center();
             return;
         }
-        std::string path, err;
-        if (!write_temp_attachment(att, path, err)) {
-            auto *dlg = new MessageDialog(this, MessageDialog::Type::Warning,
-                "Open failed", err, "OK", "", false);
-            dlg->center();
-            return;
-        }
-        if (!desktop_open_file(path)) {
-            auto *dlg = new MessageDialog(this, MessageDialog::Type::Warning,
-                "Open failed", "Could not open " + att_display_name(att),
-                "OK", "", false);
-            dlg->center();
-        }
+        open_attachment_external(att);
     }
 
     void save_attachment(const MailAttachment &att) {

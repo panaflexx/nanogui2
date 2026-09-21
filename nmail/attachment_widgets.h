@@ -211,6 +211,20 @@ inline bool attachment_is_html(const MailAttachment &a) {
     return a.mime == "text/html";
 }
 
+/* JPEG/PNG/GIF/BMP can be decoded in-pane. HEIC, TIFF, and WebP are
+ * still "photos" but stb_image cannot decode them. SVG is not a photo. */
+inline bool attachment_is_photo(const MailAttachment &a) {
+    if (a.data.empty()) return false;
+    if (a.mime == "image/svg+xml") return false;
+    const std::string ext = attachment_ext(a);
+    if (ext == "svg") return false;
+    if (a.mime.rfind("image/", 0) == 0) return true;
+    return ext_in(ext, {
+        "jpg", "jpeg", "png", "gif", "bmp", "tga",
+        "heic", "heif", "tif", "tiff", "webp"
+    });
+}
+
 /* Text or HTML: Open shows these in the reading pane, not a helper app. */
 inline bool attachment_is_inpane_preview(const MailAttachment &a) {
     if (a.data.empty()) return false;
@@ -367,6 +381,8 @@ inline std::string ellipsize(NVGcontext *ctx, const std::string &s, float max_w)
 class AttachmentChip : public Widget {
 public:
     std::function<void()> on_open;
+    /* Single click. When set, used instead of double-click on_open. */
+    std::function<void()> on_activate;
     std::function<void()> on_save;
     std::function<void()> on_remove;
     std::function<void(const Vector2i &screen_pos)> on_menu;
@@ -439,6 +455,7 @@ public:
             m_last_click = dbl ? 0.0 : now;
             select_only();
             request_focus();
+            if (on_activate) { on_activate(); return true; }
             if (dbl && on_open) on_open();
             return true;
         }
