@@ -1068,16 +1068,6 @@ public:
             redraw();
         });
 
-        m_sort_unread_btn = filter_group->add_button(FA_ENVELOPE, "Show unread only");
-        compact(m_sort_unread_btn);
-        m_sort_unread_btn->set_flags(Button::ToggleButton);
-        m_sort_unread_btn->set_change_callback([this](bool on) {
-            m_filter_unread = on;
-            sync_list_filter_bar();
-            apply_filter(true);
-            redraw();
-        });
-
         m_sort_attach_btn = filter_group->add_button(FA_PAPERCLIP,
             "Attachments only, sorted by size");
         compact(m_sort_attach_btn);
@@ -1087,6 +1077,16 @@ public:
             m_sort_by_size = true;
             m_filter_attach = true;
             m_sort_date_btn->set_pushed(false);
+            sync_list_filter_bar();
+            apply_filter(true);
+            redraw();
+        });
+
+        m_sort_unread_btn = filter_group->add_button(FA_ENVELOPE, "Show unread only");
+        compact(m_sort_unread_btn);
+        m_sort_unread_btn->set_flags(Button::ToggleButton);
+        m_sort_unread_btn->set_change_callback([this](bool on) {
+            m_filter_unread = on;
             sync_list_filter_bar();
             apply_filter(true);
             redraw();
