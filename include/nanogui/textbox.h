@@ -50,7 +50,13 @@ public:
     void set_spinnable(bool spinnable) { m_spinnable = spinnable; }
 
     const std::string &value() const { return m_value; }
-    void set_value(const std::string &value) { m_value = value; }
+    void set_value(const std::string &value) {
+        m_value = value;
+        m_value_temp = value;
+        /* The field lives inside a cached window. Without this the new
+         * text is stored and the old pixels stay on screen. */
+        propagate_cache_dirty();
+    }
 
     const std::string &default_value() const { return m_default_value; }
     void set_default_value(const std::string &default_value) { m_default_value = default_value; }

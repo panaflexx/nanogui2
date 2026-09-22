@@ -94,8 +94,10 @@ NAMESPACE_BEGIN(nanogui)
         /// Whether or not this Button is currently pushed.
         bool pushed() const { return m_pushed; }
         /// Sets whether or not this Button is currently pushed.
-        virtual void set_pushed(bool pushed) { 
-            m_pushed = pushed; }
+        virtual void set_pushed(bool pushed) {
+            m_pushed = pushed;
+            propagate_cache_dirty();
+        }
 
         /// Return the push callback (for any type of button)
         std::function<void()> callback() const { return m_callback; }

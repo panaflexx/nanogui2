@@ -28,6 +28,7 @@
 #include <nanogui/scrollpanel.h>
 #include <nanogui/zoomscrollpanel.h>
 
+#include <algorithm>
 #include <map>
 #include <iostream>
 #include <cstring>
@@ -1676,7 +1677,19 @@ void Screen::center_window(Window* window) {
         window->set_size(window->preferred_size(m_nvg_context));
         window->perform_layout(m_nvg_context);
     }
-    window->set_position((m_size - window->size()) / 2);
+    const int margin = 16;
+    Vector2i pos = (m_size - window->size()) / 2;
+    /* A window taller than the screen used to sit on the vertical center,
+     * so the bottom (and sometimes the top) landed outside the window. */
+    if (pos.x() < margin)
+        pos.x() = margin;
+    if (pos.y() < margin)
+        pos.y() = margin;
+    if (pos.x() + window->width() > m_size.x() - margin)
+        pos.x() = std::max(margin, m_size.x() - window->width() - margin);
+    if (pos.y() + window->height() > m_size.y() - margin)
+        pos.y() = std::max(margin, m_size.y() - window->height() - margin);
+    window->set_position(pos);
 }
 
 void Screen::move_window_to_front(Window* window) {

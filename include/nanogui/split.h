@@ -118,12 +118,21 @@ public:
 
     Vector2i preferred_size(NVGcontext *ctx) const override {
         Vector2i size(0, 0);
+        /* m_firstWidget is only filled in during perform_layout. Centering
+         * a window before that pass must still see the panes, or the
+         * window is sized short, placed too low, and clips its bottom. */
+        Widget *first = m_firstWidget;
+        Widget *second = m_secondWidget;
+        if (!first && !m_children.empty())
+            first = m_children[0];
+        if (!second && m_children.size() > 1)
+            second = m_children[1];
 
-        if (m_firstWidget && m_firstWidget->visible())
-            size = m_firstWidget->preferred_size(ctx);
+        if (first && first->visible())
+            size = first->preferred_size(ctx);
 
-        if (m_secondWidget && m_secondWidget->visible()) {
-            Vector2i secondSize = m_secondWidget->preferred_size(ctx);
+        if (second && second->visible()) {
+            Vector2i secondSize = second->preferred_size(ctx);
             if (m_orientation == Orientation::Horizontal) {
                 size.x() += secondSize.x();
                 size.y() = std::max(size.y(), secondSize.y());
