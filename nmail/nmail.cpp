@@ -2275,12 +2275,57 @@ public:
     int create_image_texture(const std::string &src, const std::string &bytes) {
         if (bytes.empty())
             return 0;
+        auto cached = m_img_tex.find(src);
+        if (cached != m_img_tex.end())
+            return cached->second;
         int id = nvgCreateImageMem(nvg_context(), NVG_IMAGE_PREMULTIPLIED,
                                    (unsigned char *)bytes.data(),
                                    (int)bytes.size());
         if (id <= 0)
             return 0;
         m_img_tex[src] = id;
+        return id;
+    }
+
+    /* Gallery chips are ~40px. Decode once and keep a small texture;
+     * nvgCreateImageMem on the original bytes is a full-size decode. */
+    int create_thumb_texture(const std::string &key, const std::string &bytes) {
+        auto cached = m_img_tex.find(key);
+        if (cached != m_img_tex.end())
+            return cached->second;
+        if (bytes.size() < 16) return 0;
+        int w = 0, h = 0, ch = 0;
+        unsigned char *px = stbi_load_from_memory(
+            (const unsigned char *)bytes.data(), (int)bytes.size(),
+            &w, &h, &ch, 4);
+        if (!px || w <= 0 || h <= 0) {
+            if (px) stbi_image_free(px);
+            return 0;
+        }
+        const int max_edge = 192;
+        int tw = w, th = h;
+        std::vector<unsigned char> small;
+        unsigned char *src_px = px;
+        if (w > max_edge || h > max_edge) {
+            float s = (float)max_edge / (float)std::max(w, h);
+            tw = std::max(1, (int)(w * s));
+            th = std::max(1, (int)(h * s));
+            small.resize((size_t)tw * th * 4);
+            for (int y = 0; y < th; ++y) {
+                int sy = y * h / th;
+                for (int x = 0; x < tw; ++x) {
+                    int sx = x * w / tw;
+                    const unsigned char *sp = px + ((size_t)sy * w + sx) * 4;
+                    unsigned char *dp = small.data() + ((size_t)y * tw + x) * 4;
+                    dp[0] = sp[0]; dp[1] = sp[1]; dp[2] = sp[2]; dp[3] = sp[3];
+                }
+            }
+            src_px = small.data();
+        }
+        int id = nvgCreateImageRGBA(nvg_context(), tw, th, 0, src_px);
+        stbi_image_free(px);
+        if (id <= 0) return 0;
+        m_img_tex[key] = id;
         return id;
     }
 
@@ -2718,31 +2763,40 @@ public:
     bool show_image_gallery(size_t att_index) {
         const auto &atts = m_current_message.attachments;
         if (att_index >= atts.size()) return false;
-        auto vis = visible_attachments(m_current_message);
-        std::vector<GalleryItem> items;
+        /* Clicking another chip must not rebuild or re-decode the strip.
+         * Textures stay in m_img_tex until the gallery is closed. */
         int sel = -1;
-        bool any = false;
-        for (const MailAttachment *p : vis) {
-            if (!attachment_is_photo(*p)) continue;
-            size_t idx = (size_t)(p - atts.data());
-            bool dec = image_bytes_decodable(p->data);
-            if (dec) any = true;
-            if (idx == att_index) sel = (int)items.size();
-            items.push_back({idx, dec});
+        if (m_att_preview) {
+            for (int i = 0; i < (int)m_gallery.size(); ++i)
+                if (m_gallery[(size_t)i].att_index == att_index) { sel = i; break; }
         }
-        if (!any || sel < 0) return false;
+        bool fresh = sel < 0;
+        if (fresh) {
+            auto vis = visible_attachments(m_current_message);
+            std::vector<GalleryItem> items;
+            bool any = false;
+            for (const MailAttachment *p : vis) {
+                if (!attachment_is_photo(*p)) continue;
+                size_t idx = (size_t)(p - atts.data());
+                bool dec = image_bytes_decodable(p->data);
+                if (dec) any = true;
+                if (idx == att_index) sel = (int)items.size();
+                items.push_back({idx, dec});
+            }
+            if (!any || sel < 0) return false;
+            m_gallery = std::move(items);
+            clear_image_textures();
+        }
 
         if (!m_att_preview) {
             m_att_preview_scroll = m_view_scroll ? m_view_scroll->scroll()
                                                  : Vector2f(0.f, 0.f);
         }
-        m_gallery = std::move(items);
         m_gallery_sel = sel;
         m_att_preview = true;
         const MailAttachment &att = atts[m_gallery[(size_t)sel].att_index];
         m_att_preview_name = att_display_name(att);
         hide_att_popup();
-        clear_image_textures();
         m_has_remote_images = false;
         m_doc_remotes.clear();
 
@@ -2794,8 +2848,13 @@ public:
             const MailAttachment &a = atts[g.att_index];
             int thumb = 0;
             if (g.decodable) {
-                std::string key = "galthumb:" + std::to_string(g.att_index);
-                thumb = create_image_texture(key, a.data);
+                std::string full = "att:" + std::to_string(g.att_index);
+                auto have = m_img_tex.find(full);
+                if (have != m_img_tex.end())
+                    thumb = have->second;
+                else
+                    thumb = create_thumb_texture(
+                        "galthumb:" + std::to_string(g.att_index), a.data);
             }
             auto *chip = new AttachmentChip(strip, a, thumb, 0.55f);
             if (i == m_gallery_sel) chip->set_selected(true);
