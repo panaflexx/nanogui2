@@ -27,6 +27,15 @@ enum class MailFormat {
     Html        /* text/html */
 };
 
+/* The RFC822 message SmtpClient::send puts on the wire (no dot-stuffing).
+ * Also used to APPEND an unsent composer into Drafts. */
+std::string build_rfc822_message(const std::string &from, const std::string &to,
+                                 const std::string &subject,
+                                 const std::string &body_text,
+                                 const std::string &in_reply_to,
+                                 MailFormat format,
+                                 const std::vector<MailAttachment> &attachments);
+
 class SmtpClient {
 public:
     SmtpClient() = default;

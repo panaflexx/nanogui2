@@ -63,6 +63,7 @@
 
 #include "mail_debug.h"
 #include "smtp_client.h"
+#include "message_arena.h"
 #include "http_fetch.h"
 #include "htmldocument.h"
 #include "attachment_widgets.h"
@@ -183,7 +184,8 @@ struct AccountSession {
     int                      local_expunge_seq = 0;
     /* Session-only caches; dropped on Refresh or reconnect. */
     std::map<std::string, std::vector<MailSummary>> summary_cache;
-    std::map<std::string, MailMessage>              body_cache;
+    /* Raw RFC822 only, packed into one slab capped at 512MB. */
+    MessageArena             body_cache;
 };
 
 // ---------------------------------------------------------------------------
@@ -315,57 +317,42 @@ public:
     // Dual-read helper: check UID key first (authoritative on QRESYNC), then SEQ key, then legacy ":" key.
     bool body_has(const AccountSession &acct, const std::string &folder, uint32_t uid, int seq) const {
         const auto &cache = acct.body_cache;
-        if (uid) {
-            if (cache.find(body_key(folder, uid, 0)) != cache.end()) return true;
-            // fallback to seq key if seq is known (dual-write period)
-            if (seq && cache.find(body_key(folder, 0, seq)) != cache.end()) return true;
-            if (seq && cache.find(folder + ":" + std::to_string(seq)) != cache.end()) return true;
-            return false;
-        }
-        if (cache.find(body_key(folder, 0, seq)) != cache.end()) return true;
-        if (cache.find(folder + ":" + std::to_string(seq)) != cache.end()) return true;
+        if (uid && cache.contains(body_key(folder, uid, 0))) return true;
+        if (seq && cache.contains(body_key(folder, 0, seq))) return true;
+        if (seq && cache.contains(folder + ":" + std::to_string(seq))) return true;
         return false;
     }
     bool body_has(const std::string &folder, uint32_t uid, int seq) const {
         return body_has(current_acct(), folder, uid, seq);
     }
     bool body_has(const std::string &folder, const EmailData &d) const { return body_has(folder, d.uid, d.seq); }
-    auto body_find(const AccountSession &acct, const std::string &folder, uint32_t uid, int seq) const {
-        const auto &cache = acct.body_cache;
-        if (uid) {
-            auto it = cache.find(body_key(folder, uid, 0));
-            if (it != cache.end()) return it;
-            if (seq) {
-                it = cache.find(body_key(folder, 0, seq));
-                if (it != cache.end()) return it;
-                it = cache.find(folder + ":" + std::to_string(seq));
-                if (it != cache.end()) return it;
-            }
-            return cache.end();
-        }
-        auto it = cache.find(body_key(folder, 0, seq));
-        if (it != cache.end()) return it;
-        it = cache.find(folder + ":" + std::to_string(seq));
-        return it;
+    /* Hit copies the raw bytes out of the slab and parses them. The slab
+     * stays the only long-lived copy; the returned message is the caller's. */
+    bool body_get(const AccountSession &acct, const std::string &folder,
+                  uint32_t uid, int seq, MailMessage &out) const {
+        std::string key;
+        if (uid && acct.body_cache.contains(body_key(folder, uid, 0)))
+            key = body_key(folder, uid, 0);
+        else if (seq && acct.body_cache.contains(body_key(folder, 0, seq)))
+            key = body_key(folder, 0, seq);
+        else if (seq && acct.body_cache.contains(folder + ":" + std::to_string(seq)))
+            key = folder + ":" + std::to_string(seq);
+        else
+            return false;
+        std::string raw;
+        if (!acct.body_cache.get(key, raw)) return false;
+        MailMessage msg;
+        if (!parse_rfc822_message(raw, msg)) return false;
+        out = std::move(msg);
+        return true;
     }
-    auto body_find(const std::string &folder, uint32_t uid, int seq) const {
-        return body_find(current_acct(), folder, uid, seq);
-    }
-    auto body_find(const std::string &folder, const EmailData &d) const { return body_find(folder, d.uid, d.seq); }
     void body_put(AccountSession &acct, const std::string &folder, uint32_t uid, int seq, const MailMessage &msg) {
-        auto &cache = acct.body_cache;
-        if (cache.size() > 256) cache.clear();
-        if (uid) {
-            cache[body_key(folder, uid, 0)] = msg;
-            if (seq) {
-                // dual-write for transition: keep seq key so old lookups still hit
-                cache[body_key(folder, 0, seq)] = msg;
-                cache[folder + ":" + std::to_string(seq)] = msg;
-            }
-        } else if (seq) {
-            cache[body_key(folder, 0, seq)] = msg;
-            cache[folder + ":" + std::to_string(seq)] = msg;
-        }
+        if (msg.raw.empty()) return;
+        /* One key. UID when we have it; seq only for servers without UIDs. */
+        const std::string key = uid ? body_key(folder, uid, 0)
+                                    : (seq ? body_key(folder, 0, seq) : "");
+        if (!key.empty())
+            acct.body_cache.put(key, msg.raw);
     }
     void body_put(const std::string &folder, uint32_t uid, int seq, const MailMessage &msg) {
         body_put(current_acct(), folder, uid, seq, msg);
@@ -377,17 +364,10 @@ public:
      * stay — they are stable and the next click should not re-FETCH. */
     void drop_expunged_bodies(AccountSession &acct, const std::string &folder,
                               int seq, uint32_t uid) {
-        std::vector<std::string> drop;
-        const std::string gone_u = uid ? body_key(folder, uid, 0) : "";
-        const std::string s_prefix = folder + "|S";
-        const std::string l_prefix = folder + ":";
-        for (auto &kv : acct.body_cache) {
-            const std::string &k = kv.first;
-            if (!gone_u.empty() && k == gone_u) { drop.push_back(k); continue; }
-            if (k.rfind(s_prefix, 0) == 0 || k.rfind(l_prefix, 0) == 0)
-                drop.push_back(k);
-        }
-        for (auto &k : drop) acct.body_cache.erase(k);
+        if (uid) acct.body_cache.erase(body_key(folder, uid, 0));
+        if (seq) acct.body_cache.erase(body_key(folder, 0, seq));
+        acct.body_cache.erase_prefix(folder + "|S");
+        acct.body_cache.erase_prefix(folder + ":");
     }
     std::string m_status_base;
 
@@ -875,6 +855,13 @@ public:
      * section, worker thread, callbacks -- then start connecting. Used both
      * at startup (one call per saved account) and when Preferences adds a
      * new account. */
+    void apply_cache_limit(AccountSession &acct) {
+        size_t bytes = (size_t)m_config.cache_limit_mb * 1024ull * 1024ull;
+        acct.body_cache.set_limit(bytes);
+        if (acct.worker)
+            acct.worker->set_max_body_bytes(bytes);
+    }
+
     AccountSession &add_account_session(const MailAccount &ma) {
         auto session = std::make_unique<AccountSession>();
         session->config = ma;
@@ -884,6 +871,7 @@ public:
         wire_worker(acct);
         acct.worker->set_config(ma);
         acct.worker->set_check_interval_min(m_config.check_interval_min);
+        apply_cache_limit(acct);
         acct.worker->start();
         acct.worker->connect();
         return acct;
@@ -1556,7 +1544,7 @@ public:
         int shown = 0;
         for (const MailSummary &s : fresh)
             if (summary_visible(s, needle)) ++shown;
-        apply_filter(true);
+        apply_filter(true, /*keep_shown=*/true);
         if (shown == 0) {
             update_compress_badge();
             redraw();
@@ -1609,8 +1597,10 @@ public:
             if (!seqs.empty()) acct.worker->ensure_visible_cached(folder, seqs);
         }
 
-        /* Older pages join the same filter and sort as the rows already shown. */
-        apply_filter(true);
+        /* Older pages join the same filter and sort as the rows already shown.
+         * Messages already on screen stay, even if the unread filter would
+         * now hide them because they were marked read. */
+        apply_filter(true, /*keep_shown=*/true);
         set_status(folder + ": showing " +
                               std::to_string(m_summaries.size()) +
                               " messages" + compressSuffix());
@@ -1933,11 +1923,9 @@ public:
         if (viewing) mark(m_summaries);
         if (!already) bump_folder_unseen(acct, account_id, folder, -1);
         if (!viewing) { redraw(); return; }
-        if (m_filter_unread) {
-            apply_filter(true);
-            redraw();
-            return;
-        }
+        /* Unread filter keeps the row. Rebuilding here would hide the
+         * message the moment it is marked read. Delete and junk still
+         * remove it through on_moved. */
         // Try UID first (QRESYNC path where seq may be 0), then fallback to seq
         bool done = false;
         if (m_email_list) {
@@ -1973,11 +1961,7 @@ public:
         if (found && was != seen)
             bump_folder_unseen(acct, account_id, folder, seen ? -1 : 1);
         if (!viewing) { redraw(); return; }
-        if (m_filter_unread) {
-            apply_filter(true);
-            redraw();
-            return;
-        }
+        /* Same as on_seen: don't drop the row out of an unread filter. */
         bool done = false;
         if (m_email_list) {
             uint32_t uid = uid_for_seq(acct, folder, seq);
@@ -2089,10 +2073,10 @@ public:
         const EmailData d = m_pending_email;
         const int seq = m_pending_seq;
         m_pending_seq = -1;
-        auto cached = body_find(acct, acct.current_folder, d.uid, d.seq);
-        if (cached != acct.body_cache.end()) {
+        MailMessage cached;
+        if (body_get(acct, acct.current_folder, d.uid, d.seq, cached)) {
             m_loading_seq     = -1;
-            m_current_message = cached->second;
+            m_current_message = std::move(cached);
             m_has_message     = true;
             m_rendered_seq    = seq;
             m_expanded_addrs.clear();
@@ -2205,16 +2189,31 @@ public:
 
     /* Filter and sort the current folder's summaries into the list.
      * keep_place retains scroll and the selected message when it still
-     * passes; folder changes pass false and jump back to the top. */
-    void apply_filter(bool keep_place = false) {
+     * passes; folder changes pass false and jump back to the top.
+     * keep_shown: while the unread filter is on, a message already in the
+     * list stays after it is marked read. Rows removed by delete or junk
+     * are gone from m_summaries, so they are not brought back. */
+    void apply_filter(bool keep_place = false, bool keep_shown = false) {
         std::string needle = m_filter;
         for (char &c : needle) c = (char)std::tolower((unsigned char)c);
 
+        std::unordered_set<uint32_t> shown_uid;
+        std::unordered_set<int> shown_seq;
+        if (keep_shown && m_filter_unread && m_email_list) {
+            for (const EmailData &e : m_email_list->emails()) {
+                if (e.uid) shown_uid.insert(e.uid);
+                if (e.seq) shown_seq.insert(e.seq);
+            }
+        }
+
         std::vector<EmailData> rows;
         rows.reserve(m_summaries.size());
-        for (const MailSummary &s : m_summaries)
-            if (summary_visible(s, needle))
+        for (const MailSummary &s : m_summaries) {
+            bool stay = (s.uid && shown_uid.count(s.uid)) ||
+                        (!s.uid && s.seq && shown_seq.count(s.seq));
+            if (summary_visible(s, needle) || stay)
                 rows.push_back(summary_row(s));
+        }
         sort_visible(rows);
         if (m_email_list)
             m_email_list->set_emails(std::move(rows), keep_place);
@@ -3256,6 +3255,28 @@ public:
             check_interval->set_selected_index(idx);
         }
 
+        new Label(general, "Message cache:", "sans-bold");
+        Dropdown *cache_limit = new Dropdown(general, Dropdown::ComboBox,
+                                             "Message cache");
+        static const int kCacheMb[] = {256, 512, 1024, 2048};
+        cache_limit->add_item({"256 MB", "cache_256"}, FA_DATABASE,
+                              [] {}, {{0, 0}}, true);
+        cache_limit->add_item({"512 MB", "cache_512"}, FA_DATABASE,
+                              [] {}, {{0, 0}}, true);
+        cache_limit->add_item({"1 GB", "cache_1024"}, FA_DATABASE,
+                              [] {}, {{0, 0}}, true);
+        cache_limit->add_item({"2 GB", "cache_2048"}, FA_DATABASE,
+                              [] {}, {{0, 0}}, true);
+        cache_limit->set_tooltip(
+            "Memory each account may use to keep messages you have opened. "
+            "A message larger than this is not downloaded.");
+        {
+            int idx = 1;
+            for (int i = 0; i < 4; ++i)
+                if (kCacheMb[i] == m_config.cache_limit_mb) idx = i;
+            cache_limit->set_selected_index(idx);
+        }
+
         new Label(general, "Contacts:", "sans-bold");
         CheckBox *save_contacts = new CheckBox(general, "Remember on disk");
         save_contacts->set_checked(m_config.save_contacts);
@@ -3270,12 +3291,14 @@ public:
 
         Button *save = new Button(buttons, "Save && Connect", FA_CHECK);
         save->set_callback([this, win, accounts, commit_current, check_interval,
-                           save_contacts]() {
+                           cache_limit, save_contacts]() {
             commit_current();
             m_config.accounts = *accounts;
             int idx = check_interval->selected_index();
             m_config.check_interval_min =
                 kIntervalMinutes[(idx >= 0 && idx < 4) ? idx : 1];
+            int cidx = cache_limit->selected_index();
+            m_config.cache_limit_mb = kCacheMb[(cidx >= 0 && cidx < 4) ? cidx : 1];
             m_config.save_contacts = save_contacts->checked();
             if (!save_config(m_config)) {
                 auto *dlg = new MessageDialog(this, MessageDialog::Type::Warning,
@@ -3290,6 +3313,10 @@ public:
                 m_contacts.save(contacts_path());
             if (PopupMenu *pop = check_interval->popup())
                 pop->set_visible(false);
+            if (PopupMenu *pop = cache_limit->popup())
+                pop->set_visible(false);
+            for (auto &sess : m_accounts)
+                apply_cache_limit(*sess);
 
             /* Reconcile live sessions against the edited account list:
              * accounts identified by MailAccount::id() (username@host). An
@@ -3332,6 +3359,82 @@ public:
 
         win->center();
         win->request_focus();
+    }
+
+    /* Prefer a mailbox the server marked for this use, else a familiar name. */
+    std::string guess_mailbox(const AccountSession *acct,
+                              const std::vector<std::string> &names,
+                              const std::string &fallback) const {
+        if (!acct) return fallback;
+        auto lower = [](std::string s) {
+            for (char &c : s) c = (char)std::tolower((unsigned char)c);
+            return s;
+        };
+        for (const std::string &want : names) {
+            for (const MailFolder &f : acct->folders)
+                if (lower(f.name) == want) return f.name;
+        }
+        return fallback;
+    }
+
+    /* Close of an unsent composer. Empty windows just go away. Anything
+     * with a recipient, subject, body, or attachment is APPENDed to Drafts
+     * before the window is destroyed, so a failed save leaves it open. */
+    void save_draft(Window *win, TextBox *to_box, TextBox *subj_box,
+                    TextEditor *editor, std::shared_ptr<bool> busy,
+                    const std::string &account_id,
+                    const std::string &to, const std::string &subject,
+                    const std::string &body, const std::string &irt,
+                    MailFormat format,
+                    std::vector<MailAttachment> attachments) {
+        const AccountSession *acct = account(account_id);
+        const MailAccount &ma = acct ? acct->config : current_acct().config;
+        std::string imap_host = ma.host;
+        int imap_port = ma.port;
+        std::string user = ma.username;
+        std::string pass = ma.password;
+        std::string from = ma.username;
+        std::string draft_folder = guess_mailbox(acct, {"drafts", "draft"}, "Drafts");
+        std::string raw = build_rfc822_message(from, to, subject, body, irt,
+                                               format, attachments);
+        auto alive = m_alive;
+        std::thread([this, win, to_box, subj_box, editor, busy, alive,
+                     imap_host, imap_port, user, pass, draft_folder, raw]() {
+            ImapClient imap;
+            imap.set_use_compress(false);
+            std::string err, folder = draft_folder;
+            bool ok = imap.open(imap_host, imap_port, user, pass, err);
+            if (ok) {
+                std::string special, se;
+                if (imap.special_use_mailbox("\\Drafts", special, se) &&
+                    !special.empty())
+                    folder = special;
+                ok = imap.append_message(folder, raw, err, "\\Draft \\Seen");
+            }
+            imap.close();
+            nanogui::async(std::function<void()>(
+                [this, win, to_box, subj_box, editor, busy, alive, ok, err, folder]() {
+                    if (!*alive) return;
+                    if (ok) {
+                        set_status("Draft saved to " + folder);
+                        *busy = false;
+                        close_dialog(win);
+                        return;
+                    }
+                    *busy = false;
+                    if (to_box && to_box->parent()) to_box->set_editable(true);
+                    if (subj_box && subj_box->parent()) subj_box->set_editable(true);
+                    if (editor && editor->parent()) editor->set_read_only(false);
+                    set_status("Could not save draft");
+                    auto *dlg = new MessageDialog(this, MessageDialog::Type::Warning,
+                        "Draft not saved",
+                        "The message is still open. Saving to " + folder +
+                        " failed.\n\n" + err, "OK", "", false);
+                    dlg->center();
+                    redraw();
+                }));
+            glfwPostEmptyEvent();
+        }).detach();
     }
 
     /* ---- Reply / Forward / New compose window ---- */
@@ -3760,11 +3863,54 @@ public:
         buttons_layout->set_anchor(action_group,
             AdvancedGridLayout::Anchor(2, 0, Alignment::Maximum, Alignment::Middle));
 
+        auto compose_busy = std::make_shared<bool>(false);
+        auto request_close = [this, win, to, subj, body, fmt_box, compose_atts,
+                              from_box, from_account_id, compose_busy,
+                              irt = reply ? orig.message_id : ""]() {
+            if (*compose_busy) return;
+            int fmt = fmt_box->selected_index();
+            if (fmt < 0) fmt = 1;
+            MailFormat format = fmt == 0 ? MailFormat::Plain
+                              : fmt == 2 ? MailFormat::Html
+                                         : MailFormat::Markdown;
+            std::string text = fmt == 0 ? body->plain_text()
+                             : fmt == 2 ? document_to_html(*body->document())
+                                        : document_to_markdown(*body->document());
+            std::string to_s = to->value();
+            std::string sub_s = subj->value();
+            std::vector<MailAttachment> atts =
+                compose_atts ? *compose_atts : std::vector<MailAttachment>{};
+            auto blank = [](const std::string &s) {
+                return std::find_if(s.begin(), s.end(), [](unsigned char c) {
+                    return !std::isspace(c);
+                }) == s.end();
+            };
+            if (blank(to_s) && blank(sub_s) && blank(text) && atts.empty()) {
+                close_dialog(win);
+                return;
+            }
+            *compose_busy = true;
+            to->set_editable(false);
+            subj->set_editable(false);
+            body->set_read_only(true);
+            set_status("Saving draft...");
+            std::string chosen = from_account_id;
+            if (from_box) {
+                int idx = from_box->selected_index();
+                if (idx >= 0 && idx < (int)m_accounts.size())
+                    chosen = m_accounts[idx]->config.id();
+            }
+            save_draft(win, to, subj, body, compose_busy, chosen,
+                       to_s, sub_s, text, irt, format, std::move(atts));
+        };
+        win->set_close_callback(request_close);
+
         Button *send = new Button(action_group, "Send", FA_PAPER_PLANE);
         send->set_callback([this, win, send, to, subj, body, fmt_box, spinner,
                            status_row, send_bar, compose_atts, from_box,
-                           from_account_id,
+                           from_account_id, compose_busy,
                            irt = reply ? orig.message_id : ""]() {
+            if (*compose_busy) return;
             std::string to_s  = to->value();
             std::string sub_s = subj->value();
             if (to_s.empty()) {
@@ -3774,6 +3920,7 @@ public:
                 dlg->center();
                 return;
             }
+            *compose_busy = true;
             send->set_enabled(false);
             /* Lock the composer and show busy feedback while SMTP runs. */
             to->set_editable(false);
@@ -3800,11 +3947,12 @@ public:
             send_reply(win, send, spinner, status_row, send_bar, to, subj, body,
                        chosen_account_id, to_s, sub_s, text, irt, format,
                        compose_atts ? *compose_atts
-                                    : std::vector<MailAttachment>{});
+                                    : std::vector<MailAttachment>{},
+                       compose_busy);
         });
 
         Button *cancel = new Button(action_group, "Cancel", FA_TIMES);
-        cancel->set_callback([this, win]() { close_dialog(win); });
+        cancel->set_callback(request_close);
 
         win->center();
         win->request_focus();
@@ -3820,7 +3968,8 @@ public:
                     const std::string &to, const std::string &subject,
                     const std::string &body, const std::string &irt,
                     MailFormat format,
-                    std::vector<MailAttachment> attachments) {
+                    std::vector<MailAttachment> attachments,
+                    std::shared_ptr<bool> compose_busy) {
         const AccountSession *acct = account(account_id);
         const MailAccount &ma = acct ? acct->config : current_acct().config;
         SmtpConfig sc;
@@ -3855,7 +4004,7 @@ public:
         std::thread([this, win, send_btn, spinner, status_row, send_bar, to_box,
                      subj_box, editor, sc, from, to, subject, body,
                      irt, format, attachments, imap_host, imap_port,
-                     sent_folder]() mutable {
+                     sent_folder, compose_busy]() mutable {
             SmtpClient smtp;
             std::string err, raw, save_err;
             bool ok = smtp.send(sc, from, to, subject, body, irt, format,
@@ -3884,7 +4033,8 @@ public:
             }
             nanogui::async(std::function<void()>(
                 [this, win, send_btn, spinner, status_row, send_bar, to_box,
-                 subj_box, editor, ok, err, saved, save_err, sent_folder]() {
+                 subj_box, editor, ok, err, saved, save_err, sent_folder,
+                 compose_busy]() {
                     if (ok) {
                         if (saved) {
                             set_status("Sent");
@@ -3903,6 +4053,7 @@ public:
                         redraw();
                     } else {
                         set_status("Send failed");
+                        if (compose_busy) *compose_busy = false;
                         /* Restore the composer so the user can retry. */
                         spinner->stop();
                         if (send_bar) send_bar->stop();

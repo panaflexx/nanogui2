@@ -25,6 +25,10 @@ void MailWorker::set_config(const MailAccount &c) {
     m_config = c;
 }
 
+void MailWorker::set_max_body_bytes(size_t n) {
+    m_imap.set_max_body_bytes(n);
+}
+
 void MailWorker::set_check_interval_min(int minutes) {
     std::lock_guard<std::mutex> lock(m_mutex);
     m_check_interval_min = minutes;

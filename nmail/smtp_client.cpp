@@ -487,3 +487,25 @@ bool SmtpClient::send(const SmtpConfig &cfg,
     close();
     return true;
 }
+
+std::string build_rfc822_message(const std::string &from, const std::string &to,
+                                 const std::string &subject,
+                                 const std::string &body_text,
+                                 const std::string &in_reply_to,
+                                 MailFormat format,
+                                 const std::vector<MailAttachment> &attachments) {
+    char hostbuf[256] = "localhost";
+#ifdef _WIN32
+    const char *cn = std::getenv("COMPUTERNAME");
+    if (cn && cn[0]) {
+        std::strncpy(hostbuf, cn, sizeof(hostbuf) - 1);
+        hostbuf[sizeof(hostbuf) - 1] = '\0';
+    }
+#else
+    if (gethostname(hostbuf, sizeof(hostbuf) - 1) != 0)
+        std::strcpy(hostbuf, "localhost");
+    hostbuf[sizeof(hostbuf) - 1] = '\0';
+#endif
+    return build_rfc822(from, to, subject, body_text, in_reply_to,
+                        format, hostbuf, attachments);
+}

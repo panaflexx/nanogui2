@@ -121,7 +121,7 @@ public:
     /* FETCH the full raw message and extract a readable plain-text body.
      * If `still_wanted` is set, it is checked after the IMAP round-trip
      * and before MIME decode — so a folder switch can skip a large body.
-     * Caps: messages larger than kMaxBodyBytes return an error instead of
+     * Caps: messages larger than max_body_bytes() return an error instead of
      * OOMing the UI; use body_size_guess()/fetch_message_peek() for preview,
      * or BODY.PEEK[TEXT]<0.N> chunked reads for huge messages. */
     bool fetch_message(int seq, MailMessage &msg, std::string &err,
@@ -133,7 +133,10 @@ public:
     // fetch_message() or show "too large" placeholder.
     bool body_size_guess(int seq, size_t &bytes, std::string &err);
     bool body_size_guess_uid(uint32_t uid, size_t &bytes, std::string &err);
-    static constexpr size_t kMaxBodyBytes = 20ull * 1024 * 1024; // 20 MiB
+    /* Largest message this client will fetch or append. Preferences
+     * sets it; the default matches the message cache. */
+    void set_max_body_bytes(size_t n) { m_max_body_bytes.store(n); }
+    size_t max_body_bytes() const { return m_max_body_bytes.load(); }
     static constexpr size_t kPeekLimit    = 512; // preview-only_bytes in FETCH summaries
 
     /* Move a single message (by sequence number) to another folder.
@@ -147,8 +150,10 @@ public:
     /* Upload one RFC822 message into `folder`, flagged \Seen. Creates the
      * mailbox when the server answers [TRYCREATE]. Does not SELECT it.
      * Uses LITERAL+ when the server advertises it. */
+    /* flags is the parenthesized flag list without parentheses,
+     * e.g. "\\Seen" or "\\Draft \\Seen". */
     bool append_message(const std::string &folder, const std::string &rfc822,
-                        std::string &err);
+                        std::string &err, const char *flags = "\\Seen");
 
     /* LIST and return the mailbox flagged \Sent, \Trash, \Drafts, ...
      * `use` is the attribute including the backslash, e.g. "\\Sent". */
@@ -281,6 +286,7 @@ private:
     void *m_deflate_state = nullptr;
     bool m_compressed = false;
     bool m_use_compress = true;
+    std::atomic<size_t> m_max_body_bytes{512ull * 1024 * 1024};
     bool m_qresync_enabled = false;
     QResyncState m_qresync; // last SELECT's UIDVALIDITY/HIGHESTMODSEQ
     // COMPRESS=DEFLATE helpers (raw DEFLATE, RFC 4978)

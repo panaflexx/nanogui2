@@ -1620,10 +1620,11 @@ std::string ImapClient::quote(const std::string &s) {
 }
 
 bool ImapClient::append_message(const std::string &folder,
-                                const std::string &rfc822, std::string &err) {
+                                const std::string &rfc822, std::string &err,
+                                const char *flags) {
     if (!is_open()) { err = "not connected"; return false; }
     if (folder.empty()) { err = "no Sent folder"; return false; }
-    if (rfc822.size() > kMaxBodyBytes) {
+    if (rfc822.size() > max_body_bytes()) {
         err = "message is too large to save";
         return false;
     }
@@ -1649,7 +1650,8 @@ bool ImapClient::append_message(const std::string &folder,
          * immediately and the server does not send a '+' continuation.
          * Waiting for one deadlocks — we block, the server blocks. */
         const bool plus = m_caps.count("LITERAL+");
-        std::string cmd = "APPEND " + quote(folder) + " (\\Seen) {" +
+        const char *flag_list = (flags && flags[0]) ? flags : "\\Seen";
+        std::string cmd = "APPEND " + quote(folder) + " (" + flag_list + ") {" +
                           std::to_string(rfc822.size()) + (plus ? "+}" : "}");
         std::string tag = send_with_tag(cmd);
         if (tag.empty()) { err = "connection lost"; return false; }
@@ -1716,9 +1718,9 @@ bool ImapClient::read_bytes(size_t n, std::string &out, std::string &err) {
     // Cap literals so a malicious/oversized server cannot allocate 2 GB in one
     // read_logical_line.  fetch_summaries already uses BODY.PEEK[TEXT]<0.512>,
     // but BODY.PEEK[] for a 2 GB attachment would still land here.  If the
-    // server claims a literal larger than kMaxBodyBytes, fail fast; the caller
+    // server claims a literal larger than max_body_bytes(), fail fast; the caller
     // (fetch_message) already probes RFC822.SIZE before asking for BODY.
-    if (n > kMaxBodyBytes + 8192) { // slack for headers+encoding
+    if (n > max_body_bytes() + 8192) { // slack for headers+encoding
         err = "literal too large (" + std::to_string(n) + " bytes) — message too large for preview";
         return false;
     }
@@ -2470,8 +2472,8 @@ bool ImapClient::fetch_message(int seq, MailMessage &msg, std::string &err,
     // Allows folder switches to cancel quickly and avoids OOMing the worker.
     {
         size_t sz = 0; std::string se;
-        if (body_size_guess(seq, sz, se) && sz > kMaxBodyBytes) {
-            imap_dbg("FETCH seq=%d SKIP huge size=%zu > %zu", seq, sz, kMaxBodyBytes);
+        if (body_size_guess(seq, sz, se) && sz > max_body_bytes()) {
+            imap_dbg("FETCH seq=%d SKIP huge size=%zu > %zu", seq, sz, max_body_bytes());
             err = "message too large (" + std::to_string(sz/1024/1024) + " MiB) — preview only; open in webmail for attachments";
             return false;
         }
@@ -2523,8 +2525,8 @@ bool ImapClient::fetch_message_by_uid(uint32_t uid, MailMessage &msg, std::strin
                                       const std::function<bool()> &still_wanted) {
     {
         size_t sz = 0; std::string se;
-        if (body_size_guess_uid(uid, sz, se) && sz > kMaxBodyBytes) {
-            imap_dbg("UID FETCH uid=%u SKIP huge size=%zu > %zu", uid, sz, kMaxBodyBytes);
+        if (body_size_guess_uid(uid, sz, se) && sz > max_body_bytes()) {
+            imap_dbg("UID FETCH uid=%u SKIP huge size=%zu > %zu", uid, sz, max_body_bytes());
             err = "message too large (" + std::to_string(sz/1024/1024) + " MiB) — preview only; open in webmail for attachments";
             return false;
         }

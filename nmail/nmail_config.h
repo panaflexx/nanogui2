@@ -42,6 +42,9 @@ struct MailConfig {
      * unless the user opts into keeping them on disk. */
     bool        save_contacts = false;
     int         check_interval_min = 15;  // how often to auto-check for new mail
+    /* Per-account message cache, and the largest message we will download.
+     * One of 256, 512, 1024, 2048. */
+    int         cache_limit_mb = 512;
     /* Base font size for the compose/reply editor; headings and code blocks
      * are drawn as ratios of this (see TextEditor::set_base_font_size). */
     int         compose_font_size = 16;

@@ -67,6 +67,7 @@ public:
      * (check_interval_min) are set separately, below. */
     void set_config(const MailAccount &c);
     void set_check_interval_min(int minutes);
+    void set_max_body_bytes(size_t n);
 
     void start();
     void stop();

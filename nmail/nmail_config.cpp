@@ -304,7 +304,11 @@ bool load_config(MailConfig &c) {
     c.dark_mode          = config_get_bool(root, "dark_mode", false);
     c.save_contacts      = config_get_bool(root, "save_contacts", false);
     c.check_interval_min = config_get_int(root, "check_interval_min", 15);
+    c.cache_limit_mb     = config_get_int(root, "cache_limit_mb", 512);
     c.compose_font_size  = config_get_int(root, "compose_font_size", 16);
+    if (c.cache_limit_mb != 256 && c.cache_limit_mb != 512 &&
+        c.cache_limit_mb != 1024 && c.cache_limit_mb != 2048)
+        c.cache_limit_mb = 512;
     dict_destroy(root);
     return !c.accounts.empty();
 }
@@ -319,6 +323,7 @@ bool save_config(const MailConfig &c) {
     dict_object_set(root, "save_contacts",
                     dict_create_bool(c.save_contacts ? 1 : 0));
     dict_object_set(root, "check_interval_min", dict_create_int64(c.check_interval_min));
+    dict_object_set(root, "cache_limit_mb", dict_create_int64(c.cache_limit_mb));
     dict_object_set(root, "compose_font_size", dict_create_int64(c.compose_font_size));
 
     bool ok = false;
