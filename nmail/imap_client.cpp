@@ -59,6 +59,12 @@ static bool starts_with(const std::string &s, const std::string &prefix) {
            s.compare(0, prefix.size(), prefix) == 0;
 }
 
+/* A non-numeric or over-long server value must not throw out of the worker. */
+static bool parse_size(const std::string &s, size_t &out) {
+    try { out = (size_t)std::stoull(trim(s)); return true; }
+    catch (...) { return false; }
+}
+
 // ---------------------------------------------------------------------------
 // Decoders: base64, quoted-printable, RFC 2047 encoded words
 // ---------------------------------------------------------------------------
@@ -430,11 +436,15 @@ static std::string strip_html(const std::string &html) {
             continue;
         }
         if (c == '&') {
-            if (starts_with(html.substr(i), "&amp;"))  { out += '&';  i += 4; continue; }
-            if (starts_with(html.substr(i), "&lt;"))   { out += '<';  i += 3; continue; }
-            if (starts_with(html.substr(i), "&gt;"))   { out += '>';  i += 3; continue; }
-            if (starts_with(html.substr(i), "&nbsp;")) { out += ' ';  i += 5; continue; }
-            if (starts_with(html.substr(i), "&quot;")) { out += '"';  i += 5; continue; }
+            /* compare() in place: substr() here copied the whole tail per '&'. */
+            auto ent = [&](const char *e, size_t n) {
+                return html.compare(i, n, e) == 0;
+            };
+            if (ent("&amp;",  5)) { out += '&';  i += 4; continue; }
+            if (ent("&lt;",   4)) { out += '<';  i += 3; continue; }
+            if (ent("&gt;",   4)) { out += '>';  i += 3; continue; }
+            if (ent("&nbsp;", 6)) { out += ' ';  i += 5; continue; }
+            if (ent("&quot;", 6)) { out += '"';  i += 5; continue; }
         }
         out += c;
     }
@@ -865,17 +875,22 @@ static bool is_media_type(const std::string &t) {
            t == "application" || t == "message" || t == "multipart";
 }
 
-static bool list_has_filename(const std::string &list) {
+/* Nesting mirrors the sender's multipart structure, so every walk below is
+ * depth-capped: unbounded recursion here is a stack overflow on hostile mail. */
+static const int kMaxBsDepth = 32;
+
+static bool list_has_filename(const std::string &list, int depth = 0) {
+    if (depth > kMaxBsDepth) return false;
     BsScan c{list};
     if (!c.eat('(')) return false;
     while (c.peek() && c.peek() != ')') {
         if (c.peek() == '(') {
-            if (list_has_filename(c.read_list())) return true;
+            if (list_has_filename(c.read_list(), depth + 1)) return true;
             continue;
         }
         std::string k = bs_lower(c.read_tok());
         if (c.peek() == '(') {
-            if (list_has_filename(c.read_list())) return true;
+            if (list_has_filename(c.read_list(), depth + 1)) return true;
             continue;
         }
         std::string v = bs_lower(c.read_tok());
@@ -891,32 +906,35 @@ static std::string disposition_kind(const std::string &list) {
     return bs_lower(c.read_tok());
 }
 
-static bool scan_body(BsScan &c);
+static bool scan_body(BsScan &c, int depth = 0);
 
-static bool scan_nested_blob(const std::string &blob) {
+static bool scan_nested_blob(const std::string &blob, int depth) {
+    if (depth > kMaxBsDepth) return false;
     std::string kind = disposition_kind(blob);
     if (kind == "attachment") return true;
     if (blob.size() > 1 && blob[1] == '(') {
         BsScan nested{blob};
-        if (scan_body(nested)) return true;
+        if (scan_body(nested, depth + 1)) return true;
     } else if (is_media_type(kind)) {
         BsScan nested{blob};
-        if (scan_body(nested)) return true;
+        if (scan_body(nested, depth + 1)) return true;
     }
     return false;
 }
 
-static bool scan_body(BsScan &c) {
+static bool scan_body(BsScan &c, int depth) {
+    // Consume the span: bailing without advancing spins the caller's loop.
+    if (depth > kMaxBsDepth) { c.read_list(); return false; }
     if (!c.eat('(')) return false;
     if (c.peek() == '(') {
         bool found = false;
         while (c.peek() == '(') {
-            if (scan_body(c)) found = true;
+            if (scan_body(c, depth + 1)) found = true;
         }
         c.read_tok();
         while (c.peek() && c.peek() != ')') {
             if (c.peek() == '(') {
-                if (scan_nested_blob(c.read_list())) found = true;
+                if (scan_nested_blob(c.read_list(), depth + 1)) found = true;
             } else c.skip_value();
         }
         c.eat(')');
@@ -927,7 +945,7 @@ static bool scan_body(BsScan &c) {
     bool named = false;
     bool inline_disp = false;
     bool attach_disp = false;
-    if (c.peek() == '(') named = list_has_filename(c.read_list());
+    if (c.peek() == '(') named = list_has_filename(c.read_list(), depth + 1);
     else c.skip_value();
     c.skip_value(); c.skip_value(); c.skip_value(); c.skip_value();
     if (type == "text") c.skip_value();
@@ -937,8 +955,8 @@ static bool scan_body(BsScan &c) {
             std::string kind = disposition_kind(blob);
             if (kind == "attachment") attach_disp = true;
             else if (kind == "inline") inline_disp = true;
-            if (list_has_filename(blob)) named = true;
-            if (scan_nested_blob(blob)) attach_disp = true;
+            if (list_has_filename(blob, depth + 1)) named = true;
+            if (scan_nested_blob(blob, depth + 1)) attach_disp = true;
         } else c.skip_value();
     }
     c.eat(')');
@@ -2462,13 +2480,11 @@ bool ImapClient::body_size_guess(int seq, size_t &bytes, std::string &err) {
     std::vector<std::string> untagged;
     if (!run("FETCH " + std::to_string(seq) + " (RFC822.SIZE)", untagged, err))
         return false;
-    for (auto &line : untagged) {
+    // starts_with also covers servers that suffix the key (BODY[] literal form).
+    for (auto &line : untagged)
         for (auto &kv : parse_fetch_items(line))
-            if (kv.first == "RFC822.SIZE") { bytes = (size_t)std::stoul(kv.second); return true; }
-        // Fallback: some servers use BODY[] literal on RFC822.SIZE — still parse.
-        for (auto &kv : parse_fetch_items(line))
-            if (starts_with(kv.first, "RFC822.SIZE")) { bytes = (size_t)std::stoul(kv.second); return true; }
-    }
+            if (starts_with(kv.first, "RFC822.SIZE") && parse_size(kv.second, bytes))
+                return true;
     // No RFC822.SIZE — not fatal, caller treats as unknown.
     return true;
 }
@@ -2519,12 +2535,10 @@ bool ImapClient::body_size_guess_uid(uint32_t uid, size_t &bytes, std::string &e
     std::vector<std::string> untagged;
     if (!run("UID FETCH " + std::to_string(uid) + " (RFC822.SIZE)", untagged, err))
         return false;
-    for (auto &line : untagged) {
+    for (auto &line : untagged)
         for (auto &kv : parse_fetch_items(line))
-            if (kv.first == "RFC822.SIZE") { bytes = (size_t)std::stoul(kv.second); return true; }
-        for (auto &kv : parse_fetch_items(line))
-            if (starts_with(kv.first, "RFC822.SIZE")) { bytes = (size_t)std::stoul(kv.second); return true; }
-    }
+            if (starts_with(kv.first, "RFC822.SIZE") && parse_size(kv.second, bytes))
+                return true;
     return true;
 }
 
@@ -2691,6 +2705,18 @@ std::string ImapClient::uids_to_seqset(const std::vector<uint32_t> &uids) {
     }
     return out;
 }
+/* "1:4294967295" is a legal VANISHED range but would expand to a 16 GB vector. */
+static const size_t kMaxSeqsetUids = 1u << 20;
+
+/* The digit scan guarantees digits, so only an over-long run can throw.  Out of
+ * range is not a valid UID: return 0 rather than a value that spans the cap. */
+static uint32_t seqset_num(const std::string &s) {
+    try {
+        unsigned long long v = std::stoull(s);
+        return v > 0xFFFFFFFFull ? 0u : (uint32_t)v;
+    } catch (...) { return 0u; }
+}
+
 std::vector<uint32_t> ImapClient::seqset_to_uids(const std::string &seqset) {
     std::vector<uint32_t> out;
     size_t p = 0;
@@ -2700,15 +2726,16 @@ std::vector<uint32_t> ImapClient::seqset_to_uids(const std::string &seqset) {
         size_t q = p;
         while (q < seqset.size() && isdigit((unsigned char)seqset[q])) ++q;
         if (q == p) { ++p; continue; }
-        uint32_t a = (uint32_t)std::stoul(seqset.substr(p, q - p));
+        uint32_t a = seqset_num(seqset.substr(p, q - p));
         p = q;
         if (p < seqset.size() && seqset[p] == ':') {
             ++p;
             size_t r = p;
             while (r < seqset.size() && isdigit((unsigned char)seqset[r])) ++r;
             if (r > p) {
-                uint32_t b = (uint32_t)std::stoul(seqset.substr(p, r - p));
-                for (uint32_t v = a; v <= b; ++v) out.push_back(v);
+                uint32_t b = seqset_num(seqset.substr(p, r - p));
+                for (uint32_t v = a; v <= b && out.size() < kMaxSeqsetUids; ++v)
+                    out.push_back(v);
                 p = r;
             } else out.push_back(a);
         } else out.push_back(a);

@@ -65,6 +65,18 @@ std::string MailWorker::uids_to_seqset_str(const std::vector<uint32_t> &uids) {
     }
     return out;
 }
+/* "1:4294967295" is a legal VANISHED range but would expand to a 16 GB vector. */
+static const size_t kMaxSeqsetUids = 1u << 20;
+
+/* The digit scan guarantees digits, so only an over-long run can throw.  Out of
+ * range is not a valid UID: return 0 rather than a value that spans the cap. */
+static uint32_t seqset_num(const std::string &s) {
+    try {
+        unsigned long long v = std::stoull(s);
+        return v > 0xFFFFFFFFull ? 0u : (uint32_t)v;
+    } catch (...) { return 0u; }
+}
+
 std::vector<uint32_t> MailWorker::seqset_to_uids_vec(const std::string &seqset) {
     std::vector<uint32_t> out;
     size_t p = 0;
@@ -74,15 +86,16 @@ std::vector<uint32_t> MailWorker::seqset_to_uids_vec(const std::string &seqset) 
         size_t q = p;
         while (q < seqset.size() && isdigit((unsigned char)seqset[q])) ++q;
         if (q == p) { ++p; continue; }
-        uint32_t a = (uint32_t)std::stoul(seqset.substr(p, q - p));
+        uint32_t a = seqset_num(seqset.substr(p, q - p));
         p = q;
         if (p < seqset.size() && seqset[p] == ':') {
             ++p;
             size_t r = p;
             while (r < seqset.size() && isdigit((unsigned char)seqset[r])) ++r;
             if (r > p) {
-                uint32_t b = (uint32_t)std::stoul(seqset.substr(p, r - p));
-                for (uint32_t v = a; v <= b; ++v) out.push_back(v);
+                uint32_t b = seqset_num(seqset.substr(p, r - p));
+                for (uint32_t v = a; v <= b && out.size() < kMaxSeqsetUids; ++v)
+                    out.push_back(v);
                 p = r;
             } else out.push_back(a);
         } else out.push_back(a);

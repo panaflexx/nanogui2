@@ -1096,12 +1096,12 @@ void try_host_embed(Widget *container, GumboElement *el, const std::string &id,
 // Stylesheet: <style> blocks from the mail (class / id / element selectors,
 // prefers-color-scheme media). Inline style="" still wins.
 // ---------------------------------------------------------------------------
-void collect_style_text(GumboNode *node, std::string &out) {
-    if (!node) return;
+void collect_style_text(GumboNode *node, std::string &out, int depth = 0) {
+    if (!node || depth > 200) return;
     if (node->type == GUMBO_NODE_DOCUMENT) {
         GumboVector *kids = &node->v.document.children;
         for (unsigned i = 0; i < kids->length; ++i)
-            collect_style_text((GumboNode *)kids->data[i], out);
+            collect_style_text((GumboNode *)kids->data[i], out, depth + 1);
         return;
     }
     if (node->type != GUMBO_NODE_ELEMENT) return;
@@ -1116,7 +1116,7 @@ void collect_style_text(GumboNode *node, std::string &out) {
         return;
     }
     for (unsigned i = 0; i < el->children.length; ++i)
-        collect_style_text((GumboNode *)el->children.data[i], out);
+        collect_style_text((GumboNode *)el->children.data[i], out, depth + 1);
 }
 
 std::string strip_css_comments(const std::string &in) {
@@ -2217,8 +2217,8 @@ bool cell_is_table_passthrough(GumboElement *td) {
  * cell_is_table_passthrough) isn't a real boundary — keep looking inside
  * it for the grid it forwards to, instead of stopping and reporting "no
  * grid here" for what is really just an Outlook centering wrapper. */
-bool table_has_multicell_row(GumboNode *node, bool is_root = true) {
-    if (node->type != GUMBO_NODE_ELEMENT)
+bool table_has_multicell_row(GumboNode *node, bool is_root = true, int depth = 0) {
+    if (node->type != GUMBO_NODE_ELEMENT || depth > 200)
         return false;
     GumboElement *el = &node->v.element;
     if (!is_root && el->tag == GUMBO_TAG_TABLE)
@@ -2230,12 +2230,12 @@ bool table_has_multicell_row(GumboNode *node, bool is_root = true) {
         for (unsigned i = 0; i < el->children.length; ++i) {
             GumboNode *cn = (GumboNode *)el->children.data[i];
             if (cn->type == GUMBO_NODE_ELEMENT && cn->v.element.tag == GUMBO_TAG_TABLE)
-                return table_has_multicell_row(cn, true);
+                return table_has_multicell_row(cn, true, depth + 1);
         }
         return false;
     }
     for (unsigned i = 0; i < el->children.length; ++i)
-        if (table_has_multicell_row((GumboNode *)el->children.data[i], false))
+        if (table_has_multicell_row((GumboNode *)el->children.data[i], false, depth + 1))
             return true;
     return false;
 }
@@ -3197,8 +3197,64 @@ int HtmlDocument::bind_loaded_images() {
     return n;
 }
 
+/* Gumbo has no nesting cap and is superlinear in depth: ~40k nested tags is a
+ * 19s parse and ~100k exhausts memory.  Flat markup stays linear, so bound
+ * both size and depth before the parser ever sees sender-controlled bytes. */
+static const size_t kMaxHtmlBytes = 4u * 1024 * 1024;
+static const int    kMaxHtmlDepth = 1024;
+
+/* Void elements, plus those HTML5 auto-closes on the next sibling: neither
+ * can stack, so counting them would reject ordinary unclosed <p>/<td> mail. */
+static bool tag_holds_depth(const std::string &t) {
+    static const char *kFlat[] = {
+        "area", "base", "br", "col", "embed", "hr", "img", "input", "link",
+        "meta", "param", "source", "track", "wbr",
+        "dd", "dt", "li", "option", "p", "td", "th", "thead", "tbody",
+        "tfoot", "tr"
+    };
+    for (const char *f : kFlat)
+        if (t == f) return false;
+    return true;
+}
+
+bool html_is_parseable(const std::string &html) {
+    if (html.size() > kMaxHtmlBytes)
+        return false;
+    int depth = 0;
+    for (size_t i = 0; i + 1 < html.size(); ++i) {
+        if (html[i] != '<')
+            continue;
+        if (html.compare(i, 4, "<!--") == 0) {   // markup in a comment is not structure
+            size_t e = html.find("-->", i + 4);
+            if (e == std::string::npos) break;
+            i = e + 2;
+            continue;
+        }
+        size_t j = i + 1;
+        bool close = html[j] == '/';
+        if (close) ++j;
+        if (j >= html.size() || !std::isalpha((unsigned char)html[j]))
+            continue;
+        std::string name;
+        while (j < html.size() && std::isalnum((unsigned char)html[j]))
+            name += (char)std::tolower((unsigned char)html[j++]);
+        if (close) {
+            if (depth > 0) --depth;
+        } else if (tag_holds_depth(name) && ++depth > kMaxHtmlDepth) {
+            return false;
+        }
+    }
+    return true;
+}
+
 void HtmlDocument::set_html(const std::string &html) {
     clear();
+
+    if (!html_is_parseable(html)) {
+        set_plain("This message could not be displayed: its formatting is "
+                  "too large or too deeply nested to render safely.");
+        return;
+    }
 
     /* Light text on dark background -> dark mode link/code colors. */
     bool dark_text_is_light = (m_text.r + m_text.g + m_text.b) > 1.5f;

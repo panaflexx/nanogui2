@@ -13,9 +13,19 @@
 #include <cstring>
 #include <string>
 
+/* Largest body we will buffer for one fetch. */
+#ifndef NMAIL_HTTP_MAX_BODY
+#define NMAIL_HTTP_MAX_BODY (16u * 1024 * 1024)
+#endif
+
 inline bool nmail_parse_url(const std::string &url, bool &https,
                             std::string &host, int &port,
                             std::string &path, std::string &hostport) {
+    /* A CR/LF reaching the request line would smuggle extra headers or a
+     * second request; sender-controlled <img src> can carry them. */
+    for (unsigned char c : url)
+        if (c < 0x20 || c == 0x7f)
+            return false;
     https = url.rfind("https://", 0) == 0;
     bool http = url.rfind("http://", 0) == 0;
     if (!https && !http)
@@ -99,13 +109,21 @@ inline bool nmail_http_get_once(const std::string &url, std::string &out,
 
     std::string raw;
     char buf[16384];
+    bool overflow = false;
     for (;;) {
         int r = nmail_sock_recv(fd, buf, sizeof(buf));
         if (r <= 0)
             break;
+        /* A server that never closes would otherwise grow this unbounded. */
+        if (raw.size() + (size_t)r > NMAIL_HTTP_MAX_BODY) {
+            overflow = true;
+            break;
+        }
         raw.append(buf, (size_t)r);
     }
     nmail_sock_close(fd);
+    if (overflow)
+        return false;
 
     size_t he = raw.find("\r\n\r\n");
     if (he == std::string::npos)

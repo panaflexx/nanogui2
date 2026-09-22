@@ -37,6 +37,11 @@ struct HtmlImageInfo {
     float w  = 0.0f, h = 0.0f;
 };
 
+/* False when the markup is too large or too deeply nested to hand to Gumbo,
+ * which has no nesting cap of its own and is superlinear in depth.  Callers
+ * holding a text/plain alternative should prefer it over set_html(). */
+bool html_is_parseable(const std::string &html);
+
 class HtmlDocument : public nanogui::Widget {
 public:
     explicit HtmlDocument(nanogui::Widget *parent);

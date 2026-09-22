@@ -496,7 +496,7 @@ public:
             h += "</div><div style=\"height:12px\"></div>";
         }
 
-        if (!msg.html.empty()) {
+        if (!msg.html.empty() && html_is_parseable(msg.html)) {
             m_view->set_html(with_attachment_slots(h + msg.html, msg));
         } else if (!msg.body.empty() || !visible_attachments(msg).empty()) {
             std::string body_html = h;

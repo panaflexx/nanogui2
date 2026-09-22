@@ -553,12 +553,12 @@ public:
             // unknown scheme - return as-is up to slash
             host = s;
         }
+        // cut at / ? # first: an '@' in the path is not userinfo
+        size_t end = host.find_first_of("/?#");
+        if (end != std::string::npos) host = host.substr(0, end);
         // strip userinfo if present
         size_t at = host.rfind('@');
         if (at != std::string::npos) host = host.substr(at + 1);
-        // cut at / ? #
-        size_t end = host.find_first_of("/?#");
-        if (end != std::string::npos) host = host.substr(0, end);
         // strip port
         size_t colon = host.find(':');
         if (colon != std::string::npos) host = host.substr(0, colon);
@@ -2482,7 +2482,9 @@ public:
         /* HTML and plain/Markdown both go through HtmlDocument so the
          * parchment header card is the same chrome on every message. */
         std::string html = header_html(msg, m_expanded_addrs);
-        html += msg.html.empty() ? body_as_html(msg) : msg.html;
+        /* Unrenderable markup falls back to the text part, keeping the card. */
+        html += (!msg.html.empty() && html_is_parseable(msg.html))
+                    ? msg.html : body_as_html(msg);
         m_view->set_html(with_attachment_slots(html, msg));
         m_has_remote_images = m_view->has_remote_images();
         /* Enabled when this message has remote images, or whenever loading
