@@ -32,12 +32,25 @@ public:
         if (key.empty() || raw.empty() || raw.size() > m_limit) return false;
         erase(key);
         evict_until(raw.size());
-        if (m_high + raw.size() > m_limit) compact();
-        if (m_high + raw.size() > m_limit) evict_until(raw.size());
-        if (m_high + raw.size() > m_limit) compact();
+        if (m_live + raw.size() > m_limit) return false;
+        /* Erase/evict leave holes but do not rewind the bump pointer, so
+         * once the slab has been filled every later put looks like it needs
+         * room. Pack only then, and only when the live bytes actually fit. */
+        if (m_high + raw.size() > m_limit || m_slab.size() < m_high + raw.size())
+            compact();
         if (m_high + raw.size() > m_limit) return false;
-        if (m_slab.size() < m_high + raw.size())
-            m_slab.resize(m_high + raw.size());
+        /* Grow the one slab, never past the cap. resize() alone may
+         * double capacity and blow the limit; reserve() asks for an
+         * exact size. */
+        size_t need = m_high + raw.size();
+        if (m_slab.capacity() < need) {
+            size_t grown = m_slab.capacity() ? m_slab.capacity() * 2 : need;
+            if (grown < need) grown = need;
+            if (grown > m_limit) grown = m_limit;
+            m_slab.reserve(grown);
+        }
+        if (m_slab.size() < need)
+            m_slab.resize(need);
         std::memcpy(m_slab.data() + m_high, raw.data(), raw.size());
         m_slots.push_back(Slot{key, m_high, raw.size(), ++m_clock});
         m_high += raw.size();
@@ -109,18 +122,25 @@ private:
         }
     }
 
+    /* Slide live ranges down over holes. A second buffer the size of the
+     * cache was allocating and freeing hundreds of MB on the UI thread
+     * (prefetch -> body_put -> compact) and froze the window. Dest is
+     * always <= src, so memmove is safe. */
     void compact() {
-        std::vector<char> packed;
-        packed.reserve(m_live);
+        if (m_slots.empty()) {
+            m_high = 0;
+            m_live = 0;
+            return;
+        }
+        std::sort(m_slots.begin(), m_slots.end(),
+                  [](const Slot &a, const Slot &b) { return a.off < b.off; });
         size_t at = 0;
         for (Slot &s : m_slots) {
-            packed.insert(packed.end(),
-                          m_slab.begin() + (std::ptrdiff_t)s.off,
-                          m_slab.begin() + (std::ptrdiff_t)(s.off + s.len));
+            if (s.len && s.off != at)
+                std::memmove(m_slab.data() + at, m_slab.data() + s.off, s.len);
             s.off = at;
             at += s.len;
         }
-        m_slab.swap(packed);
         m_high = at;
     }
 
