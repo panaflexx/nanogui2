@@ -54,12 +54,6 @@ struct MailAddress {
  * plausible address are dropped, so the result may be shorter than the input. */
 std::vector<MailAddress> parse_address_list(const std::string &raw);
 
-struct MailImage {
-    std::string cid;          // Content-ID without angle brackets ("" if none)
-    std::string mime;         // e.g. "image/png"
-    std::string data;         // decoded image bytes (PNG/JPEG/GIF)
-};
-
 struct MailAttachment {
     std::string filename;     // display name (may be empty)
     std::string mime;         // e.g. "application/pdf"
@@ -79,13 +73,17 @@ struct MailMessage {
     std::string raw;           // original RFC 822 bytes (IMAP BODY[])
     bool body_markdown = false; // text part declared markup=markdown
                                 // (MailMate convention) or text/markdown
-    std::vector<MailImage> images;   // inline image/* parts (for cid: srcs)
-    std::vector<MailAttachment> attachments; // non-body MIME parts
+    /* Every MIME part that is not the body, inline image/* included: a
+     * cid: src resolves by matching MailAttachment::cid. */
+    std::vector<MailAttachment> attachments;
 };
 
 /* Parse a complete RFC 822 / MIME message (the IMAP BODY[] payload, or
  * a saved .eml file).  Fills `msg` including `msg.raw`. */
 bool parse_rfc822_message(const std::string &raw, MailMessage &msg);
+/* Takes ownership of `raw`, saving a full copy of the message bytes for
+ * callers that do not need theirs afterwards. */
+bool parse_rfc822_message(std::string &&raw, MailMessage &msg);
 
 /* Derive a collapsed preview snippet (<=160 chars) from a fully fetched
  * message — prefers the plain body, falls back to stripped HTML. */

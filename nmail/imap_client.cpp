@@ -522,13 +522,13 @@ static std::string mime_content_id(const std::map<std::string, std::string> &hea
 static void mime_push_attachment(std::vector<MailAttachment> &attachments,
                                  const std::map<std::string, std::string> &headers,
                                  const std::string &ct, const std::string &base,
-                                 const std::string &data, const std::string &cid) {
+                                 std::string data, const std::string &cid) {
     if (data.empty()) return;
     MailAttachment a;
     a.filename = mime_part_filename(headers, ct);
     a.mime = base;
     a.cid = cid;
-    a.data = data;
+    a.data = std::move(data);
     attachments.push_back(std::move(a));
 }
 
@@ -540,7 +540,6 @@ static void mime_push_attachment(std::vector<MailAttachment> &attachments,
 static void mime_extract_parts(const std::string &head, const std::string &body,
                                std::string &plain, std::string &html,
                                bool &plain_markdown,
-                               std::vector<MailImage> &images,
                                std::vector<MailAttachment> &attachments,
                                int depth) {
     if (depth > 6) return;
@@ -571,7 +570,7 @@ static void mime_extract_parts(const std::string &head, const std::string &body,
             std::string ph, pb;
             split_head_body(part, ph, pb);
             mime_extract_parts(ph, pb, plain, html, plain_markdown,
-                               images, attachments, depth + 1);
+                               attachments, depth + 1);
             pos = next;
         }
         return;
@@ -579,18 +578,11 @@ static void mime_extract_parts(const std::string &head, const std::string &body,
 
     const std::string cid = mime_content_id(headers);
 
-    /* Inline image part (referenced from the HTML via cid:). */
+    /* Inline image part (referenced from the HTML via cid:).  Chips for cid
+     * images used in the HTML are filtered at display. */
     if (starts_with(base, "image/")) {
-        MailImage img;
-        img.mime = base;
-        img.cid = cid;
-        img.data = cte_decode(body, cte);
-        if (!img.data.empty()) {
-            if (!cid.empty())
-                images.push_back(img);
-            /* Chips for cid images used in the HTML are filtered at display. */
-            mime_push_attachment(attachments, headers, ct, base, img.data, cid);
-        }
+        mime_push_attachment(attachments, headers, ct, base,
+                             cte_decode(body, cte), cid);
         return;
     }
 
@@ -1743,6 +1735,7 @@ bool ImapClient::read_bytes(size_t n, std::string &out, std::string &err) {
         return false;
     }
     out.clear();
+    out.reserve(n);
     const bool track = m_byte_progress && n >= (1u << 20) && on_progress;
     size_t last_report = 0;
     if (track) on_progress(0, n);
@@ -1750,7 +1743,7 @@ bool ImapClient::read_bytes(size_t n, std::string &out, std::string &err) {
     
         if (!m_rbuf.empty()) {
             size_t take = std::min(n - out.size(), m_rbuf.size());
-            out += m_rbuf.substr(0, take);
+            out.append(m_rbuf, 0, take);
             m_rbuf.erase(0, take);
             if (track && (out.size() == n || out.size() - last_report >= 256 * 1024)) {
                 last_report = out.size();
@@ -2527,7 +2520,7 @@ bool ImapClient::fetch_message(int seq, MailMessage &msg, std::string &err,
         return false;
     }
     imap_dbg("FETCH seq=%d raw=%zu bytes, MIME decode", seq, raw.size());
-    return parse_rfc822_message(raw, msg);
+    return parse_rfc822_message(std::move(raw), msg);
 }
 
 bool ImapClient::body_size_guess_uid(uint32_t uid, size_t &bytes, std::string &err) {
@@ -2575,12 +2568,12 @@ bool ImapClient::fetch_message_by_uid(uint32_t uid, MailMessage &msg, std::strin
         return false;
     }
     imap_dbg("UID FETCH uid=%u raw=%zu bytes, MIME decode", uid, raw.size());
-    return parse_rfc822_message(raw, msg);
+    return parse_rfc822_message(std::move(raw), msg);
 }
 
-bool parse_rfc822_message(const std::string &raw, MailMessage &msg) {
+/* Everything except msg.raw, which the two public entry points own. */
+static bool parse_rfc822_into(const std::string &raw, MailMessage &msg) {
     msg = MailMessage{};
-    msg.raw = raw;
     if (raw.empty())
         return false;
 
@@ -2602,7 +2595,7 @@ bool parse_rfc822_message(const std::string &raw, MailMessage &msg) {
     std::string plain, html;
     bool plain_markdown = false;
     mime_extract_parts(head, body, plain, html, plain_markdown,
-                       msg.images, msg.attachments, 0);
+                       msg.attachments, 0);
     msg.html = html;
     msg.body = !plain.empty() ? plain
              : !html.empty()  ? strip_html(html)
@@ -2613,6 +2606,18 @@ bool parse_rfc822_message(const std::string &raw, MailMessage &msg) {
              msg.body.size(), msg.html.size(), msg.attachments.size(),
              raw.size());
     return true;
+}
+
+bool parse_rfc822_message(const std::string &raw, MailMessage &msg) {
+    if (!parse_rfc822_into(raw, msg)) { msg.raw = raw; return false; }
+    msg.raw = raw;
+    return true;
+}
+
+bool parse_rfc822_message(std::string &&raw, MailMessage &msg) {
+    bool ok = parse_rfc822_into(raw, msg);
+    msg.raw = std::move(raw);
+    return ok;
 }
 
 bool ImapClient::move_message(int seq, const std::string &dest_folder,

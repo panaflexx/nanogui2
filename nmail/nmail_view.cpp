@@ -777,9 +777,9 @@ private:
         std::string bytes;
         if (src.rfind("cid:", 0) == 0) {
             std::string cid = src.substr(4);
-            for (const MailImage &img : m_last.images) {
-                if (img.cid == cid)
-                    return make_info(create_texture(src, img.data));
+            for (const MailAttachment &a : m_last.attachments) {
+                if (a.cid == cid)
+                    return make_info(create_texture(src, a.data));
             }
             return HtmlImageInfo{};
         }

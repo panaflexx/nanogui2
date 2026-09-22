@@ -182,10 +182,9 @@ struct AccountSession {
      * MOVE must not run on_expunged after we have already resequenced. */
     std::string              local_expunge_folder;
     int                      local_expunge_seq = 0;
-    /* Session-only caches; dropped on Refresh or reconnect. */
+    /* Session-only cache; dropped on Refresh or reconnect.  Message bodies
+     * live in MailApp::m_body_cache, one slab shared by every account. */
     std::map<std::string, std::vector<MailSummary>> summary_cache;
-    /* Raw RFC822 only, packed into one slab capped at 512MB. */
-    MessageArena             body_cache;
 };
 
 // ---------------------------------------------------------------------------
@@ -228,6 +227,8 @@ public:
      * (m_summaries / m_email_list / m_view below are shared, singular UI --
      * only one account's message list is ever visible at a time). */
     std::vector<std::unique_ptr<AccountSession>> m_accounts;
+    /* Raw RFC822 bodies for every account, packed into one capped slab. */
+    MessageArena m_body_cache;
     std::string m_current_account_id;
 
     AccountSession *account(const std::string &id) {
@@ -280,17 +281,23 @@ public:
     bool                     m_show_remote_images = false;  // user opt-in
     bool                     m_has_remote_images  = false;  // current msg refs
 
-    // UID-aware body cache key: "folder|U<uid>" when uid!=0 else "folder|S<seq>".
-    // Keeps seq path working when uid==0 (server without CONDSTORE/QRESYNC).
-    static std::string body_key(const std::string &folder, uint32_t uid, int seq) {
-        if (uid) return folder + "|U" + std::to_string(uid);
-        return folder + "|S" + std::to_string(seq);
+    /* One slab serves every account, so keys are account-scoped:
+     * "<account>|<folder>|U<uid>", or "|S<seq>" on a server without UIDs. */
+    static std::string acct_prefix(const AccountSession &a) {
+        return a.config.id() + "|";
     }
-    static std::string body_key(const std::string &folder, const MailSummary &s) {
-        return body_key(folder, s.uid, s.seq);
+    static std::string body_key(const AccountSession &a, const std::string &folder,
+                                uint32_t uid, int seq) {
+        return acct_prefix(a) + folder + (uid ? "|U" + std::to_string(uid)
+                                              : "|S" + std::to_string(seq));
     }
-    static std::string body_key(const std::string &folder, const EmailData &d) {
-        return body_key(folder, d.uid, d.seq);
+    static std::string body_key(const AccountSession &a, const std::string &folder,
+                                const MailSummary &s) {
+        return body_key(a, folder, s.uid, s.seq);
+    }
+    static std::string body_key(const AccountSession &a, const std::string &folder,
+                                const EmailData &d) {
+        return body_key(a, folder, d.uid, d.seq);
     }
     /* Every cache helper below takes an explicit AccountSession& so callback
      * handlers (which may be reporting for a background, not-currently-
@@ -314,12 +321,10 @@ public:
         return uid_for_seq(const_cast<MailApp*>(this)->current_acct(), folder, seq);
     }
     uint32_t uid_for_seq_any(int seq) const { return uid_for_seq(current_acct().current_folder, seq); }
-    // Dual-read helper: check UID key first (authoritative on QRESYNC), then SEQ key, then legacy ":" key.
+    // Dual-read helper: UID key first (authoritative on QRESYNC), then SEQ key.
     bool body_has(const AccountSession &acct, const std::string &folder, uint32_t uid, int seq) const {
-        const auto &cache = acct.body_cache;
-        if (uid && cache.contains(body_key(folder, uid, 0))) return true;
-        if (seq && cache.contains(body_key(folder, 0, seq))) return true;
-        if (seq && cache.contains(folder + ":" + std::to_string(seq))) return true;
+        if (uid && m_body_cache.contains(body_key(acct, folder, uid, 0))) return true;
+        if (seq && m_body_cache.contains(body_key(acct, folder, 0, seq))) return true;
         return false;
     }
     bool body_has(const std::string &folder, uint32_t uid, int seq) const {
@@ -331,28 +336,24 @@ public:
     bool body_get(const AccountSession &acct, const std::string &folder,
                   uint32_t uid, int seq, MailMessage &out) const {
         std::string key;
-        if (uid && acct.body_cache.contains(body_key(folder, uid, 0)))
-            key = body_key(folder, uid, 0);
-        else if (seq && acct.body_cache.contains(body_key(folder, 0, seq)))
-            key = body_key(folder, 0, seq);
-        else if (seq && acct.body_cache.contains(folder + ":" + std::to_string(seq)))
-            key = folder + ":" + std::to_string(seq);
+        if (uid && m_body_cache.contains(body_key(acct, folder, uid, 0)))
+            key = body_key(acct, folder, uid, 0);
+        else if (seq && m_body_cache.contains(body_key(acct, folder, 0, seq)))
+            key = body_key(acct, folder, 0, seq);
         else
             return false;
         std::string raw;
-        if (!acct.body_cache.get(key, raw)) return false;
+        if (!m_body_cache.get(key, raw)) return false;
         MailMessage msg;
-        if (!parse_rfc822_message(raw, msg)) return false;
+        if (!parse_rfc822_message(std::move(raw), msg)) return false;
         out = std::move(msg);
         return true;
     }
     void body_put(AccountSession &acct, const std::string &folder, uint32_t uid, int seq, const MailMessage &msg) {
         if (msg.raw.empty()) return;
         /* One key. UID when we have it; seq only for servers without UIDs. */
-        const std::string key = uid ? body_key(folder, uid, 0)
-                                    : (seq ? body_key(folder, 0, seq) : "");
-        if (!key.empty())
-            acct.body_cache.put(key, msg.raw);
+        if (uid || seq)
+            m_body_cache.put(body_key(acct, folder, uid, seq), msg.raw);
     }
     void body_put(const std::string &folder, uint32_t uid, int seq, const MailMessage &msg) {
         body_put(current_acct(), folder, uid, seq, msg);
@@ -364,10 +365,9 @@ public:
      * stay — they are stable and the next click should not re-FETCH. */
     void drop_expunged_bodies(AccountSession &acct, const std::string &folder,
                               int seq, uint32_t uid) {
-        if (uid) acct.body_cache.erase(body_key(folder, uid, 0));
-        if (seq) acct.body_cache.erase(body_key(folder, 0, seq));
-        acct.body_cache.erase_prefix(folder + "|S");
-        acct.body_cache.erase_prefix(folder + ":");
+        if (uid) m_body_cache.erase(body_key(acct, folder, uid, 0));
+        if (seq) m_body_cache.erase(body_key(acct, folder, 0, seq));
+        m_body_cache.erase_prefix(acct_prefix(acct) + folder + "|S");
     }
     std::string m_status_base;
 
@@ -885,7 +885,7 @@ public:
      * new account. */
     void apply_cache_limit(AccountSession &acct) {
         size_t bytes = (size_t)m_config.cache_limit_mb * 1024ull * 1024ull;
-        acct.body_cache.set_limit(bytes);
+        m_body_cache.set_limit(bytes);
         if (acct.worker)
             acct.worker->set_max_body_bytes(bytes);
     }
@@ -911,6 +911,7 @@ public:
         AccountSession *acct = account(id);
         if (!acct) return;
         acct->worker->stop();
+        m_body_cache.erase_prefix(acct_prefix(*acct));
         m_folder_view->remove_account(id);
         if (m_current_account_id == id) m_current_account_id.clear();
         m_accounts.erase(std::remove_if(m_accounts.begin(), m_accounts.end(),
@@ -1138,7 +1139,7 @@ public:
             static double last = 0; double now = glfwGetTime();
             if (now - last < 0.15 && m_email_list->visible_seqs().size() < 30) return;
             last = now;
-            auto rows = m_email_list->emails();
+            const auto &rows = m_email_list->emails();
             auto vr = m_email_list->visible_range();
             int a = std::max(0, vr.first - 6);
             int b = std::min((int)rows.size(), vr.second + 6);
@@ -1310,7 +1311,7 @@ public:
         acct.move_inflight = false;
         /* Fresh connection / explicit refresh: drop all cached state. */
         acct.summary_cache.clear();
-        acct.body_cache.clear();
+        m_body_cache.erase_prefix(acct_prefix(acct));
         update_move_buttons();
         update_compress_badge();
 
@@ -1377,8 +1378,7 @@ public:
                     if (any) {
                         for (auto &s : itc->second) {
                             if (s.uid && new_uids.find(s.uid)==new_uids.end()) {
-                                acct.body_cache.erase(body_key(folder, s.uid, s.seq));
-                                if (s.seq) acct.body_cache.erase(folder + ":" + std::to_string(s.seq));
+                                m_body_cache.erase(body_key(acct, folder, s.uid, s.seq));
                             }
                         }
                     }
@@ -1439,12 +1439,10 @@ public:
                     else if (!s.uid || !any_new_uid) gone = (new_seqs.find(s.seq) == new_seqs.end());
                     else gone = (new_uids.find(s.uid) == new_uids.end());
                     if (gone) {
-                        body_evict_keys.push_back(body_key(folder, s.uid, s.seq));
-                        // also evict legacy ":" key if present
-                        if (s.seq) body_evict_keys.push_back(folder + ":" + std::to_string(s.seq));
+                        body_evict_keys.push_back(body_key(acct, folder, s.uid, s.seq));
                     }
                 }
-                for (auto &k : body_evict_keys) acct.body_cache.erase(k);
+                for (auto &k : body_evict_keys) m_body_cache.erase(k);
             }
         }
         acct.summary_cache[folder] = sums;
@@ -1476,7 +1474,7 @@ public:
                 !m_email_list)
                 return;
             // UID-aware need check: prefer UID key when present, route via UID prefetch
-            auto rows = m_email_list->emails();
+            const auto &rows = m_email_list->emails();
             auto vr = m_email_list->visible_range();
             int a = std::max(0, vr.first - 6);
             int b = std::min((int)rows.size(), vr.second + 6);
@@ -2146,7 +2144,7 @@ public:
          * account currently on screen. */
         AccountSession &acct = current_acct();
         acct.summary_cache.clear();
-        acct.body_cache.clear();
+        m_body_cache.erase_prefix(acct_prefix(acct));
         acct.worker->cancel_seen();   // seqs may renumber; don't flag a stranger
         if (!acct.wanted_folder.empty())
             set_folder_busy(true, "Refreshing " + acct.wanted_folder + "..." + compressSuffix());
@@ -2339,10 +2337,9 @@ public:
 
         if (src.rfind("cid:", 0) == 0) {
             std::string cid = src.substr(4);
-            for (const MailImage &img : m_current_message.images) {
-                if (img.cid == cid)
-                    return make_image_info(
-                        create_image_texture(src, img.data));
+            for (const MailAttachment &a : m_current_message.attachments) {
+                if (a.cid == cid)
+                    return make_image_info(create_image_texture(src, a.data));
             }
             return HtmlImageInfo{};
         }
@@ -3361,8 +3358,8 @@ public:
         cache_limit->add_item({"2 GB", "cache_2048"}, FA_DATABASE,
                               [] {}, {{0, 0}}, true);
         cache_limit->set_tooltip(
-            "Memory each account may use to keep messages you have opened. "
-            "A message larger than this is not downloaded.");
+            "Memory used to keep messages you have opened, shared by all "
+            "accounts. A message larger than this is not downloaded.");
         {
             int idx = 1;
             for (int i = 0; i < 4; ++i)

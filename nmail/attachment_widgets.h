@@ -32,10 +32,10 @@ inline std::string att_lower(std::string s) {
     return s;
 }
 
-inline bool html_uses_cid(const std::string &html, const std::string &cid) {
-    if (html.empty() || cid.empty()) return false;
+/* hay is the message HTML, already lowercased once by the caller. */
+inline bool html_uses_cid(const std::string &hay, const std::string &cid) {
+    if (hay.empty() || cid.empty()) return false;
     const std::string needle = att_lower("cid:" + cid);
-    const std::string hay = att_lower(html);
     size_t p = hay.find(needle);
     while (p != std::string::npos) {
         size_t e = p + needle.size();
@@ -52,9 +52,13 @@ inline std::vector<const MailAttachment *>
 visible_attachments(const MailMessage &msg) {
     std::vector<const MailAttachment *> out;
     out.reserve(msg.attachments.size());
+    bool any_cid = false;
+    for (const MailAttachment &a : msg.attachments)
+        if (!a.cid.empty()) { any_cid = true; break; }
+    const std::string hay = any_cid ? att_lower(msg.html) : std::string();
     for (const MailAttachment &a : msg.attachments) {
         if (a.data.empty()) continue;
-        if (!a.cid.empty() && html_uses_cid(msg.html, a.cid))
+        if (!a.cid.empty() && html_uses_cid(hay, a.cid))
             continue;
         out.push_back(&a);
     }

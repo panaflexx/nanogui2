@@ -21,10 +21,11 @@ public:
 
     void set_limit(size_t n) {
         if (n < 256ull * 1024 * 1024) n = 256ull * 1024 * 1024;
+        if (n == m_limit) return;   // called once per account; only re-pack on a real change
         m_limit = n;
         evict_until(0);
-        if (m_high > m_limit || m_slab.size() > m_live)
-            compact();
+        compact();
+        trim_slab();
     }
     size_t limit() const { return m_limit; }
 
@@ -33,10 +34,9 @@ public:
         erase(key);
         evict_until(raw.size());
         if (m_live + raw.size() > m_limit) return false;
-        /* Erase/evict leave holes but do not rewind the bump pointer, so
-         * once the slab has been filled every later put looks like it needs
-         * room. Pack only then, and only when the live bytes actually fit. */
-        if (m_high + raw.size() > m_limit || m_slab.size() < m_high + raw.size())
+        /* Erase/evict leave holes but do not rewind the bump pointer, so pack
+         * only once the bump pointer itself would run past the cap. */
+        if (m_high + raw.size() > m_limit)
             compact();
         if (m_high + raw.size() > m_limit) return false;
         /* Grow the one slab, never past the cap. resize() alone may
@@ -96,6 +96,7 @@ public:
         m_slab.clear();
         m_high = 0;
         m_live = 0;
+        trim_slab();
     }
 
     size_t bytes_live() const { return m_live; }
@@ -142,6 +143,13 @@ private:
             at += s.len;
         }
         m_high = at;
+    }
+
+    /* vector never releases capacity on its own, so peak usage would stay
+     * resident for the life of the process. */
+    void trim_slab() {
+        m_slab.resize(m_high);
+        m_slab.shrink_to_fit();
     }
 
     std::vector<char> m_slab;
