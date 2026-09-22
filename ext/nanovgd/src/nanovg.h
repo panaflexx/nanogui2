@@ -451,6 +451,8 @@ extern NVG_EXPORT float nvgRadToDeg(float rad);
 // NanoVG allows you to load jpg, png, psd, tga, pic and gif files to be used for rendering.
 // In addition you can upload your own image. The image loading is provided by stb_image.
 // The parameter imageFlags is combination of flags defined in NVGimageFlags.
+// JPEG EXIF orientation is applied on load, so photos from phones come out
+// upright (stb_image itself ignores the tag).
 
 // Creates image by loading it from the disk from specified file name.
 // Returns handle to the image.
@@ -459,6 +461,11 @@ extern NVG_EXPORT int nvgCreateImage(NVGcontext* ctx, const char* filename, int 
 // Creates image by loading it from the specified chunk of memory.
 // Returns handle to the image.
 extern NVG_EXPORT int nvgCreateImageMem(NVGcontext* ctx, int imageFlags, unsigned char* data, int ndata);
+
+// As nvgCreateImageMem, but box-filter downscaled so the longest edge is at
+// most maxEdge (0 = no downscale). Decodes once: use this for thumbnails
+// rather than uploading a full-size texture and scaling at draw time.
+extern NVG_EXPORT int nvgCreateImageThumbMem(NVGcontext* ctx, int imageFlags, unsigned char* data, int ndata, int maxEdge);
 
 // Creates image from specified image data.
 // Returns handle to the image.

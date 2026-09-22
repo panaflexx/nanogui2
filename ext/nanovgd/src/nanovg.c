@@ -45,6 +45,7 @@
 #ifndef NVG_NO_STB
 #define STB_IMAGE_IMPLEMENTATION
 #include "stb_image.h"
+#include "nanovg_exif.h"
 #endif
 
 #define IMAGESTASH_IMPLEMENTATION
@@ -1507,33 +1508,138 @@ void nvgFillPaint(NVGcontext* ctx, NVGpaint paint)
 	nvgTransformMultiply(state->fill.xform, state->xform);
 }
 
+// Box-filtered downscale of a tightly packed RGBA buffer. Averaging rather
+// than point sampling matters at thumbnail sizes, where nearest-neighbour
+// drops most of the source pixels and aliases hard.
+static unsigned char* nvg__downscaleRGBA(const unsigned char* src, int sw, int sh,
+										 int dw, int dh)
+{
+	unsigned char* out;
+	int x, y, c;
+
+	if (src == NULL || sw <= 0 || sh <= 0 || dw <= 0 || dh <= 0) return NULL;
+	out = (unsigned char*)malloc((size_t)dw * dh * 4);
+	if (out == NULL) return NULL;
+
+	for (y = 0; y < dh; y++) {
+		int y0 = (int)((long long)y * sh / dh);
+		int y1 = (int)((long long)(y + 1) * sh / dh);
+		if (y1 <= y0) y1 = y0 + 1;
+		if (y1 > sh) y1 = sh;
+		for (x = 0; x < dw; x++) {
+			int x0 = (int)((long long)x * sw / dw);
+			int x1 = (int)((long long)(x + 1) * sw / dw);
+			unsigned sum[4] = { 0, 0, 0, 0 };
+			unsigned count;
+			int sx, sy;
+			if (x1 <= x0) x1 = x0 + 1;
+			if (x1 > sw) x1 = sw;
+			for (sy = y0; sy < y1; sy++) {
+				const unsigned char* row = src + (size_t)sy * sw * 4;
+				for (sx = x0; sx < x1; sx++) {
+					const unsigned char* s = row + (size_t)sx * 4;
+					sum[0] += s[0]; sum[1] += s[1]; sum[2] += s[2]; sum[3] += s[3];
+				}
+			}
+			count = (unsigned)(x1 - x0) * (unsigned)(y1 - y0);
+			for (c = 0; c < 4; c++)
+				out[((size_t)y * dw + x) * 4 + c] = (unsigned char)(sum[c] / count);
+		}
+	}
+	return out;
+}
+
+// Shared tail of the loaders: applies EXIF orientation, optionally downscales
+// so the longest edge is at most maxEdge, uploads. Frees img either way.
+static int nvg__createImageFrom(NVGcontext* ctx, int imageFlags, unsigned char* img,
+								int w, int h, int orient, int maxEdge)
+{
+	int image;
+	int owned = 0;	// img came from malloc rather than stb
+	unsigned char* rotated = nvg__exifApply(img, &w, &h, orient);
+	if (rotated != NULL) {
+		stbi_image_free(img);
+		img = rotated;
+		owned = 1;
+	}
+	if (maxEdge > 0 && (w > maxEdge || h > maxEdge)) {
+		int longest = w > h ? w : h;
+		int dw = (int)((long long)w * maxEdge / longest);
+		int dh = (int)((long long)h * maxEdge / longest);
+		unsigned char* small;
+		if (dw < 1) dw = 1;
+		if (dh < 1) dh = 1;
+		small = nvg__downscaleRGBA(img, w, h, dw, dh);
+		if (small != NULL) {
+			if (owned) free(img); else stbi_image_free(img);
+			img = small;
+			owned = 1;
+			w = dw;
+			h = dh;
+		}
+	}
+	image = nvgCreateImageRGBA(ctx, w, h, imageFlags, img);
+	if (owned) free(img); else stbi_image_free(img);
+	return image;
+}
+
 int nvgCreateImage(NVGcontext* ctx, const char* filename, int imageFlags)
 {
-	int w, h, n, image;
+	int w, h, n, orient = 1, len;
 	unsigned char* img;
+	unsigned char* blob;
+	FILE* fp;
+
+	// Read the file up front so the EXIF scan and the decoder see the same
+	// bytes; stbi_load() alone would leave no way to reach APP1.
+	fp = fopen(filename, "rb");
+	if (fp == NULL) return 0;
+	fseek(fp, 0, SEEK_END);
+	len = (int)ftell(fp);
+	fseek(fp, 0, SEEK_SET);
+	if (len <= 0) { fclose(fp); return 0; }
+	blob = (unsigned char*)malloc((size_t)len);
+	if (blob == NULL) { fclose(fp); return 0; }
+	if ((int)fread(blob, 1, (size_t)len, fp) != len) {
+		fclose(fp);
+		free(blob);
+		return 0;
+	}
+	fclose(fp);
+
 	stbi_set_unpremultiply_on_load(1);
 	stbi_convert_iphone_png_to_rgb(1);
-	img = stbi_load(filename, &w, &h, &n, 4);
+	img = stbi_load_from_memory(blob, len, &w, &h, &n, 4);
+	if (img != NULL) orient = nvg__exifOrientation(blob, len);
+	free(blob);
 	if (img == NULL) {
 //		printf("Failed to load %s - %s\n", filename, stbi_failure_reason());
 		return 0;
 	}
-	image = nvgCreateImageRGBA(ctx, w, h, imageFlags, img);
-	stbi_image_free(img);
-	return image;
+	return nvg__createImageFrom(ctx, imageFlags, img, w, h, orient, 0);
 }
 
 int nvgCreateImageMem(NVGcontext* ctx, int imageFlags, unsigned char* data, int ndata)
 {
-	int w, h, n, image;
+	int w, h, n;
 	unsigned char* img = stbi_load_from_memory(data, ndata, &w, &h, &n, 4);
 	if (img == NULL) {
 //		printf("Failed to load %s - %s\n", filename, stbi_failure_reason());
 		return 0;
 	}
-	image = nvgCreateImageRGBA(ctx, w, h, imageFlags, img);
-	stbi_image_free(img);
-	return image;
+	return nvg__createImageFrom(ctx, imageFlags, img, w, h,
+								nvg__exifOrientation(data, ndata), 0);
+}
+
+int nvgCreateImageThumbMem(NVGcontext* ctx, int imageFlags, unsigned char* data,
+						   int ndata, int maxEdge)
+{
+	int w, h, n;
+	unsigned char* img = stbi_load_from_memory(data, ndata, &w, &h, &n, 4);
+	if (img == NULL)
+		return 0;
+	return nvg__createImageFrom(ctx, imageFlags, img, w, h,
+								nvg__exifOrientation(data, ndata), maxEdge);
 }
 
 int nvgCreateImageRGBA(NVGcontext* ctx, int w, int h, int imageFlags, const unsigned char* data)
