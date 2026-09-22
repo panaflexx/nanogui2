@@ -1725,12 +1725,19 @@ bool ImapClient::read_bytes(size_t n, std::string &out, std::string &err) {
         return false;
     }
     out.clear();
+    const bool track = m_byte_progress && n >= (1u << 20) && on_progress;
+    size_t last_report = 0;
+    if (track) on_progress(0, n);
     while (out.size() < n) {
     
         if (!m_rbuf.empty()) {
             size_t take = std::min(n - out.size(), m_rbuf.size());
             out += m_rbuf.substr(0, take);
             m_rbuf.erase(0, take);
+            if (track && (out.size() == n || out.size() - last_report >= 256 * 1024)) {
+                last_report = out.size();
+                on_progress(out.size(), n);
+            }
             continue;
         }
         if (m_compressed) {

@@ -202,11 +202,14 @@ public:
     void cancel();
     uint64_t op_gen() const { return m_op_gen.load(std::memory_order_acquire); }
 
-    /* Optional FETCH progress: done/total untagged FETCH lines.
+    /* Optional FETCH progress. Summary fetches pass a message count.
+     * A foreground body larger than 1MB passes bytes read / size.
      * Called from the worker thread; keep it cheap. */
-    std::function<void(int done, int total)> on_progress;
+    std::function<void(size_t done, size_t total)> on_progress;
     void expect_progress(int total) { m_progress_total = total; m_progress_done = 0; }
     void clear_progress() { m_progress_total = 0; m_progress_done = 0; }
+    /* Body FETCH only. Prefetch stays quiet. */
+    void set_byte_progress(bool on) { m_byte_progress = on; }
 
     // ── RFC 4551 CONDSTORE / RFC 7162 QRESYNC / RFC 4978 COMPRESS=DEFLATE ──
     bool has_compress_deflate() const;
@@ -307,6 +310,7 @@ private:
     std::atomic<uint64_t> m_op_gen{0}; // bumped by cancel() to drop in-flight cmds
     int m_progress_total = 0;
     int m_progress_done = 0;
+    bool m_byte_progress = false;
     std::string m_idle_tag;   // tag of the in-progress IDLE ("" = not idling)
     /* Untagged responses seen while entering/leaving IDLE, prepended to the
      * next idle_wait() result so no push is lost. */

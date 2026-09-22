@@ -819,20 +819,48 @@ public:
             set_status(out);
             update_compress_badge();
         };
-        w.cb_progress = [this, id](const std::string &folder, int done, int total) {
+        w.cb_progress = [this, id](const std::string &folder, size_t done, size_t total) {
             /* The shared load bar/progress text stays tied to whichever
              * account is on screen -- a background account's fetch
              * progress would otherwise make the bar flicker between
              * unrelated accounts. */
             AccountSession *acct = account(id);
             if (!acct || id != m_current_account_id) return;
-            if (folder != acct->wanted_folder || !acct->folder_loading) return;
-            if (m_load_bar && total > 0)
-                m_load_bar->set_progress((float)done / (float)total);
+            if (total == 0) {
+                if (acct->older_inflight) {
+                    acct->older_inflight = false;
+                    if (m_email_list) m_email_list->set_loading_more(false);
+                }
+                if (m_load_bar && !acct->folder_loading) m_load_bar->stop();
+                return;
+            }
+            if (!folder.empty() && folder != acct->wanted_folder) return;
+            const bool bytes = total >= (1u << 20);
+            const bool counts = acct->folder_loading || acct->older_inflight;
+            if (!bytes && !counts) return;
+            /* A summary FETCH can contain a large literal. Don't let that
+             * replace the message-count bar for an open or older page. */
+            if (bytes && acct->folder_loading) return;
+            if (m_load_bar)
+                m_load_bar->set_progress(total ? (float)done / (float)total : 0.f);
             std::string prefix = m_accounts.size() > 1
                 ? acct->config.display_name() + ": " : "";
-            set_status(prefix + folder + ": " + std::to_string(done) + " / " +
-                       std::to_string(total) + compressSuffix());
+            if (bytes) {
+                auto mb = [](size_t n) {
+                    char buf[32];
+                    std::snprintf(buf, sizeof(buf), "%.1f MB", n / (1024.0 * 1024.0));
+                    return std::string(buf);
+                };
+                set_status(prefix + "Loading message: " + mb(done) + " / " +
+                           mb(total) + compressSuffix());
+            } else if (acct->older_inflight && !acct->folder_loading) {
+                set_status(prefix + "Loading older messages in " + folder + ": " +
+                           std::to_string(done) + " / " + std::to_string(total) +
+                           compressSuffix());
+            } else {
+                set_status(prefix + folder + ": " + std::to_string(done) + " / " +
+                           std::to_string(total) + compressSuffix());
+            }
             redraw();
         };
         w.cb_seen = [this, id](const std::string &folder, int seq) {
@@ -1570,6 +1598,7 @@ public:
         if (oldest <= 1) return;               // already at the first message
         acct.older_inflight = true;
         m_email_list->set_loading_more(true);
+        if (m_load_bar) m_load_bar->set_progress(0.f);
         set_status("Loading older messages in " + acct.wanted_folder + "...");
         acct.worker->fetch_older(acct.wanted_folder);
     }
@@ -1581,6 +1610,7 @@ public:
         AccountSession &acct = *acct_ptr;
         if (folder != acct.wanted_folder || folder != acct.current_folder) return;
         acct.older_inflight = false;
+        if (m_load_bar && !acct.folder_loading) m_load_bar->stop();
         if (account_id != m_current_account_id) return;   // not looking at this account
         m_email_list->set_loading_more(false);
         if (sums.empty()) return;
@@ -1644,6 +1674,8 @@ public:
         }
         if (!key_folder.empty())
             body_put(acct, key_folder, uid, seq, msg);
+        if (viewing_this_account && m_load_bar && m_load_bar->visible() && !acct.folder_loading)
+            m_load_bar->stop();
         if (!viewing_this_account) return;
         if (key_folder != acct.wanted_folder) return;
         if (seq != m_loading_seq) return;   // not the foreground fetch

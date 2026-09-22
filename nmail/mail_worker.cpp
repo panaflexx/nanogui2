@@ -415,8 +415,8 @@ void MailWorker::report_error(const std::string &title, const std::string &msg) 
     });
 }
 
-void MailWorker::report_fetch_progress(int done, int total) {
-    if (total <= 0 || m_progress_quiet) return;
+void MailWorker::report_fetch_progress(size_t done, size_t total) {
+    if (m_progress_quiet) return;
     std::string folder;
     {
         std::lock_guard<std::mutex> lock(m_mutex);
@@ -424,8 +424,8 @@ void MailWorker::report_fetch_progress(int done, int total) {
     }
     if (folder.empty() || !folder_wanted(folder)) return;
     auto now = std::chrono::steady_clock::now();
-    if (done > 0 && done < total) {
-        int step = std::max(1, total / 24);
+    if (total > 0 && done > 0 && done < total) {
+        size_t step = std::max<size_t>(1, total / 24);
         if (done - m_prog_done < step &&
             now - m_prog_at < std::chrono::milliseconds(40))
             return;
@@ -1085,30 +1085,46 @@ void MailWorker::do_fetch_summaries(const std::string &folder, int exists,
 }
 
 void MailWorker::do_fetch_older(const Cmd &cmd) {
+    auto abandon = [this]() {
+        deliver([this] {
+            if (cb_progress) cb_progress("", 0, 0);
+        });
+    };
     std::string folder = cmd.folder.empty() ? m_selected_folder : cmd.folder;
-    if (folder.empty() || !folder_wanted(folder))
+    if (folder.empty() || !folder_wanted(folder)) {
+        abandon();
         return;
-    if (m_selected_folder != folder || m_first_loaded <= 1)
+    }
+    if (m_selected_folder != folder || m_first_loaded <= 1) {
+        abandon();
         return;   // Select hasn't landed, or nothing older
+    }
     if (m_imap.selected_folder() != folder) {
         std::string se;
-        if (!m_imap.ensure_selected(folder, se) || !folder_wanted(folder))
+        if (!m_imap.ensure_selected(folder, se) || !folder_wanted(folder)) {
+            abandon();
             return;
+        }
     }
     int last  = m_first_loaded - 1;
     int first = std::max(1, last - 149);
 
+    m_progress_quiet = false;
     report_status("Loading older messages in " + folder + "...", folder);
     std::vector<MailSummary> summaries;
     std::string err;
     if (!m_imap.fetch_summaries(first, last, summaries, err)) {
-        if (!folder_wanted(folder) || is_stale_err(err))
+        if (!folder_wanted(folder) || is_stale_err(err)) {
+            abandon();
             return;
+        }
         report_error("Could not fetch older messages", err);
         return;
     }
-    if (!folder_wanted(folder))
+    if (!folder_wanted(folder)) {
+        abandon();
         return;
+    }
     m_first_loaded = first;
     /* Newest first, so the GUI can append them after the current
        (newer) page. */
@@ -1743,6 +1759,11 @@ void MailWorker::run() {
             report_status("Fetching message...", want_folder);
             MailMessage msg;
             std::string err;
+            struct ByteProgress {
+                ImapClient &imap;
+                explicit ByteProgress(ImapClient &i) : imap(i) { imap.set_byte_progress(true); }
+                ~ByteProgress() { imap.set_byte_progress(false); }
+            } byte_progress(m_imap);
             auto do_fetch = [&]() {
                 if (cmd.uid)
                     return m_imap.fetch_message_by_uid(cmd.uid, msg, err);

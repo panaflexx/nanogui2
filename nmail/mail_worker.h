@@ -60,7 +60,7 @@ public:
      * down by one). */
     std::function<void(const std::string &, int)>               cb_expunged;
     /* FETCH summaries progress (worker thread marshals via deliver). */
-    std::function<void(const std::string &, int done, int total)> cb_progress;
+    std::function<void(const std::string &, size_t done, size_t total)> cb_progress;
 
     /* One MailWorker == one account's connection: its own host/port/
      * username/password/smtp settings. Shared app-level settings
@@ -130,7 +130,7 @@ private:
 
     bool quitting();
     void report_error(const std::string &title, const std::string &msg);
-    void report_fetch_progress(int done, int total);
+    void report_fetch_progress(size_t done, size_t total);
     void report_status(const std::string &msg, const std::string &folder = "");
 
     /* Re-LOGIN without LIST (used after cancel() killed the socket). */
@@ -198,7 +198,7 @@ private:
      * previous folder can be ignored after a click. */
     std::string             m_wanted_folder;
     uint64_t                m_epoch = 0;
-    int                     m_prog_done = 0;
+    size_t                  m_prog_done = 0;
     std::chrono::steady_clock::time_point m_prog_at{};
     bool                    m_progress_quiet = false;
     bool                    m_busy = false;   // worker is inside a blocking IMAP cmd
