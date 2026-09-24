@@ -302,8 +302,10 @@ void Button::draw(NVGcontext* ctx) {
         }
     }
 
-    // Keyboard focus ring
-    if (focused() && m_enabled)
+    // Keyboard focus ring. Skip when an ancestor (usually a popup) has
+    // already been hidden — the ring would otherwise stroke on the cleared
+    // background at this widget's last position.
+    if (focused() && m_enabled && visible_recursive())
         m_theme->draw_focus_ring(ctx, fx, fy, fw, fh, cr);
 
     int font_size = m_font_size == -1 ? m_theme->m_button_font_size : m_font_size;

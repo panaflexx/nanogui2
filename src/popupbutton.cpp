@@ -39,13 +39,52 @@ PopupButton::~PopupButton()
 	this->m_popup->dispose();
 }
 
+void PopupButton::set_pushed(bool pushed) {
+    m_pushed = pushed;
+    if (!m_popup)
+        return;
+
+    // Hide immediately. Waiting until draw() left the popup's focused child
+    // on screen for the focus-ring pass, which strokes the ring after the
+    // popup is gone.
+    m_popup->set_visible(pushed);
+
+    Screen* scr = screen();
+    if (!scr)
+        return;
+
+    // Track the popup panel itself (not this button) with the screen, so
+    // outside-click detection can check the panel's own (screen-absolute)
+    // bounds rather than this button's.
+    if (pushed) {
+        scr->set_popup_visible(m_popup);
+        return;
+    }
+
+    scr->remove_popup_visible(m_popup);
+
+    if (scr->m_focus_path.empty())
+        return;
+    for (Widget* w = scr->m_focus_path.front(); w; w = w->parent()) {
+        if (w == m_popup) {
+            scr->update_focus(nullptr);
+            break;
+        }
+    }
+}
+
 Vector2i PopupButton::preferred_size(NVGcontext* ctx) const {
     return Button::preferred_size(ctx) + Vector2i(15, 0);
 }
 
 void PopupButton::draw(NVGcontext* ctx) {
-    if (!m_enabled && m_pushed)
-        set_pushed(false);
+    if (!m_enabled && m_pushed) {
+        // Don't call set_pushed() here: it drops focus, and this runs while
+        // the screen is iterating children.
+        m_pushed = false;
+        if (Screen* scr = screen())
+            scr->remove_popup_visible(m_popup);
+    }
 
     m_popup->set_visible(m_pushed);
     Button::draw(ctx);

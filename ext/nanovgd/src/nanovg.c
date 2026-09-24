@@ -1556,7 +1556,7 @@ static int nvg__createImageFrom(NVGcontext* ctx, int imageFlags, unsigned char* 
 {
 	int image;
 	int owned = 0;	// img came from malloc rather than stb
-	unsigned char* rotated = nvg__exifApply(img, &w, &h, orient);
+	unsigned char* rotated = nvg__exifApply(img, &w, &h, 4, orient);
 	if (rotated != NULL) {
 		stbi_image_free(img);
 		img = rotated;

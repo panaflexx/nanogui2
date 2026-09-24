@@ -1015,6 +1015,16 @@ void Screen::nvg_flush() {
 }
 
 void Screen::draw_widgets() {
+    // A popup item takes focus on click; the popup then closes. If that item
+    // is still focused, the ring below is stroked at its last position after
+    // the popup has already been omitted from this frame. Drop it first so a
+    // cache rebuild does not record the ring either.
+    if (!m_focus_path.empty()) {
+        Widget* leaf = m_focus_path.front();
+        if (!leaf || !leaf->visible_recursive())
+            update_focus(nullptr);
+    }
+
     // Rebuild dirty display-list caches BEFORE the screen frame begins so
     // recording does not disturb ancestor NanoVG transform/scissor state.
     Widget::process_pending_cache_updates(m_nvg_context);
@@ -1023,8 +1033,10 @@ void Screen::draw_widgets() {
 
     draw(m_nvg_context);
 
-	// Draw light cyan border around focused widget
-    if (!m_focus_path.empty() && m_focus_path.front() && m_focus_path.back()->visible()) {
+	// Draw light cyan border around focused widget. Visibility is final
+    // here: PopupButton::draw may have hidden the popup during draw().
+    if (!m_focus_path.empty() && m_focus_path.front() &&
+        m_focus_path.front()->visible_recursive()) {
         Widget* focused_widget = m_focus_path.front();
         Vector2i pos = focused_widget->absolute_position();
         Vector2i size = focused_widget->size();
@@ -1626,9 +1638,19 @@ void Screen::update_focus(Widget* widget) {
 */
 
 void Screen::update_focus(Widget* widget) {
-	// Clear focus
+	// Clear focus. Also clear m_focused — dropping the path alone left the
+	// widget drawing its own focus ring (combo-box items after the popup
+	// closed). Leave the Screen itself alone; GLFW drives that flag.
 	if(!widget) {
-		m_focus_path.clear();
+        std::vector<Widget*> prev;
+        prev.swap(m_focus_path);
+        for (Widget* w : prev) {
+            if (w == nullptr || !w->focused())
+                continue;
+            if (dynamic_cast<Screen*>(w))
+                continue;
+            w->focus_event(false);
+        }
 		return;
 	}
 

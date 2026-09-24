@@ -3,8 +3,9 @@
 //
 // stb_image parses only APP0 (JFIF) and APP14 (Adobe) and skips every other
 // APPn, so the Orientation tag in APP1 never reaches the decoded pixels and
-// photos from phones come out rotated.  nvgCreateImage*() reads the tag with
-// the helpers below and transforms the RGBA buffer before upload.
+// photos from phones come out rotated.  nvgCreateImage*() and nanogui's
+// Texture read the tag with the helpers below and transform the decoded
+// pixels before upload.
 //
 // Image bytes are untrusted, so every read here is bounds checked; a malformed
 // segment simply yields orientation 1 (no transform).
@@ -14,13 +15,13 @@
 
 #include <stdlib.h>
 
-static unsigned nvg__exifU16(const unsigned char* t, int off, int le)
+static inline unsigned nvg__exifU16(const unsigned char* t, int off, int le)
 {
 	return le ? (unsigned)t[off] | ((unsigned)t[off + 1] << 8)
 	          : (unsigned)t[off + 1] | ((unsigned)t[off] << 8);
 }
 
-static unsigned nvg__exifU32(const unsigned char* t, int off, int le)
+static inline unsigned nvg__exifU32(const unsigned char* t, int off, int le)
 {
 	return le ? (unsigned)t[off] | ((unsigned)t[off+1] << 8) |
 	            ((unsigned)t[off+2] << 16) | ((unsigned)t[off+3] << 24)
@@ -29,7 +30,7 @@ static unsigned nvg__exifU32(const unsigned char* t, int off, int le)
 }
 
 // Orientation tag value, 1..8 per the TIFF spec. 1 when absent or unreadable.
-static int nvg__exifOrientation(const unsigned char* d, int n)
+static inline int nvg__exifOrientation(const unsigned char* d, int n)
 {
 	int p;
 	if (d == NULL || n < 4 || d[0] != 0xFF || d[1] != 0xD8)
@@ -84,21 +85,24 @@ static int nvg__exifOrientation(const unsigned char* d, int n)
 	return 1;
 }
 
-// Applies orient to a tightly packed *w * *h * 4 RGBA buffer, swapping *w/*h
-// for the transposing cases. Returns a new malloc'd buffer the caller frees,
-// or NULL when there is nothing to do (orientation 1) or allocation failed.
-static unsigned char* nvg__exifApply(const unsigned char* src, int* w, int* h, int orient)
+// Applies orient to a tightly packed *w * *h * comp buffer (comp bytes per
+// pixel, 1..4), swapping *w/*h for the transposing cases. Returns a new
+// malloc'd buffer the caller frees, or NULL when there is nothing to do
+// (orientation 1) or allocation failed.
+static inline unsigned char* nvg__exifApply(const unsigned char* src, int* w, int* h,
+											int comp, int orient)
 {
-	int sw = *w, sh = *h, dw, dh, x, y, swap;
+	int sw = *w, sh = *h, dw, dh, x, y, c, swap;
 	unsigned char* out;
 
-	if (src == NULL || orient <= 1 || orient > 8 || sw <= 0 || sh <= 0)
+	if (src == NULL || orient <= 1 || orient > 8 || sw <= 0 || sh <= 0 ||
+	    comp < 1 || comp > 4)
 		return NULL;
 
 	swap = orient >= 5;
 	dw = swap ? sh : sw;
 	dh = swap ? sw : sh;
-	out = (unsigned char*)malloc((size_t)dw * dh * 4);
+	out = (unsigned char*)malloc((size_t)dw * dh * comp);
 	if (out == NULL) return NULL;
 
 	for (y = 0; y < dh; y++) {
@@ -115,9 +119,9 @@ static unsigned char* nvg__exifApply(const unsigned char* src, int* w, int* h, i
 				case 7:  sx = sw - 1 - y; sy = sh - 1 - x; break;	// anti-transpose
 				default: sx = sw - 1 - y; sy = x;          break;	// 8: 270 CW
 			}
-			s = src + ((size_t)sy * sw + sx) * 4;
-			o = out + ((size_t)y * dw + x) * 4;
-			o[0] = s[0]; o[1] = s[1]; o[2] = s[2]; o[3] = s[3];
+			s = src + ((size_t)sy * sw + sx) * comp;
+			o = out + ((size_t)y * dw + x) * comp;
+			for (c = 0; c < comp; c++) o[c] = s[c];
 		}
 	}
 	*w = dw;

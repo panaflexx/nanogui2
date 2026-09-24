@@ -1,7 +1,12 @@
 #include <nanogui/texture.h>
 #include <stb_image.h>
+#include <nanovg_exif.h>
+#include <fstream>
+#include <iterator>
+#include <limits>
 #include <memory>
 #include <stdexcept>
+#include <vector>
 
 NAMESPACE_BEGIN(nanogui)
 
@@ -37,10 +42,30 @@ Texture::Texture(const std::string &filename,
       m_flags(TextureFlags::ShaderRead) {
     int n = 0;
     using Holder = std::unique_ptr<uint8_t[], void(*)(void*)>;
-    Holder texture_data(stbi_load(filename.c_str(), &m_size.x(), &m_size.y(), &n, 0),
+
+    /* Read the file up front: stbi_load(filename) leaves no way to reach the
+     * JPEG APP1 segment, which is where EXIF orientation lives. */
+    std::vector<uint8_t> blob;
+    {
+        std::ifstream in(filename, std::ios::binary);
+        if (in)
+            blob.assign(std::istreambuf_iterator<char>(in),
+                        std::istreambuf_iterator<char>());
+    }
+    if (blob.empty() || blob.size() > (size_t) std::numeric_limits<int>::max())
+        throw std::runtime_error("Could not load texture data from file \"" + filename + "\".");
+
+    Holder texture_data(stbi_load_from_memory(blob.data(), (int) blob.size(),
+                                              &m_size.x(), &m_size.y(), &n, 0),
                         stbi_image_free);
     if (!texture_data)
         throw std::runtime_error("Could not load texture data from file \"" + filename + "\".");
+
+    /* stb_image ignores EXIF, so a photo would otherwise upload rotated. */
+    if (uint8_t *rotated = nvg__exifApply(
+            texture_data.get(), &m_size.x(), &m_size.y(), n,
+            nvg__exifOrientation(blob.data(), (int) blob.size())))
+        texture_data = Holder(rotated, free);
 
     switch (n) {
         case 1: m_pixel_format = PixelFormat::R;    break;

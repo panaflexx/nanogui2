@@ -151,7 +151,7 @@ void TextBox::draw(NVGcontext* ctx) {
     nvgStroke(ctx);
 
     // macOS focus ring when editing
-    if (m_editable && focused() && m_valid_format && m_theme)
+    if (m_editable && focused() && m_valid_format && m_theme && visible_recursive())
         m_theme->draw_focus_ring(ctx, fx, fy, fw, fh, cr);
 
     nvgFontSize(ctx, font_size());

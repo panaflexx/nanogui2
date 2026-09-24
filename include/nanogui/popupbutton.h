@@ -41,18 +41,7 @@ NAMESPACE_BEGIN(nanogui)
         void set_side(Popup::Side popup_side);
         Popup::Side side() const { return m_popup->side(); }
 
-        virtual void set_pushed(bool pushed)override
-        {
-            m_pushed = pushed;
-            // Track the popup panel itself (not this button) with the
-            // screen, so outside-click detection can check the panel's own
-            // (screen-absolute) bounds rather than this button's.
-            if(pushed) {
-                this->screen()->set_popup_visible(m_popup);
-			} else {
-                this->screen()->remove_popup_visible(m_popup);
-			}
-        }
+        virtual void set_pushed(bool pushed) override;
 
         Popup* popup() { return m_popup; }
         const Popup* popup() const { return m_popup; }

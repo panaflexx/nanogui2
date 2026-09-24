@@ -128,7 +128,7 @@ void CheckBox::draw(NVGcontext *ctx) {
         nvgStroke(ctx);
     }
 
-    if (focused() && m_enabled)
+    if (focused() && m_enabled && visible_recursive())
         m_theme->draw_focus_ring(ctx, bx - 1.f, by - 1.f, box + 2.f, box + 2.f, cr + 1.f);
 }
 
