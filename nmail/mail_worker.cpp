@@ -17,6 +17,7 @@
 #ifndef _WIN32
 #include <sys/stat.h>
 #endif
+#include <cctype>
 #include <cstring>
 #include <cstdlib>
 
@@ -386,9 +387,22 @@ void MailWorker::post(Type t, const std::string &folder, int seq,
     m_cv.notify_one();
 }
 
+static bool same_mailbox(const std::string &a, const std::string &b) {
+    if (a.size() != b.size()) return false;
+    for (size_t i = 0; i < a.size(); ++i)
+        if (std::tolower((unsigned char)a[i]) != std::tolower((unsigned char)b[i]))
+            return false;
+    return true;
+}
+
 bool MailWorker::folder_wanted(const std::string &folder) {
     std::lock_guard<std::mutex> lock(m_mutex);
-    return !folder.empty() && folder == m_wanted_folder;
+    if (folder.empty()) return false;
+    /* No folder has been opened on this account yet: the periodic check
+     * watches INBOX, and a fetch for that mailbox must not be dropped. */
+    if (m_wanted_folder.empty())
+        return same_mailbox(folder, "INBOX");
+    return folder == m_wanted_folder;
 }
 
 std::string MailWorker::wanted_folder_copy() {
@@ -447,6 +461,19 @@ void MailWorker::report_fetch_progress(size_t done, size_t total) {
     m_prog_at = now;
     deliver([this, folder, done, total]() {
         if (cb_progress) cb_progress(folder, done, total);
+    });
+}
+
+/* STATUS does not change the selected mailbox, so this is safe while the
+ * user is reading another folder — and on accounts they have not opened. */
+void MailWorker::publish_unseen(const std::string &folder) {
+    if (folder.empty() || !m_imap.is_open()) return;
+    int messages = 0, unseen = 0;
+    std::string err;
+    if (!m_imap.status_counts(folder, messages, unseen, err))
+        return;
+    deliver([this, folder, unseen]() {
+        if (cb_unseen) cb_unseen(folder, unseen);
     });
 }
 
@@ -1610,12 +1637,15 @@ void MailWorker::run() {
                 if ((m_seen_seq > 0 && now_wait >= m_seen_at) ||
                     now_wait >= next_check)
                     break;
-                /* Server advertises IDLE and the wanted mailbox is SELECTed:
-                 * park on the socket instead of the CV so the server can
-                 * push flag/expunge/new-mail events instantly (RFC 2177). */
+                /* Server advertises IDLE and the mailbox we are watching is
+                 * SELECTed. Accounts the user has not opened still watch
+                 * INBOX once the baseline SELECT has landed. */
+                std::string idle_box = m_wanted_folder;
+                if (idle_box.empty() && m_inbox_baseline)
+                    idle_box = "INBOX";
                 if (!m_idle_disabled && m_imap.is_open() &&
-                    m_imap.has_idle() && !m_wanted_folder.empty() &&
-                    m_wanted_folder == m_imap.selected_folder()) {
+                    m_imap.has_idle() && !idle_box.empty() &&
+                    same_mailbox(idle_box, m_imap.selected_folder())) {
                     idle_now = true;
                     break;
                 }
@@ -1646,9 +1676,10 @@ void MailWorker::run() {
                     } else if (now >= next_check) {
                         int interval_min = std::max(1, m_check_interval_min);
                         next_check = now + std::chrono::minutes(interval_min);
-                        if (m_config.host.empty() ||
-                            (m_wanted_folder.empty() && m_selected_folder.empty()))
-                            continue;   // nothing configured/selected to check yet
+                        /* Every connected account is checked, not only the
+                         * one whose folder is on screen. */
+                        if (m_config.host.empty())
+                            continue;
                         cmd.type = Type::AutoRefresh;
                         cmd.folder = m_wanted_folder.empty() ? m_selected_folder
                                                              : m_wanted_folder;
@@ -1677,7 +1708,36 @@ void MailWorker::run() {
             if (!m_imap.is_open()) {
                 if (!do_connect()) break;
             }
+            /* Absolute unread count for this account's inbox, and for the
+             * folder on screen when that is something else. STATUS does
+             * not leave the selected mailbox. */
+            publish_unseen("INBOX");
             {
+                std::string open = wanted_folder_copy();
+                if (!open.empty() && !same_mailbox(open, "INBOX"))
+                    publish_unseen(open);
+            }
+            {
+                bool background = false;
+                {
+                    std::lock_guard<std::mutex> lock(m_mutex);
+                    background = m_wanted_folder.empty();
+                }
+                /* First look at an account the user has not opened: remember
+                 * EXISTS so the next check fetches only new mail. */
+                if (background && !m_inbox_baseline) {
+                    std::string err;
+                    int exists = 0;
+                    if (m_imap.select_folder("INBOX", exists, err)) {
+                        std::lock_guard<std::mutex> lock(m_mutex);
+                        if (m_wanted_folder.empty()) {
+                            m_selected_folder = "INBOX";
+                            m_last_known_exists = std::max(0, exists);
+                            m_inbox_baseline = true;
+                        }
+                    }
+                    break;
+                }
                 std::string want = wanted_folder_copy();
                 if (want.empty()) break;
                 /* A folder switch is in flight — don't SELECT the old box. */
@@ -1845,7 +1905,8 @@ void MailWorker::run_idle(const std::chrono::steady_clock::time_point &next_chec
     std::string folder;
     {
         std::lock_guard<std::mutex> lock(m_mutex);
-        folder = m_wanted_folder;
+        /* Background accounts park on INBOX; attribute pushes to that box. */
+        folder = m_wanted_folder.empty() ? m_imap.selected_folder() : m_wanted_folder;
     }
     mail_dbg("[mail] IDLE begin on '%s'\n", folder.c_str());
     std::string err;

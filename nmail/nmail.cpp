@@ -788,6 +788,9 @@ public:
                                          const std::vector<MailSummary> &sums) {
             on_auto_summaries(id, folder, sums);
         };
+        w.cb_unseen = [this, id](const std::string &folder, int unseen) {
+            on_mailbox_unseen(id, folder, unseen);
+        };
         w.cb_older = [this, id](const std::string &folder,
                                 const std::vector<MailSummary> &sums) {
             on_older(id, folder, sums);
@@ -1529,19 +1532,13 @@ public:
             return fresh;
         };
 
-        auto apply_new_unseen = [&](const std::vector<MailSummary> &fresh) {
-            int n = 0;
-            for (const MailSummary &s : fresh)
-                if (!s.seen) ++n;
-            if (n)
-                bump_folder_unseen(acct, account_id, folder, n);
-        };
-
+        /* Unread badges come from STATUS (absolute UNSEEN), not from
+         * counting the messages just spliced in. A delta added on top of
+         * the previous badge drifts. */
         if (folder != acct.wanted_folder || !viewing_this_account) {
             auto &cache = acct.summary_cache[folder];
             auto fresh = merge_fresh(cache, sums);
             harvest(fresh);
-            apply_new_unseen(fresh);
             redraw();
             return;
         }
@@ -1549,7 +1546,6 @@ public:
         auto fresh = merge_fresh(m_summaries, sums);
         acct.summary_cache[folder] = m_summaries;
         harvest(fresh);
-        apply_new_unseen(fresh);
         // Vanished on auto-refresh: MailWorker patched its per-folder cache but
         // MailApp may still hold stale body entries for vanished UIDs. When
         // on_auto_summaries is not used for QRESYNC delta (auto path fetches only
@@ -1921,6 +1917,30 @@ public:
             for (const MailSummary &s : m_summaries)
                 if (match(s)) return !s.seen;
         return false;
+    }
+
+    /* Replace the folder badge with the server's UNSEEN. `folder` may be
+     * the IMAP name "INBOX" while the sidebar lists "Inbox". */
+    void on_mailbox_unseen(const std::string &account_id, const std::string &folder,
+                           int unseen) {
+        AccountSession *acct = account(account_id);
+        if (!acct || !m_folder_view) return;
+        unseen = std::max(0, unseen);
+        auto same = [](const std::string &a, const std::string &b) {
+            if (a.size() != b.size()) return false;
+            for (size_t i = 0; i < a.size(); ++i)
+                if (std::tolower((unsigned char)a[i]) !=
+                    std::tolower((unsigned char)b[i]))
+                    return false;
+            return true;
+        };
+        for (MailFolder &f : acct->folders) {
+            if (!same(f.name, folder)) continue;
+            f.unseen = unseen;
+            m_folder_view->set_folder_unseen(account_id, f.name, unseen);
+            redraw();
+            return;
+        }
     }
 
     void bump_folder_unseen(AccountSession &acct, const std::string &account_id,

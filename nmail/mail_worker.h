@@ -37,6 +37,10 @@ public:
      * list wholesale. */
     std::function<void(const std::string &,
                        const std::vector<MailSummary> &)>       cb_auto_summaries;
+    /* Absolute UNSEEN from STATUS. Not a delta — the GUI replaces the
+     * folder badge with this count. Fired for every account's INBOX on
+     * the periodic check, and for the folder currently on screen. */
+    std::function<void(const std::string &folder, int unseen)>  cb_unseen;
     /* Older-message page (appended to the bottom of the list). */
     std::function<void(const std::string &,
                        const std::vector<MailSummary> &)>       cb_older;
@@ -132,6 +136,8 @@ private:
     void report_error(const std::string &title, const std::string &msg);
     void report_fetch_progress(size_t done, size_t total);
     void report_status(const std::string &msg, const std::string &folder = "");
+    /* STATUS `folder` and deliver the absolute UNSEEN count. */
+    void publish_unseen(const std::string &folder);
 
     /* Re-LOGIN without LIST (used after cancel() killed the socket). */
     bool ensure_connected();
@@ -209,6 +215,10 @@ private:
     /* Highest sequence number fetched so far in m_selected_folder — lets
        Type::AutoRefresh fetch only the delta since the last check. */
     int                     m_last_known_exists = 0;
+    /* An account the user has not opened still watches INBOX. The first
+     * check records EXISTS and does not download the mailbox; later
+     * checks fetch only the growth. */
+    bool                    m_inbox_baseline = false;
     // background prefetch backlog (low priority, viewport-aware)
     std::string             m_prefetch_folder;
     std::deque<int>         m_prefetch_queue;
