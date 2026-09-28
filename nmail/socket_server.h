@@ -165,7 +165,6 @@ struct http_parser;
 
 typedef void (*socket_handler_t)(int fd, const char *data, size_t len, struct client_info *info);
 typedef void (*http_handler_t)(struct http_parser *http, struct http_request *req, struct client_data *info);
-static void default_http_handler(struct http_parser *http, struct http_request *req, struct client_data *info);
 
 /* ── Port forwarding / protocol translation ───────────────────────────── */
 
@@ -441,20 +440,6 @@ static inline int conn_del(int fd) {
     clients_unlock();
     return close(fd);
 }
-
-static inline int socket_write(int fd, const void *buf, size_t len);
-
-static inline void default_socket_handler(int fd, const char *data, size_t len, struct client_info *info);
-
-/*static inline void default_socket_handler(int fd, const char *data, size_t len, struct client_info *info) {
-    if (info->type == CONN_UDPV4 || info->type == CONN_UDPV6) {
-        socket_write(fd, data, len);
-    } else {
-        const char *msg = "Hello world!\n";
-        socket_write(fd, msg, strlen(msg));
-    }
-}
-*/
 
 static inline int socket_write(int fd, const void *buf, size_t len) {
     int idx = get_conn(fd);
@@ -902,11 +887,8 @@ static inline void my_on_read(int loopfd, int fd, struct event_handlers *handler
             conn_del(fd);
         } else if (res == 2) {
             /* Headers complete, body streaming begins */
-            if (handlers->on_http_request) {
+            if (handlers->on_http_request)
                 handlers->on_http_request(&cd->parser, &cd->parser.req, cd);
-            } else {
-                default_http_handler(&cd->parser, &cd->parser.req, cd);
-            }
             /* After handler setup, forward any leftover body data in parser buffer */
             if (cd->proxy_streaming && handlers->on_body_data) {
                 const char *leftover;
@@ -916,11 +898,8 @@ static inline void my_on_read(int loopfd, int fd, struct event_handlers *handler
                 }
             }
         } else if (res > 0) {
-            if (handlers->on_http_request) {
+            if (handlers->on_http_request)
                 handlers->on_http_request(&cd->parser, &cd->parser.req, cd);
-            } else {
-                default_http_handler(&cd->parser, &cd->parser.req, cd);
-            }
             //http_parser_reset(&cd->parser);
             //conn_del(fd);
         }
@@ -942,11 +921,8 @@ static inline void my_on_read(int loopfd, int fd, struct event_handlers *handler
                 cd->connected = true;
                 if (handlers->on_connect) handlers->on_connect(loopfd, fd, &cd->info);
             }
-            if (cd->si && cd->si->socket_handler) {
+            if (cd->si && cd->si->socket_handler)
                 cd->si->socket_handler(fd, buf, n, &cd->info);
-            } else {
-                default_socket_handler(fd, buf, n, &cd->info);
-            }
         } else {
 #ifdef HAVE_OPENSSL
             if (cd->ssl) {
@@ -977,11 +953,8 @@ static inline void my_on_read(int loopfd, int fd, struct event_handlers *handler
             }
             cd->bytes_read += n;
             cd->last_activity = time(NULL);
-            if (cd->si->socket_handler) {
+            if (cd->si->socket_handler)
                 cd->si->socket_handler(fd, buf, n, &cd->info);
-            } else {
-                default_socket_handler(fd, buf, n, &cd->info);
-            }
         }
     }
 }

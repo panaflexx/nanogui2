@@ -352,18 +352,18 @@ static GLNVGtexture* glnvg__allocTexture(GLNVGcontext* gl)
 	GLNVGtexture* tex = NULL;
 	int i;
 
-	if( gl->utextures < gl->ntextures)
-	{
+	if (gl->utextures < gl->ntextures) {
 		for (i = 0; i < gl->ntextures; i++) {
 			if (gl->textures[i].id == 0) {
 				tex = &gl->textures[i];
 				break;
 			}
 		}
-		assert( i < gl->ntextures && "Hole must be found, this should not happen");
-	}
-	else
-	{
+		/* assert() disappears under NDEBUG, and LTO then treats tex as a
+		   null destination for the clear below ("region of size 0"). */
+		if (tex == NULL)
+			return NULL;
+	} else {
 		if (gl->ntextures >= gl->ctextures) {
 			GLNVGtexture* textures;
 			int ctextures = glnvg__maxi(gl->ntextures+1, 4) +  gl->ctextures/2; // 1.5x Overallocate
@@ -373,10 +373,17 @@ static GLNVGtexture* glnvg__allocTexture(GLNVGcontext* gl)
 			gl->ctextures = ctextures;
 		}
 		i   = gl->ntextures++;
-		tex = &gl->textures[ i];
+		tex = &gl->textures[i];
 	}
 
-	memset(tex, 0, sizeof(*tex));
+	/* Clear a local of known size, then copy. memset(tex) still trips
+	   -Wstringop-overflow at -O3/LTO: realloc's result is treated as a
+	   zero-sized object. */
+	{
+		GLNVGtexture cleared;
+		memset(&cleared, 0, sizeof(cleared));
+		*tex = cleared;
+	}
 	tex->id = i + 1;
 	gl->utextures++;
 

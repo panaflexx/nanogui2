@@ -73,7 +73,7 @@ struct MailMessage {
     std::string raw;           // original RFC 822 bytes (IMAP BODY[])
     bool body_markdown = false; // text part declared markup=markdown
                                 // (MailMate convention) or text/markdown
-    /* Every MIME part that is not the body, inline image/* included: a
+    /* Every MIME part that is not the body, inline images included: a
      * cid: src resolves by matching MailAttachment::cid. */
     std::vector<MailAttachment> attachments;
 };

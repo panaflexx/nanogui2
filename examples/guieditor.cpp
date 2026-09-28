@@ -399,7 +399,7 @@ void GUIEditor::init_widget_registry() {
                 dd->set_fixed_size(Vector2i(150, 25));
                 dd->set_width(150);
                 dd->set_text_color(Color(255, 255, 255, 255));
-                for (const std::string& item : {"Item 1", "Item 2"}) {
+                for (const std::string item : {"Item 1", "Item 2"}) {
                     dd->add_item({item, item + "_item"}, 0, nullptr, {{0, 0}}, true);
                 }
                 for (Widget* child : dd->popup()->children()) {

@@ -2,7 +2,6 @@
 #include <nanogui/opengl.h>
 #include <nanogui/scrollpanel.h>
 #include <nanogui/zoomscrollpanel.h>
-#include <nanogui/cachedwidget.h>
 #include <nanogui/layout.h>
 #include <nanogui/textbox.h>
 #include <nanogui/button.h>

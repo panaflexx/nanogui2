@@ -149,11 +149,17 @@ void BoxLayout::perform_layout(NVGcontext* ctx, Widget* widget) const {
         Vector2i pos(0, y_offset);
         pos[axis1] = position;
 
-        // For axis2
+        // For axis2. Resolve min/max before aligning: set_fixed_size() is
+        // stored as a minimum, so a scroll panel is wider than its content's
+        // preferred width. Centering the preferred width and then growing
+        // the widget leaves it shifted toward the far edge.
         int available_axis2 = container_size[axis2] - 2 * m_margin;
         int target_axis2 = ps[axis2];
         int axis2_min = min_s[axis2];
         int axis2_max = max_s[axis2] > 0 ? max_s[axis2] : available_axis2;
+        if (m_alignment == Alignment::Fill)
+            target_axis2 = available_axis2;
+        target_axis2 = std::max(axis2_min, std::min(target_axis2, axis2_max));
 
         switch (m_alignment) {
             case Alignment::Minimum:
@@ -167,11 +173,8 @@ void BoxLayout::perform_layout(NVGcontext* ctx, Widget* widget) const {
                 break;
             case Alignment::Fill:
                 pos[axis2] += m_margin;
-                target_axis2 = available_axis2;
                 break;
         }
-
-        target_axis2 = std::max(axis2_min, std::min(target_axis2, axis2_max));
 
         Vector2i target_size;
         target_size[axis1] = target_axis1;
