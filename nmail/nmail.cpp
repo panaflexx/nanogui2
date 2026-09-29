@@ -2013,7 +2013,8 @@ public:
 
     /* IDLE push: a message was expunged from the folder by another session.
      * Mirrors on_moved's removal path (uid-aware, seq renumber fallback). */
-    void on_expunged(const std::string &account_id, const std::string &folder, uint32_t uid) {
+    void on_expunged(const std::string &account_id, const std::string &folder, uint32_t uid,
+                     bool show_placeholder = true) {
         AccountSession *acct_ptr = account(account_id);
         if (!acct_ptr || !uid) return;
         AccountSession &acct = *acct_ptr;
@@ -2054,10 +2055,12 @@ public:
             m_reply_btn->set_enabled(false);
             if (m_fwd_btn) m_fwd_btn->set_enabled(false);
             if (m_save_btn) m_save_btn->set_enabled(false);
-            Document doc;
-            parse_markdown(doc, "*Message deleted*", text_color(), 18.f);
-            m_view->set_document(std::move(doc));
-            m_view_scroll->set_scroll(0.0f);
+            if (show_placeholder) {
+                Document doc;
+                parse_markdown(doc, "*Message deleted*", text_color(), 18.f);
+                m_view->set_document(std::move(doc));
+                m_view_scroll->set_scroll(0.0f);
+            }
         }
         if (m_loading_uid == uid) m_loading_uid = 0;
         if (m_pending_uid == uid) { m_pending_uid = 0; m_preview_settle_at = 0; }
@@ -3156,7 +3159,8 @@ public:
 
     /* Close of an unsent composer. Empty windows just go away. Anything
      * with a recipient, subject, body, or attachment is APPENDed to Drafts
-     * before the window is destroyed, so a failed save leaves it open. */
+     * before the window is destroyed, so a failed save leaves it open.
+     * A composer opened from Drafts replaces that message. */
     void save_draft(Window *win, TextBox *to_box, TextBox *subj_box,
                     TextEditor *editor, std::shared_ptr<bool> busy,
                     const OutgoingMail &mail,
@@ -3171,21 +3175,79 @@ public:
         if (from.empty()) from = ma.username;
         std::string draft_folder = acct ? acct->drafts_folder() : "Drafts";
         std::string raw = mail.rfc822(from);
+        uint32_t replace_uid = mail.replace_uid;
+        std::string replace_folder = mail.replace_folder;
+        std::string replace_account = mail.replace_account_id;
+        std::string replace_host, replace_user, replace_pass;
+        int replace_port = 0;
+        if (replace_uid) {
+            AccountSession *src = account(replace_account);
+            if (!src || replace_folder.empty()) {
+                replace_uid = 0;
+            } else {
+                replace_host = src->config.host;
+                replace_port = src->config.port;
+                replace_user = src->config.username;
+                replace_pass = src->config.password;
+                /* The server's EXPUNGE echo must not paint "Message deleted"
+                 * over the reading pane. The row is removed on success. */
+                src->local_expunge_folder = replace_folder;
+                src->local_expunge_uid = replace_uid;
+            }
+        }
+        const bool same_login = replace_uid && replace_host == imap_host &&
+                                replace_port == imap_port && replace_user == user;
         auto alive = m_alive;
         std::thread([this, win, to_box, subj_box, editor, busy, alive, unlock,
-                     imap_host, imap_port, user, pass, draft_folder, raw]() {
-            std::string err;
+                     imap_host, imap_port, user, pass, draft_folder, raw,
+                     replace_uid, replace_folder, replace_account,
+                     replace_host, replace_port, replace_user, replace_pass,
+                     same_login]() {
+            std::string err, replace_err;
             bool ok = imap_upload(imap_host, imap_port, user, pass,
-                                  draft_folder, "\\Draft \\Seen", raw, err);
+                                  draft_folder, "\\Draft \\Seen", raw, err,
+                                  same_login ? replace_uid : 0, replace_folder,
+                                  &replace_err);
+            if (ok && replace_uid && !same_login) {
+                std::string de;
+                if (!imap_delete_uid(replace_host, replace_port, replace_user,
+                                     replace_pass, replace_folder, replace_uid, de))
+                    replace_err = de.empty() ? "could not remove the previous draft" : de;
+            }
             nanogui::async(std::function<void()>(
-                [this, win, to_box, subj_box, editor, busy, alive, unlock, ok, err, draft_folder]() {
+                [this, win, to_box, subj_box, editor, busy, alive, unlock, ok, err,
+                 draft_folder, replace_uid, replace_folder, replace_account, replace_err]() {
+                    auto disarm = [&]() {
+                        AccountSession *src = account(replace_account);
+                        if (!src || !replace_uid) return;
+                        if (src->local_expunge_folder == replace_folder &&
+                            src->local_expunge_uid == replace_uid) {
+                            src->local_expunge_folder.clear();
+                            src->local_expunge_uid = 0;
+                        }
+                    };
                     if (!*alive) return;
                     if (ok) {
-                        set_status("Draft saved to " + draft_folder);
+                        if (replace_uid && replace_err.empty()) {
+                            disarm();
+                            on_expunged(replace_account, replace_folder, replace_uid, false);
+                            if (AccountSession *src = account(replace_account)) {
+                                src->local_expunge_folder = replace_folder;
+                                src->local_expunge_uid = replace_uid;
+                            }
+                            set_status("Draft saved to " + draft_folder);
+                        } else if (replace_uid) {
+                            disarm();
+                            set_status("Draft saved; the previous copy is still in " +
+                                       replace_folder);
+                        } else {
+                            set_status("Draft saved to " + draft_folder);
+                        }
                         *busy = false;
                         close_dialog(win);
                         return;
                     }
+                    disarm();
                     *busy = false;
                     if (to_box && to_box->parent()) to_box->set_editable(true);
                     if (subj_box && subj_box->parent()) subj_box->set_editable(true);
@@ -3208,6 +3270,19 @@ public:
         m_msg_popup->set_visible(false);
     }
 
+    /* Edit for send. A message already in Drafts is marked so a later
+     * save overwrites it. */
+    void open_existing(const MailMessage &msg, uint32_t uid) {
+        AccountSession &acct = current_acct();
+        OutgoingMail mail = OutgoingMail::again(msg, current_id());
+        if (uid && lower_copy(acct.current_folder) == lower_copy(acct.drafts_folder())) {
+            mail.replace_account_id = current_id();
+            mail.replace_folder = acct.current_folder;
+            mail.replace_uid = uid;
+        }
+        open_composer(std::move(mail), "Edit Message");
+    }
+
     /* Body is already in hand: open it for editing. Otherwise remember the
      * UID and let the fetch that is already running (or one we start) call
      * back through maybe_open_pending_compose. */
@@ -3218,15 +3293,13 @@ public:
         AccountSession &acct = current_acct();
         if (m_has_message && m_rendered_uid == uid) {
             m_compose_after_uid = 0;
-            open_composer(OutgoingMail::again(m_current_message, current_id()),
-                          "Edit Message");
+            open_existing(m_current_message, uid);
             return;
         }
         MailMessage cached;
         if (body_get(acct, acct.current_folder, uid, cached)) {
             m_compose_after_uid = 0;
-            open_composer(OutgoingMail::again(cached, current_id()),
-                          "Edit Message");
+            open_existing(cached, uid);
             return;
         }
         m_compose_after_uid = uid;
@@ -3239,7 +3312,7 @@ public:
     void maybe_open_pending_compose(uint32_t uid, const MailMessage &msg) {
         if (!uid || uid != m_compose_after_uid) return;
         m_compose_after_uid = 0;
-        open_composer(OutgoingMail::again(msg, current_id()), "Edit Message");
+        open_existing(msg, uid);
     }
 
     void set_selected_seen(bool seen) {
@@ -3922,7 +3995,11 @@ public:
         });
 
         Button *cancel = new Button(action_group, "Cancel", FA_TIMES);
-        cancel->set_callback(request_close);
+        /* Discard. The title-bar close still saves a draft. */
+        cancel->set_callback([this, win, compose_busy]() {
+            if (*compose_busy) return;
+            close_dialog(win);
+        });
 
         /* The attachment rebuild above laid the window out before this
          * toolbar and the Send row existed. Measure again now that the

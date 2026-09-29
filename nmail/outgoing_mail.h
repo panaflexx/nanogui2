@@ -30,6 +30,11 @@ public:
     MailFormat  format = MailFormat::Markdown;
     std::vector<MailAttachment> attachments;
     Quote quote;
+    /* Existing Drafts message this composer should overwrite on save.
+     * uid 0 means a new draft. */
+    std::string replace_account_id;
+    std::string replace_folder;
+    uint32_t    replace_uid = 0;
 
     static OutgoingMail fresh(const std::string &account_id);
     static OutgoingMail reply(const MailMessage &orig, const std::string &account_id);

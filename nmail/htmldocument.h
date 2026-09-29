@@ -121,7 +121,11 @@ public:
      * places a caret and keyboard input changes the text. edited_html()
      * returns the source passed to set_html() until the first edit; after
      * that it writes paragraphs, headings, lists, links, and images.
-     * Tables and CSS do not survive an edit. */
+     * Tables and CSS do not survive an edit.
+     *
+     * Both the reader and the editor can select text (drag, double-click
+     * a word, triple-click a paragraph, Ctrl/Cmd+A). Ctrl/Cmd+C copies
+     * the selection as plain text. Paste and cut run only while editable. */
     enum class InlineStyle { Bold, Italic, Underline };
     void set_editable(bool on);
     bool editable() const { return m_editable; }
@@ -144,6 +148,24 @@ public:
      * refresh. Not cleared by set_html() / clear(). */
     std::function<void()> on_caret;
 
+    /* `leaf` is the HtmlText under the caret. extend keeps the anchor. */
+    void set_text_caret(nanogui::Widget *leaf, size_t para, size_t col, bool extend);
+    bool has_text_selection() const;
+    /* Range of the selection that falls in `leaf`, in paragraph order.
+     * False when this leaf is outside the selection. */
+    bool leaf_selection(const nanogui::Widget *leaf, size_t &p0, size_t &c0,
+                        size_t &p1, size_t &c1) const;
+    void select_word_at(nanogui::Widget *leaf, size_t para, size_t col);
+    void select_paragraph_at(nanogui::Widget *leaf, size_t para);
+    void select_all_text();
+    void copy_selection();
+    void paste_clipboard();
+    /* Removes the selected text. Returns the leaf that now holds the caret. */
+    nanogui::Widget *delete_selection();
+    /* Flip one inline flag across the selection. No selection: no-op. */
+    void restyle_selection(bool nanogui::Style::*flag);
+    bool keyboard_event(int key, int scancode, int action, int modifiers) override;
+
 private:
     void touch_edit();
     void notify_caret();
@@ -155,6 +177,14 @@ private:
     bool     m_editable = false;
     bool     m_edit_dirty = false;
     std::string m_source_html;
+    /* Selection anchor and focus. Equal means a caret, or no selection
+     * in the reader. Leaves are HtmlText widgets; cleared in clear(). */
+    nanogui::Widget *m_anchor_leaf = nullptr;
+    size_t  m_anchor_para = 0;
+    size_t  m_anchor_col  = 0;
+    nanogui::Widget *m_focus_leaf = nullptr;
+    size_t  m_focus_para = 0;
+    size_t  m_focus_col  = 0;
     std::string m_last_hover_url;
 
     /* Some HTML tables produce a preferred-size measurement that never

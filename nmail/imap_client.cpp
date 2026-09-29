@@ -1702,10 +1702,39 @@ bool ImapClient::append_message(const std::string &folder,
     return once();
 }
 
+bool ImapClient::delete_uid(const std::string &folder, uint32_t uid,
+                           std::string &err) {
+    if (uid == 0) { err = "invalid uid"; return false; }
+    if (!is_open()) { err = "not connected"; return false; }
+    if (!ensure_selected(folder, err)) return false;
+    std::vector<std::string> un;
+    std::string store = "UID STORE " + std::to_string(uid) +
+                        " +FLAGS.SILENT (\\Deleted)";
+    if (!run(store, un, err)) return false;
+    un.clear();
+    err.clear();
+    if (m_caps.count("UIDPLUS")) {
+        if (run("UID EXPUNGE " + std::to_string(uid), un, err))
+            return true;
+        std::string low = to_lower(err);
+        bool unknown = low.find("unknown") != std::string::npos ||
+                       low.find("invalid") != std::string::npos ||
+                       low.find("bad") != std::string::npos;
+        if (!unknown) return false;
+        err.clear();
+        un.clear();
+    }
+    /* Without UIDPLUS, EXPUNGE clears every \Deleted message in the
+     * mailbox. The draft we just flagged is one of them. */
+    return run("EXPUNGE", un, err);
+}
+
 bool imap_upload(const std::string &host, int port,
                  const std::string &user, const std::string &pass,
                  const std::string &folder, const char *flags,
-                 const std::string &rfc822, std::string &err) {
+                 const std::string &rfc822, std::string &err,
+                 uint32_t replace_uid, const std::string &replace_folder,
+                 std::string *replace_err) {
     ImapClient imap;
     imap.set_use_compress(false);
     if (!imap.open(host, port, user, pass, err)) {
@@ -1713,6 +1742,27 @@ bool imap_upload(const std::string &host, int port,
         return false;
     }
     bool ok = imap.append_message(folder, rfc822, err, flags);
+    if (ok && replace_uid) {
+        std::string de;
+        const std::string &src = replace_folder.empty() ? folder : replace_folder;
+        if (!imap.delete_uid(src, replace_uid, de) && replace_err)
+            *replace_err = de.empty() ? "could not remove the previous draft" : de;
+    }
+    imap.close();
+    return ok;
+}
+
+bool imap_delete_uid(const std::string &host, int port,
+                     const std::string &user, const std::string &pass,
+                     const std::string &folder, uint32_t uid,
+                     std::string &err) {
+    ImapClient imap;
+    imap.set_use_compress(false);
+    if (!imap.open(host, port, user, pass, err)) {
+        imap.close();
+        return false;
+    }
+    bool ok = imap.delete_uid(folder, uid, err);
     imap.close();
     return ok;
 }

@@ -95,11 +95,24 @@ std::string message_preview(const MailMessage &msg);
 /* APPEND `rfc822` on a short-lived connection with COMPRESS left off.
  * A large literal through the reading connection's deflate stream hangs
  * on some servers (maddy). `folder` is already resolved. `flags` is the
- * flag list without parentheses, e.g. "\\Seen" or "\\Draft \\Seen". */
+ * flag list without parentheses, e.g. "\\Seen" or "\\Draft \\Seen".
+ * When `replace_uid` is set, that message is removed from
+ * `replace_folder` on the same connection after the append. Append
+ * success still returns true; a failed removal is written to
+ * `replace_err` when that pointer is set. */
 bool imap_upload(const std::string &host, int port,
                  const std::string &user, const std::string &pass,
                  const std::string &folder, const char *flags,
-                 const std::string &rfc822, std::string &err);
+                 const std::string &rfc822, std::string &err,
+                 uint32_t replace_uid = 0,
+                 const std::string &replace_folder = {},
+                 std::string *replace_err = nullptr);
+
+/* SELECT `folder` and expunge one UID. COMPRESS stays off. */
+bool imap_delete_uid(const std::string &host, int port,
+                     const std::string &user, const std::string &pass,
+                     const std::string &folder, uint32_t uid,
+                     std::string &err);
 
 class ImapClient {
 public:
@@ -164,6 +177,10 @@ public:
      * e.g. "\\Seen" or "\\Draft \\Seen". */
     bool append_message(const std::string &folder, const std::string &rfc822,
                         std::string &err, const char *flags = "\\Seen");
+
+    /* SELECT `folder`, mark `uid` \Deleted, and expunge it. Prefers
+     * UID EXPUNGE when the server advertises UIDPLUS. */
+    bool delete_uid(const std::string &folder, uint32_t uid, std::string &err);
 
     /* LIST and return the mailbox flagged \Sent, \Trash, \Drafts, ...
      * `use` is the attribute including the backslash, e.g. "\\Sent". */

@@ -13,6 +13,7 @@
 #include <nanogui/layout.h>
 #include <nanogui/screen.h>
 #include <nanogui/scrollpanel.h>
+#include <nanogui/zoomscrollpanel.h>
 #include <GLFW/glfw3.h>
 #include "gumbo.h"
 
@@ -704,6 +705,34 @@ static bool open_url_secure(const std::string &raw) {
 #endif
 }
 
+class HtmlBlock;
+
+static std::string ancestor_block_link(const Widget *from);
+
+/* Press and release can both try to open the same address: the leaf
+ * gets the release, then the block under the pointer does too. */
+static bool follow_link(Widget *from, const std::string &url) {
+    if (url.empty()) return false;
+    static double last_t = -1.0;
+    static std::string last_u;
+    double now = glfwGetTime();
+    if (last_t >= 0.0 && url == last_u && now - last_t < 0.05)
+        return true;
+    last_t = now;
+    last_u = url;
+    for (Widget *pp = from; pp; pp = pp->parent())
+        if (auto *hd = dynamic_cast<HtmlDocument *>(pp)) {
+            if (hd->notify_link_click(url)) return true;
+            break;
+        }
+    std::string n;
+    if (is_allowed_url(url, n)) {
+        open_url_secure(n);
+        return true;
+    }
+    return false;
+}
+
 class HtmlText : public Widget {
 public:
     Document m_doc;
@@ -725,12 +754,19 @@ public:
     size_t m_caret_col  = 0;
     bool  m_typing_on = false;
     Style m_typing;
+    double m_last_click = -1.0;
+    int    m_clicks = 0;
+    Vector2i m_down_pt;
+    bool   m_press_dragged = false;
+    int    m_press_travel = 0;
+    bool   m_press_shift = false;
+    std::string m_press_url;
 
     HtmlDocument *owner() const;
     bool editing() const;
     void ensure_layout(NVGcontext *ctx);
     void solo_caret();
-    void place_caret(size_t para, size_t col);
+    void place_caret(size_t para, size_t col, bool extend = false);
     Style style_for_insert() const;
     void insert_text(const std::string &s);
     void insert_newline();
@@ -739,7 +775,12 @@ public:
     void delete_backward();
     void delete_forward();
     void move_caret(int key, int mods);
-    void move_to_leaf(HtmlText *ht, bool at_end);
+    void move_to_leaf(HtmlText *ht, bool at_end, bool extend = false);
+    void erase_span(size_t p0, size_t c0, size_t p1, size_t c1);
+    void erase_to_end(size_t para, size_t col);
+    void erase_from_start(size_t para, size_t col);
+    void mark_dirty_leaf();
+    void draw_selection(NVGcontext *ctx);
     void toggle_inline(bool Style::*flag);
     void toggle_header_level(int level);
     void toggle_bullet_para();
@@ -749,6 +790,8 @@ public:
     void scroll_caret();
     bool keyboard_event(int key, int scancode, int action, int mods) override;
     bool keyboard_character_event(unsigned int codepoint) override;
+    bool mouse_drag_event(const Vector2i &p, const Vector2i &rel,
+                          int button, int mods) override;
 
     virtual Vector2i preferred_size(NVGcontext *ctx) const override {
         /* Cap at the parent, not at our last laid-out m_size: using
@@ -822,6 +865,7 @@ public:
             m_doc.markLayoutDirty();
         m_doc.contentWidth = (float)w;
         m_doc.draw(ctx, x, y);
+        draw_selection(ctx);
         if (m_have_caret && editing() && focused()) {
             Document::CaretInfo info = m_doc.richCaretInfo(ctx, m_caret_para, m_caret_col);
             if (info.valid) {
@@ -848,13 +892,12 @@ public:
                 }
         }
     }
-    // Hit-test: p is widget-local (0..size) as passed by Widget::mouse_motion_event.
-    // Document was drawn at (m_layout_origin_x, m_layout_origin_y) which for HtmlText is m_pos.x/y
-    // in its parent's space. The simplest correct hit is in document space: local p + layout_origin.
+    /* p is parent space, same as richHitTest. Words sit at the layout
+     * origin: m_pos after paint, 0 after a measure-only pass. */
     std::string hit_url(const Vector2i &p) const {
         if (m_doc.m_rich_layout.empty()) return "";
-        float x = (float)p.x() + m_doc.m_layout_origin_x;
-        float y = (float)p.y() + m_doc.m_layout_origin_y;
+        float x = (float)p.x() - (float)m_pos.x() + m_doc.m_layout_origin_x;
+        float y = (float)p.y() - (float)m_pos.y() + m_doc.m_layout_origin_y;
         const Document::RichLine *found=nullptr;
         for(auto &rl: m_doc.m_rich_layout){ if(y>=rl.y_top-2 && y<rl.y_bottom+2){ found=&rl; break; } }
         if(!found){ // scrolled: try absolute as fallback
@@ -879,7 +922,7 @@ public:
         std::string url = hit_url(p);
         m_hover_url = url;
         bool is_link = !url.empty();
-        set_cursor(is_link ? Cursor::Hand : Cursor::Arrow);
+        set_cursor(is_link ? Cursor::Hand : Cursor::IBeam);
         notify_hover(url);
         bool handled = Widget::mouse_motion_event(p, rel, b, m);
         return is_link || handled;
@@ -890,43 +933,65 @@ public:
             return Widget::mouse_enter_event(p, enter);
         }
         if(!enter){ set_cursor(Cursor::Arrow); m_hover_url.clear(); notify_hover(""); }
-        else { std::string u=hit_url(p); m_hover_url=u; if(!u.empty()) set_cursor(Cursor::Hand); else set_cursor(Cursor::Arrow); notify_hover(u); }
+        else { std::string u=hit_url(p); m_hover_url=u; if(!u.empty()) set_cursor(Cursor::Hand); else set_cursor(Cursor::IBeam); notify_hover(u); }
         return Widget::mouse_enter_event(p, enter);
     }
-    bool notify_click(const std::string &url) {
-        for (Widget *pp = parent(); pp; pp = pp->parent())
-            if (auto *hd = dynamic_cast<HtmlDocument *>(pp))
-                return hd->notify_link_click(url);
-        return false;
-    }
     virtual bool mouse_button_event(const Vector2i &p, int button, bool down, int mods) override {
-        if (editing() && button == GLFW_MOUSE_BUTTON_1) {
-            if (down) {
-                request_focus();
-                NVGcontext *ctx = screen() ? screen()->nvg_context() : nullptr;
-                size_t para = 0, col = 0;
-                if (ctx) {
-                    ensure_layout(ctx);
-                    /* p and the document words are both in this leaf's
-                     * parent space (draw origin is m_pos). */
-                    std::pair<size_t, size_t> hit =
-                        m_doc.richHitTest(ctx, (float)p.x(), (float)p.y());
-                    para = hit.first;
-                    col = hit.second;
-                }
-                place_caret(para, col);
-                after_move();
+        if (button != GLFW_MOUSE_BUTTON_1)
+            return Widget::mouse_button_event(p, button, down, mods);
+        HtmlDocument *hd = owner();
+        if (!hd) return Widget::mouse_button_event(p, button, down, mods);
+        if (down) {
+            request_focus();
+            NVGcontext *ctx = screen() ? screen()->nvg_context() : nullptr;
+            size_t para = 0, col = 0;
+            if (ctx) {
+                ensure_layout(ctx);
+                /* p and the document words are both in this leaf's
+                 * parent space (draw origin is m_pos). */
+                std::pair<size_t, size_t> hit =
+                    m_doc.richHitTest(ctx, (float)p.x(), (float)p.y());
+                para = hit.first;
+                col = hit.second;
             }
-            return true;   // edit mode does not follow links
-        }
-        if(button==GLFW_MOUSE_BUTTON_1 && !down){
-            std::string u=hit_url(p);
-            if(!u.empty()){
-                if(notify_click(u)) return true;   // host claimed it
-                std::string n; if(is_allowed_url(u,n)){ open_url_secure(n); return true; }
+            double now = glfwGetTime();
+            bool near = std::abs(p.x() - m_down_pt.x()) +
+                        std::abs(p.y() - m_down_pt.y()) <= 6;
+            bool shift = (mods & GLFW_MOD_SHIFT) != 0;
+            if (!shift && m_last_click >= 0.0 && now - m_last_click < 0.4 && near) {
+                if (m_clicks < 3) ++m_clicks;
+            } else {
+                m_clicks = 1;
             }
+            m_last_click = now;
+            m_down_pt = p;
+            m_press_dragged = false;
+            m_press_travel = 0;
+            m_press_shift = shift;
+            m_press_url.clear();
+            /* Remember the address under the press. Mouse-up may arrive in
+             * another coordinate space once the pointer leaves the leaf. */
+            if (!editing() && !shift && m_clicks <= 1) {
+                m_press_url = hit_url(p);
+                if (m_press_url.empty())
+                    m_press_url = ancestor_block_link(this);
+            }
+            if (shift || m_clicks <= 1)
+                place_caret(para, col, shift);
+            else if (m_clicks == 2)
+                hd->select_word_at(this, para, col);
+            else
+                hd->select_paragraph_at(this, para);
+            after_move();
+            return true;
         }
-        return Widget::mouse_button_event(p, button, down, mods);
+        /* A drag, a multi-click, or a live selection stays a selection. */
+        if (editing() || m_press_shift || m_press_dragged || m_clicks > 1 ||
+            hd->has_text_selection())
+            return true;
+        if (follow_link(this, m_press_url))
+            return true;
+        return false;
     }
 };
 
@@ -977,12 +1042,7 @@ public:
             }
         }
         if(!m_link_url.empty() && button==GLFW_MOUSE_BUTTON_1 && !down){
-            for (Widget *pp = parent(); pp; pp = pp->parent())
-                if (auto *hd = dynamic_cast<HtmlDocument *>(pp)) {
-                    if (hd->notify_link_click(m_link_url)) return true;
-                    break;
-                }
-            std::string n; if(is_allowed_url(m_link_url,n)){ open_url_secure(n); return true; }
+            if (follow_link(this, m_link_url)) return true;
         }
         return false;
     }
@@ -1067,6 +1127,17 @@ public:
             nvgRestore(ctx);
     }
 };
+
+static std::string ancestor_block_link(const Widget *from) {
+    for (const Widget *w = from; w; w = w->parent()) {
+        if (dynamic_cast<const HtmlDocument *>(w))
+            break;
+        if (auto *b = dynamic_cast<const HtmlBlock *>(w))
+            if (!b->m_link_url.empty())
+                return b->m_link_url;
+    }
+    return {};
+}
 
 // ---------------------------------------------------------------------------
 // Builder: shared render state for one set_html() pass.
@@ -3232,6 +3303,94 @@ static void collect_text_leaves(Widget *w, std::vector<HtmlText *> &out) {
     }
 }
 
+/* Screen drag coordinates ignore ZoomScrollPanel's pan and zoom.
+ * Map a screen point into this leaf's parent space, which is where
+ * Document word positions and richHitTest live. */
+static Vector2i parent_point_from_screen(const HtmlText *ht, const Vector2i &screen_p) {
+    const ZoomScrollPanel *zsp = nullptr;
+    const HtmlDocument *hd = nullptr;
+    for (const Widget *w = ht; w; w = w->parent()) {
+        if (!zsp) zsp = dynamic_cast<const ZoomScrollPanel *>(w);
+        if (!hd) hd = dynamic_cast<const HtmlDocument *>(w);
+    }
+    Vector2i doc_pt;
+    if (zsp && zsp->parent()) {
+        Vector2i in_parent = screen_p - zsp->parent()->absolute_position();
+        doc_pt = zsp->to_child(in_parent);
+    } else if (hd) {
+        doc_pt = screen_p - hd->absolute_position();
+    } else if (ht->parent()) {
+        return screen_p - ht->parent()->absolute_position();
+    } else {
+        return screen_p;
+    }
+    Vector2i leaf_p = doc_pt;
+    for (const Widget *w = ht; w && w->parent() && w->parent() != hd; w = w->parent())
+        leaf_p -= w->parent()->position();
+    return leaf_p;
+}
+
+struct DocHit { HtmlText *leaf = nullptr; size_t para = 0; size_t col = 0; };
+
+static DocHit hit_document(HtmlDocument *hd, const Vector2i &screen_p) {
+    DocHit best;
+    if (!hd) return best;
+    Screen *scr = hd->screen();
+    NVGcontext *ctx = scr ? scr->nvg_context() : nullptr;
+    std::vector<HtmlText *> leaves;
+    collect_text_leaves(hd, leaves);
+    int best_dist = 1 << 30;
+    for (HtmlText *ht : leaves) {
+        if (!ht->parent()) continue;
+        Vector2i pt = parent_point_from_screen(ht, screen_p);
+        if (ctx) ht->ensure_layout(ctx);
+        bool inside = ht->contains(pt);
+        Vector2i local = pt - ht->position();
+        int dist = 0;
+        if (local.y() < 0) dist = -local.y();
+        else if (local.y() >= ht->height()) dist = local.y() - ht->height();
+        if (!inside && dist >= best_dist) continue;
+        size_t para = 0, col = 0;
+        if (ctx && !ht->m_doc.m_rich_layout.empty()) {
+            std::pair<size_t, size_t> hit =
+                ht->m_doc.richHitTest(ctx, (float)pt.x(), (float)pt.y());
+            para = hit.first;
+            col = hit.second;
+        }
+        if (inside) return { ht, para, col };
+        best_dist = dist;
+        best = { ht, para, col };
+    }
+    return best;
+}
+
+static void autoscroll_for_drag(Widget *from, const Vector2i &screen_p) {
+    for (Widget *w = from; w; w = w->parent()) {
+        if (auto *sp = dynamic_cast<ScrollPanel *>(w)) {
+            Vector2i o = sp->absolute_position();
+            float frac = sp->scroll().y();
+            if (screen_p.y() < o.y() + 28) frac -= 0.04f;
+            else if (screen_p.y() > o.y() + sp->height() - 28) frac += 0.04f;
+            else return;
+            if (frac < 0.f) frac = 0.f;
+            if (frac > 1.f) frac = 1.f;
+            sp->set_scroll(frac);
+            return;
+        }
+        if (auto *zp = dynamic_cast<ZoomScrollPanel *>(w)) {
+            Vector2i o = zp->absolute_position();
+            float y = zp->scroll().y();
+            if (screen_p.y() < o.y() + 28) y -= 0.04f;
+            else if (screen_p.y() > o.y() + zp->height() - 28) y += 0.04f;
+            else return;
+            if (y < 0.f) y = 0.f;
+            if (y > 1.f) y = 1.f;
+            zp->set_scroll(y);
+            return;
+        }
+    }
+}
+
 HtmlDocument *HtmlText::owner() const {
     for (const Widget *p = parent(); p; p = p->parent())
         if (auto *hd = dynamic_cast<const HtmlDocument *>(p))
@@ -3271,7 +3430,7 @@ void HtmlText::solo_caret() {
     }
 }
 
-void HtmlText::place_caret(size_t para, size_t col) {
+void HtmlText::place_caret(size_t para, size_t col, bool extend) {
     solo_caret();
     if (m_doc.paragraphs.empty()) m_doc.addParagraph();
     if (para >= m_doc.paragraphs.size()) para = m_doc.paragraphs.size() - 1;
@@ -3280,7 +3439,9 @@ void HtmlText::place_caret(size_t para, size_t col) {
     m_have_caret = true;
     m_caret_para = para;
     m_caret_col = col;
-    m_typing_on = false;
+    if (!extend) m_typing_on = false;
+    if (HtmlDocument *hd = owner())
+        hd->set_text_caret(this, m_caret_para, m_caret_col, extend);
 }
 
 Style HtmlText::style_for_insert() const {
@@ -3415,6 +3576,15 @@ void HtmlText::break_paragraph() {
 
 void HtmlText::insert_text(const std::string &s) {
     if (!editing() || s.empty()) return;
+    if (HtmlDocument *hd = owner()) {
+        if (hd->has_text_selection()) {
+            HtmlText *t = dynamic_cast<HtmlText *>(hd->delete_selection());
+            if (t != this) {
+                if (t) t->insert_text(s);
+                return;
+            }
+        }
+    }
     size_t start = 0;
     for (size_t i = 0; i <= s.size(); ++i) {
         if (i != s.size() && s[i] != '\n') continue;
@@ -3434,6 +3604,15 @@ void HtmlText::insert_text(const std::string &s) {
 
 void HtmlText::insert_newline() {
     if (!editing()) return;
+    if (HtmlDocument *hd = owner()) {
+        if (hd->has_text_selection()) {
+            HtmlText *t = dynamic_cast<HtmlText *>(hd->delete_selection());
+            if (t != this) {
+                if (t) t->insert_newline();
+                return;
+            }
+        }
+    }
     ensure_text_para();
     Paragraph *p = m_doc.paragraphs[m_caret_para].get();
     if (p->isBullet && p->byte_length() == 0) {
@@ -3448,6 +3627,9 @@ void HtmlText::insert_newline() {
 
 void HtmlText::delete_backward() {
     if (!editing() || m_doc.paragraphs.empty()) return;
+    if (HtmlDocument *hd = owner()) {
+        if (hd->has_text_selection()) { hd->delete_selection(); return; }
+    }
     if (m_caret_para >= m_doc.paragraphs.size())
         m_caret_para = m_doc.paragraphs.size() - 1;
     Paragraph *p = m_doc.paragraphs[m_caret_para].get();
@@ -3486,6 +3668,9 @@ void HtmlText::delete_backward() {
 
 void HtmlText::delete_forward() {
     if (!editing() || m_doc.paragraphs.empty()) return;
+    if (HtmlDocument *hd = owner()) {
+        if (hd->has_text_selection()) { hd->delete_selection(); return; }
+    }
     if (m_caret_para >= m_doc.paragraphs.size())
         m_caret_para = m_doc.paragraphs.size() - 1;
     Paragraph *p = m_doc.paragraphs[m_caret_para].get();
@@ -3528,7 +3713,7 @@ static HtmlText *neighbor_leaf(HtmlText *self, int dir) {
     return nullptr;
 }
 
-void HtmlText::move_to_leaf(HtmlText *ht, bool at_end) {
+void HtmlText::move_to_leaf(HtmlText *ht, bool at_end, bool extend) {
     if (!ht) return;
     if (ht->m_doc.paragraphs.empty()) ht->m_doc.addParagraph();
     size_t para = 0;
@@ -3546,7 +3731,7 @@ void HtmlText::move_to_leaf(HtmlText *ht, bool at_end) {
     }
     size_t col = at_end ? ht->m_doc.paragraphs[para]->byte_length() : 0;
     ht->request_focus();
-    ht->place_caret(para, col);
+    ht->place_caret(para, col, extend);
     ht->after_move();
 }
 
@@ -3556,6 +3741,12 @@ void HtmlText::move_caret(int key, int mods) {
         m_caret_para = m_doc.paragraphs.size() - 1;
     Paragraph *p = m_doc.paragraphs[m_caret_para].get();
     bool para_jump = (mods & SYSTEM_COMMAND_MOD) != 0;
+    bool extend = (mods & GLFW_MOD_SHIFT) != 0;
+    auto finish = [&]() {
+        if (HtmlDocument *hd = owner())
+            hd->set_text_caret(this, m_caret_para, m_caret_col, extend);
+        after_move();
+    };
 
     if (key == GLFW_KEY_HOME) {
         if (para_jump) {
@@ -3564,13 +3755,13 @@ void HtmlText::move_caret(int key, int mods) {
         } else {
             m_caret_col = 0;
         }
-        after_move();
+        finish();
         return;
     }
     if (key == GLFW_KEY_END) {
         if (para_jump) m_caret_para = m_doc.paragraphs.size() - 1;
         m_caret_col = m_doc.paragraphs[m_caret_para]->byte_length();
-        after_move();
+        finish();
         return;
     }
     if (key == GLFW_KEY_LEFT || key == GLFW_KEY_RIGHT) {
@@ -3578,12 +3769,12 @@ void HtmlText::move_caret(int key, int mods) {
         std::string text = p->plain_text();
         if (dir < 0 && m_caret_col > 0) {
             m_caret_col = utf8_step_prev(text, m_caret_col);
-            after_move();
+            finish();
             return;
         }
         if (dir > 0 && m_caret_col < text.size()) {
             m_caret_col = utf8_step_next(text, m_caret_col);
-            after_move();
+            finish();
             return;
         }
         int step = dir < 0 ? -1 : 1;
@@ -3593,21 +3784,21 @@ void HtmlText::move_caret(int key, int mods) {
             if (q->isImage || q->isRule) continue;
             m_caret_para = (size_t)i;
             m_caret_col = dir < 0 ? q->byte_length() : 0;
-            after_move();
+            finish();
             return;
         }
-        move_to_leaf(neighbor_leaf(this, dir), dir < 0);
+        move_to_leaf(neighbor_leaf(this, dir), dir < 0, extend);
         return;
     }
 
     Screen *scr = screen();
     NVGcontext *ctx = scr ? scr->nvg_context() : nullptr;
-    if (!ctx) { after_move(); return; }
+    if (!ctx) { finish(); return; }
     ensure_layout(ctx);
     Document::CaretInfo info = m_doc.richCaretInfo(ctx, m_caret_para, m_caret_col);
     int dir = key == GLFW_KEY_UP ? -1 : 1;
     if (m_doc.m_rich_layout.empty() || !info.valid) {
-        move_to_leaf(neighbor_leaf(this, dir), dir < 0);
+        move_to_leaf(neighbor_leaf(this, dir), dir < 0, extend);
         return;
     }
     float x = info.x;
@@ -3615,7 +3806,7 @@ void HtmlText::move_caret(int key, int mods) {
     const Document::RichLine &first = m_doc.m_rich_layout.front();
     const Document::RichLine &last = m_doc.m_rich_layout.back();
     if ((dir < 0 && y < first.y_top) || (dir > 0 && y >= last.y_bottom)) {
-        move_to_leaf(neighbor_leaf(this, dir), dir < 0);
+        move_to_leaf(neighbor_leaf(this, dir), dir < 0, extend);
         return;
     }
     std::pair<size_t, size_t> hit = m_doc.richHitTest(ctx, x, y);
@@ -3626,11 +3817,17 @@ void HtmlText::move_caret(int key, int mods) {
     size_t n = m_doc.paragraphs[m_caret_para]->byte_length();
     if (m_caret_col > n) m_caret_col = n;
     m_typing_on = false;
-    after_move();
+    finish();
 }
 
 void HtmlText::toggle_inline(bool Style::*flag) {
     if (!editing()) return;
+    if (HtmlDocument *hd = owner()) {
+        if (hd->has_text_selection()) {
+            hd->restyle_selection(flag);
+            return;
+        }
+    }
     ensure_text_para();
     Style st = style_for_insert();
     st.*flag = !(st.*flag);
@@ -3805,6 +4002,209 @@ bool HtmlText::keyboard_character_event(unsigned int codepoint) {
     return true;
 }
 
+void HtmlText::erase_span(size_t p0, size_t c0, size_t p1, size_t c1) {
+    if (m_doc.paragraphs.empty()) {
+        m_doc.addParagraph();
+        m_caret_para = 0;
+        m_caret_col = 0;
+        return;
+    }
+    if (p0 > p1 || (p0 == p1 && c0 > c1)) {
+        std::swap(p0, p1);
+        std::swap(c0, c1);
+    }
+    if (p0 >= m_doc.paragraphs.size()) return;
+    if (p1 >= m_doc.paragraphs.size()) {
+        p1 = m_doc.paragraphs.size() - 1;
+        c1 = m_doc.paragraphs[p1]->byte_length();
+    }
+    auto clamp_col = [](const Paragraph *p, size_t c) {
+        size_t n = p->byte_length();
+        return c > n ? n : c;
+    };
+    c0 = clamp_col(m_doc.paragraphs[p0].get(), c0);
+    c1 = clamp_col(m_doc.paragraphs[p1].get(), c1);
+    if (p0 == p1) {
+        Paragraph *p = m_doc.paragraphs[p0].get();
+        if (!p->isImage && !p->isRule)
+            erase_cols(p, c0, c1);
+        m_caret_para = p0;
+        m_caret_col = c0;
+        return;
+    }
+
+    Paragraph *start = m_doc.paragraphs[p0].get();
+    Paragraph *end = m_doc.paragraphs[p1].get();
+    bool start_block = start->isImage || start->isRule;
+    bool end_block = end->isImage || end->isRule;
+    if (!start_block)
+        erase_cols(start, c0, start->byte_length());
+    if (!end_block)
+        erase_cols(end, 0, c1);
+    /* Paragraphs strictly inside the range, including images, go away. */
+    for (size_t i = p1; i > p0 + 1; --i)
+        m_doc.removeParagraph(i - 1);
+    if (p0 + 1 < m_doc.paragraphs.size()) {
+        Paragraph *dst = m_doc.paragraphs[p0].get();
+        Paragraph *src = m_doc.paragraphs[p0 + 1].get();
+        bool dst_block = dst->isImage || dst->isRule;
+        bool src_block = src->isImage || src->isRule;
+        /* A block touched only at column 0 stays. Text paragraphs join. */
+        if (src_block && c1 == 0) {
+            if (dst_block && c0 == 0)
+                m_doc.removeParagraph(p0);
+        } else if (dst_block && c0 == 0) {
+            m_doc.removeParagraph(p0);
+        } else if (!dst_block && !src_block) {
+            for (Text &r : src->runs)
+                dst->runs.push_back(std::move(r));
+            m_doc.removeParagraph(p0 + 1);
+        } else if (!dst_block && src_block) {
+            m_doc.removeParagraph(p0 + 1);
+        }
+    }
+    if (m_doc.paragraphs.empty()) m_doc.addParagraph();
+    if (p0 >= m_doc.paragraphs.size())
+        p0 = m_doc.paragraphs.size() - 1;
+    m_caret_para = p0;
+    m_caret_col = std::min(c0, m_doc.paragraphs[p0]->byte_length());
+}
+
+void HtmlText::erase_to_end(size_t para, size_t col) {
+    if (m_doc.paragraphs.empty()) {
+        m_doc.addParagraph();
+        m_caret_para = 0;
+        m_caret_col = 0;
+        return;
+    }
+    if (para >= m_doc.paragraphs.size())
+        para = m_doc.paragraphs.size() - 1;
+    Paragraph *p = m_doc.paragraphs[para].get();
+    size_t n = p->byte_length();
+    if (col > n) col = n;
+    if ((p->isImage || p->isRule) && col == 0) {
+        while (m_doc.paragraphs.size() > para)
+            m_doc.removeParagraph(m_doc.paragraphs.size() - 1);
+    } else {
+        if (!p->isImage && !p->isRule)
+            erase_cols(p, col, p->byte_length());
+        while (m_doc.paragraphs.size() > para + 1)
+            m_doc.removeParagraph(m_doc.paragraphs.size() - 1);
+    }
+    if (m_doc.paragraphs.empty()) m_doc.addParagraph();
+    if (para >= m_doc.paragraphs.size())
+        para = m_doc.paragraphs.size() - 1;
+    m_caret_para = para;
+    m_caret_col = std::min(col, m_doc.paragraphs[para]->byte_length());
+}
+
+void HtmlText::erase_from_start(size_t para, size_t col) {
+    if (m_doc.paragraphs.empty()) {
+        m_doc.addParagraph();
+        return;
+    }
+    if (para >= m_doc.paragraphs.size()) {
+        m_doc.paragraphs.clear();
+        m_doc.addParagraph();
+        m_caret_para = 0;
+        m_caret_col = 0;
+        return;
+    }
+    for (size_t i = 0; i < para && !m_doc.paragraphs.empty(); ++i)
+        m_doc.removeParagraph(0);
+    if (m_doc.paragraphs.empty()) {
+        m_doc.addParagraph();
+        return;
+    }
+    Paragraph *p = m_doc.paragraphs[0].get();
+    size_t n = p->byte_length();
+    if (col > n) col = n;
+    if (!p->isImage && !p->isRule)
+        erase_cols(p, 0, col);
+    m_caret_para = 0;
+    m_caret_col = 0;
+}
+
+void HtmlText::mark_dirty_leaf() {
+    m_doc.markLayoutDirty();
+    m_measured_w = -1;
+    m_natural_w = -1;
+    m_have_caret = false;
+    m_typing_on = false;
+}
+
+void HtmlText::draw_selection(NVGcontext *ctx) {
+    HtmlDocument *hd = owner();
+    if (!hd || m_doc.m_rich_layout.empty()) return;
+    size_t p0 = 0, c0 = 0, p1 = 0, c1 = 0;
+    if (!hd->leaf_selection(this, p0, c0, p1, c1)) return;
+    for (const Document::RichLine &rl : m_doc.m_rich_layout) {
+        if (rl.para_idx < p0 || rl.para_idx > p1) continue;
+        size_t lo, hi;
+        if (rl.para_idx == p0 && rl.para_idx == p1) {
+            lo = std::max(c0, rl.byte_start);
+            hi = std::min(c1, rl.byte_end);
+        } else if (rl.para_idx == p0) {
+            lo = std::max(c0, rl.byte_start);
+            hi = rl.byte_end;
+        } else if (rl.para_idx == p1) {
+            lo = rl.byte_start;
+            hi = std::min(c1, rl.byte_end);
+        } else {
+            lo = rl.byte_start;
+            hi = rl.byte_end;
+        }
+        if (lo > hi) continue;
+        float x0, x1;
+        if (rl.words.empty()) {
+            x0 = rl.x_start;
+            x1 = rl.x_start + 4.f;
+        } else {
+            auto x_for = [&](size_t bc) -> float {
+                Document::CaretInfo ci = m_doc.richCaretInfo(ctx, rl.para_idx, bc);
+                return ci.valid ? ci.x : rl.x_start;
+            };
+            x0 = x_for(lo);
+            x1 = x_for(hi);
+            if (rl.para_idx < p1 && hi == rl.byte_end)
+                x1 = rl.words.back().x + rl.words.back().advance + 6.f;
+        }
+        nvgBeginPath(ctx);
+        nvgRect(ctx, x0, rl.y_top,
+                std::max(2.f, x1 - x0),
+                std::max(2.f, rl.y_bottom - rl.y_top));
+        nvgFillColor(ctx, nvgRGBA(70, 110, 180, 130));
+        nvgFill(ctx);
+    }
+}
+
+bool HtmlText::mouse_drag_event(const Vector2i &p, const Vector2i &rel,
+                                int button, int) {
+    if (!(button & (1 << GLFW_MOUSE_BUTTON_1)))
+        return false;
+    if (!parent()) return true;
+    HtmlDocument *hd = owner();
+    if (!hd) return true;
+    /* rel is screen pixels since the press. A converted point can
+     * disagree with m_down_pt under pan and zoom and turn a click
+     * into a selection, which then refuses the link. */
+    m_press_travel += std::abs(rel.x()) + std::abs(rel.y());
+    if (m_press_travel > 3)
+        m_press_dragged = true;
+    if (!m_press_dragged) return true;
+    /* Screen's drag point ignores ZoomScrollPanel pan and zoom.
+     * Recover the screen point, then map it back into leaf space. */
+    Vector2i screen_p = p + parent()->absolute_position();
+    autoscroll_for_drag(this, screen_p);
+    DocHit h = hit_document(hd, screen_p);
+    if (h.leaf) {
+        h.leaf->request_focus();
+        h.leaf->place_caret(h.para, h.col, true);
+        h.leaf->after_move();
+    }
+    return true;
+}
+
 } // anonymous namespace
 
 // ---------------------------------------------------------------------------
@@ -3839,6 +4239,12 @@ bool HtmlDocument::mouse_enter_event(const Vector2i &p, bool enter) {
     return Widget::mouse_enter_event(p, enter);
 }
 void HtmlDocument::clear() {
+    m_anchor_leaf = nullptr;
+    m_focus_leaf = nullptr;
+    m_anchor_para = 0;
+    m_anchor_col = 0;
+    m_focus_para = 0;
+    m_focus_col = 0;
     set_hover_url("");
 #ifdef DEBUG
     if (debug_draw())
@@ -4097,6 +4503,37 @@ static std::string leaves_to_html(const std::vector<HtmlText *> &leaves) {
     return out;
 }
 
+static int index_of_leaf(const std::vector<HtmlText *> &leaves, HtmlText *ht) {
+    for (int i = 0; i < (int)leaves.size(); ++i)
+        if (leaves[i] == ht) return i;
+    return -1;
+}
+
+/* Anchor and focus ordered in document order. False when they coincide
+ * or either leaf is no longer in the tree. */
+static bool order_leaves(HtmlDocument *doc, Widget *anchor, size_t ap, size_t ac,
+                         Widget *focus, size_t fp, size_t fc,
+                         HtmlText *&lo, size_t &lp, size_t &lc,
+                         HtmlText *&hi, size_t &hp, size_t &hc,
+                         std::vector<HtmlText *> &leaves) {
+    auto *a = dynamic_cast<HtmlText *>(anchor);
+    auto *f = dynamic_cast<HtmlText *>(focus);
+    if (!a || !f || (a == f && ap == fp && ac == fc)) return false;
+    leaves.clear();
+    collect_text_leaves(doc, leaves);
+    int ia = index_of_leaf(leaves, a);
+    int ib = index_of_leaf(leaves, f);
+    if (ia < 0 || ib < 0) return false;
+    lo = a; lp = ap; lc = ac;
+    hi = f; hp = fp; hc = fc;
+    if (ia > ib || (ia == ib && (ap > fp || (ap == fp && ac > fc)))) {
+        std::swap(lo, hi);
+        std::swap(lp, hp);
+        std::swap(lc, hc);
+    }
+    return true;
+}
+
 static HtmlText *find_caret_leaf(const HtmlDocument *doc) {
     std::vector<HtmlText *> leaves;
     collect_text_leaves(const_cast<HtmlDocument *>(doc), leaves);
@@ -4205,6 +4642,339 @@ void HtmlDocument::touch_edit() {
 
 void HtmlDocument::notify_caret() {
     if (on_caret) on_caret();
+}
+
+void HtmlDocument::set_text_caret(Widget *leaf, size_t para, size_t col, bool extend) {
+    if (!extend || !m_anchor_leaf) {
+        m_anchor_leaf = leaf;
+        m_anchor_para = para;
+        m_anchor_col = col;
+    }
+    m_focus_leaf = leaf;
+    m_focus_para = para;
+    m_focus_col = col;
+}
+
+bool HtmlDocument::has_text_selection() const {
+    auto *a = dynamic_cast<HtmlText *>(m_anchor_leaf);
+    auto *f = dynamic_cast<HtmlText *>(m_focus_leaf);
+    if (!a || !f) return false;
+    return a != f || m_anchor_para != m_focus_para || m_anchor_col != m_focus_col;
+}
+
+bool HtmlDocument::leaf_selection(const Widget *leaf, size_t &p0, size_t &c0,
+                                  size_t &p1, size_t &c1) const {
+    HtmlText *lo = nullptr, *hi = nullptr;
+    size_t lp = 0, lc = 0, hp = 0, hc = 0;
+    std::vector<HtmlText *> leaves;
+    if (!order_leaves(const_cast<HtmlDocument *>(this),
+                      m_anchor_leaf, m_anchor_para, m_anchor_col,
+                      m_focus_leaf, m_focus_para, m_focus_col,
+                      lo, lp, lc, hi, hp, hc, leaves))
+        return false;
+    auto *me = dynamic_cast<HtmlText *>(const_cast<Widget *>(leaf));
+    int im = index_of_leaf(leaves, me);
+    int il = index_of_leaf(leaves, lo);
+    int ih = index_of_leaf(leaves, hi);
+    if (im < 0 || im < il || im > ih) return false;
+    if (me->m_doc.paragraphs.empty()) {
+        p0 = c0 = p1 = c1 = 0;
+        return im != il && im != ih;
+    }
+    size_t last = me->m_doc.paragraphs.size() - 1;
+    if (im == il && im == ih) {
+        p0 = lp; c0 = lc; p1 = hp; c1 = hc;
+    } else if (im == il) {
+        p0 = lp; c0 = lc;
+        p1 = last;
+        c1 = me->m_doc.paragraphs[last]->byte_length();
+    } else if (im == ih) {
+        p0 = 0; c0 = 0; p1 = hp; c1 = hc;
+    } else {
+        p0 = 0; c0 = 0;
+        p1 = last;
+        c1 = me->m_doc.paragraphs[last]->byte_length();
+        return true;
+    }
+    return p0 != p1 || c0 != c1;
+}
+
+void HtmlDocument::select_word_at(Widget *leaf, size_t para, size_t col) {
+    auto *ht = dynamic_cast<HtmlText *>(leaf);
+    if (!ht) return;
+    if (ht->m_doc.paragraphs.empty() || para >= ht->m_doc.paragraphs.size()) {
+        ht->place_caret(0, 0, false);
+        return;
+    }
+    Paragraph *p = ht->m_doc.paragraphs[para].get();
+    if (p->isImage || p->isRule || p->byte_length() == 0) {
+        ht->place_caret(para, 0, false);
+        return;
+    }
+    std::string text = p->plain_text();
+    size_t c = col > text.size() ? text.size() : col;
+    auto is_word = [](char ch) {
+        return std::isalnum((unsigned char)ch) || ch == '_' || (ch & 0x80);
+    };
+    bool word = is_word(text[c == text.size() ? c - 1 : c]);
+    size_t start = c, end = c;
+    while (start > 0 && is_word(text[start - 1]) == word) --start;
+    while (end < text.size() && is_word(text[end]) == word) ++end;
+    m_anchor_leaf = ht;
+    m_anchor_para = para;
+    m_anchor_col = start;
+    ht->place_caret(para, end, true);
+}
+
+void HtmlDocument::select_paragraph_at(Widget *leaf, size_t para) {
+    auto *ht = dynamic_cast<HtmlText *>(leaf);
+    if (!ht) return;
+    if (ht->m_doc.paragraphs.empty()) {
+        ht->place_caret(0, 0, false);
+        return;
+    }
+    if (para >= ht->m_doc.paragraphs.size())
+        para = ht->m_doc.paragraphs.size() - 1;
+    m_anchor_leaf = ht;
+    m_anchor_para = para;
+    m_anchor_col = 0;
+    ht->place_caret(para, ht->m_doc.paragraphs[para]->byte_length(), true);
+}
+
+void HtmlDocument::select_all_text() {
+    std::vector<HtmlText *> leaves;
+    collect_text_leaves(this, leaves);
+    if (leaves.empty()) return;
+    HtmlText *first = leaves.front();
+    HtmlText *last = leaves.back();
+    first->place_caret(0, 0, false);
+    size_t para = 0, col = 0;
+    if (!last->m_doc.paragraphs.empty()) {
+        para = last->m_doc.paragraphs.size() - 1;
+        col = last->m_doc.paragraphs[para]->byte_length();
+    }
+    if (first != last || para != 0 || col != 0)
+        last->place_caret(para, col, true);
+    last->request_focus();
+    if (Screen *s = screen()) s->redraw();
+}
+
+void HtmlDocument::copy_selection() {
+    HtmlText *lo = nullptr, *hi = nullptr;
+    size_t lp = 0, lc = 0, hp = 0, hc = 0;
+    std::vector<HtmlText *> leaves;
+    if (!order_leaves(this, m_anchor_leaf, m_anchor_para, m_anchor_col,
+                      m_focus_leaf, m_focus_para, m_focus_col,
+                      lo, lp, lc, hi, hp, hc, leaves))
+        return;
+    int il = index_of_leaf(leaves, lo);
+    int ih = index_of_leaf(leaves, hi);
+    std::string out;
+    bool started = false;
+    auto append_para = [&](HtmlText *ht, size_t pi, size_t a, size_t b) {
+        if (started) out.push_back('\n');
+        started = true;
+        if (!ht || pi >= ht->m_doc.paragraphs.size()) return;
+        std::string t = ht->m_doc.paragraphs[pi]->plain_text();
+        if (a > t.size()) a = t.size();
+        if (b > t.size()) b = t.size();
+        if (b > a) out.append(t, a, b - a);
+    };
+    for (int i = il; i <= ih; ++i) {
+        HtmlText *ht = leaves[i];
+        if (ht->m_doc.paragraphs.empty()) {
+            append_para(ht, 0, 0, 0);
+            continue;
+        }
+        size_t last = ht->m_doc.paragraphs.size() - 1;
+        size_t p0, c0, p1, c1;
+        if (i == il && i == ih) {
+            p0 = lp; c0 = lc; p1 = hp; c1 = hc;
+        } else if (i == il) {
+            p0 = lp; c0 = lc; p1 = last;
+            c1 = ht->m_doc.paragraphs[last]->byte_length();
+        } else if (i == ih) {
+            p0 = 0; c0 = 0; p1 = hp; c1 = hc;
+        } else {
+            p0 = 0; c0 = 0; p1 = last;
+            c1 = ht->m_doc.paragraphs[last]->byte_length();
+        }
+        if (p0 > p1) continue;
+        for (size_t pi = p0; pi <= p1 && pi < ht->m_doc.paragraphs.size(); ++pi) {
+            size_t a = pi == p0 ? c0 : 0;
+            size_t b = pi == p1 ? c1 : ht->m_doc.paragraphs[pi]->byte_length();
+            append_para(ht, pi, a, b);
+        }
+    }
+    if (Screen *s = screen())
+        glfwSetClipboardString(s->glfw_window(), out.c_str());
+}
+
+void HtmlDocument::paste_clipboard() {
+    if (!m_editable) return;
+    Screen *s = screen();
+    const char *cb = s ? glfwGetClipboardString(s->glfw_window()) : nullptr;
+    if (!cb || !*cb) return;
+    std::string norm;
+    norm.reserve(std::strlen(cb));
+    for (size_t i = 0; cb[i]; ++i) {
+        if (cb[i] == '\r') {
+            norm.push_back('\n');
+            if (cb[i + 1] == '\n') ++i;
+        } else {
+            norm.push_back(cb[i]);
+        }
+    }
+    if (norm.empty()) return;
+    HtmlText *ht = dynamic_cast<HtmlText *>(m_focus_leaf);
+    if (!ht) ht = find_caret_leaf(this);
+    if (!ht) {
+        std::vector<HtmlText *> leaves;
+        collect_text_leaves(this, leaves);
+        if (leaves.empty()) return;
+        ht = leaves.front();
+        ht->place_caret(0, 0, false);
+    }
+    ht->request_focus();
+    ht->insert_text(norm);
+}
+
+Widget *HtmlDocument::delete_selection() {
+    if (!m_editable || !has_text_selection())
+        return m_focus_leaf;
+    HtmlText *lo = nullptr, *hi = nullptr;
+    size_t lp = 0, lc = 0, hp = 0, hc = 0;
+    std::vector<HtmlText *> leaves;
+    if (!order_leaves(this, m_anchor_leaf, m_anchor_para, m_anchor_col,
+                      m_focus_leaf, m_focus_para, m_focus_col,
+                      lo, lp, lc, hi, hp, hc, leaves))
+        return m_focus_leaf;
+    int il = index_of_leaf(leaves, lo);
+    int ih = index_of_leaf(leaves, hi);
+    if (il == ih) {
+        lo->erase_span(lp, lc, hp, hc);
+        lo->place_caret(lo->m_caret_para, lo->m_caret_col, false);
+        lo->after_edit();
+        return lo;
+    }
+    lo->erase_to_end(lp, lc);
+    hi->erase_from_start(hp, hc);
+    for (int i = il + 1; i < ih; ++i) {
+        leaves[i]->m_doc.paragraphs.clear();
+        leaves[i]->m_doc.addParagraph();
+        leaves[i]->mark_dirty_leaf();
+    }
+    hi->mark_dirty_leaf();
+    lo->place_caret(lo->m_caret_para, lo->m_caret_col, false);
+    lo->after_edit();
+    return lo;
+}
+
+void HtmlDocument::restyle_selection(bool Style::*flag) {
+    if (!m_editable || !has_text_selection()) return;
+    HtmlText *lo = nullptr, *hi = nullptr;
+    size_t lp = 0, lc = 0, hp = 0, hc = 0;
+    std::vector<HtmlText *> leaves;
+    if (!order_leaves(this, m_anchor_leaf, m_anchor_para, m_anchor_col,
+                      m_focus_leaf, m_focus_para, m_focus_col,
+                      lo, lp, lc, hi, hp, hc, leaves))
+        return;
+    int il = index_of_leaf(leaves, lo);
+    int ih = index_of_leaf(leaves, hi);
+
+    auto range_for = [&](int i, HtmlText *ht, size_t &p0, size_t &c0,
+                         size_t &p1, size_t &c1) -> bool {
+        if (ht->m_doc.paragraphs.empty()) return false;
+        size_t last = ht->m_doc.paragraphs.size() - 1;
+        if (i == il && i == ih) {
+            p0 = lp; c0 = lc; p1 = hp; c1 = hc;
+        } else if (i == il) {
+            p0 = lp; c0 = lc; p1 = last;
+            c1 = ht->m_doc.paragraphs[last]->byte_length();
+        } else if (i == ih) {
+            p0 = 0; c0 = 0; p1 = hp; c1 = hc;
+        } else {
+            p0 = 0; c0 = 0; p1 = last;
+            c1 = ht->m_doc.paragraphs[last]->byte_length();
+        }
+        return p0 < p1 || (p0 == p1 && c0 < c1);
+    };
+    auto touch_run = [&](const Paragraph *p, size_t lo_c, size_t hi_c,
+                         bool &any, bool &all_set) {
+        size_t acc = 0;
+        for (const Text &r : p->runs) {
+            if (r.isImageRun) continue;
+            size_t n = r.content.size();
+            size_t rlo = acc, rhi = acc + n;
+            acc = rhi;
+            if (rhi <= lo_c || rlo >= hi_c || r.content.empty()) continue;
+            any = true;
+            if (!(r.style.*flag)) all_set = false;
+        }
+    };
+
+    bool any = false, all_set = true;
+    for (int i = il; i <= ih; ++i) {
+        size_t p0, c0, p1, c1;
+        if (!range_for(i, leaves[i], p0, c0, p1, c1)) continue;
+        for (size_t pi = p0; pi <= p1 && pi < leaves[i]->m_doc.paragraphs.size(); ++pi) {
+            size_t a = pi == p0 ? c0 : 0;
+            size_t b = pi == p1 ? c1 : leaves[i]->m_doc.paragraphs[pi]->byte_length();
+            touch_run(leaves[i]->m_doc.paragraphs[pi].get(), a, b, any, all_set);
+        }
+    }
+    bool value = any ? !all_set : true;
+    for (int i = il; i <= ih; ++i) {
+        HtmlText *ht = leaves[i];
+        size_t p0, c0, p1, c1;
+        if (!range_for(i, ht, p0, c0, p1, c1)) continue;
+        for (size_t pi = p0; pi <= p1 && pi < ht->m_doc.paragraphs.size(); ++pi) {
+            Paragraph *p = ht->m_doc.paragraphs[pi].get();
+            size_t a = pi == p0 ? c0 : 0;
+            size_t b = pi == p1 ? c1 : p->byte_length();
+            if (a > b) continue;
+            size_t ri_lo = p->split_run_at(a);
+            size_t ri_hi = p->split_run_at(b);
+            for (size_t ri = ri_lo; ri < ri_hi && ri < p->runs.size(); ++ri) {
+                if (p->runs[ri].isImageRun) continue;
+                p->runs[ri].style.*flag = value;
+            }
+        }
+        ht->m_doc.markLayoutDirty();
+        ht->m_measured_w = -1;
+        ht->m_natural_w = -1;
+    }
+    note_edit();
+    request_reflow();
+    if (auto *f = dynamic_cast<HtmlText *>(m_focus_leaf))
+        f->scroll_caret();
+    if (Screen *s = screen()) s->redraw();
+}
+
+bool HtmlDocument::keyboard_event(int key, int, int action, int mods) {
+    if ((mods & SYSTEM_COMMAND_MOD) == 0) return false;
+    if (action != GLFW_PRESS &&
+        !(action == GLFW_REPEAT && key == GLFW_KEY_V))
+        return false;
+    switch (key) {
+    case GLFW_KEY_A:
+        select_all_text();
+        return true;
+    case GLFW_KEY_C:
+        copy_selection();
+        return true;
+    case GLFW_KEY_X:
+        if (m_editable) {
+            copy_selection();
+            delete_selection();
+        }
+        return true;
+    case GLFW_KEY_V:
+        if (m_editable) paste_clipboard();
+        return true;
+    default:
+        return false;
+    }
 }
 
 void HtmlDocument::set_html(const std::string &html) {
