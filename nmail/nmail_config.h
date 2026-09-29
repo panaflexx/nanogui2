@@ -14,7 +14,7 @@
 #include <vector>
 
 /* One IMAP/SMTP account.  Several of these can be configured at once; every
- * one connects and polls simultaneously (see MailApp::m_accounts). */
+ * one connects and polls simultaneously (see Accounts in nmail.cpp). */
 struct MailAccount {
     std::string name;           // display label ("iCloud", "Work Gmail"); defaults to username
     std::string host;

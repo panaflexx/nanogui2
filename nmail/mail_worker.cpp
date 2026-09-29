@@ -240,7 +240,7 @@ void MailWorker::select_folder(const std::string &name) {
         m_wanted_folder = name;
         ++m_epoch;
         drop_stale_mailbox_work_locked();
-        m_queue.push_back({Type::Select, name, 0, "", m_epoch});
+        m_queue.push_back({Type::Select, name, "", m_epoch});
         /* Abort only a long in-flight mailbox command (SELECT of the
          * previous folder, a 150-message FETCH, a full-body read).
          * Prefetch is a single BODY.PEEK[] that finishes in tens of
@@ -262,20 +262,13 @@ void MailWorker::select_folder(const std::string &name) {
     m_cv.notify_one();
 }
 
-void MailWorker::fetch_body(int seq) {
-    std::string folder;
-    { std::lock_guard<std::mutex> l(m_mutex); folder = m_wanted_folder.empty()
-          ? m_selected_folder : m_wanted_folder; }
-    fetch_body(folder, seq, 0);
-}
-
-void MailWorker::fetch_body(const std::string &folder, int seq, uint32_t uid) {
+void MailWorker::fetch_body(const std::string &folder, uint32_t uid) {
+    if (uid == 0) return;
     {
         std::lock_guard<std::mutex> lock(m_mutex);
         Cmd c;
         c.type   = Type::FetchBody;
         c.folder = folder;
-        c.seq    = seq;
         c.uid    = uid;
         c.epoch  = m_epoch;
         m_queue.push_back(c);
@@ -283,19 +276,12 @@ void MailWorker::fetch_body(const std::string &folder, int seq, uint32_t uid) {
     m_cv.notify_one();
 }
 
-void MailWorker::schedule_seen(const std::string &folder, int seq, double delay_sec) {
-    schedule_seen(folder, seq, 0, delay_sec);
-}
-
-void MailWorker::schedule_seen(const std::string &folder, int seq, uint64_t modseq, double delay_sec) {
-    schedule_seen_uid(folder, seq, 0, modseq, delay_sec);
-}
-
-void MailWorker::schedule_seen_uid(const std::string &folder, int seq, uint32_t uid, uint64_t modseq, double delay_sec) {
+void MailWorker::schedule_seen(const std::string &folder, uint32_t uid,
+                               uint64_t modseq, double delay_sec) {
+    if (uid == 0) return;
     {
         std::lock_guard<std::mutex> lock(m_mutex);
         m_seen_folder = folder;
-        m_seen_seq    = seq;
         m_seen_uid    = uid;
         m_seen_modseq = modseq;
         m_seen_at     = std::chrono::steady_clock::now() +
@@ -307,49 +293,19 @@ void MailWorker::schedule_seen_uid(const std::string &folder, int seq, uint32_t 
 void MailWorker::cancel_seen() {
     {
         std::lock_guard<std::mutex> lock(m_mutex);
-        m_seen_seq = 0;
         m_seen_uid = 0;
         m_seen_modseq = 0;
     }
     m_cv.notify_one();
 }
 
-void MailWorker::move_message(const std::string &folder, int seq,
+void MailWorker::move_message(const std::string &folder, uint32_t uid,
                               const std::string &dest_folder) {
-    post(Type::Move, folder, seq, dest_folder);
+    post(Type::Move, folder, uid, dest_folder);
 }
 
 void MailWorker::ensure_visible_cached(const std::string &folder,
-                                       const std::vector<int> &visible_seqs) {
-    if (visible_seqs.empty() || folder.empty()) return;
-    bool need_post = false;
-    {
-        std::lock_guard<std::mutex> lock(m_mutex);
-        if (folder != m_prefetch_folder) return;
-        if (folder != m_selected_folder) return;
-        if (folder != m_wanted_folder) return;
-        for (auto it = visible_seqs.rbegin(); it != visible_seqs.rend(); ++it) {
-            int s = *it;
-            bool inflight = false;
-            for (auto &c : m_queue)
-                if (c.type == Type::Prefetch && c.seq == s && c.folder == folder) { inflight = true; break; }
-            if (inflight) continue;
-            auto qit = std::find(m_prefetch_queue.begin(), m_prefetch_queue.end(), s);
-            if (qit != m_prefetch_queue.end()) {
-                m_prefetch_queue.erase(qit);
-                m_prefetch_queue.push_front(s);
-            } else if (!m_prefetch_queued.count(s)) {
-                m_prefetch_queue.push_front(s);
-                m_prefetch_queued.insert(s);
-            }
-        }
-        need_post = !m_prefetch_queue.empty();
-    }
-    if (need_post) schedule_next_prefetch();
-}
-
-void MailWorker::ensure_visible_cached_uid(const std::string &folder,
-                                           const std::vector<uint32_t> &uids) {
+                                       const std::vector<uint32_t> &uids) {
     if (uids.empty() || folder.empty()) return;
     bool need_post = false;
     {
@@ -362,27 +318,33 @@ void MailWorker::ensure_visible_cached_uid(const std::string &folder,
             if (u == 0) continue;
             bool inflight = false;
             for (auto &c : m_queue)
-                if (c.type == Type::PrefetchUid && c.uid == u && c.folder == folder) { inflight = true; break; }
+                if (c.type == Type::Prefetch && c.uid == u && c.folder == folder) { inflight = true; break; }
             if (inflight) continue;
-            auto qit = std::find(m_prefetch_uid_queue.begin(), m_prefetch_uid_queue.end(), u);
-            if (qit != m_prefetch_uid_queue.end()) {
-                m_prefetch_uid_queue.erase(qit);
-                m_prefetch_uid_queue.push_front(u);
-            } else if (!m_prefetch_uid_queued.count(u)) {
-                m_prefetch_uid_queue.push_front(u);
-                m_prefetch_uid_queued.insert(u);
+            auto qit = std::find(m_prefetch_queue.begin(), m_prefetch_queue.end(), u);
+            if (qit != m_prefetch_queue.end()) {
+                m_prefetch_queue.erase(qit);
+                m_prefetch_queue.push_front(u);
+            } else if (!m_prefetch_queued.count(u)) {
+                m_prefetch_queue.push_front(u);
+                m_prefetch_queued.insert(u);
             }
         }
-        need_post = !m_prefetch_uid_queue.empty();
+        need_post = !m_prefetch_queue.empty();
     }
-    if (need_post) schedule_next_prefetch_uid();
+    if (need_post) schedule_next_prefetch();
 }
 
-void MailWorker::post(Type t, const std::string &folder, int seq,
+void MailWorker::post(Type t, const std::string &folder, uint32_t uid,
                       const std::string &dest) {
     {
         std::lock_guard<std::mutex> lock(m_mutex);
-        m_queue.push_back({t, folder, seq, dest, m_epoch});
+        Cmd c;
+        c.type = t;
+        c.folder = folder;
+        c.uid = uid;
+        c.dest_folder = dest;
+        c.epoch = m_epoch;
+        m_queue.push_back(c);
     }
     m_cv.notify_one();
 }
@@ -415,7 +377,7 @@ void MailWorker::drop_stale_mailbox_work_locked() {
     m_queue.erase(std::remove_if(m_queue.begin(), m_queue.end(),
         [this](const Cmd &c) {
             if (c.type == Type::Select || c.type == Type::FetchOlder ||
-                c.type == Type::Prefetch || c.type == Type::PrefetchUid ||
+                c.type == Type::Prefetch ||
                 c.type == Type::AutoRefresh)
                 return true;
             if ((c.type == Type::FetchBody || c.type == Type::MarkSeen) &&
@@ -892,26 +854,14 @@ void MailWorker::do_fetch_summaries(const std::string &folder, int exists,
                 m_prefetch_folder = folder;
                 m_prefetch_queue.clear();
                 m_prefetch_queued.clear();
-                m_prefetch_uid_queue.clear();
-                m_prefetch_uid_queued.clear();
-                bool has_uid = false; for (auto &s : summaries) if (s.uid) { has_uid = true; break; }
-                if (has_uid) {
-                    for (size_t i = 0; i < summaries.size() && i < 25; ++i) {
-                        if (!summaries[i].uid) continue;
-                        if (m_prefetch_uid_queued.count(summaries[i].uid)) continue;
-                        m_prefetch_uid_queue.push_back(summaries[i].uid);
-                        m_prefetch_uid_queued.insert(summaries[i].uid);
-                    }
-                } else {
-                    for (size_t i = 0; i < summaries.size() && i < 25; ++i) {
-                        if (m_prefetch_queued.count(summaries[i].seq)) continue;
-                        m_prefetch_queue.push_back(summaries[i].seq);
-                        m_prefetch_queued.insert(summaries[i].seq);
-                    }
+                for (size_t i = 0; i < summaries.size() && i < 25; ++i) {
+                    if (!summaries[i].uid) continue;
+                    if (m_prefetch_queued.count(summaries[i].uid)) continue;
+                    m_prefetch_queue.push_back(summaries[i].uid);
+                    m_prefetch_queued.insert(summaries[i].uid);
                 }
             }
             schedule_next_prefetch();
-            schedule_next_prefetch_uid();
             return;
         }
         if (!needs_full_refetch) {
@@ -961,27 +911,15 @@ void MailWorker::do_fetch_summaries(const std::string &folder, int exists,
                 if (!is_auto) {
                     m_prefetch_queue.clear();
                     m_prefetch_queued.clear();
-                    m_prefetch_uid_queue.clear();
-                    m_prefetch_uid_queued.clear();
                 }
-                bool has_uid = false; for (auto &s : summaries) if (s.uid) { has_uid = true; break; }
-                if (has_uid) {
-                    for (size_t i = 0; i < summaries.size() && i < 25; ++i) {
-                        if (!summaries[i].uid) continue;
-                        if (m_prefetch_uid_queued.count(summaries[i].uid)) continue;
-                        m_prefetch_uid_queue.push_back(summaries[i].uid);
-                        m_prefetch_uid_queued.insert(summaries[i].uid);
-                    }
-                } else {
-                    for (size_t i = 0; i < summaries.size() && i < 25; ++i) {
-                        if (m_prefetch_queued.count(summaries[i].seq)) continue;
-                        m_prefetch_queue.push_back(summaries[i].seq);
-                        m_prefetch_queued.insert(summaries[i].seq);
-                    }
+                for (size_t i = 0; i < summaries.size() && i < 25; ++i) {
+                    if (!summaries[i].uid) continue;
+                    if (m_prefetch_queued.count(summaries[i].uid)) continue;
+                    m_prefetch_queue.push_back(summaries[i].uid);
+                    m_prefetch_queued.insert(summaries[i].uid);
                 }
             }
             schedule_next_prefetch();
-            schedule_next_prefetch_uid();
             return;
         }
         // needs_full_refetch: fall through to full FETCH path below (is_qresync_resume handled)
@@ -1099,29 +1037,15 @@ void MailWorker::do_fetch_summaries(const std::string &folder, int exists,
         if (!is_auto) {
             m_prefetch_queue.clear();
             m_prefetch_queued.clear();
-            m_prefetch_uid_queue.clear();
-            m_prefetch_uid_queued.clear();
         }
-        // Prefer UID queue when UIDs are available (QRESYNC path)
-        bool has_uid = false;
-        for (auto &s : summaries) if (s.uid) { has_uid = true; break; }
-        if (has_uid) {
-            for (size_t i = 0; i < summaries.size() && i < 25; ++i) {
-                if (!summaries[i].uid) continue;
-                if (m_prefetch_uid_queued.count(summaries[i].uid)) continue;
-                m_prefetch_uid_queue.push_back(summaries[i].uid);
-                m_prefetch_uid_queued.insert(summaries[i].uid);
-            }
-        } else {
-            for (size_t i = 0; i < summaries.size() && i < 25; ++i) {
-                if (m_prefetch_queued.count(summaries[i].seq)) continue;
-                m_prefetch_queue.push_back(summaries[i].seq);
-                m_prefetch_queued.insert(summaries[i].seq);
-            }
+        for (size_t i = 0; i < summaries.size() && i < 25; ++i) {
+            if (!summaries[i].uid) continue;
+            if (m_prefetch_queued.count(summaries[i].uid)) continue;
+            m_prefetch_queue.push_back(summaries[i].uid);
+            m_prefetch_queued.insert(summaries[i].uid);
         }
     }
     schedule_next_prefetch();
-    schedule_next_prefetch_uid();
 }
 
 void MailWorker::do_fetch_older(const Cmd &cmd) {
@@ -1228,21 +1152,27 @@ void MailWorker::cancel_prefetch_locked() {
     m_prefetch_folder.clear();
     m_prefetch_queue.clear();
     m_prefetch_queued.clear();
-    m_prefetch_uid_queue.clear();
-    m_prefetch_uid_queued.clear();
     m_queue.erase(std::remove_if(m_queue.begin(), m_queue.end(),
-        [](const Cmd &c){ return c.type == Type::Prefetch || c.type == Type::PrefetchUid; }), m_queue.end());
+        [](const Cmd &c){ return c.type == Type::Prefetch; }), m_queue.end());
 }
 
 bool MailWorker::do_move(const Cmd &cmd) {
-    /* move_message() may EXPUNGE, which renumbers the mailbox — a queued
-     * "mark read" seq would then point at an unrelated message. */
+    /* MOVE expunges, which renumbers the mailbox. Drop a pending mark-read
+     * so it cannot land on a different UID. */
     {
         std::lock_guard<std::mutex> lock(m_mutex);
-        m_seen_seq = 0;
+        m_seen_uid = 0;
     }
     std::string folder = cmd.folder;
-    int seq = cmd.seq;
+    uint32_t uid = cmd.uid;
+    int seq = 0;
+    {
+        std::lock_guard<std::mutex> lock(m_mutex);
+        auto it = m_summaries_cache.find(folder);
+        if (it != m_summaries_cache.end())
+            for (const auto &s : it->second)
+                if (s.uid == uid) { seq = s.seq; break; }
+    }
     std::string dest = cmd.dest_folder;
     if (folder.empty() || dest.empty() || seq <= 0)
         return false;
@@ -1270,31 +1200,15 @@ bool MailWorker::do_move(const Cmd &cmd) {
     {
         std::lock_guard<std::mutex> lock(m_mutex);
         m_selected_folder = folder;
-        // Remove the moving message from any pending prefetch work (both seq and uid paths).
         m_prefetch_queue.erase(
-            std::remove(m_prefetch_queue.begin(), m_prefetch_queue.end(), seq),
+            std::remove(m_prefetch_queue.begin(), m_prefetch_queue.end(), uid),
             m_prefetch_queue.end());
-        m_prefetch_queued.erase(seq);
-        // Also drop UID prefetch for this message if known
-        uint32_t uid_moving = 0;
-        auto itc = m_summaries_cache.find(folder);
-        if (itc != m_summaries_cache.end())
-            for (auto &s : itc->second) if (s.seq == seq && s.uid) { uid_moving = s.uid; break; }
-        if (uid_moving) {
-            m_prefetch_uid_queue.erase(
-                std::remove(m_prefetch_uid_queue.begin(), m_prefetch_uid_queue.end(), uid_moving),
-                m_prefetch_uid_queue.end());
-            m_prefetch_uid_queued.erase(uid_moving);
-        }
+        m_prefetch_queued.erase(uid);
         m_queue.erase(std::remove_if(m_queue.begin(), m_queue.end(),
             [&](const Cmd &c){
                 if (c.folder != folder) return false;
-                if (c.type == Type::Prefetch && c.seq == seq) return true;
-                if (c.type == Type::PrefetchUid && uid_moving && c.uid == uid_moving) return true;
-                if (c.type == Type::FetchBody &&
-                    ((seq && c.seq == seq) || (uid_moving && c.uid == uid_moving)))
-                    return true;
-                return false;
+                if (c.uid != uid) return false;
+                return c.type == Type::Prefetch || c.type == Type::FetchBody;
             }),
             m_queue.end());
     }
@@ -1324,41 +1238,30 @@ bool MailWorker::do_move(const Cmd &cmd) {
         if (m_first_loaded > seq)    --m_first_loaded;
         auto itc = m_summaries_cache.find(folder);
         if (itc != m_summaries_cache.end()) {
-            uint32_t uid_moved = 0;
-            for (auto &s : itc->second)
-                if (s.seq == seq && s.uid) { uid_moved = s.uid; break; }
             auto &v = itc->second;
-            if (uid_moved)
-                v.erase(std::remove_if(v.begin(), v.end(),
-                    [&](const MailSummary &s){ return s.uid == uid_moved; }), v.end());
-            else
-                v.erase(std::remove_if(v.begin(), v.end(),
-                    [&](const MailSummary &s){ return s.seq == seq; }), v.end());
+            v.erase(std::remove_if(v.begin(), v.end(),
+                [&](const MailSummary &s){ return s.uid == uid; }), v.end());
             if (seq > 0)
                 for (auto &s : v) if (s.seq > seq) --s.seq;
         }
     }
     report_status("Moved to " + dest);
-    deliver([this, folder, seq, dest]() {
-        if (cb_moved) cb_moved(folder, seq, dest);
+    deliver([this, folder, uid, dest]() {
+        if (cb_moved) cb_moved(folder, uid, dest);
     });
-    // Keep scroll/position: do NOT re-SELECT the folder. The GUI
-    // removes the row locally and adjusts remaining seq numbers
-    // (EXPUNGE resequences). Next explicit Refresh will fully
-    // reconcile with the server.
     return true;
 }
 
 void MailWorker::do_mark_seen(const Cmd &cmd) {
-    mail_dbg("[mail] MarkSeen folder='%s' seq=%d uid=%u modseq=%llu\n",
-             cmd.folder.c_str(), cmd.seq, cmd.uid,
+    mail_dbg("[mail] MarkSeen folder='%s' uid=%u modseq=%llu\n",
+             cmd.folder.c_str(), cmd.uid,
              (unsigned long long)cmd.modseq);
     if (cmd.folder.empty() || !m_imap.is_open()) {
         mail_dbg("[mail] MarkSeen skipped: not connected or no folder\n");
         return;
     }
-    if (cmd.seq <= 0 && cmd.uid == 0) {
-        mail_dbg("[mail] MarkSeen skipped: no seq/uid\n");
+    if (cmd.uid == 0) {
+        mail_dbg("[mail] MarkSeen skipped: no uid\n");
         return;
     }
     if (!folder_wanted(cmd.folder)) {
@@ -1372,30 +1275,18 @@ void MailWorker::do_mark_seen(const Cmd &cmd) {
         return;
     }
 
-    // Resolve UID/MODSEQ for the CONDSTORE path from the summaries cache.
-    // The timer may have been armed with an explicit uid/modseq; otherwise
-    // look it up by seq from the last fetched summaries for this folder.
     uint32_t uid = cmd.uid;
     uint64_t modseq = cmd.modseq;
-    if (uid == 0 || modseq == 0) {
+    if (modseq == 0) {
         std::lock_guard<std::mutex> lock(m_mutex);
         auto it = m_summaries_cache.find(cmd.folder);
-        if (it != m_summaries_cache.end()) {
-            for (auto &s : it->second) if (s.seq == cmd.seq) {
-                if (uid == 0)    uid = s.uid;
-                if (modseq == 0) modseq = s.modseq;
-                break;
-            }
-        }
+        if (it != m_summaries_cache.end())
+            for (auto &s : it->second)
+                if (s.uid == uid) { modseq = s.modseq; break; }
     }
 
-    // Prefer UID STORE whenever we have a UID (stable across EXPUNGE).
-    // When CONDSTORE is available and modseq != 0, UNCHANGEDSINCE is added
-    // and a [MODIFIED] response is treated as success inside mark_seen_uid.
     auto do_store = [&]() -> bool {
-        if (uid != 0) return m_imap.mark_seen_uid(uid, modseq, err);
-        if (cmd.seq <= 0) { err = "no seq/uid"; return false; }
-        return m_imap.mark_seen(cmd.seq, err);
+        return m_imap.mark_seen_uid(uid, modseq, err);
     };
 
     if (!do_store()) {
@@ -1421,54 +1312,31 @@ void MailWorker::do_mark_seen(const Cmd &cmd) {
             }
         }
     }
-    mail_dbg("[mail] MarkSeen ok seq=%d uid=%u\n", cmd.seq, uid);
+    mail_dbg("[mail] MarkSeen ok uid=%u\n", uid);
     std::string folder = cmd.folder;
-    int seq = cmd.seq;
-    deliver([this, folder, seq]() { if (cb_seen) cb_seen(folder, seq); });
+    deliver([this, folder, uid]() { if (cb_seen) cb_seen(folder, uid); });
 }
 
-bool MailWorker::already_prefetch_queued_locked(int seq, const std::string &folder) const {
-    if (m_prefetch_queued.count(seq)) return true;
+bool MailWorker::already_prefetch_queued_locked(uint32_t uid, const std::string &folder) const {
+    if (m_prefetch_queued.count(uid)) return true;
     for (auto &c : m_queue)
-        if (c.type == Type::Prefetch && c.seq == seq && c.folder == folder) return true;
-    return false;
-}
-
-bool MailWorker::already_prefetch_uid_queued_locked(uint32_t uid, const std::string &folder) const {
-    if (m_prefetch_uid_queued.count(uid)) return true;
-    for (auto &c : m_queue)
-        if (c.type == Type::PrefetchUid && c.uid == uid && c.folder == folder) return true;
+        if (c.type == Type::Prefetch && c.uid == uid && c.folder == folder) return true;
     return false;
 }
 
 void MailWorker::schedule_next_prefetch() {
-    std::string folder; int seq = 0;
+    std::string folder; uint32_t uid = 0;
     {
         std::lock_guard<std::mutex> lock(m_mutex);
         if (m_prefetch_queue.empty()) return;
         if (!m_selected_folder.empty() && m_selected_folder != m_prefetch_folder)
             return;
         folder = m_prefetch_folder;
-        seq = m_prefetch_queue.front();
+        uid = m_prefetch_queue.front();
         for (auto &c : m_queue)
-            if (c.type == Type::Prefetch && c.seq == seq && c.folder == folder) return;
+            if (c.type == Type::Prefetch && c.uid == uid && c.folder == folder) return;
     }
-    post(Type::Prefetch, folder, seq);
-}
-
-void MailWorker::schedule_next_prefetch_uid() {
-    std::string folder; uint32_t uid = 0;
-    {
-        std::lock_guard<std::mutex> lock(m_mutex);
-        if (m_prefetch_uid_queue.empty()) return;
-        if (!m_selected_folder.empty() && m_selected_folder != m_prefetch_folder)
-            return;
-        folder = m_prefetch_folder;
-        uid = m_prefetch_uid_queue.front();
-        for (auto &c : m_queue)
-            if (c.type == Type::PrefetchUid && c.uid == uid && c.folder == folder) return;
-    }
-    Cmd c; c.type = Type::PrefetchUid; c.folder = folder; c.uid = uid; c.epoch = 0;
+    Cmd c; c.type = Type::Prefetch; c.folder = folder; c.uid = uid; c.epoch = 0;
     {
         std::lock_guard<std::mutex> lock(m_mutex);
         c.epoch = m_epoch;
@@ -1481,7 +1349,7 @@ void MailWorker::do_prefetch(const Cmd &cmd) {
     {
         std::lock_guard<std::mutex> lock(m_mutex);
         bool has_priority = false;
-        for (auto &c : m_queue) if (c.type != Type::Prefetch && c.type != Type::PrefetchUid) { has_priority = true; break; }
+        for (auto &c : m_queue) if (c.type != Type::Prefetch && c.type != Type::Prefetch) { has_priority = true; break; }
         if (has_priority) {
             m_queue.push_back(cmd);
             return;
@@ -1494,67 +1362,8 @@ void MailWorker::do_prefetch(const Cmd &cmd) {
         std::string re; m_imap.reconnect(re);
         if (!m_imap.is_open()) {
             std::lock_guard<std::mutex> lock(m_mutex);
-            if (!m_prefetch_queue.empty() && m_prefetch_queue.front() == cmd.seq) {
-                m_prefetch_queue.pop_front(); m_prefetch_queued.erase(cmd.seq);
-            }
-            return;
-        }
-    }
-    if (!cmd.folder.empty() && m_imap.selected_folder() != cmd.folder) {
-        std::string se; m_imap.ensure_selected(cmd.folder, se);
-    }
-    MailMessage msg; std::string err;
-    bool ok = m_imap.fetch_message(cmd.seq, msg, err,
-        [this, folder = cmd.folder]() { return folder_wanted(folder); });
-    mail_dbg("[mail] prefetch seq=%d folder='%s' done ok=%d wanted='%s'\n",
-            cmd.seq, cmd.folder.c_str(), (int)ok, wanted_folder_copy().c_str());
-    {
-        std::lock_guard<std::mutex> lock(m_mutex);
-        if (!m_prefetch_queue.empty() && m_prefetch_queue.front() == cmd.seq) {
-            m_prefetch_queue.pop_front(); m_prefetch_queued.erase(cmd.seq);
-        } else {
-            auto qit = std::find(m_prefetch_queue.begin(), m_prefetch_queue.end(), cmd.seq);
-            if (qit != m_prefetch_queue.end()) { m_prefetch_queue.erase(qit); m_prefetch_queued.erase(cmd.seq); }
-        }
-    }
-    if (!ok) {
-        mail_dbg("[mail] prefetch seq=%d folder='%s' failed: %s\n",
-                cmd.seq, cmd.folder.c_str(), err.c_str());
-        if (!is_stale_err(err) && folder_wanted(cmd.folder)) {
-            schedule_next_prefetch();
-            schedule_next_prefetch_uid();
-        }
-        return;
-    }
-    std::string preview = message_preview(msg);
-    deliver([this, folder = cmd.folder, seq = cmd.seq, msg, preview]() {
-        if (cb_prefetched) cb_prefetched(folder, seq, msg, preview);
-    });
-    if (folder_wanted(cmd.folder)) {
-        schedule_next_prefetch();
-        schedule_next_prefetch_uid();
-    }
-}
-
-void MailWorker::do_prefetch_uid(const Cmd &cmd) {
-    {
-        std::lock_guard<std::mutex> lock(m_mutex);
-        bool has_priority = false;
-        for (auto &c : m_queue) if (c.type != Type::Prefetch && c.type != Type::PrefetchUid) { has_priority = true; break; }
-        if (has_priority) {
-            m_queue.push_back(cmd);
-            return;
-        }
-        if (cmd.folder != m_prefetch_folder) return;
-        if (cmd.folder != m_selected_folder) return;
-        if (cmd.folder != m_wanted_folder) return;
-    }
-    if (!m_imap.is_open()) {
-        std::string re; m_imap.reconnect(re);
-        if (!m_imap.is_open()) {
-            std::lock_guard<std::mutex> lock(m_mutex);
-            if (!m_prefetch_uid_queue.empty() && m_prefetch_uid_queue.front() == cmd.uid) {
-                m_prefetch_uid_queue.pop_front(); m_prefetch_uid_queued.erase(cmd.uid);
+            if (!m_prefetch_queue.empty() && m_prefetch_queue.front() == cmd.uid) {
+                m_prefetch_queue.pop_front(); m_prefetch_queued.erase(cmd.uid);
             }
             return;
         }
@@ -1567,19 +1376,13 @@ void MailWorker::do_prefetch_uid(const Cmd &cmd) {
         [this, folder = cmd.folder]() { return folder_wanted(folder); });
     mail_dbg("[mail] prefetch uid=%u folder='%s' done ok=%d wanted='%s'\n",
             cmd.uid, cmd.folder.c_str(), (int)ok, wanted_folder_copy().c_str());
-    // Resolve seq for legacy callback (seq may be 0 if server resequenced since summary).
-    int seq_for_cb = 0;
     {
         std::lock_guard<std::mutex> lock(m_mutex);
-        auto it = m_summaries_cache.find(cmd.folder);
-        if (it != m_summaries_cache.end()) {
-            for (auto &s : it->second) if (s.uid == cmd.uid) { seq_for_cb = s.seq; break; }
-        }
-        if (!m_prefetch_uid_queue.empty() && m_prefetch_uid_queue.front() == cmd.uid) {
-            m_prefetch_uid_queue.pop_front(); m_prefetch_uid_queued.erase(cmd.uid);
+        if (!m_prefetch_queue.empty() && m_prefetch_queue.front() == cmd.uid) {
+            m_prefetch_queue.pop_front(); m_prefetch_queued.erase(cmd.uid);
         } else {
-            auto qit = std::find(m_prefetch_uid_queue.begin(), m_prefetch_uid_queue.end(), cmd.uid);
-            if (qit != m_prefetch_uid_queue.end()) { m_prefetch_uid_queue.erase(qit); m_prefetch_uid_queued.erase(cmd.uid); }
+            auto qit = std::find(m_prefetch_queue.begin(), m_prefetch_queue.end(), cmd.uid);
+            if (qit != m_prefetch_queue.end()) { m_prefetch_queue.erase(qit); m_prefetch_queued.erase(cmd.uid); }
         }
     }
     if (!ok) {
@@ -1587,17 +1390,17 @@ void MailWorker::do_prefetch_uid(const Cmd &cmd) {
                 cmd.uid, cmd.folder.c_str(), err.c_str());
         if (!is_stale_err(err) && folder_wanted(cmd.folder)) {
             schedule_next_prefetch();
-            schedule_next_prefetch_uid();
+            schedule_next_prefetch();
         }
         return;
     }
     std::string preview = message_preview(msg);
-    deliver([this, folder = cmd.folder, seq = seq_for_cb, msg, preview]() {
-        if (cb_prefetched) cb_prefetched(folder, seq, msg, preview);
+    deliver([this, folder = cmd.folder, uid = cmd.uid, msg, preview]() {
+        if (cb_prefetched) cb_prefetched(folder, uid, msg, preview);
     });
     if (folder_wanted(cmd.folder)) {
         schedule_next_prefetch();
-        schedule_next_prefetch_uid();
+        schedule_next_prefetch();
     }
 }
 
@@ -1634,7 +1437,7 @@ void MailWorker::run() {
                  * deadline fires, then this loop used to pick IDLE again
                  * and spin IDLE/DONE without ever synthesizing MarkSeen. */
                 auto now_wait = std::chrono::steady_clock::now();
-                if ((m_seen_seq > 0 && now_wait >= m_seen_at) ||
+                if ((m_seen_uid > 0 && now_wait >= m_seen_at) ||
                     now_wait >= next_check)
                     break;
                 /* Server advertises IDLE and the mailbox we are watching is
@@ -1650,7 +1453,7 @@ void MailWorker::run() {
                     break;
                 }
                 auto deadline = next_check;
-                if (m_seen_seq > 0 && m_seen_at < deadline)
+                if (m_seen_uid > 0 && m_seen_at < deadline)
                     deadline = m_seen_at;
                 m_cv.wait_until(lock, deadline);
                 if (m_quit || !m_queue.empty() ||
@@ -1664,13 +1467,11 @@ void MailWorker::run() {
                 bool got_cmd = !m_queue.empty();
                 if (!got_cmd) {
                     auto now = std::chrono::steady_clock::now();
-                    if (m_seen_seq > 0 && now >= m_seen_at) {
+                    if (m_seen_uid > 0 && now >= m_seen_at) {
                         cmd.type   = Type::MarkSeen;
                         cmd.folder = m_seen_folder;
-                        cmd.seq    = m_seen_seq;
                         cmd.uid    = m_seen_uid;
                         cmd.modseq = m_seen_modseq;
-                        m_seen_seq = 0;             // consume the request
                         m_seen_uid = 0;
                         m_seen_modseq = 0;
                     } else if (now >= next_check) {
@@ -1837,10 +1638,9 @@ void MailWorker::run() {
                 explicit ByteProgress(ImapClient &i) : imap(i) { imap.set_byte_progress(true); }
                 ~ByteProgress() { imap.set_byte_progress(false); }
             } byte_progress(m_imap);
+            if (cmd.uid == 0) break;
             auto do_fetch = [&]() {
-                if (cmd.uid)
-                    return m_imap.fetch_message_by_uid(cmd.uid, msg, err);
-                return m_imap.fetch_message(cmd.seq, msg, err);
+                return m_imap.fetch_message_by_uid(cmd.uid, msg, err);
             };
             if (!do_fetch()) {
                 if (is_stale_err(err) || !folder_wanted(want_folder))
@@ -1853,8 +1653,8 @@ void MailWorker::run() {
                         err.clear();
                         if (do_fetch()) {
                             report_status("Ready (reconnected)", want_folder);
-                            deliver([this, folder = want_folder, seq = cmd.seq, msg]() {
-                                if (cb_body) cb_body(folder, seq, msg);
+                            deliver([this, folder = want_folder, uid = cmd.uid, msg]() {
+                                if (cb_body) cb_body(folder, uid, msg);
                             });
                             break;
                         }
@@ -1867,8 +1667,8 @@ void MailWorker::run() {
                 break;
             }
             report_status("Ready", want_folder);
-            deliver([this, folder = want_folder, seq = cmd.seq, msg]() {
-                if (cb_body) cb_body(folder, seq, msg);
+            deliver([this, folder = want_folder, uid = cmd.uid, msg]() {
+                if (cb_body) cb_body(folder, uid, msg);
             });
             break;
         }
@@ -1883,9 +1683,6 @@ void MailWorker::run() {
         case Type::Prefetch:
             do_prefetch(cmd);
             break;
-        case Type::PrefetchUid:
-            do_prefetch_uid(cmd);
-            break;
         case Type::Move:
             do_move(cmd);
             break;
@@ -1899,6 +1696,34 @@ void MailWorker::run() {
             m_busy = false;
         }
     }
+}
+
+uint32_t MailWorker::uid_at_seq_locked(const std::string &folder, int seq) const {
+    auto it = m_summaries_cache.find(folder);
+    if (it == m_summaries_cache.end()) return 0;
+    for (const auto &s : it->second)
+        if (s.seq == seq && s.uid) return s.uid;
+    return 0;
+}
+
+uint32_t MailWorker::take_expunge_locked(const std::string &folder, int seq) {
+    uint32_t uid = uid_at_seq_locked(folder, seq);
+    if (m_last_known_exists > 0) --m_last_known_exists;
+    if (seq > 0 && m_first_loaded > seq) --m_first_loaded;
+    if (uid && m_seen_uid == uid) m_seen_uid = 0;
+    auto it = m_summaries_cache.find(folder);
+    if (it != m_summaries_cache.end()) {
+        auto &v = it->second;
+        if (uid)
+            v.erase(std::remove_if(v.begin(), v.end(),
+                [&](const MailSummary &s){ return s.uid == uid; }), v.end());
+        else
+            v.erase(std::remove_if(v.begin(), v.end(),
+                [&](const MailSummary &s){ return s.seq == seq; }), v.end());
+        if (seq > 0)
+            for (auto &s : v) if (s.seq > seq) --s.seq;
+    }
+    return uid;
 }
 
 void MailWorker::run_idle(const std::chrono::steady_clock::time_point &next_check) {
@@ -1944,7 +1769,7 @@ void MailWorker::run_idle(const std::chrono::steady_clock::time_point &next_chec
             std::lock_guard<std::mutex> lock(m_mutex);
             auto now = std::chrono::steady_clock::now();
             auto deadline = next_check;
-            if (m_seen_seq > 0 && m_seen_at < deadline)
+            if (m_seen_uid > 0 && m_seen_at < deadline)
                 deadline = m_seen_at;
             if (rearm < deadline)
                 deadline = rearm;
@@ -1969,23 +1794,27 @@ void MailWorker::run_idle(const std::chrono::steady_clock::time_point &next_chec
                 int seq = ev.seq;
                 mail_dbg("[mail] IDLE push: FLAGS seq=%d %s\n", seq,
                          ev.flags.c_str());
+                uint32_t uid = 0;
+                {
+                    std::lock_guard<std::mutex> lock(m_mutex);
+                    uid = uid_at_seq_locked(f, seq);
+                }
+                if (!uid) break;
                 if (ev.flags.find("\\Deleted") != std::string::npos) {
                     /* Another client marked the message \Deleted but has not
-                     * expunged it yet (Apple Mail "erase deleted messages:
-                     * later" does exactly this — no EXPUNGE push ever
-                     * comes).  Hide the row now, as if the EXPUNGE had
-                     * arrived; mailbox counts stay untouched until the real
-                     * expunge. */
-                    deliver([this, f, seq]() {
-                        if (cb_expunged) cb_expunged(f, seq);
+                     * expunged it yet. Hide the row now. */
+                    {
+                        std::lock_guard<std::mutex> lock(m_mutex);
+                        take_expunge_locked(f, seq);
+                    }
+                    deliver([this, f, uid]() {
+                        if (cb_expunged) cb_expunged(f, uid);
                     });
                     break;
                 }
-                /* Another session changed flags (e.g. marked read on the
-                 * phone): update the row live. */
                 bool seen = ev.flags.find("\\Seen") != std::string::npos;
-                deliver([this, f, seq, seen]() {
-                    if (cb_flag_seen) cb_flag_seen(f, seq, seen);
+                deliver([this, f, uid, seen]() {
+                    if (cb_flag_seen) cb_flag_seen(f, uid, seen);
                 });
                 break;
             }
@@ -1993,16 +1822,14 @@ void MailWorker::run_idle(const std::chrono::steady_clock::time_point &next_chec
                 std::string f = folder;
                 int seq = ev.seq;
                 mail_dbg("[mail] IDLE push: EXPUNGE seq=%d\n", seq);
+                uint32_t uid = 0;
                 {
                     std::lock_guard<std::mutex> lock(m_mutex);
-                    /* Sequence numbers above the expunged one shift down. */
-                    if (m_last_known_exists > 0) --m_last_known_exists;
-                    if (m_first_loaded > seq)    --m_first_loaded;
-                    m_seen_seq = 0;   // any pending mark-read seq is stale
-                    cancel_prefetch_locked();
+                    uid = take_expunge_locked(f, seq);
                 }
-                deliver([this, f, seq]() {
-                    if (cb_expunged) cb_expunged(f, seq);
+                if (!uid) break;
+                deliver([this, f, uid]() {
+                    if (cb_expunged) cb_expunged(f, uid);
                 });
                 break;
             }
@@ -2037,11 +1864,11 @@ void MailWorker::run_idle(const std::chrono::steady_clock::time_point &next_chec
             m_imap.close();
             /* Reconnect + resync promptly instead of waiting out the
              * periodic timer. */
-            m_queue.push_back({Type::AutoRefresh, folder, 0, "", m_epoch});
+            m_queue.push_back({Type::AutoRefresh, folder, "", m_epoch});
         } else if (resync_full) {
-            m_queue.push_back({Type::Refresh, folder, 0, "", m_epoch});
+            m_queue.push_back({Type::Refresh, folder, "", m_epoch});
         } else if (resync_delta) {
-            m_queue.push_back({Type::AutoRefresh, folder, 0, "", m_epoch});
+            m_queue.push_back({Type::AutoRefresh, folder, "", m_epoch});
         }
     }
     m_cv.notify_one();

@@ -44,25 +44,25 @@ public:
     /* Older-message page (appended to the bottom of the list). */
     std::function<void(const std::string &,
                        const std::vector<MailSummary> &)>       cb_older;
-    std::function<void(const std::string &, int,
+    std::function<void(const std::string &, uint32_t,
                        const MailMessage &)>                    cb_body;
-    /* Background prefetch: folder + seq + full message + derived preview. */
-    std::function<void(const std::string &, int,
+    /* Background prefetch: folder + uid + full message + derived preview. */
+    std::function<void(const std::string &, uint32_t,
                        const MailMessage &, const std::string &)> cb_prefetched;
     std::function<void(const std::string &,
                        const std::string &)>                    cb_error;
     std::function<void(const std::string &,
                        const std::string &)>                    cb_status;
-    std::function<void(const std::string &, int,
+    std::function<void(const std::string &, uint32_t,
                        const std::string &)>                    cb_moved;
     /* A message was flagged \Seen on the server. */
-    std::function<void(const std::string &, int)>               cb_seen;
+    std::function<void(const std::string &, uint32_t)>          cb_seen;
     /* IDLE push: another session changed a message's \Seen flag
-     * (folder, seq, new state). */
-    std::function<void(const std::string &, int, bool)>         cb_flag_seen;
-    /* IDLE push: a message was expunged (folder, seq; higher seqs shift
-     * down by one). */
-    std::function<void(const std::string &, int)>               cb_expunged;
+     * (folder, uid, new state). */
+    std::function<void(const std::string &, uint32_t, bool)>    cb_flag_seen;
+    /* IDLE push: a message was removed. Identity is the UID; the worker
+     * has already applied the sequence-number shift on its private map. */
+    std::function<void(const std::string &, uint32_t)>          cb_expunged;
     /* FETCH summaries progress (worker thread marshals via deliver). */
     std::function<void(const std::string &, size_t done, size_t total)> cb_progress;
 
@@ -81,44 +81,32 @@ public:
     /* Latest mailbox the GUI asked to look at.  Select/Refresh/FetchOlder
      * all key off this so an in-flight INBOX fetch cannot clobber Trash. */
     void select_folder(const std::string &name);
-    void fetch_body(int seq);
-    void fetch_body(const std::string &folder, int seq, uint32_t uid = 0);
+    void fetch_body(const std::string &folder, uint32_t uid);
     void fetch_older(const std::string &folder)         { post(Type::FetchOlder, folder); }
-    /* Flag `seq` in `folder` as \Seen once `delay_sec` has passed without a
-     * newer request.  Calling again replaces the pending one, so moving to a
-     * different message restarts the clock rather than queueing a second
-     * mark.
-     * The overload carrying modseq enables CONDSTORE UNCHANGEDSINCE
-     * (RFC 4551 §3.3) via UID STORE when the server advertises CONDSTORE. */
-    void schedule_seen(const std::string &folder, int seq, double delay_sec);
-    void schedule_seen(const std::string &folder, int seq, uint64_t modseq, double delay_sec);
-    void schedule_seen_uid(const std::string &folder, int seq, uint32_t uid, uint64_t modseq, double delay_sec);
+    /* Flag `uid` \Seen once `delay_sec` has passed without a newer request.
+     * Calling again replaces the pending one. modseq enables CONDSTORE
+     * UNCHANGEDSINCE (RFC 4551 §3.3) when the server advertises it. */
+    void schedule_seen(const std::string &folder, uint32_t uid,
+                       uint64_t modseq, double delay_sec);
     void cancel_seen();
-    void move_message(const std::string &folder, int seq,
+    void move_message(const std::string &folder, uint32_t uid,
                       const std::string &dest_folder);
     void ensure_visible_cached(const std::string &folder,
-                               const std::vector<int> &visible_seqs);
-    // UID-aware prefetch: stable across QRESYNC seq shifts; uses UID FETCH.
-    void ensure_visible_cached_uid(const std::string &folder,
-                                   const std::vector<uint32_t> &uids);
-    // UID body fetch (foreground and prefetch use this when a UID is known).
-    bool fetch_message_by_uid(uint32_t uid, MailMessage &msg, std::string &err,
-                              std::function<bool()> still_wanted = {});
+                               const std::vector<uint32_t> &uids);
     bool is_compressed() const;
 
 private:
-    enum class Type { Connect, Refresh, Select, FetchBody, FetchOlder, Prefetch, PrefetchUid, Move, MarkSeen, AutoRefresh };
+    enum class Type { Connect, Refresh, Select, FetchBody, FetchOlder, Prefetch, Move, MarkSeen, AutoRefresh };
     struct Cmd {
         Type type;
         std::string folder;
-        int seq = 0;
         std::string dest_folder; // for Move
         uint64_t epoch = 0;      // mailbox generation; stale cmds are dropped
-        uint32_t uid = 0;        // for PrefetchUid / MarkSeen uid path
+        uint32_t uid = 0;
         uint64_t modseq = 0;     // for MarkSeen CONDSTORE UNCHANGEDSINCE
     };
 
-    void post(Type t, const std::string &folder = "", int seq = 0,
+    void post(Type t, const std::string &folder = "", uint32_t uid = 0,
               const std::string &dest = "");
 
     /* True if `folder` is still the mailbox the GUI wants. */
@@ -164,12 +152,15 @@ private:
     /* Best effort: a failed read-flag is not worth interrupting the user,
      * so this reports nothing on error beyond a status line. */
     void do_mark_seen(const Cmd &cmd);
-    bool already_prefetch_queued_locked(int seq, const std::string &folder) const;
-    bool already_prefetch_uid_queued_locked(uint32_t uid, const std::string &folder) const;
+    bool already_prefetch_queued_locked(uint32_t uid, const std::string &folder) const;
     void schedule_next_prefetch();
-    void schedule_next_prefetch_uid();
     void do_prefetch(const Cmd &cmd);
-    void do_prefetch_uid(const Cmd &cmd);
+    /* seq is the protocol position in the SELECTed mailbox. Returns 0
+     * when this worker has no UID for it. */
+    uint32_t uid_at_seq_locked(const std::string &folder, int seq) const;
+    /* Apply an EXPUNGE to the protocol mirror and return the UID that
+     * occupied `seq` (0 if unknown). The GUI is told the UID only. */
+    uint32_t take_expunge_locked(const std::string &folder, int seq);
     void run();
     /* Park in IMAP IDLE (RFC 2177) until the server pushes an event, a
      * command is posted, or a timer (auto-check, mark-seen, 29-min IDLE
@@ -220,24 +211,19 @@ private:
      * checks fetch only the growth. */
     bool                    m_inbox_baseline = false;
     // background prefetch backlog (low priority, viewport-aware)
-    std::string             m_prefetch_folder;
-    std::deque<int>         m_prefetch_queue;
-    std::unordered_set<int> m_prefetch_queued;
-    // UID-stable prefetch queue (QRESYNC): UIDs don't shift on EXPUNGE.
-    std::deque<uint32_t>         m_prefetch_uid_queue;
-    std::unordered_set<uint32_t> m_prefetch_uid_queued;
+    std::string                  m_prefetch_folder;
+    std::deque<uint32_t>         m_prefetch_queue;
+    std::unordered_set<uint32_t> m_prefetch_queued;
 
-    /* Pending "mark read" request; m_seen_seq == 0 means none. */
+    /* Pending "mark read" request; m_seen_uid == 0 means none. */
     std::string m_seen_folder;
-    int         m_seen_seq = 0;
     uint32_t    m_seen_uid = 0;
     uint64_t    m_seen_modseq = 0;
     std::chrono::steady_clock::time_point m_seen_at;
 
-    // QRESYNC delta + cached summaries.  Capability-gated: only used
-    // when ImapClient::has_qresync() is true.  Per-folder cache keeps
-    // Inbox summaries while viewing Trash so switching back can apply
-    // VANISHED/changed delta without re-fetching 150 msgs.
+    /* Protocol mirror for the connection thread: sequence number → UID
+     * for mailboxes this socket has fetched. Not a UI cache. The GUI's
+     * single copy lives on AccountSession::summary_cache. */
     std::unordered_map<std::string, std::vector<MailSummary>> m_summaries_cache;
     std::unordered_map<std::string, ImapClient::QResyncState> m_qresync_cache;
     // Pending QRESYNC delta from the most recent select_qresync(),

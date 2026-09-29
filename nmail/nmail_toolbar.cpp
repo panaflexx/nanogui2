@@ -33,7 +33,7 @@ MailToolbarGroup *MailToolbar::add_group() {
     return new MailToolbarGroup(this);
 }
 
-Widget *MailToolbar::add_spacer(int width) {
+Widget *MailToolbar::add_spacer(int width) { // UNUSED
     Widget *sp = new Widget(this);
     sp->set_min_width(width);
     sp->set_width(width);

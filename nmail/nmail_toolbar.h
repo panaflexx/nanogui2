@@ -28,7 +28,7 @@ public:
     MailToolbarGroup *add_group();
 
     // A fixed-width gap between groups.
-    nanogui::Widget *add_spacer(int width = 12);
+    nanogui::Widget *add_spacer(int width = 12); // UNUSED
 
     // A gap that grows to consume free space, pushing whatever follows
     // (e.g. the search box) to the right edge of the bar.

@@ -29,7 +29,7 @@ struct MailFolder {
 };
 
 struct MailSummary {
-    int seq = 0;               // IMAP message sequence number
+    int seq = 0;               // position in the SELECTed mailbox; not an identity
     uint32_t uid = 0;          // UID (when CONDSTORE/QRESYNC available)
     uint64_t modseq = 0;       // MODSEQ (RFC 4551)
     std::string from;          // display name, or the address if none was given
@@ -198,7 +198,7 @@ public:
      * non-retryable "cancelled"; the socket is unusable afterwards and the
      * caller must reconnect.  Safe to call from the GUI thread. */
     void cancel();
-    uint64_t op_gen() const { return m_op_gen.load(std::memory_order_acquire); }
+    uint64_t op_gen() const { return m_op_gen.load(std::memory_order_acquire); } // UNUSED
 
     /* Optional FETCH progress. Summary fetches pass a message count.
      * A foreground body larger than 1MB passes bytes read / size.
@@ -217,7 +217,7 @@ public:
     bool has_qresync() const { return m_caps.count("QRESYNC") && has_condstore(); }
     bool has_enable() const { return m_caps.count("ENABLE"); }
     bool enable_qresync(std::string &err); // idempotent; NO-OP after first OK
-    bool enable_condstore(std::string &err);
+    bool enable_condstore(std::string &err); // UNUSED
     bool compress_deflate(std::string &err); // one-shot per connection, before first SELECT
     bool is_compressed() const { return m_compressed; }
 
@@ -241,7 +241,7 @@ public:
                         QResyncState &out_state, QResyncDelta &out_delta,
                         std::string &err);
     // Cheap incremental sync after IDLE/NOOP: ask for VANISHED + changed since modseq.
-    bool qresync_delta(uint64_t since_modseq, QResyncDelta &out, std::string &err);
+    bool qresync_delta(uint64_t since_modseq, QResyncDelta &out, std::string &err); // UNUSED
     bool fetch_flags_uid(const std::vector<uint32_t> &uids,
                          std::unordered_map<uint32_t, std::vector<std::string>> &out,
                          std::string &err);

@@ -1433,7 +1433,7 @@ bool ImapClient::enable_qresync(std::string &err) {
     }
     return true;
 }
-bool ImapClient::enable_condstore(std::string &err) {
+bool ImapClient::enable_condstore(std::string &err) { // UNUSED
     if (!has_enable()) { imap_dbg("ENABLE CONDSTORE skipped: no ENABLE cap"); err = "no ENABLE"; return false; }
     std::vector<std::string> un;
     if (!run_once("ENABLE CONDSTORE", un, err)) return false;
@@ -2861,7 +2861,7 @@ bool ImapClient::select_qresync(const std::string &name, const QResyncState &kno
     m_selected_folder = name;
     return true;
 }
-bool ImapClient::qresync_delta(uint64_t since_modseq, QResyncDelta &out, std::string &err) {
+bool ImapClient::qresync_delta(uint64_t since_modseq, QResyncDelta &out, std::string &err) { // UNUSED
     out = {};
     if (!m_qresync_enabled || !has_condstore()) {
         imap_dbg("qresync_delta skipped: not enabled (qresync_en=%d condstore=%d)", (int)m_qresync_enabled, (int)has_condstore());

@@ -27,14 +27,14 @@ struct SavedEmail {
     std::string body;   // plain text
 };
 
-inline std::string nmail_comment_safe(std::string s) {
+inline std::string nmail_comment_safe(std::string s) { // UNUSED
     for (size_t i = 0; i + 1 < s.size(); ++i)
         if (s[i] == '-' && s[i + 1] == '-')
             s[i + 1] = '_';
     return s;
 }
 
-inline std::string nmail_serialize_email(const SavedEmail &e) {
+inline std::string nmail_serialize_email(const SavedEmail &e) { // UNUSED
     bool as_html = !e.html.empty();
     std::ostringstream out;
     out << "<!-- nmail-saved\n"

@@ -161,8 +161,7 @@ private:
 // EmailData — plain struct describing one message in the list
 // ---------------------------------------------------------------------------
 struct EmailData {
-    int         seq = 0;           // IMAP message sequence number (0 on QRESYNC when UID is authoritative)
-    uint32_t    uid = 0;           // UID when CONDSTORE/QRESYNC available, 0 otherwise
+    uint32_t    uid = 0;
     uint64_t    modseq = 0;        // MODSEQ when CONDSTORE available
     std::string sender;
     std::string subject;
@@ -234,8 +233,7 @@ public:
     void draw(NVGcontext *ctx) override;
 
     /* Update the preview text for an already-listed row in place. */
-    void update_preview(int seq, const std::string &preview);
-    void update_preview_by_uid(uint32_t uid, const std::string &preview);
+    void update_preview(uint32_t uid, const std::string &preview);
 
     // viewport helpers — used by MailApp to prioritize prefetch
     std::pair<int,int> visible_range() const {
@@ -243,14 +241,6 @@ public:
         int first = std::max(0, (int)(m_scroll / row_h()));
         int last  = std::min((int)m_emails.size(), (int)((m_scroll + (float)m_size.y()) / row_h()) + 2);
         return {first, last};
-    }
-    std::vector<int> visible_seqs(int pad = 6) const {
-        auto [first,last] = visible_range();
-        int a = std::max(0, first - pad);
-        int b = std::min((int)m_emails.size(), last + pad);
-        std::vector<int> out; out.reserve(b-a);
-        for (int i=a;i<b;++i) out.push_back(m_emails[i].seq);
-        return out;
     }
     std::vector<uint32_t> visible_uids(int pad = 6) const {
         auto [first,last] = visible_range();
@@ -269,14 +259,14 @@ public:
 
     /* Append older rows (from a "load more" fetch) without resetting
        scroll or selection. */
-    void append_emails(std::vector<EmailData> more);
+    void append_emails(std::vector<EmailData> more); // UNUSED
 
     /* Splice newly-arrived mail in at the top (background auto-check)
        without disturbing the user's current place: the rows already on
        screen stay on screen (scroll advances by exactly the inserted
        height) and the selected message stays selected (re-resolved by
        seq, since prepending shifts every existing row's index). */
-    void prepend_emails(std::vector<EmailData> newer);
+    void prepend_emails(std::vector<EmailData> newer); // UNUSED
 
     /* Spinner strip at the bottom while older messages are fetched. */
     void set_loading_more(bool v);
@@ -290,28 +280,19 @@ public:
     void set_dark(bool dark);
 
     int selected_index() const { return m_selected; }
-    int selected_seq() const {
+    uint32_t selected_uid() const {
         if (m_selected >= 0 && m_selected < (int)m_emails.size())
-            return m_emails[m_selected].seq;
-        return -1;
+            return m_emails[m_selected].uid;
+        return 0;
     }
     const EmailData* selected_data() const {
         if (m_selected >= 0 && m_selected < (int)m_emails.size())
             return &m_emails[m_selected];
         return nullptr;
     }
-    /* Flip a row's read state in place (the server confirmed a \Seen flag).
-     * Returns false when the seq is not in the current view. */
-    bool set_seen(int seq, bool seen) {
-        for (EmailData &e : m_emails)
-            if (e.seq == seq) {
-                if (e.seen == seen) return true;
-                e.seen = seen;
-                return true;
-            }
-        return false;
-    }
-    bool set_seen_by_uid(uint32_t uid, bool seen) {
+    /* Flip a row's read state in place. Returns false when the UID
+     * is not in the current view. */
+    bool set_seen(uint32_t uid, bool seen) {
         if (uid == 0) return false;
         for (EmailData &e : m_emails)
             if (e.uid == uid) {
@@ -322,16 +303,11 @@ public:
         return false;
     }
 
-    // Remove a row by seq, preserving scroll position and viewport.
-    // Selects the message below the deleted one, or the last if at end.
-    // IMAP sequence numbers shift after EXPUNGE, so remaining seqs > deleted
-    // are decremented to stay in sync without a full refresh.
-    bool remove_seq(int seq);
-    // UID-based removal: UIDs stay put, but IMAP sequence numbers still
-    // shift after EXPUNGE, so remaining seqs > the removed row are decremented.
-    bool remove_by_uid(uint32_t uid);
+    /* Remove a row. Selects the message below it, or the last if at the end.
+     * Other rows are not renumbered: UID is the identity. */
+    bool remove(uint32_t uid);
 
-    void clear_selection();
+    void clear_selection(); // UNUSED
 
 private:
     /* ---- scrollbar geometry ---- */

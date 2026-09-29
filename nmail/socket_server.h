@@ -1088,7 +1088,7 @@ static inline void run_event_loop(int loopfd, struct server_sockets *ss, struct 
     }
 }
 
-static inline void run_event_loop_old(int loopfd, struct server_sockets *ss, struct event_handlers *handlers) {
+static inline void run_event_loop_old(int loopfd, struct server_sockets *ss, struct event_handlers *handlers) { // UNUSED
     struct event evlist[MAX_EVENTS];
 	bool is_datagram = false;
 

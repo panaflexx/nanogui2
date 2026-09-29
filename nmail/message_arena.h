@@ -99,7 +99,7 @@ public:
         trim_slab();
     }
 
-    size_t bytes_live() const { return m_live; }
+    size_t bytes_live() const { return m_live; } // UNUSED
 
 private:
     struct Slot {

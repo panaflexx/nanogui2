@@ -524,17 +524,7 @@ void EmailListView::draw(NVGcontext *ctx) {
     draw_scrollbar(ctx);  // drawn on top, no clip
 }
 
-void EmailListView::update_preview(int seq, const std::string &preview) {
-    for (auto &e : m_emails) {
-        if (e.seq == seq && e.preview != preview) {
-            e.preview = preview;
-            if (screen()) screen()->redraw();
-            break;
-        }
-    }
-}
-
-void EmailListView::update_preview_by_uid(uint32_t uid, const std::string &preview) {
+void EmailListView::update_preview(uint32_t uid, const std::string &preview) {
     if (uid == 0) return;
     for (auto &e : m_emails) {
         if (e.uid == uid && e.preview != preview) {
@@ -547,12 +537,9 @@ void EmailListView::update_preview_by_uid(uint32_t uid, const std::string &previ
 
 void EmailListView::set_emails(std::vector<EmailData> emails, bool keep_place) {
     uint32_t keep_uid = 0;
-    int keep_seq = -1;
     float scroll = m_scroll;
-    if (keep_place && m_selected >= 0 && m_selected < (int)m_emails.size()) {
+    if (keep_place && m_selected >= 0 && m_selected < (int)m_emails.size())
         keep_uid = m_emails[m_selected].uid;
-        keep_seq = m_emails[m_selected].seq;
-    }
     m_emails   = std::move(emails);
     m_hovered  = -1;
     m_vel      = 0.0f;
@@ -563,10 +550,6 @@ void EmailListView::set_emails(std::vector<EmailData> emails, bool keep_place) {
         if (keep_uid) {
             for (int i = 0; i < (int)m_emails.size(); ++i)
                 if (m_emails[i].uid == keep_uid) { m_selected = i; break; }
-        }
-        if (m_selected < 0 && keep_seq > 0) {
-            for (int i = 0; i < (int)m_emails.size(); ++i)
-                if (m_emails[i].seq == keep_seq) { m_selected = i; break; }
         }
         m_scroll = std::clamp(scroll, 0.0f, max_scroll());
         if (m_selected >= 0) {
@@ -579,25 +562,25 @@ void EmailListView::set_emails(std::vector<EmailData> emails, bool keep_place) {
     if (screen()) screen()->redraw();
 }
 
-void EmailListView::append_emails(std::vector<EmailData> more) {
+void EmailListView::append_emails(std::vector<EmailData> more) { // UNUSED
     m_emails.insert(m_emails.end(),
                     std::make_move_iterator(more.begin()),
                     std::make_move_iterator(more.end()));
     screen()->redraw();
 }
 
-void EmailListView::prepend_emails(std::vector<EmailData> newer) {
+void EmailListView::prepend_emails(std::vector<EmailData> newer) { // UNUSED
     if (newer.empty()) return;
-    int prev_selected_seq = selected_seq();
+    uint32_t prev_uid = selected_uid();
     float inserted_h = (float)newer.size() * row_h();
     m_emails.insert(m_emails.begin(),
                     std::make_move_iterator(newer.begin()),
                     std::make_move_iterator(newer.end()));
     m_scroll = std::clamp(m_scroll + inserted_h, 0.0f, max_scroll());
-    if (prev_selected_seq >= 0) {
+    if (prev_uid) {
         m_selected = -1;
         for (int i = 0; i < (int)m_emails.size(); ++i)
-            if (m_emails[i].seq == prev_selected_seq) { m_selected = i; break; }
+            if (m_emails[i].uid == prev_uid) { m_selected = i; break; }
     }
     m_hovered = -1;
     if (screen()) screen()->redraw();
@@ -611,43 +594,15 @@ void EmailListView::set_loading_more(bool v) {
 
 void EmailListView::set_dark(bool dark) { m_dark = dark; screen()->redraw(); }
 
-void EmailListView::clear_selection() { m_selected = -1; m_hovered = -1; if (screen()) screen()->redraw(); }
-
-bool EmailListView::remove_seq(int seq) {
-    for (int i = 0; i < (int)m_emails.size(); ++i) {
-        if (m_emails[i].seq != seq) continue;
-        m_emails.erase(m_emails.begin() + i);
-        for (auto &e : m_emails)
-            if (e.seq > seq) --e.seq;
-        if (m_selected == i) {
-            if (i < (int)m_emails.size())
-                m_selected = i;
-            else
-                m_selected = (int)m_emails.size() - 1;
-            m_hovered = -1;
-        } else if (m_selected > i) {
-            --m_selected;
-            if (m_hovered > i) --m_hovered;
-        } else if (m_hovered > i) {
-            --m_hovered;
-        }
-        m_scroll = std::clamp(m_scroll, 0.0f, max_scroll());
-        if (screen()) screen()->redraw();
-        return true;
-    }
-    return false;
+void EmailListView::clear_selection() { // UNUSED
+    m_selected = -1; m_hovered = -1; if (screen()) screen()->redraw();
 }
 
-bool EmailListView::remove_by_uid(uint32_t uid) {
+bool EmailListView::remove(uint32_t uid) {
     if (uid == 0) return false;
     for (int i = 0; i < (int)m_emails.size(); ++i) {
         if (m_emails[i].uid != uid) continue;
-        int gone_seq = m_emails[i].seq;
         m_emails.erase(m_emails.begin() + i);
-        // UIDs are stable; IMAP sequence numbers still shift after EXPUNGE.
-        if (gone_seq > 0)
-            for (auto &e : m_emails)
-                if (e.seq > gone_seq) --e.seq;
         if (m_selected == i) {
             if (i < (int)m_emails.size())
                 m_selected = i;

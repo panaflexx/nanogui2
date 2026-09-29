@@ -9,8 +9,9 @@
  * Account details are entered in the Preferences window and stored in
  * "amail.config" (JSON, via dict.h).
  *
- * This file holds the application shell (MailApp) and main().  The pieces
- * broken out of it:
+ * This file holds the application shell (MailApp) and main().  Account
+ * sessions (AccountSession, Accounts) and the Preferences dialog are
+ * separate types in this file.  The pieces broken out of it:
  *   nmail_config.h/.cpp  — MailConfig, config file I/O, password encryption
  *   mail_worker.h/.cpp   — MailWorker, the IMAP worker thread
  *   mail_widgets.h/.cpp  — FolderView sidebar and EmailListView widgets
@@ -162,14 +163,11 @@ static Vector2i visual_screen_pos(const Widget *w, const Vector2i &logical_abs) 
 }
 
 // ---------------------------------------------------------------------------
-// MailApp — the application
+// AccountSession — one IMAP/SMTP account and the connection that serves it.
+// Every configured account has one, and they run concurrently (see Accounts).
 // ---------------------------------------------------------------------------
-// AccountSession — everything that is per-connection state: one IMAP/SMTP
-// account's config, its own worker thread, its own folder list, and its own
-// summary/body caches. Every configured account gets one of these and they
-// all run concurrently (see MailApp::m_accounts).
-// ---------------------------------------------------------------------------
-struct AccountSession {
+class AccountSession {
+public:
     MailAccount              config;
     std::unique_ptr<MailWorker> worker = std::make_unique<MailWorker>();
     std::vector<MailFolder>  folders;
@@ -178,15 +176,159 @@ struct AccountSession {
     bool                     folder_loading = false;
     bool                     older_inflight = false;
     bool                     move_inflight  = false;
-    /* Seq of a message we just MOVE'd.  The server's EXPUNGE echo of that
-     * MOVE must not run on_expunged after we have already resequenced. */
+    /* UID of a message we just MOVE'd. The server's EXPUNGE echo of that
+     * MOVE must not run on_expunged after we have already removed the row. */
     std::string              local_expunge_folder;
-    int                      local_expunge_seq = 0;
-    /* Session-only cache; dropped on Refresh or reconnect.  Message bodies
-     * live in MailApp::m_body_cache, one slab shared by every account. */
+    uint32_t                 local_expunge_uid = 0;
+    /* The one UI copy of each folder's message list. The on-screen list
+     * is summary_cache[current_folder], not a second vector. Bodies live
+     * in MailApp::m_body_cache. Dropped on Refresh or reconnect. */
     std::map<std::string, std::vector<MailSummary>> summary_cache;
+
+    std::string id() const { return config.id(); }
+    std::string display_name() const { return config.display_name(); }
+
+    std::vector<MailSummary> &messages(const std::string &folder) {
+        return summary_cache[folder];
+    }
+
+    /* Trash/Junk destination from this account's folder list. */
+    std::string dest_folder(const std::string &kind) const;
+    /* First folder whose name matches an entry of `names`, else fallback. */
+    std::string mailbox_named(const std::vector<std::string> &names,
+                              const std::string &fallback) const;
+    /* Existing Sent mailbox, or "Sent Messages" when the server has none. */
+    std::string sent_mailbox() const;
 };
 
+static std::string lower_copy(std::string s) {
+    for (char &c : s) c = (char)std::tolower((unsigned char)c);
+    return s;
+}
+
+std::string AccountSession::dest_folder(const std::string &kind) const {
+    if (folders.empty()) return kind;
+    std::string want = lower_copy(kind);
+    for (const auto &f : folders) {
+        std::string low = lower_copy(f.name);
+        size_t p = low.find_last_of("/.");
+        std::string leaf = (p == std::string::npos) ? low : low.substr(p + 1);
+        if (leaf == want) return f.name;
+    }
+    std::vector<std::string> keys;
+    if (want == "trash") keys = {"trash","deleted","deleted messages","bin"};
+    else if (want == "junk") keys = {"junk","spam","junk email","bulk mail"};
+    else keys = {want};
+    for (const std::string &k : keys) {
+        for (const auto &f : folders) {
+            std::string low = lower_copy(f.name);
+            size_t p = low.find_last_of("/.");
+            std::string leaf = (p == std::string::npos) ? low : low.substr(p + 1);
+            if (leaf.find(k) != std::string::npos) return f.name;
+            if (low.find(k) != std::string::npos) return f.name;
+        }
+    }
+    return kind;
+}
+
+std::string AccountSession::mailbox_named(const std::vector<std::string> &names,
+                                         const std::string &fallback) const {
+    for (const std::string &want : names) {
+        for (const MailFolder &f : folders)
+            if (lower_copy(f.name) == want) return f.name;
+    }
+    return fallback;
+}
+
+std::string AccountSession::sent_mailbox() const {
+    const MailFolder *exact = nullptr;
+    const MailFolder *other = nullptr;
+    for (const MailFolder &f : folders) {
+        std::string n = lower_copy(f.name);
+        if (n == "sent messages") { exact = &f; break; }
+        if (!other && (n == "sent" || n == "sent mail" || n == "sent items"))
+            other = &f;
+    }
+    if (exact) return exact->name;
+    if (other) return other->name;
+    return "Sent Messages";
+}
+
+/* The accounts this process is connected to, and which one's folder is on
+ * screen. add() only constructs a session; the app starts the worker. */
+class Accounts {
+public:
+    AccountSession *find(const std::string &id) {
+        for (auto &a : m_sessions)
+            if (a->id() == id) return a.get();
+        return nullptr;
+    }
+    const AccountSession *find(const std::string &id) const {
+        return const_cast<Accounts *>(this)->find(id);
+    }
+
+    /* Before any folder has been selected (or after the active account was
+     * removed), returns a never-connected placeholder. Every field on it
+     * reads as "nothing selected". */
+    AccountSession &current() {
+        if (AccountSession *a = find(m_current_id)) return *a;
+        return m_none;
+    }
+    const AccountSession &current() const {
+        return const_cast<Accounts *>(this)->current();
+    }
+
+    const std::string &current_id() const { return m_current_id; }
+    void set_current_id(const std::string &id) { m_current_id = id; }
+
+    bool empty() const { return m_sessions.empty(); }
+    size_t size() const { return m_sessions.size(); }
+    AccountSession *front() {
+        return m_sessions.empty() ? nullptr : m_sessions.front().get();
+    }
+    AccountSession *operator[](size_t i) { return m_sessions.at(i).get(); }
+    const AccountSession *operator[](size_t i) const { return m_sessions.at(i).get(); }
+
+    AccountSession &add(const MailAccount &ma) {
+        auto session = std::make_unique<AccountSession>();
+        session->config = ma;
+        AccountSession &acct = *session;
+        m_sessions.push_back(std::move(session));
+        return acct;
+    }
+    void remove(const std::string &id) {
+        if (m_current_id == id) m_current_id.clear();
+        m_sessions.erase(std::remove_if(m_sessions.begin(), m_sessions.end(),
+            [&](const std::unique_ptr<AccountSession> &a) { return a->id() == id; }),
+            m_sessions.end());
+    }
+
+    using iterator = std::vector<std::unique_ptr<AccountSession>>::iterator;
+    using const_iterator = std::vector<std::unique_ptr<AccountSession>>::const_iterator;
+    iterator begin() { return m_sessions.begin(); }
+    iterator end() { return m_sessions.end(); }
+    const_iterator begin() const { return m_sessions.begin(); }
+    const_iterator end() const { return m_sessions.end(); }
+
+private:
+    std::vector<std::unique_ptr<AccountSession>> m_sessions;
+    std::string m_current_id;
+    AccountSession m_none;
+};
+
+/* Accounts dialog. Edits `config` and writes amail.config. On a successful
+ * save it calls on_saved so the app can reconcile live sessions; it does
+ * not start or stop workers itself. `close` disposes the window. */
+class Preferences {
+public:
+    static void show(Widget *parent, MailConfig &config,
+                     const std::string &contacts_path,
+                     const std::function<void()> &on_saved,
+                     const std::function<void(Window *)> &close);
+};
+
+// ---------------------------------------------------------------------------
+// MailApp — the application
 // ---------------------------------------------------------------------------
 class MailApp : public Screen {
 public:
@@ -223,45 +365,38 @@ public:
     bool        m_dark          = false;
 
     /* One session per configured account; all connect and poll at once.
-     * m_current_account_id names whichever account's folder is on screen
-     * (m_summaries / m_email_list / m_view below are shared, singular UI --
+     * current_id() names whichever account's folder is on screen
+     * (shown() / m_email_list / m_view below are shared, singular UI --
      * only one account's message list is ever visible at a time). */
-    std::vector<std::unique_ptr<AccountSession>> m_accounts;
+    Accounts m_accounts;
     /* Raw RFC822 bodies for every account, packed into one capped slab. */
     MessageArena m_body_cache;
-    std::string m_current_account_id;
 
-    AccountSession *account(const std::string &id) {
-        for (auto &a : m_accounts) if (a->config.id() == id) return a.get();
-        return nullptr;
+    AccountSession *account(const std::string &id) { return m_accounts.find(id); }
+    const AccountSession *account(const std::string &id) const { return m_accounts.find(id); }
+    AccountSession &current_acct() { return m_accounts.current(); }
+    const AccountSession &current_acct() const { return m_accounts.current(); }
+    const std::string &current_id() const { return m_accounts.current_id(); }
+    void set_current_id(const std::string &id) { m_accounts.set_current_id(id); }
+
+    /* On-screen folder. Same vector as summary_cache[current_folder]. */
+    std::vector<MailSummary> &shown() {
+        AccountSession &acct = current_acct();
+        return acct.messages(acct.current_folder);
     }
-    const AccountSession *account(const std::string &id) const {
-        return const_cast<MailApp*>(this)->account(id);
-    }
-    /* Whichever account is on screen. Before any folder has ever been
-     * selected (or if the active account was since removed), returns a
-     * harmless never-connected placeholder -- every field on it reads as
-     * "nothing selected" (empty folder, not loading, ...), which is exactly
-     * the right answer for e.g. update_move_buttons() at startup. */
-    AccountSession &current_acct() {
-        static AccountSession dummy;
-        AccountSession *a = account(m_current_account_id);
-        return a ? *a : dummy;
-    }
-    const AccountSession &current_acct() const {
-        return const_cast<MailApp*>(this)->current_acct();
+    const std::vector<MailSummary> &shown() const {
+        return const_cast<MailApp*>(this)->shown();
     }
 
-    std::vector<MailSummary> m_summaries;   // current folder, newest first
     std::string              m_filter;
-    int                      m_loading_seq = -1;
+    uint32_t                 m_loading_uid = 0;
     MailMessage              m_current_message;
     bool                     m_has_message = false;
     /* Preview is not built on GLFW_REPEAT: the list highlight moves
      * immediately, HTML parse / IMAP FETCH wait until the selected seq
      * has been idle for kPreviewSettleSec. */
-    int                      m_pending_seq = -1;
-    int                      m_rendered_seq = -1;
+    uint32_t                 m_pending_uid = 0;
+    uint32_t                 m_rendered_uid = 0;
     double                   m_preview_settle_at = 0.0;
     EmailData                m_pending_email;
     static constexpr double  kPreviewSettleSec = 0.10;
@@ -281,23 +416,21 @@ public:
     bool                     m_show_remote_images = false;  // user opt-in
     bool                     m_has_remote_images  = false;  // current msg refs
 
-    /* One slab serves every account, so keys are account-scoped:
-     * "<account>|<folder>|U<uid>", or "|S<seq>" on a server without UIDs. */
+    /* One slab serves every account. Key is "<account>|<folder>|U<uid>". */
     static std::string acct_prefix(const AccountSession &a) {
         return a.config.id() + "|";
     }
     static std::string body_key(const AccountSession &a, const std::string &folder,
-                                uint32_t uid, int seq) {
-        return acct_prefix(a) + folder + (uid ? "|U" + std::to_string(uid)
-                                              : "|S" + std::to_string(seq));
+                                uint32_t uid) {
+        return acct_prefix(a) + folder + "|U" + std::to_string(uid);
     }
     static std::string body_key(const AccountSession &a, const std::string &folder,
                                 const MailSummary &s) {
-        return body_key(a, folder, s.uid, s.seq);
+        return body_key(a, folder, s.uid);
     }
     static std::string body_key(const AccountSession &a, const std::string &folder,
                                 const EmailData &d) {
-        return body_key(a, folder, d.uid, d.seq);
+        return body_key(a, folder, d.uid);
     }
     /* Every cache helper below takes an explicit AccountSession& so callback
      * handlers (which may be reporting for a background, not-currently-
@@ -306,68 +439,36 @@ public:
      * folder is on screen -- for the UI-driven call sites (viewport
      * prefetch, render, selection) that only ever act on what's visible. */
 
-    // Resolve uid for a seq via current summaries/cache (for on_body/on_prefetched where only seq is known).
-    uint32_t uid_for_seq(AccountSession &acct, const std::string &folder, int seq) const {
-        if (seq <= 0) return 0;
-        if (&acct == &current_acct() && folder == current_acct().current_folder) {
-            for (auto &s : m_summaries) if (s.seq == seq && s.uid) return s.uid;
-        }
-        auto it = acct.summary_cache.find(folder);
-        if (it != acct.summary_cache.end())
-            for (auto &s : it->second) if (s.seq == seq && s.uid) return s.uid;
-        return 0;
+    bool body_has(const AccountSession &acct, const std::string &folder, uint32_t uid) const {
+        return uid && m_body_cache.contains(body_key(acct, folder, uid));
     }
-    uint32_t uid_for_seq(const std::string &folder, int seq) const {
-        return uid_for_seq(const_cast<MailApp*>(this)->current_acct(), folder, seq);
+    bool body_has(const std::string &folder, uint32_t uid) const {
+        return body_has(current_acct(), folder, uid);
     }
-    uint32_t uid_for_seq_any(int seq) const { return uid_for_seq(current_acct().current_folder, seq); }
-    // Dual-read helper: UID key first (authoritative on QRESYNC), then SEQ key.
-    bool body_has(const AccountSession &acct, const std::string &folder, uint32_t uid, int seq) const {
-        if (uid && m_body_cache.contains(body_key(acct, folder, uid, 0))) return true;
-        if (seq && m_body_cache.contains(body_key(acct, folder, 0, seq))) return true;
-        return false;
-    }
-    bool body_has(const std::string &folder, uint32_t uid, int seq) const {
-        return body_has(current_acct(), folder, uid, seq);
-    }
-    bool body_has(const std::string &folder, const EmailData &d) const { return body_has(folder, d.uid, d.seq); }
+    bool body_has(const std::string &folder, const EmailData &d) const { return body_has(folder, d.uid); }
     /* Hit copies the raw bytes out of the slab and parses them. The slab
      * stays the only long-lived copy; the returned message is the caller's. */
     bool body_get(const AccountSession &acct, const std::string &folder,
-                  uint32_t uid, int seq, MailMessage &out) const {
-        std::string key;
-        if (uid && m_body_cache.contains(body_key(acct, folder, uid, 0)))
-            key = body_key(acct, folder, uid, 0);
-        else if (seq && m_body_cache.contains(body_key(acct, folder, 0, seq)))
-            key = body_key(acct, folder, 0, seq);
-        else
-            return false;
+                  uint32_t uid, MailMessage &out) const {
+        if (!uid) return false;
         std::string raw;
-        if (!m_body_cache.get(key, raw)) return false;
+        if (!m_body_cache.get(body_key(acct, folder, uid), raw)) return false;
         MailMessage msg;
         if (!parse_rfc822_message(std::move(raw), msg)) return false;
         out = std::move(msg);
         return true;
     }
-    void body_put(AccountSession &acct, const std::string &folder, uint32_t uid, int seq, const MailMessage &msg) {
-        if (msg.raw.empty()) return;
-        /* One key. UID when we have it; seq only for servers without UIDs. */
-        if (uid || seq)
-            m_body_cache.put(body_key(acct, folder, uid, seq), msg.raw);
+    void body_put(AccountSession &acct, const std::string &folder, uint32_t uid, const MailMessage &msg) {
+        if (msg.raw.empty() || !uid) return;
+        m_body_cache.put(body_key(acct, folder, uid), msg.raw);
     }
-    void body_put(const std::string &folder, uint32_t uid, int seq, const MailMessage &msg) {
-        body_put(current_acct(), folder, uid, seq, msg);
+    void body_put(const std::string &folder, uint32_t uid, const MailMessage &msg) {
+        body_put(current_acct(), folder, uid, msg);
     }
-    void body_put(const std::string &folder, const EmailData &d, const MailMessage &msg) { body_put(folder, d.uid, d.seq, msg); }
+    void body_put(const std::string &folder, const EmailData &d, const MailMessage &msg) { body_put(folder, d.uid, msg); }
 
-    /* After EXPUNGE/MOVE: drop the vanished UID key and every seq-keyed
-     * body for this folder (those numbers just shifted). Other UID keys
-     * stay — they are stable and the next click should not re-FETCH. */
-    void drop_expunged_bodies(AccountSession &acct, const std::string &folder,
-                              int seq, uint32_t uid) {
-        if (uid) m_body_cache.erase(body_key(acct, folder, uid, 0));
-        if (seq) m_body_cache.erase(body_key(acct, folder, 0, seq));
-        m_body_cache.erase_prefix(acct_prefix(acct) + folder + "|S");
+    void drop_expunged_bodies(AccountSession &acct, const std::string &folder, uint32_t uid) {
+        if (uid) m_body_cache.erase(body_key(acct, folder, uid));
     }
     std::string m_status_base;
 
@@ -495,37 +596,6 @@ public:
         perform_layout();
     }
 
-    // helpers for Trash/Junk moves
-    std::string resolve_dest_folder(const std::string &kind) const {
-        auto lower = [](std::string s) {
-            for (char &c : s) c = (char)std::tolower((unsigned char)c);
-            return s;
-        };
-        const std::vector<MailFolder> &folders = current_acct().folders;
-        if (folders.empty()) return kind;
-        std::string want = lower(kind);
-        // exact leaf match first
-        for (const auto &f : folders) {
-            std::string low = lower(f.name);
-            size_t p = low.find_last_of("/.");
-            std::string leaf = (p == std::string::npos) ? low : low.substr(p + 1);
-            if (leaf == want) return f.name;
-        }
-        std::vector<std::string> keys;
-        if (want == "trash") keys = {"trash","deleted","deleted messages","bin"};
-        else if (want == "junk") keys = {"junk","spam","junk email","bulk mail"};
-        else keys = {want};
-        for (const std::string &k : keys) {
-            for (const auto &f : folders) {
-                std::string low = lower(f.name);
-                size_t p = low.find_last_of("/.");
-                std::string leaf = (p == std::string::npos) ? low : low.substr(p + 1);
-                if (leaf.find(k) != std::string::npos) return f.name;
-                if (low.find(k) != std::string::npos) return f.name;
-            }
-        }
-        return kind;
-    }
     static std::string link_domain(const std::string &url) {
         std::string s = url;
         // trim whitespace
@@ -629,15 +699,15 @@ public:
     }
     void update_move_buttons() {
         const std::string &cur_folder = current_acct().current_folder;
-        bool has_sel = m_email_list && m_email_list->selected_seq() != -1
+        bool has_sel = m_email_list && m_email_list->selected_uid() != 0
                        && !cur_folder.empty() && !current_acct().move_inflight;
         auto lower = [](std::string s) {
             for (char &c : s) c = (char)std::tolower((unsigned char)c);
             return s;
         };
         std::string curLow = lower(cur_folder);
-        std::string trashDest = cur_folder.empty() ? "" : resolve_dest_folder("Trash");
-        std::string junkDest  = cur_folder.empty() ? "" : resolve_dest_folder("Junk");
+        std::string trashDest = cur_folder.empty() ? "" : current_acct().dest_folder("Trash");
+        std::string junkDest  = cur_folder.empty() ? "" : current_acct().dest_folder("Junk");
         bool trashSame = !trashDest.empty() && lower(trashDest) == curLow;
         bool junkSame  = !junkDest.empty() && lower(junkDest) == curLow;
         bool in_trash_or_junk = trashSame || junkSame;
@@ -667,10 +737,10 @@ public:
         AccountSession &acct = current_acct();
         if (acct.move_inflight) return;
         if (!m_email_list) return;
-        int seq = m_email_list->selected_seq();
-        if (seq <= 0) { set_status("No message selected"); return; }
+        uint32_t uid = m_email_list->selected_uid();
+        if (!uid) { set_status("No message selected"); return; }
         if (acct.current_folder.empty()) return;
-        std::string dest = resolve_dest_folder(kind);
+        std::string dest = current_acct().dest_folder(kind);
         if (dest.empty()) { set_status("No " + kind + " folder found"); return; }
         auto lower = [](std::string s){ for(char &c:s) c=(char)std::tolower((unsigned char)c); return s; };
         if (lower(dest) == lower(acct.current_folder)) {
@@ -681,55 +751,42 @@ public:
         update_move_buttons();
         set_status("Moving to " + dest + "...");
         acct.worker->cancel_seen();
-        acct.worker->move_message(acct.current_folder, seq, dest);
+        acct.worker->move_message(acct.current_folder, uid, dest);
     }
-    void on_moved(const std::string &account_id, const std::string &folder, int seq,
+    void on_moved(const std::string &account_id, const std::string &folder, uint32_t uid,
                  const std::string &dest) {
         AccountSession *acct_ptr = account(account_id);
-        if (!acct_ptr) return;
+        if (!acct_ptr || !uid) return;
         AccountSession &acct = *acct_ptr;
         acct.move_inflight = false;
-        uint32_t moved_uid = uid_for_seq(acct, folder, seq);
-        if (is_unseen(acct, folder, seq, moved_uid)) {
+        if (is_unseen(acct, folder, uid)) {
             bump_folder_unseen(acct, account_id, folder, -1);
             bump_folder_unseen(acct, account_id, dest, +1);
         }
-        auto remove_from_vec = [&](std::vector<MailSummary> &vec){
-            if (moved_uid) {
-                vec.erase(std::remove_if(vec.begin(), vec.end(),
-                    [&](const MailSummary &s){ return s.uid == moved_uid; }), vec.end());
-            } else {
-                vec.erase(std::remove_if(vec.begin(), vec.end(),
-                    [&](const MailSummary &s){ return s.seq == seq; }), vec.end());
-            }
+        auto remove_uid = [&](std::vector<MailSummary> &vec) {
+            vec.erase(std::remove_if(vec.begin(), vec.end(),
+                [&](const MailSummary &s){ return s.uid == uid; }), vec.end());
         };
         const bool viewing_source =
-            account_id == m_current_account_id &&
+            account_id == current_id() &&
             folder == acct.wanted_folder && folder == acct.current_folder;
-        if (viewing_source) {
-            remove_from_vec(m_summaries);
-            // MOVE/EXPUNGE always renumbers IMAP sequence numbers, even
-            // when UIDs are stable. Skipping this left FETCH seq pointing
-            // past EXISTS ("NO No messages matched") for later rows.
-            if (seq > 0) for (auto &s : m_summaries) if (s.seq > seq) --s.seq;
-        }
+        /* One list: the cache entry is the on-screen vector when this
+         * folder is current, so remove it once. */
         auto it = acct.summary_cache.find(folder);
-        if (it != acct.summary_cache.end()) {
-            remove_from_vec(it->second);
-            if (seq > 0) for (auto &s : it->second) if (s.seq > seq) --s.seq;
-        }
-        drop_expunged_bodies(acct, folder, seq, moved_uid);
+        if (it != acct.summary_cache.end())
+            remove_uid(it->second);
+        drop_expunged_bodies(acct, folder, uid);
         acct.local_expunge_folder = folder;
-        acct.local_expunge_seq = seq;
+        acct.local_expunge_uid = uid;
         if (!viewing_source) {
             set_status("Moved to " + dest);
             update_move_buttons();
             redraw();
             return;
         }
-        if (m_rendered_seq == seq) {
+        if (m_rendered_uid == uid) {
             m_has_message = false;
-            m_rendered_seq = -1;
+            m_rendered_uid = 0;
             m_reply_btn->set_enabled(false);
             if (m_fwd_btn) m_fwd_btn->set_enabled(false);
             if (m_save_btn) m_save_btn->set_enabled(false);
@@ -738,18 +795,10 @@ public:
             parse_markdown(doc, "*Message moved to " + dest + "*", text_color(), 18.f);
             m_view->set_document(std::move(doc));
             m_view_scroll->set_scroll(0.0f);
-        } else if (seq > 0 && m_rendered_seq > seq) {
-            --m_rendered_seq;
         }
-        if (m_loading_seq == seq) m_loading_seq = -1;
-        else if (seq > 0 && m_loading_seq > seq) --m_loading_seq;
-        if (m_pending_seq == seq) { m_pending_seq = -1; m_preview_settle_at = 0; }
-        else if (seq > 0 && m_pending_seq > seq) { --m_pending_seq; --m_pending_email.seq; }
-        bool removed = false;
-        if (m_email_list) {
-            if (moved_uid) removed = m_email_list->remove_by_uid(moved_uid);
-            if (!removed) removed = m_email_list->remove_seq(seq);
-        }
+        if (m_loading_uid == uid) m_loading_uid = 0;
+        if (m_pending_uid == uid) { m_pending_uid = 0; m_preview_settle_at = 0; }
+        bool removed = m_email_list && m_email_list->remove(uid);
         if (removed && m_email_list) {
             const EmailData* nd = m_email_list->selected_data();
             if (nd) {
@@ -759,8 +808,8 @@ public:
         }
         if (m_email_list && m_email_list->emails().empty()) {
             m_has_message = false;
-            m_rendered_seq = -1;
-            m_pending_seq = -1;
+            m_rendered_uid = 0;
+            m_pending_uid = 0;
             Document doc;
             parse_markdown(doc, "*No messages*", text_color(), 18.f);
             m_view->set_document(std::move(doc));
@@ -795,14 +844,14 @@ public:
                                 const std::vector<MailSummary> &sums) {
             on_older(id, folder, sums);
         };
-        w.cb_body = [this, id](const std::string &folder, int seq,
+        w.cb_body = [this, id](const std::string &folder, uint32_t uid,
                                const MailMessage &msg) {
-            on_body(id, folder, seq, msg);
+            on_body(id, folder, uid, msg);
         };
-        w.cb_prefetched = [this, id](const std::string &folder, int seq,
+        w.cb_prefetched = [this, id](const std::string &folder, uint32_t uid,
                                      const MailMessage &msg,
                                      const std::string &preview) {
-            on_prefetched(id, folder, seq, msg, preview);
+            on_prefetched(id, folder, uid, msg, preview);
         };
         w.cb_error = [this, id](const std::string &title, const std::string &msg) {
             on_worker_error(id, title, msg);
@@ -828,7 +877,7 @@ public:
              * progress would otherwise make the bar flicker between
              * unrelated accounts. */
             AccountSession *acct = account(id);
-            if (!acct || id != m_current_account_id) return;
+            if (!acct || id != current_id()) return;
             if (total == 0) {
                 if (acct->older_inflight) {
                     acct->older_inflight = false;
@@ -866,19 +915,19 @@ public:
             }
             redraw();
         };
-        w.cb_seen = [this, id](const std::string &folder, int seq) {
-            on_seen(id, folder, seq);
+        w.cb_seen = [this, id](const std::string &folder, uint32_t uid) {
+            on_seen(id, folder, uid);
         };
-        w.cb_flag_seen = [this, id](const std::string &folder, int seq,
+        w.cb_flag_seen = [this, id](const std::string &folder, uint32_t uid,
                                     bool seen) {
-            on_remote_seen(id, folder, seq, seen);
+            on_remote_seen(id, folder, uid, seen);
         };
-        w.cb_expunged = [this, id](const std::string &folder, int seq) {
-            on_expunged(id, folder, seq);
+        w.cb_expunged = [this, id](const std::string &folder, uint32_t uid) {
+            on_expunged(id, folder, uid);
         };
-        w.cb_moved = [this, id](const std::string &folder, int seq,
+        w.cb_moved = [this, id](const std::string &folder, uint32_t uid,
                                 const std::string &dest) {
-            on_moved(id, folder, seq, dest);
+            on_moved(id, folder, uid, dest);
         };
     }
 
@@ -894,10 +943,7 @@ public:
     }
 
     AccountSession &add_account_session(const MailAccount &ma) {
-        auto session = std::make_unique<AccountSession>();
-        session->config = ma;
-        AccountSession &acct = *session;
-        m_accounts.push_back(std::move(session));
+        AccountSession &acct = m_accounts.add(ma);
         m_folder_view->add_account(ma.id(), ma.display_name());
         wire_worker(acct);
         acct.worker->set_config(ma);
@@ -916,10 +962,7 @@ public:
         acct->worker->stop();
         m_body_cache.erase_prefix(acct_prefix(*acct));
         m_folder_view->remove_account(id);
-        if (m_current_account_id == id) m_current_account_id.clear();
-        m_accounts.erase(std::remove_if(m_accounts.begin(), m_accounts.end(),
-            [&](const std::unique_ptr<AccountSession> &a) { return a->config.id() == id; }),
-            m_accounts.end());
+        m_accounts.remove(id);
     }
 
     MailApp() : Screen(Vector2i(1100, 700), "nmail") {
@@ -1140,22 +1183,14 @@ public:
             AccountSession &acct = current_acct();
             if (acct.current_folder.empty() || !m_email_list) return;
             static double last = 0; double now = glfwGetTime();
-            if (now - last < 0.15 && m_email_list->visible_seqs().size() < 30) return;
+            if (now - last < 0.15 && m_email_list->visible_uids().size() < 30) return;
             last = now;
-            const auto &rows = m_email_list->emails();
-            auto vr = m_email_list->visible_range();
-            int a = std::max(0, vr.first - 6);
-            int b = std::min((int)rows.size(), vr.second + 6);
-            std::vector<int> need_seq; need_seq.reserve(b-a);
-            std::vector<uint32_t> need_uid; need_uid.reserve(b-a);
-            for (int i=a;i<b;++i) {
-                const EmailData &d = rows[i];
-                if (body_has(acct.current_folder, d)) continue;
-                if (d.uid) need_uid.push_back(d.uid);
-                else if (d.seq) need_seq.push_back(d.seq);
-            }
-            if (!need_uid.empty()) acct.worker->ensure_visible_cached_uid(acct.current_folder, need_uid);
-            if (!need_seq.empty()) acct.worker->ensure_visible_cached(acct.current_folder, need_seq);
+            std::vector<uint32_t> need = m_email_list->visible_uids();
+            need.erase(std::remove_if(need.begin(), need.end(), [&](uint32_t u) {
+                return !u || body_has(acct.current_folder, u);
+            }), need.end());
+            if (!need.empty())
+                acct.worker->ensure_visible_cached(acct.current_folder, need);
         };
 
         // ---- Right: message area ----
@@ -1326,14 +1361,14 @@ public:
         // app-wide (nothing shown yet). Accounts that connect afterwards
         // just populate their own sidebar section without stealing focus
         // from whatever the user is already looking at.
-        if (highlight.empty() && m_current_account_id.empty()) {
+        if (highlight.empty() && current_id().empty()) {
             for (const auto &f : folders) {
                 std::string lower = f.name;
                 for (char &c : lower) c = (char)std::tolower((unsigned char)c);
                 if (lower == "inbox") {
                     highlight = f.name;
                     acct.wanted_folder = f.name;
-                    m_current_account_id = account_id;
+                    set_current_id(account_id);
                     set_folder_busy(true, "Opening " + f.name + "...");
                     m_folder_view->update_account(account_id, label, folders, highlight);
                     acct.worker->select_folder(f.name);
@@ -1350,7 +1385,7 @@ public:
         AccountSession *acct_ptr = account(account_id);
         if (!acct_ptr) return;
         AccountSession &acct = *acct_ptr;
-        const bool viewing_this_account = (account_id == m_current_account_id);
+        const bool viewing_this_account = (account_id == current_id());
         mail_dbg("[mail] UI on_summaries folder='%s' wanted='%s' n=%zu loading=%d\n",
                 folder.c_str(), acct.wanted_folder.c_str(), sums.size(),
                 (int)acct.folder_loading);
@@ -1360,7 +1395,7 @@ public:
              * cache for that folder unless the payload is empty and we
              * already have a better list.
              * For QRESYNC (Option A): MailWorker already patched
-             * m_summaries_cache[folder] by removing vanished UIDs before
+             * shown()_cache[folder] by removing vanished UIDs before
              * delivering cb_summaries — but MailApp's per-account
              * summary_cache is separate. So even stale deliveries honor the
              * patched list (vanished removed) when empty check would
@@ -1381,7 +1416,7 @@ public:
                     if (any) {
                         for (auto &s : itc->second) {
                             if (s.uid && new_uids.find(s.uid)==new_uids.end()) {
-                                m_body_cache.erase(body_key(acct, folder, s.uid, s.seq));
+                                m_body_cache.erase(body_key(acct, folder, s.uid));
                             }
                         }
                     }
@@ -1395,34 +1430,34 @@ public:
          * BUT: if MailWorker delivered a QRESYNC-patched list (vanished UIDs
          * removed), do not mask it — honor the smaller list and evict body
          * cache entries for the vanished UIDs (MailWorker already stripped
-         * m_summaries_cache[folder]; MailApp must follow through on the
+         * shown()_cache[folder]; MailApp must follow through on the
          * account's body_cache and selection).  When uid==0 (no
          * CONDSTORE/QRESYNC) this degenerates to the old behaviour.
-         * Only meaningful while this account is the one on screen -- m_summaries
+         * Only meaningful while this account is the one on screen -- shown()
          * belongs to whichever account is currently viewed. */
-        if (viewing_this_account && sums.empty() && !m_summaries.empty() &&
+        if (viewing_this_account && sums.empty() && !shown().empty() &&
             acct.current_folder == folder) {
             // Detect genuine vanished vs. empty-fetch: if the cache entry
             // was intentionally replaced with a smaller list by QRESYNC delta,
             // sums would not be what we would cache — but here sums IS empty so
             // it's not a QRESYNC delta delivery. Keep cached.
             set_folder_busy(false, folder + ": keeping " +
-                std::to_string(m_summaries.size()) +
+                std::to_string(shown().size()) +
                 " cached (server sent none)" + compressSuffix());
             update_compress_badge();
             return;
         }
         // Vanished handling (Option B): evict Body cache for UIDs that disappeared
         // between the previous list and this delivery.  MailWorker already patched
-        // m_summaries_cache[folder] by removing vanished UIDs before delivering
+        // shown()_cache[folder] by removing vanished UIDs before delivering
         // cb_summaries, but the account's body_cache still has stale UID keys. Also
-        // covers direct server expunge without QRESYNC (seq-shift) when m_summaries
+        // covers direct server expunge without QRESYNC (seq-shift) when shown()
         // (this account's visible list) is not empty.
-        if ((viewing_this_account && !m_summaries.empty()) ||
+        if ((viewing_this_account && !shown().empty()) ||
             acct.summary_cache.find(folder) != acct.summary_cache.end()) {
             const std::vector<MailSummary> *prev_ptr = nullptr;
-            if (viewing_this_account && !m_summaries.empty() && acct.current_folder == folder)
-                prev_ptr = &m_summaries;
+            if (viewing_this_account && !shown().empty() && acct.current_folder == folder)
+                prev_ptr = &shown();
             else {
                 auto itc = acct.summary_cache.find(folder);
                 if (itc != acct.summary_cache.end()) prev_ptr = &itc->second;
@@ -1442,7 +1477,7 @@ public:
                     else if (!s.uid || !any_new_uid) gone = (new_seqs.find(s.seq) == new_seqs.end());
                     else gone = (new_uids.find(s.uid) == new_uids.end());
                     if (gone) {
-                        body_evict_keys.push_back(body_key(acct, folder, s.uid, s.seq));
+                        body_evict_keys.push_back(body_key(acct, folder, s.uid));
                     }
                 }
                 for (auto &k : body_evict_keys) m_body_cache.erase(k);
@@ -1452,13 +1487,13 @@ public:
 
         if (!viewing_this_account) {
             // Background account: cache is up to date, but don't touch the
-            // shared UI (m_summaries/m_email_list/m_view) -- the user isn't
+            // shared UI (shown()/m_email_list/m_view) -- the user isn't
             // looking at this account right now.
             return;
         }
 
         acct.current_folder = folder;
-        m_summaries      = sums;
+        shown()      = sums;
         acct.older_inflight = false;
         acct.move_inflight = false;
         m_email_list->set_loading_more(false);
@@ -1472,7 +1507,7 @@ public:
         redraw();
         nanogui::async([this, account_id, folder]() {
             AccountSession *acct = account(account_id);
-            if (!acct || account_id != m_current_account_id ||
+            if (!acct || account_id != current_id() ||
                 folder != acct->wanted_folder || folder != acct->current_folder ||
                 !m_email_list)
                 return;
@@ -1481,16 +1516,13 @@ public:
             auto vr = m_email_list->visible_range();
             int a = std::max(0, vr.first - 6);
             int b = std::min((int)rows.size(), vr.second + 6);
-            std::vector<int> need_seq; need_seq.reserve(b-a);
             std::vector<uint32_t> need_uid; need_uid.reserve(b-a);
             for (int i=a;i<b;++i) {
                 const EmailData &d = rows[i];
-                if (body_has(*acct, folder, d.uid, d.seq)) continue;
-                if (d.uid) need_uid.push_back(d.uid);
-                else if (d.seq) need_seq.push_back(d.seq);
+                if (!d.uid || body_has(*acct, folder, d.uid)) continue;
+                need_uid.push_back(d.uid);
             }
-            if (!need_uid.empty()) acct->worker->ensure_visible_cached_uid(folder, need_uid);
-            if (!need_seq.empty()) acct->worker->ensure_visible_cached(folder, need_seq);
+            if (!need_uid.empty()) acct->worker->ensure_visible_cached(folder, need_uid);
         });
         glfwPostEmptyEvent();
     }
@@ -1506,9 +1538,9 @@ public:
         AccountSession *acct_ptr = account(account_id);
         if (!acct_ptr) return;
         AccountSession &acct = *acct_ptr;
-        const bool viewing_this_account = (account_id == m_current_account_id);
+        const bool viewing_this_account = (account_id == current_id());
         // Merge into the cache for *this* folder.  Never splice into
-        // m_summaries unless the user is still looking at this account and
+        // shown() unless the user is still looking at this account and
         // `folder` — otherwise an INBOX auto-check would pollute the Trash
         // list, or a background account's check would pollute whichever
         // account is actually on screen.
@@ -1543,8 +1575,7 @@ public:
             return;
         }
 
-        auto fresh = merge_fresh(m_summaries, sums);
-        acct.summary_cache[folder] = m_summaries;
+        auto fresh = merge_fresh(acct.messages(folder), sums);
         harvest(fresh);
         // Vanished on auto-refresh: MailWorker patched its per-folder cache but
         // MailApp may still hold stale body entries for vanished UIDs. When
@@ -1584,12 +1615,10 @@ public:
     void maybe_fetch_older() {
         AccountSession &acct = current_acct();
         if (acct.folder_loading || acct.older_inflight ||
-            acct.wanted_folder.empty() || m_summaries.empty())
+            acct.wanted_folder.empty() || shown().empty())
             return;
         if (acct.wanted_folder != acct.current_folder)
             return;
-        int oldest = m_summaries.back().seq;   // list is newest-first
-        if (oldest <= 1) return;               // already at the first message
         acct.older_inflight = true;
         m_email_list->set_loading_more(true);
         if (m_load_bar) m_load_bar->set_progress(0.f);
@@ -1605,20 +1634,16 @@ public:
         if (folder != acct.wanted_folder || folder != acct.current_folder) return;
         acct.older_inflight = false;
         if (m_load_bar && !acct.folder_loading) m_load_bar->stop();
-        if (account_id != m_current_account_id) return;   // not looking at this account
+        if (account_id != current_id()) return;   // not looking at this account
         m_email_list->set_loading_more(false);
         if (sums.empty()) return;
 
-        m_summaries.insert(m_summaries.end(), sums.begin(), sums.end());
-        acct.summary_cache[folder] = m_summaries;
+        shown().insert(shown().end(), sums.begin(), sums.end());
         harvest(sums);
-        // make newly paged-in older rows eligible for viewport prefetch too
         {
             std::vector<uint32_t> uids; uids.reserve(sums.size());
-            std::vector<int> seqs; seqs.reserve(sums.size());
-            for (auto &s : sums) { if (s.uid) uids.push_back(s.uid); else seqs.push_back(s.seq); }
-            if (!uids.empty()) acct.worker->ensure_visible_cached_uid(folder, uids);
-            if (!seqs.empty()) acct.worker->ensure_visible_cached(folder, seqs);
+            for (auto &s : sums) if (s.uid) uids.push_back(s.uid);
+            if (!uids.empty()) acct.worker->ensure_visible_cached(folder, uids);
         }
 
         /* Older pages join the same filter and sort as the rows already shown.
@@ -1626,119 +1651,73 @@ public:
          * now hide them because they were marked read. */
         apply_filter(true, /*keep_shown=*/true);
         set_status(folder + ": showing " +
-                              std::to_string(m_summaries.size()) +
+                              std::to_string(shown().size()) +
                               " messages" + compressSuffix());
         update_compress_badge();
         redraw();
     }
 
-    void on_body(const std::string &account_id, const std::string &folder, int seq,
+    void on_body(const std::string &account_id, const std::string &folder, uint32_t uid,
                 const MailMessage &msg) {
         AccountSession *acct_ptr = account(account_id);
-        if (!acct_ptr) return;
+        if (!acct_ptr || !uid) return;
         AccountSession &acct = *acct_ptr;
-        const bool viewing_this_account = (account_id == m_current_account_id);
+        const bool viewing_this_account = (account_id == current_id());
         harvest(msg);
         std::string key_folder = folder.empty() ? acct.wanted_folder : folder;
-        // Resolve UID before preview patch so VANISHED/QRESYNC seq-0 still matches.
-        uint32_t uid = uid_for_seq(acct, key_folder, seq);
-        // Always enrich the preview + cache, even if this wasn't the
-        // foreground fetch — background prefetches land here too when
-        // the user happens to be looking at that message.
         std::string preview = message_preview(msg);
         if (!preview.empty() && viewing_this_account && key_folder == acct.current_folder) {
-            for (auto &s : m_summaries) {
-                if ((uid && s.uid == uid) || (!uid && s.seq == seq)) {
+            for (auto &s : shown())
+                if (s.uid == uid) {
                     if (s.preview != preview) s.preview = preview;
                     break;
                 }
-            }
-            auto it = acct.summary_cache.find(key_folder);
-            if (it != acct.summary_cache.end())
-                for (auto &s : it->second)
-                    if ((uid && s.uid == uid) || (!uid && s.seq == seq)) {
-                        if (s.preview != preview) s.preview = preview;
-                        break;
-                    }
-            if (m_email_list) {
-                if (uid) m_email_list->update_preview_by_uid(uid, preview);
-                // dual-write: seq lookup still works for legacy path
-                m_email_list->update_preview(seq, preview);
-            }
+            if (m_email_list) m_email_list->update_preview(uid, preview);
         }
         if (!key_folder.empty())
-            body_put(acct, key_folder, uid, seq, msg);
+            body_put(acct, key_folder, uid, msg);
         if (viewing_this_account && m_load_bar && m_load_bar->visible() && !acct.folder_loading)
             m_load_bar->stop();
         if (!viewing_this_account) return;
         if (key_folder != acct.wanted_folder) return;
-        if (seq != m_loading_seq) return;   // not the foreground fetch
-        if (m_pending_seq >= 0 && seq != m_pending_seq)
-            return;   // still scrubbing a different message
-        m_loading_seq = -1;
+        if (uid != m_loading_uid) return;
+        if (m_pending_uid && uid != m_pending_uid) return;
+        m_loading_uid = 0;
         m_current_message = msg;
         m_has_message     = true;
-        m_rendered_seq    = seq;
-        m_expanded_addrs.clear();   // reveals belong to the message shown
-        arm_read_timer(seq);
+        m_rendered_uid    = uid;
+        m_expanded_addrs.clear();
+        arm_read_timer(uid);
         m_reply_btn->set_enabled(true);
         if (m_fwd_btn) m_fwd_btn->set_enabled(true);
         if (m_save_btn) m_save_btn->set_enabled(true);
         render_current();
     }
 
-    void on_prefetched(const std::string &account_id, const std::string &folder, int seq,
+    void on_prefetched(const std::string &account_id, const std::string &folder, uint32_t uid,
                        const MailMessage &msg, const std::string &preview) {
         AccountSession *acct_ptr = account(account_id);
-        if (!acct_ptr) return;
+        if (!acct_ptr || !uid) return;
         AccountSession &acct = *acct_ptr;
-        // Prefetch may arrive via UID path (seq==0 when seq stale); resolve uid via cache
-        uint32_t uid = 0;
-        if (seq) uid = uid_for_seq(acct, folder, seq);
-        // If seq==0 (UID prefetch), try to harvest uid from body cache already? msg has no uid.
-        // Body cache key will use uid if we can infer it; otherwise seq key.
-        // For UID prefetch path we already popped uid queue; deliver carries resolved seq.
-        // Still try uid resolution: if seq==0, scan summaries for any uid that matches body?
-        // Instead prefer: if uid==0 and seq==0 we cannot key by UID — still store by seq 0 is noop.
-        // Worker delivers seq_for_cb looked up in its summaries_cache, so seq should be non-zero
-        // when UID had a known seq. Keep fallback to uid lookup via m_summaries.
-        if (!uid && seq == 0) {
-            // Attempt to find the message's uid by matching that this prefetch was the only one
-            // outstanding — not reliable, just keep seq path. Body cache will store under seq.
-        }
-        body_put(acct, folder, uid, seq, msg);
-        // Also ensure UID key exists when uid known but delivered seq doesn't give it:
-        // if we resolved uid, dual-write already happened via body_put above.
+        body_put(acct, folder, uid, msg);
         harvest(msg);
-        if (account_id != m_current_account_id ||
+        if (account_id != current_id() ||
             folder != acct.wanted_folder || folder != acct.current_folder) return;
-        // only enrich empty/thin previews — never clobber a real one with
-        // a shorter derived snippet from a failed decode edge case
         bool enriched = false;
-        for (auto &s : m_summaries) {
-            bool match = uid ? (s.uid == uid) : (s.seq == seq);
-            if (!match) continue;
+        for (auto &s : shown()) {
+            if (s.uid != uid) continue;
             if (preview.size() > s.preview.size()) { s.preview = preview; enriched = true; }
             break;
         }
-        auto it = acct.summary_cache.find(folder);
-        if (it != acct.summary_cache.end())
-            for (auto &s : it->second) {
-                bool match = uid ? (s.uid == uid) : (s.seq == seq);
-                if (!match) continue;
-                if (preview.size() > s.preview.size()) { s.preview = preview; break; }
-            }
-        if (enriched && m_email_list && preview.size() > 0) {
-            if (uid) m_email_list->update_preview_by_uid(uid, preview);
-            m_email_list->update_preview(seq, preview);
-        }
+        if (enriched && m_email_list)
+            m_email_list->update_preview(uid, preview);
     }
 
     void on_worker_error(const std::string &account_id, const std::string &title,
                         const std::string &msg) {
         AccountSession *acct = account(account_id);
         if (acct) { acct->older_inflight = false; acct->move_inflight = false; }
-        if (account_id == m_current_account_id) {
+        if (account_id == current_id()) {
             if (m_email_list) m_email_list->set_loading_more(false);
             set_folder_busy(false, title);
             update_move_buttons();
@@ -1763,21 +1742,21 @@ public:
         // The tooltip carries the full folder name (caption is the leaf).
         std::string folder = item->tooltip();
         if (folder.empty()) folder = item->caption();
-        const bool switching_account = (account_id != m_current_account_id);
+        const bool switching_account = (account_id != current_id());
         /* Already opening this folder — ignore the duplicate click. */
         if (!switching_account && folder == acct.wanted_folder && acct.folder_loading) return;
         /* Already showing this folder with a populated list. */
         if (!switching_account && folder == acct.wanted_folder && folder == acct.current_folder &&
-            !acct.folder_loading && !m_summaries.empty())
+            !acct.folder_loading && !shown().empty())
             return;
         /* A mark-read timer armed in the account/folder being left must not
          * fire here -- the message is no longer on screen (and seqs may
          * shift). Cancel on the outgoing account before repointing
-         * m_current_account_id below. */
+         * current_id() below. */
         current_acct().worker->cancel_seen();
-        m_loading_seq  = -1;
-        m_pending_seq  = -1;
-        m_rendered_seq = -1;
+        m_loading_uid  = 0;
+        m_pending_uid  = 0;
+        m_rendered_uid = 0;
         m_has_message  = false;
         acct.older_inflight = false;
         acct.move_inflight = false;
@@ -1788,7 +1767,7 @@ public:
         /* Pin the wanted account+folder *before* any async IMAP callback can
          * land, so a late INBOX summary cannot hijack the Trash view -- or a
          * different account's delivery cannot hijack this one. */
-        m_current_account_id = account_id;
+        set_current_id(account_id);
         acct.wanted_folder  = folder;
         acct.current_folder = folder;
 
@@ -1797,13 +1776,13 @@ public:
          * that one-frame empty list was the "flash then clear". */
         auto cached = acct.summary_cache.find(folder);
         if (cached != acct.summary_cache.end()) {
-            m_summaries = cached->second;
+            shown() = cached->second;
             apply_filter();
             set_folder_busy(true, folder + ": " +
-                std::to_string(m_summaries.size()) +
+                std::to_string(shown().size()) +
                 " cached, fetching latest..." + compressSuffix());
         } else {
-            m_summaries.clear();
+            shown().clear();
             m_email_list->set_emails({});
             Document doc;
             parse_markdown(doc, "*Loading " + folder + "...*", text_color(), 18.0f);
@@ -1820,33 +1799,26 @@ public:
         update_move_buttons();
         /* List highlight already moved.  Do not parse HTML or FETCH on
          * every GLFW_REPEAT — wait until this seq sits still. */
-        if (d.seq == m_pending_seq)
+        if (d.uid == m_pending_uid)
             return;
-        if (d.seq == m_rendered_seq && m_pending_seq < 0)
+        if (d.uid == m_rendered_uid && !m_pending_uid)
             return;
         AccountSession &acct = current_acct();
-        // speculatively prioritize neighbors of the selection — the user is
-        // walking the list sequentially, so ±6 around idx are most likely next.
         if (m_email_list && idx >= 0) {
-            std::vector<int> around_seq; around_seq.reserve(13);
             std::vector<uint32_t> around_uid; around_uid.reserve(13);
             auto &rows = m_email_list->emails();
             for (int i = std::max(0, idx-6); i <= std::min((int)rows.size()-1, idx+6); ++i) {
                 const EmailData &r = rows[i];
-                if (r.seq == d.seq && r.uid == d.uid) continue;
-                if (body_has(acct, acct.current_folder, r.uid, r.seq)) continue;
-                if (r.uid) around_uid.push_back(r.uid);
-                else if (r.seq) around_seq.push_back(r.seq);
+                if (!r.uid || r.uid == d.uid) continue;
+                if (body_has(acct, acct.current_folder, r.uid)) continue;
+                around_uid.push_back(r.uid);
             }
-            if (!around_uid.empty()) acct.worker->ensure_visible_cached_uid(acct.current_folder, around_uid);
-            if (!around_seq.empty()) acct.worker->ensure_visible_cached(acct.current_folder, around_seq);
+            if (!around_uid.empty())
+                acct.worker->ensure_visible_cached(acct.current_folder, around_uid);
         }
-        m_loading_seq = -1;   // drop in-flight body for a previous seq
-        /* Cancel now rather than waiting for the preview to settle, so a
-         * near-expired timer on the previous message cannot still fire. */
-        if (d.seq != m_rendered_seq) acct.worker->cancel_seen();
-        //const bool switched = (d.seq != m_rendered_seq);
-        m_pending_seq       = d.seq;
+        m_loading_uid = 0;
+        if (d.uid != m_rendered_uid) acct.worker->cancel_seen();
+        m_pending_uid       = d.uid;
         m_pending_email     = d;
         m_preview_settle_at = glfwGetTime() + kPreviewSettleSec;
         //if (switched)
@@ -1885,37 +1857,24 @@ public:
 
     /* Start the read clock for the message now on screen.  Already-read mail
      * needs no STORE, and a message with no folder cannot be addressed. */
-    void arm_read_timer(int seq) {
+    void arm_read_timer(uint32_t uid) {
         AccountSession &acct = current_acct();
-        if (seq <= 0 || acct.current_folder.empty()) { acct.worker->cancel_seen(); return; }
-        uint32_t uid = 0;
-        uint64_t modseq = 0;
-        for (const MailSummary &s : m_summaries) if (s.seq == seq) {
+        if (!uid || acct.current_folder.empty()) { acct.worker->cancel_seen(); return; }
+        for (const MailSummary &s : shown()) if (s.uid == uid) {
             if (s.seen) { acct.worker->cancel_seen(); return; }
-            uid = s.uid;
-            modseq = s.modseq;
-            break;
+            acct.worker->schedule_seen(acct.current_folder, uid, s.modseq, kMarkReadSec);
+            return;
         }
-        if (uid != 0)
-            acct.worker->schedule_seen_uid(acct.current_folder, seq, uid, modseq, kMarkReadSec);
-        else if (modseq != 0)
-            acct.worker->schedule_seen(acct.current_folder, seq, modseq, kMarkReadSec);
-        else
-            acct.worker->schedule_seen(acct.current_folder, seq, kMarkReadSec);
+        acct.worker->cancel_seen();
     }
 
     bool is_unseen(const AccountSession &acct, const std::string &folder,
-                   int seq, uint32_t uid) const {
-        auto match = [&](const MailSummary &s) {
-            return uid ? s.uid == uid : s.seq == seq;
-        };
+                   uint32_t uid) const {
+        if (!uid) return false;
         auto it = acct.summary_cache.find(folder);
-        if (it != acct.summary_cache.end())
-            for (const MailSummary &s : it->second)
-                if (match(s)) return !s.seen;
-        if (folder == acct.current_folder)
-            for (const MailSummary &s : m_summaries)
-                if (match(s)) return !s.seen;
+        if (it == acct.summary_cache.end()) return false;
+        for (const MailSummary &s : it->second)
+            if (s.uid == uid) return !s.seen;
         return false;
     }
 
@@ -1957,32 +1916,19 @@ public:
 
     /* The server confirmed the flag: mirror it locally so the row stops
      * rendering as unread. */
-    void on_seen(const std::string &account_id, const std::string &folder, int seq) {
+    void on_seen(const std::string &account_id, const std::string &folder, uint32_t uid) {
         AccountSession *acct_ptr = account(account_id);
-        if (!acct_ptr) return;
+        if (!acct_ptr || !uid) return;
         AccountSession &acct = *acct_ptr;
         bool already = false;
-        auto mark = [seq, &already](std::vector<MailSummary> &v) {
-            for (MailSummary &s : v)
-                if (s.seq == seq) { already = already || s.seen; s.seen = true; break; }
-        };
         auto it = acct.summary_cache.find(folder);
-        if (it != acct.summary_cache.end()) mark(it->second);
-        const bool viewing = account_id == m_current_account_id &&
-            folder == acct.wanted_folder && folder == acct.current_folder;
-        if (viewing) mark(m_summaries);
+        if (it != acct.summary_cache.end())
+            for (MailSummary &s : it->second)
+                if (s.uid == uid) { already = s.seen; s.seen = true; break; }
         if (!already) bump_folder_unseen(acct, account_id, folder, -1);
-        if (!viewing) { redraw(); return; }
-        /* Unread filter keeps the row. Rebuilding here would hide the
-         * message the moment it is marked read. Delete and junk still
-         * remove it through on_moved. */
-        // Try UID first (QRESYNC path where seq may be 0), then fallback to seq
-        bool done = false;
-        if (m_email_list) {
-            uint32_t uid = uid_for_seq(acct, folder, seq);
-            if (uid) done = m_email_list->set_seen_by_uid(uid, true);
-            if (!done) done = m_email_list->set_seen(seq, true);
-        }
+        const bool viewing = account_id == current_id() &&
+            folder == acct.wanted_folder && folder == acct.current_folder;
+        if (viewing && m_email_list) m_email_list->set_seen(uid, true);
         redraw();
     }
 
@@ -1990,99 +1936,61 @@ public:
      * \Seen flag.  Same bookkeeping as on_seen, but honors the pushed state
      * in both directions (read AND unread). */
     void on_remote_seen(const std::string &account_id, const std::string &folder,
-                        int seq, bool seen) {
+                        uint32_t uid, bool seen) {
         AccountSession *acct_ptr = account(account_id);
-        if (!acct_ptr) return;
+        if (!acct_ptr || !uid) return;
         AccountSession &acct = *acct_ptr;
         bool found = false, was = false;
-        auto mark = [seq, seen, &found, &was](std::vector<MailSummary> &v) {
-            for (MailSummary &s : v)
-                if (s.seq == seq) {
-                    if (!found) { found = true; was = s.seen; }
-                    s.seen = seen;
-                    break;
-                }
-        };
         auto it = acct.summary_cache.find(folder);
-        if (it != acct.summary_cache.end()) mark(it->second);
-        const bool viewing = account_id == m_current_account_id &&
-            folder == acct.wanted_folder && folder == acct.current_folder;
-        if (viewing) mark(m_summaries);
+        if (it != acct.summary_cache.end())
+            for (MailSummary &s : it->second)
+                if (s.uid == uid) { found = true; was = s.seen; s.seen = seen; break; }
         if (found && was != seen)
             bump_folder_unseen(acct, account_id, folder, seen ? -1 : 1);
-        if (!viewing) { redraw(); return; }
-        /* Same as on_seen: don't drop the row out of an unread filter. */
-        bool done = false;
-        if (m_email_list) {
-            uint32_t uid = uid_for_seq(acct, folder, seq);
-            if (uid) done = m_email_list->set_seen_by_uid(uid, seen);
-            if (!done) done = m_email_list->set_seen(seq, seen);
-        }
+        const bool viewing = account_id == current_id() &&
+            folder == acct.wanted_folder && folder == acct.current_folder;
+        if (viewing && m_email_list) m_email_list->set_seen(uid, seen);
         redraw();
     }
 
     /* IDLE push: a message was expunged from the folder by another session.
      * Mirrors on_moved's removal path (uid-aware, seq renumber fallback). */
-    void on_expunged(const std::string &account_id, const std::string &folder, int seq) {
+    void on_expunged(const std::string &account_id, const std::string &folder, uint32_t uid) {
         AccountSession *acct_ptr = account(account_id);
-        if (!acct_ptr) return;
+        if (!acct_ptr || !uid) return;
         AccountSession &acct = *acct_ptr;
-        /* EXPUNGE echo of our own MOVE: on_moved already removed the row
-         * and decremented higher seqs.  After that shift, `seq` now names
-         * a different message — applying this event would delete it too. */
-        if (folder == acct.local_expunge_folder && seq == acct.local_expunge_seq) {
+        if (folder == acct.local_expunge_folder && uid == acct.local_expunge_uid) {
             acct.local_expunge_folder.clear();
-            acct.local_expunge_seq = 0;
+            acct.local_expunge_uid = 0;
             redraw();
             return;
         }
-        uint32_t gone_uid = uid_for_seq(acct, folder, seq);
-        if (is_unseen(acct, folder, seq, gone_uid))
+        if (is_unseen(acct, folder, uid))
             bump_folder_unseen(acct, account_id, folder, -1);
-        /* A duplicate push (e.g. the EXPUNGE echo of our own MOVE arriving
-         * after on_moved already cleaned up) must not renumber a second
-         * time -- only adjust seqs when this event actually removed a row. */
         bool removed_any = false;
-        auto remove_from_vec = [&](std::vector<MailSummary> &vec){
-            size_t before = vec.size();
-            if (gone_uid) {
-                vec.erase(std::remove_if(vec.begin(), vec.end(),
-                    [&](const MailSummary &s){ return s.uid == gone_uid; }), vec.end());
-            } else {
-                vec.erase(std::remove_if(vec.begin(), vec.end(),
-                    [&](const MailSummary &s){ return s.seq == seq; }), vec.end());
-            }
-            if (vec.size() != before) {
-                removed_any = true;
-                if (seq > 0) for (auto &s : vec) if (s.seq > seq) --s.seq;
-            }
-        };
         auto it = acct.summary_cache.find(folder);
-        if (it != acct.summary_cache.end())
-            remove_from_vec(it->second);
-        drop_expunged_bodies(acct, folder, seq, gone_uid);
+        if (it != acct.summary_cache.end()) {
+            size_t before = it->second.size();
+            it->second.erase(std::remove_if(it->second.begin(), it->second.end(),
+                [&](const MailSummary &s){ return s.uid == uid; }), it->second.end());
+            removed_any = it->second.size() != before;
+        }
+        drop_expunged_bodies(acct, folder, uid);
         const bool viewing =
-            account_id == m_current_account_id &&
+            account_id == current_id() &&
             folder == acct.wanted_folder && folder == acct.current_folder;
         if (!viewing) {
             redraw();
             return;
         }
-        remove_from_vec(m_summaries);
-        bool removed = false;
-        if (m_email_list) {
-            if (gone_uid) removed = m_email_list->remove_by_uid(gone_uid);
-            if (!removed) removed = m_email_list->remove_seq(seq);
-        }
+        bool removed = m_email_list && m_email_list->remove(uid);
         if (!removed_any && !removed) {
-            /* Stale/duplicate push: nothing was removed anywhere, so none of
-             * the seq-dependent state may be adjusted. */
             redraw();
             return;
         }
-        if (m_rendered_seq == seq) {
+        if (m_rendered_uid == uid) {
             m_has_message = false;
-            m_rendered_seq = -1;
+            m_rendered_uid = 0;
             m_reply_btn->set_enabled(false);
             if (m_fwd_btn) m_fwd_btn->set_enabled(false);
             if (m_save_btn) m_save_btn->set_enabled(false);
@@ -2090,13 +1998,9 @@ public:
             parse_markdown(doc, "*Message deleted*", text_color(), 18.f);
             m_view->set_document(std::move(doc));
             m_view_scroll->set_scroll(0.0f);
-        } else if (seq > 0 && m_rendered_seq > seq) {
-            --m_rendered_seq;
         }
-        if (m_loading_seq == seq) m_loading_seq = -1;
-        else if (seq > 0 && m_loading_seq > seq) --m_loading_seq;
-        if (m_pending_seq == seq) { m_pending_seq = -1; m_preview_settle_at = 0; }
-        else if (seq > 0 && m_pending_seq > seq) { --m_pending_seq; --m_pending_email.seq; }
+        if (m_loading_uid == uid) m_loading_uid = 0;
+        if (m_pending_uid == uid) { m_pending_uid = 0; m_preview_settle_at = 0; }
         if (removed && m_email_list) {
             const EmailData* nd = m_email_list->selected_data();
             if (nd) {
@@ -2106,8 +2010,8 @@ public:
         }
         if (m_email_list && m_email_list->emails().empty()) {
             m_has_message = false;
-            m_rendered_seq = -1;
-            m_pending_seq = -1;
+            m_rendered_uid = 0;
+            m_pending_uid = 0;
             Document doc;
             parse_markdown(doc, "*No messages*", text_color(), 18.f);
             m_view->set_document(std::move(doc));
@@ -2117,34 +2021,34 @@ public:
     }
 
     void commit_pending_preview() {
-        if (m_pending_seq < 0)
+        if (!m_pending_uid)
             return;
         AccountSession &acct = current_acct();
         const EmailData d = m_pending_email;
-        const int seq = m_pending_seq;
-        m_pending_seq = -1;
+        const uint32_t uid = m_pending_uid;
+        m_pending_uid = 0;
         MailMessage cached;
-        if (body_get(acct, acct.current_folder, d.uid, d.seq, cached)) {
-            m_loading_seq     = -1;
+        if (body_get(acct, acct.current_folder, uid, cached)) {
+            m_loading_uid     = 0;
             m_current_message = std::move(cached);
             m_has_message     = true;
-            m_rendered_seq    = seq;
+            m_rendered_uid    = uid;
             m_expanded_addrs.clear();
             m_reply_btn->set_enabled(true);
             if (m_fwd_btn) m_fwd_btn->set_enabled(true);
             if (m_save_btn) m_save_btn->set_enabled(true);
             render_current();
-            arm_read_timer(seq);
+            arm_read_timer(uid);
             return;
         }
-        m_loading_seq = seq;
+        m_loading_uid = uid;
         show_preview_stub_with_loading(d);
-        acct.worker->fetch_body(acct.current_folder, seq, d.uid);
+        acct.worker->fetch_body(acct.current_folder, uid);
         redraw();
     }
 
     void pump_preview() {
-        if (m_pending_seq < 0)
+        if (!m_pending_uid)
             return;
         if (glfwGetTime() < m_preview_settle_at) {
             /* Need another frame after the settle deadline; WaitEvents
@@ -2194,7 +2098,6 @@ public:
 
     EmailData summary_row(const MailSummary &s) const {
         EmailData d;
-        d.seq            = s.seq;
         d.uid            = s.uid;
         d.modseq         = s.modseq;
         d.sender         = s.from;
@@ -2233,7 +2136,7 @@ public:
                 }
                 if (a.uid && b.uid && a.uid != b.uid)
                     return desc ? a.uid > b.uid : a.uid < b.uid;
-                return desc ? a.seq > b.seq : a.seq < b.seq;
+                return false;
             });
     }
 
@@ -2242,25 +2145,21 @@ public:
      * passes; folder changes pass false and jump back to the top.
      * keep_shown: while the unread filter is on, a message already in the
      * list stays after it is marked read. Rows removed by delete or junk
-     * are gone from m_summaries, so they are not brought back. */
+     * are gone from shown(), so they are not brought back. */
     void apply_filter(bool keep_place = false, bool keep_shown = false) {
         std::string needle = m_filter;
         for (char &c : needle) c = (char)std::tolower((unsigned char)c);
 
         std::unordered_set<uint32_t> shown_uid;
-        std::unordered_set<int> shown_seq;
         if (keep_shown && m_filter_unread && m_email_list) {
-            for (const EmailData &e : m_email_list->emails()) {
+            for (const EmailData &e : m_email_list->emails())
                 if (e.uid) shown_uid.insert(e.uid);
-                if (e.seq) shown_seq.insert(e.seq);
-            }
         }
 
         std::vector<EmailData> rows;
-        rows.reserve(m_summaries.size());
-        for (const MailSummary &s : m_summaries) {
-            bool stay = (s.uid && shown_uid.count(s.uid)) ||
-                        (!s.uid && s.seq && shown_seq.count(s.seq));
+        rows.reserve(shown().size());
+        for (const MailSummary &s : shown()) {
+            bool stay = s.uid && shown_uid.count(s.uid);
             if (summary_visible(s, needle) || stay)
                 rows.push_back(summary_row(s));
         }
@@ -3149,316 +3048,50 @@ public:
     }
 
     /* ---- Preferences window ---- */
-    /* Accounts on the left, the selected account's settings on the right --
-     * a master/detail dialog rather than one flat form, since any number of
-     * accounts can be configured (every one connects simultaneously; see
-     * AccountSession / add_account_session). */
     void show_preferences() {
-        Window *win = new Window(this, "Accounts", false);
-        win->set_id("nmail-prefs");
-        win->set_close_callback([this, win] { close_dialog(win); });
-        win->set_traffic_lights_mask(0x1);   // close (red) button only
-        win->set_layout(new BoxLayout(Orientation::Vertical, Alignment::Fill,
-                                      12, 10));
-        win->set_min_width(680);
-
-        // Working copy: only committed to m_config / live sessions on Save.
-        auto accounts = std::make_shared<std::vector<MailAccount>>(m_config.accounts);
-        auto selected = std::make_shared<int>(accounts->empty() ? -1 : 0);
-
-        Split *split = new Split(win, Split::Orientation::Horizontal);
-        // Split::set_min_size floors EACH pane, not the widget.
-        split->set_min_size(100);
-        split->set_max_size({2048, 2048});
-        split->set_keep_size_on_resize(true);
-        split->set_fixed_first_size(200);
-        split->set_min_width(200 + 6 + 380);
-
-        // ---- Left: account list ----
-        Widget *left = new Widget(split);
-        left->set_layout(new BoxLayout(Orientation::Vertical, Alignment::Fill, 0, 6));
-        left->set_min_width(170);
-
-        Widget *list = new Widget(left);
-        list->set_layout(new BoxLayout(Orientation::Vertical, Alignment::Fill, 0, 2));
-
-        Button *add_btn = new Button(left, "Add Account", FA_PLUS);
-
-        // ---- Right: settings form for the selected account ----
-        Widget *right = new Widget(split);
-        right->set_layout(new BoxLayout(Orientation::Vertical, Alignment::Fill, 0, 10));
-        right->set_min_width(380);
-
-        Widget *form = new Widget(right);
-        auto *form_layout = new GridLayout(Orientation::Horizontal, 2,
-                                           Alignment::Middle, 0, 8);
-        form_layout->set_col_alignment(
-            std::vector<Alignment>{Alignment::Middle, Alignment::Fill});
-        form->set_layout(form_layout);
-
-        new Label(form, "Name:", "sans-bold");
-        TextBox *name = new TextBox(form);
-        name->set_placeholder("e.g. iCloud, Work Gmail");
-        name->set_editable(true);
-        name->set_alignment(TextBox::Alignment::Right);
-
-        new Label(form, "IMAP server:", "sans-bold");
-        TextBox *host = new TextBox(form);
-        host->set_placeholder("imap.example.com");
-        host->set_editable(true);
-        host->set_alignment(TextBox::Alignment::Right);
-
-        new Label(form, "Port:", "sans-bold");
-        IntBox<int> *port = new IntBox<int>(form);
-        port->set_editable(true);
-
-        new Label(form, "Username:", "sans-bold");
-        TextBox *user = new TextBox(form);
-        user->set_placeholder("you@example.com");
-        user->set_editable(true);
-        user->set_alignment(TextBox::Alignment::Right);
-
-        new Label(form, "Password:", "sans-bold");
-        TextBox *pass = new TextBox(form);
-        pass->set_editable(true);
-        pass->set_alignment(TextBox::Alignment::Right);
-
-        new Label(form, "SMTP server:", "sans-bold");
-        TextBox *smtp_host = new TextBox(form);
-        smtp_host->set_placeholder("(same as IMAP server)");
-        smtp_host->set_editable(true);
-        smtp_host->set_alignment(TextBox::Alignment::Right);
-
-        new Label(form, "SMTP port:", "sans-bold");
-        IntBox<int> *smtp_port = new IntBox<int>(form);
-        smtp_port->set_editable(true);
-
-        Widget *remove_row = new Widget(right);
-        remove_row->set_layout(new BoxLayout(Orientation::Horizontal, Alignment::Middle, 0, 8));
-        Button *remove_btn = new Button(remove_row, "Remove Account", FA_TRASH);
-
-        /* Flush the visible form into the model for whichever account is
-         * currently selected -- called right before switching rows and
-         * right before Save, so in-progress edits are never lost. */
-        auto commit_current = [=]() {
-            if (*selected < 0 || *selected >= (int)accounts->size()) return;
-            MailAccount &a = (*accounts)[*selected];
-            a.name       = name->value();
-            a.host       = host->value();
-            a.port       = port->value();
-            a.username   = user->value();
-            a.password   = pass->value();
-            a.smtp_host  = smtp_host->value();
-            a.smtp_port  = smtp_port->value();
-        };
-
-        /* Reflect account `idx` (or blank/disabled fields when idx < 0) in
-         * the form. */
-        auto populate_fields = [=](int idx) {
-            bool have = idx >= 0 && idx < (int)accounts->size();
-            MailAccount blank;
-            const MailAccount &a = have ? (*accounts)[idx] : blank;
-            name->set_value(a.name);
-            host->set_value(a.host);
-            port->set_value(a.port);
-            user->set_value(a.username);
-            pass->set_value(a.password);
-            smtp_host->set_value(a.smtp_host);
-            smtp_port->set_value(a.smtp_port);
-            for (Widget *w : {(Widget*)name, (Widget*)host, (Widget*)port,
-                             (Widget*)user, (Widget*)pass, (Widget*)smtp_host,
-                             (Widget*)smtp_port})
-                w->set_enabled(have);
-            remove_btn->set_enabled(have);
-        };
-
-        /* Rebuild the row buttons from `*accounts` -- only needed when
-         * accounts are added/removed, not on an ordinary selection click. */
-        std::function<void()> rebuild_list = [=]() {
-            while (!list->children().empty())
-                list->remove_child_at(0);
-            for (int i = 0; i < (int)accounts->size(); ++i) {
-                const MailAccount &a = (*accounts)[i];
-                Button *row = new Button(list, a.display_name(), FA_USER);
-                row->set_flags(Button::RadioButton);
-                row->set_pushed(i == *selected);
-                row->set_callback([=]() {
-                    commit_current();
-                    *selected = i;
-                    populate_fields(i);
-                });
-            }
-            if (screen()) screen()->perform_layout();
-        };
-        rebuild_list();
-        populate_fields(*selected);
-
-        add_btn->set_callback([=]() {
-            commit_current();
-            MailAccount a;
-            a.name = "New Account";
-            accounts->push_back(a);
-            *selected = (int)accounts->size() - 1;
-            rebuild_list();
-            populate_fields(*selected);
-        });
-
-        remove_btn->set_callback([=]() {
-            if (*selected < 0 || *selected >= (int)accounts->size()) return;
-            accounts->erase(accounts->begin() + *selected);
-            if (*selected >= (int)accounts->size()) *selected = (int)accounts->size() - 1;
-            rebuild_list();
-            populate_fields(*selected);
-        });
-
-        // ---- General (shared, app-wide) settings ----
-        Widget *general = new Widget(win);
-        auto *general_layout = new GridLayout(Orientation::Horizontal, 2,
-                                              Alignment::Middle, 0, 8);
-        general_layout->set_col_alignment(
-            std::vector<Alignment>{Alignment::Middle, Alignment::Fill});
-        general->set_layout(general_layout);
-
-        new Label(general, "Check for mail:", "sans-bold");
-        Dropdown *check_interval = new Dropdown(general, Dropdown::ComboBox,
-                                                "Check for mail");
-        static const int kIntervalMinutes[] = {5, 15, 30, 60};
-        check_interval->add_item({"Every 5 minutes", "check_5"}, FA_CLOCK,
-                                 [] {}, {{0, 0}}, true);
-        check_interval->add_item({"Every 15 minutes", "check_15"}, FA_CLOCK,
-                                 [] {}, {{0, 0}}, true);
-        check_interval->add_item({"Every 30 minutes", "check_30"}, FA_CLOCK,
-                                 [] {}, {{0, 0}}, true);
-        check_interval->add_item({"Hourly", "check_60"}, FA_CLOCK,
-                                 [] {}, {{0, 0}}, true);
-        {
-            int idx = 1;   // default: 15 minutes
-            for (int i = 0; i < 4; ++i)
-                if (kIntervalMinutes[i] == m_config.check_interval_min) idx = i;
-            check_interval->set_selected_index(idx);
-        }
-
-        new Label(general, "Message cache:", "sans-bold");
-        Dropdown *cache_limit = new Dropdown(general, Dropdown::ComboBox,
-                                             "Message cache");
-        static const int kCacheMb[] = {256, 512, 1024, 2048};
-        cache_limit->add_item({"256 MB", "cache_256"}, FA_DATABASE,
-                              [] {}, {{0, 0}}, true);
-        cache_limit->add_item({"512 MB", "cache_512"}, FA_DATABASE,
-                              [] {}, {{0, 0}}, true);
-        cache_limit->add_item({"1 GB", "cache_1024"}, FA_DATABASE,
-                              [] {}, {{0, 0}}, true);
-        cache_limit->add_item({"2 GB", "cache_2048"}, FA_DATABASE,
-                              [] {}, {{0, 0}}, true);
-        cache_limit->set_tooltip(
-            "Memory used to keep messages you have opened, shared by all "
-            "accounts. A message larger than this is not downloaded.");
-        {
-            int idx = 1;
-            for (int i = 0; i < 4; ++i)
-                if (kCacheMb[i] == m_config.cache_limit_mb) idx = i;
-            cache_limit->set_selected_index(idx);
-        }
-
-        new Label(general, "Contacts:", "sans-bold");
-        CheckBox *save_contacts = new CheckBox(general, "Remember on disk");
-        save_contacts->set_checked(m_config.save_contacts);
-        save_contacts->set_tooltip(
-            "Keep addresses harvested from your mail in " +
-            contacts_path() + " so completions survive a restart. "
-            "When off they are kept only for this session.");
-
-        Widget *buttons = new Widget(win);
-        buttons->set_layout(new BoxLayout(Orientation::Horizontal,
-                                          Alignment::Middle, 0, 8));
-
-        Button *save = new Button(buttons, "Save && Connect", FA_CHECK);
-        save->set_callback([this, win, accounts, commit_current, check_interval,
-                           cache_limit, save_contacts]() {
-            commit_current();
-            m_config.accounts = *accounts;
-            int idx = check_interval->selected_index();
-            m_config.check_interval_min =
-                kIntervalMinutes[(idx >= 0 && idx < 4) ? idx : 1];
-            int cidx = cache_limit->selected_index();
-            m_config.cache_limit_mb = kCacheMb[(cidx >= 0 && cidx < 4) ? cidx : 1];
-            m_config.save_contacts = save_contacts->checked();
-            if (!save_config(m_config)) {
-                auto *dlg = new MessageDialog(this, MessageDialog::Type::Warning,
-                    "Save failed",
-                    "Could not write " + config_path(), "OK", "", false);
-                dlg->center();
-                return;
-            }
-            m_config_loaded = true;
-            /* Write straight away so enabling the option survives a crash. */
-            if (m_config.save_contacts && m_contacts.dirty())
-                m_contacts.save(contacts_path());
-            if (PopupMenu *pop = check_interval->popup())
-                pop->set_visible(false);
-            if (PopupMenu *pop = cache_limit->popup())
-                pop->set_visible(false);
-            for (auto &sess : m_accounts)
-                apply_cache_limit(*sess);
-
-            /* Reconcile live sessions against the edited account list:
-             * accounts identified by MailAccount::id() (username@host). An
-             * edit to host/username changes the id, which this treats as
-             * "old account removed, new one added" -- a clean reconnect
-             * that only costs that one account's QRESYNC/body-cache warmth,
-             * same tradeoff the id() doc comment already calls out. */
-            std::vector<std::string> new_ids;
-            for (const MailAccount &ma : m_config.accounts)
-                if (!ma.host.empty()) new_ids.push_back(ma.id());
-
-            std::vector<std::string> to_remove;
-            for (auto &sess : m_accounts)
-                if (std::find(new_ids.begin(), new_ids.end(), sess->config.id()) == new_ids.end())
-                    to_remove.push_back(sess->config.id());
-            for (const std::string &id : to_remove) remove_account_session(id);
-
-            for (const MailAccount &ma : m_config.accounts) {
-                if (ma.host.empty()) continue;   // still being filled in
-                AccountSession *acct = account(ma.id());
-                if (acct) {
-                    acct->config = ma;
-                    m_folder_view->update_account(ma.id(), ma.display_name(),
-                                                  acct->folders, acct->current_folder);
-                    acct->worker->set_config(ma);
-                    acct->worker->set_check_interval_min(m_config.check_interval_min);
-                    acct->worker->connect();
-                } else {
-                    add_account_session(ma);
-                }
-            }
-            /* Destroy the prefs window after this callback returns so we
-               do not free the Save button while it is still running. */
-            close_dialog(win);
-            glfwPostEmptyEvent();
-        });
-
-        Button *cancel = new Button(buttons, "Cancel", FA_TIMES);
-        cancel->set_callback([this, win]() { close_dialog(win); });
-
-        win->center();
-        win->request_focus();
+        Preferences::show(this, m_config, contacts_path(),
+            [this] { apply_saved_accounts(); },
+            [this](Window *win) { close_dialog(win); });
     }
 
-    /* Prefer a mailbox the server marked for this use, else a familiar name. */
-    std::string guess_mailbox(const AccountSession *acct,
-                              const std::vector<std::string> &names,
-                              const std::string &fallback) const {
-        if (!acct) return fallback;
-        auto lower = [](std::string s) {
-            for (char &c : s) c = (char)std::tolower((unsigned char)c);
-            return s;
-        };
-        for (const std::string &want : names) {
-            for (const MailFolder &f : acct->folders)
-                if (lower(f.name) == want) return f.name;
+    /* Live sessions follow the config Preferences just wrote. A host or
+     * username edit changes MailAccount::id(), so that account reconnects
+     * as a new session. An empty host is still being filled in. */
+    void apply_saved_accounts() {
+        m_config_loaded = true;
+        /* Write straight away so enabling the option survives a crash. */
+        if (m_config.save_contacts && m_contacts.dirty())
+            m_contacts.save(contacts_path());
+        for (auto &sess : m_accounts)
+            apply_cache_limit(*sess);
+
+        std::vector<std::string> new_ids;
+        for (const MailAccount &ma : m_config.accounts)
+            if (!ma.host.empty()) new_ids.push_back(ma.id());
+
+        std::vector<std::string> to_remove;
+        for (auto &sess : m_accounts)
+            if (std::find(new_ids.begin(), new_ids.end(), sess->id()) == new_ids.end())
+                to_remove.push_back(sess->id());
+        for (const std::string &id : to_remove) remove_account_session(id);
+
+        for (const MailAccount &ma : m_config.accounts) {
+            if (ma.host.empty()) continue;
+            AccountSession *acct = account(ma.id());
+            if (acct) {
+                acct->config = ma;
+                m_folder_view->update_account(ma.id(), ma.display_name(),
+                                              acct->folders, acct->current_folder);
+                acct->worker->set_config(ma);
+                acct->worker->set_check_interval_min(m_config.check_interval_min);
+                acct->worker->connect();
+            } else {
+                add_account_session(ma);
+            }
         }
-        return fallback;
     }
+
+
 
     /* Close of an unsent composer. Empty windows just go away. Anything
      * with a recipient, subject, body, or attachment is APPENDed to Drafts
@@ -3477,7 +3110,9 @@ public:
         std::string user = ma.username;
         std::string pass = ma.password;
         std::string from = ma.username;
-        std::string draft_folder = guess_mailbox(acct, {"drafts", "draft"}, "Drafts");
+        std::string draft_folder = acct
+            ? acct->mailbox_named({"drafts", "draft"}, "Drafts")
+            : "Drafts";
         std::string raw = build_rfc822_message(from, to, subject, body, irt,
                                                format, attachments);
         auto alive = m_alive;
@@ -3560,7 +3195,7 @@ public:
          * replied to/forwarded), falling back to the first configured
          * account for a brand-new compose with nothing open yet. */
         const bool multi_account = m_accounts.size() > 1;
-        std::string from_account_id = m_current_account_id;
+        std::string from_account_id = current_id();
         if (from_account_id.empty() && !m_accounts.empty())
             from_account_id = m_accounts.front()->config.id();
 
@@ -4065,23 +3700,7 @@ public:
         int imap_port = ma.port;
         /* Maddy does not file a copy. Prefer an existing Sent mailbox;
          * otherwise APPEND creates "Sent Messages". */
-        std::string sent_folder = "Sent Messages";
-        if (acct) {
-            auto lower = [](std::string s) {
-                for (char &c : s) c = (char)std::tolower((unsigned char)c);
-                return s;
-            };
-            const MailFolder *exact = nullptr;
-            const MailFolder *other = nullptr;
-            for (const MailFolder &f : acct->folders) {
-                std::string n = lower(f.name);
-                if (n == "sent messages") { exact = &f; break; }
-                if (!other && (n == "sent" || n == "sent mail" || n == "sent items"))
-                    other = &f;
-            }
-            if (exact) sent_folder = exact->name;
-            else if (other) sent_folder = other->name;
-        }
+        std::string sent_folder = acct ? acct->sent_mailbox() : "Sent Messages";
 
         set_status("Sending...");
         std::thread([this, win, send_btn, spinner, status_row, send_bar, to_box,
@@ -4158,6 +3777,13 @@ public:
 
     virtual bool keyboard_event(int key, int scancode,
                                 int action, int modifiers) override {
+        /* Quit before a focused text field can swallow the key. Command+Q
+         * is the macOS system shortcut and never reaches us. */
+        if (key == GLFW_KEY_Q && action == GLFW_PRESS &&
+            (modifiers & GLFW_MOD_CONTROL)) {
+            nanogui::leave();
+            return true;
+        }
         if (Screen::keyboard_event(key, scancode, action, modifiers))
             return true;
         // Ctrl/Cmd+T toggles light/dark theme at runtime
@@ -4174,6 +3800,12 @@ public:
         }
         if (key == GLFW_KEY_ESCAPE && action == GLFW_PRESS && m_att_preview) {
             close_attachment_preview();
+            return true;
+        }
+        /* Delete moves the selected message to Trash. A focused text
+         * field already consumed the key above. */
+        if (key == GLFW_KEY_DELETE && action == GLFW_PRESS) {
+            move_selected_to("Trash");
             return true;
         }
         // Ctrl/Cmd+S saves the current message as an .eml
@@ -4223,6 +3855,267 @@ public:
         Screen::draw(ctx);
     }
 };
+
+void Preferences::show(Widget *parent, MailConfig &config,
+                       const std::string &contacts_file,
+                       const std::function<void()> &on_saved,
+                       const std::function<void(Window *)> &close) {
+    Window *win = new Window(parent, "Accounts", false);
+    win->set_id("nmail-prefs");
+    win->set_close_callback([close, win] { close(win); });
+    win->set_traffic_lights_mask(0x1);   // close (red) button only
+    win->set_layout(new BoxLayout(Orientation::Vertical, Alignment::Fill,
+                                  12, 10));
+    win->set_min_width(680);
+
+    // Working copy. Written back to `config` only after the file is saved.
+    auto accounts = std::make_shared<std::vector<MailAccount>>(config.accounts);
+    auto selected = std::make_shared<int>(accounts->empty() ? -1 : 0);
+
+    Split *split = new Split(win, Split::Orientation::Horizontal);
+    // Split::set_min_size floors EACH pane, not the widget.
+    split->set_min_size(100);
+    split->set_max_size({2048, 2048});
+    split->set_keep_size_on_resize(true);
+    split->set_fixed_first_size(200);
+    split->set_min_width(200 + 6 + 380);
+
+    // ---- Left: account list ----
+    Widget *left = new Widget(split);
+    left->set_layout(new BoxLayout(Orientation::Vertical, Alignment::Fill, 0, 6));
+    left->set_min_width(170);
+
+    Widget *list = new Widget(left);
+    list->set_layout(new BoxLayout(Orientation::Vertical, Alignment::Fill, 0, 2));
+
+    Button *add_btn = new Button(left, "Add Account", FA_PLUS);
+
+    // ---- Right: settings form for the selected account ----
+    Widget *right = new Widget(split);
+    right->set_layout(new BoxLayout(Orientation::Vertical, Alignment::Fill, 0, 10));
+    right->set_min_width(380);
+
+    Widget *form = new Widget(right);
+    auto *form_layout = new GridLayout(Orientation::Horizontal, 2,
+                                       Alignment::Middle, 0, 8);
+    form_layout->set_col_alignment(
+        std::vector<Alignment>{Alignment::Middle, Alignment::Fill});
+    form->set_layout(form_layout);
+
+    new Label(form, "Name:", "sans-bold");
+    TextBox *name = new TextBox(form);
+    name->set_placeholder("e.g. iCloud, Work Gmail");
+    name->set_editable(true);
+    name->set_alignment(TextBox::Alignment::Right);
+
+    new Label(form, "IMAP server:", "sans-bold");
+    TextBox *host = new TextBox(form);
+    host->set_placeholder("imap.example.com");
+    host->set_editable(true);
+    host->set_alignment(TextBox::Alignment::Right);
+
+    new Label(form, "Port:", "sans-bold");
+    IntBox<int> *port = new IntBox<int>(form);
+    port->set_editable(true);
+
+    new Label(form, "Username:", "sans-bold");
+    TextBox *user = new TextBox(form);
+    user->set_placeholder("you@example.com");
+    user->set_editable(true);
+    user->set_alignment(TextBox::Alignment::Right);
+
+    new Label(form, "Password:", "sans-bold");
+    TextBox *pass = new TextBox(form);
+    pass->set_editable(true);
+    pass->set_alignment(TextBox::Alignment::Right);
+
+    new Label(form, "SMTP server:", "sans-bold");
+    TextBox *smtp_host = new TextBox(form);
+    smtp_host->set_placeholder("(same as IMAP server)");
+    smtp_host->set_editable(true);
+    smtp_host->set_alignment(TextBox::Alignment::Right);
+
+    new Label(form, "SMTP port:", "sans-bold");
+    IntBox<int> *smtp_port = new IntBox<int>(form);
+    smtp_port->set_editable(true);
+
+    Widget *remove_row = new Widget(right);
+    remove_row->set_layout(new BoxLayout(Orientation::Horizontal, Alignment::Middle, 0, 8));
+    Button *remove_btn = new Button(remove_row, "Remove Account", FA_TRASH);
+
+    /* Flush the visible form into the model for whichever account is
+     * currently selected -- called right before switching rows and
+     * right before Save, so in-progress edits are never lost. */
+    auto commit_current = [=]() {
+        if (*selected < 0 || *selected >= (int)accounts->size()) return;
+        MailAccount &a = (*accounts)[*selected];
+        a.name       = name->value();
+        a.host       = host->value();
+        a.port       = port->value();
+        a.username   = user->value();
+        a.password   = pass->value();
+        a.smtp_host  = smtp_host->value();
+        a.smtp_port  = smtp_port->value();
+    };
+
+    /* Reflect account `idx` (or blank/disabled fields when idx < 0) in
+     * the form. */
+    auto populate_fields = [=](int idx) {
+        bool have = idx >= 0 && idx < (int)accounts->size();
+        MailAccount blank;
+        const MailAccount &a = have ? (*accounts)[idx] : blank;
+        name->set_value(a.name);
+        host->set_value(a.host);
+        port->set_value(a.port);
+        user->set_value(a.username);
+        pass->set_value(a.password);
+        smtp_host->set_value(a.smtp_host);
+        smtp_port->set_value(a.smtp_port);
+        for (Widget *w : {(Widget*)name, (Widget*)host, (Widget*)port,
+                         (Widget*)user, (Widget*)pass, (Widget*)smtp_host,
+                         (Widget*)smtp_port})
+            w->set_enabled(have);
+        remove_btn->set_enabled(have);
+    };
+
+    /* Rebuild the row buttons from `*accounts` -- only needed when
+     * accounts are added/removed, not on an ordinary selection click. */
+    std::function<void()> rebuild_list = [=]() {
+        while (!list->children().empty())
+            list->remove_child_at(0);
+        for (int i = 0; i < (int)accounts->size(); ++i) {
+            const MailAccount &a = (*accounts)[i];
+            Button *row = new Button(list, a.display_name(), FA_USER);
+            row->set_flags(Button::RadioButton);
+            row->set_pushed(i == *selected);
+            row->set_callback([=]() {
+                commit_current();
+                *selected = i;
+                populate_fields(i);
+            });
+        }
+        if (Screen *s = win->screen()) s->perform_layout();
+    };
+    rebuild_list();
+    populate_fields(*selected);
+
+    add_btn->set_callback([=]() {
+        commit_current();
+        MailAccount a;
+        a.name = "New Account";
+        accounts->push_back(a);
+        *selected = (int)accounts->size() - 1;
+        rebuild_list();
+        populate_fields(*selected);
+    });
+
+    remove_btn->set_callback([=]() {
+        if (*selected < 0 || *selected >= (int)accounts->size()) return;
+        accounts->erase(accounts->begin() + *selected);
+        if (*selected >= (int)accounts->size()) *selected = (int)accounts->size() - 1;
+        rebuild_list();
+        populate_fields(*selected);
+    });
+
+    // ---- General (shared, app-wide) settings ----
+    Widget *general = new Widget(win);
+    auto *general_layout = new GridLayout(Orientation::Horizontal, 2,
+                                          Alignment::Middle, 0, 8);
+    general_layout->set_col_alignment(
+        std::vector<Alignment>{Alignment::Middle, Alignment::Fill});
+    general->set_layout(general_layout);
+
+    new Label(general, "Check for mail:", "sans-bold");
+    Dropdown *check_interval = new Dropdown(general, Dropdown::ComboBox,
+                                            "Check for mail");
+    static const int kIntervalMinutes[] = {5, 15, 30, 60};
+    check_interval->add_item({"Every 5 minutes", "check_5"}, FA_CLOCK,
+                             [] {}, {{0, 0}}, true);
+    check_interval->add_item({"Every 15 minutes", "check_15"}, FA_CLOCK,
+                             [] {}, {{0, 0}}, true);
+    check_interval->add_item({"Every 30 minutes", "check_30"}, FA_CLOCK,
+                             [] {}, {{0, 0}}, true);
+    check_interval->add_item({"Hourly", "check_60"}, FA_CLOCK,
+                             [] {}, {{0, 0}}, true);
+    {
+        int idx = 1;   // default: 15 minutes
+        for (int i = 0; i < 4; ++i)
+            if (kIntervalMinutes[i] == config.check_interval_min) idx = i;
+        check_interval->set_selected_index(idx);
+    }
+
+    new Label(general, "Message cache:", "sans-bold");
+    Dropdown *cache_limit = new Dropdown(general, Dropdown::ComboBox,
+                                         "Message cache");
+    static const int kCacheMb[] = {256, 512, 1024, 2048};
+    cache_limit->add_item({"256 MB", "cache_256"}, FA_DATABASE,
+                          [] {}, {{0, 0}}, true);
+    cache_limit->add_item({"512 MB", "cache_512"}, FA_DATABASE,
+                          [] {}, {{0, 0}}, true);
+    cache_limit->add_item({"1 GB", "cache_1024"}, FA_DATABASE,
+                          [] {}, {{0, 0}}, true);
+    cache_limit->add_item({"2 GB", "cache_2048"}, FA_DATABASE,
+                          [] {}, {{0, 0}}, true);
+    cache_limit->set_tooltip(
+        "Memory used to keep messages you have opened, shared by all "
+        "accounts. A message larger than this is not downloaded.");
+    {
+        int idx = 1;
+        for (int i = 0; i < 4; ++i)
+            if (kCacheMb[i] == config.cache_limit_mb) idx = i;
+        cache_limit->set_selected_index(idx);
+    }
+
+    new Label(general, "Contacts:", "sans-bold");
+    CheckBox *save_contacts = new CheckBox(general, "Remember on disk");
+    save_contacts->set_checked(config.save_contacts);
+    save_contacts->set_tooltip(
+        "Keep addresses harvested from your mail in " +
+        contacts_file + " so completions survive a restart. "
+        "When off they are kept only for this session.");
+
+    Widget *buttons = new Widget(win);
+    buttons->set_layout(new BoxLayout(Orientation::Horizontal,
+                                      Alignment::Middle, 0, 8));
+
+    Button *save = new Button(buttons, "Save && Connect", FA_CHECK);
+    save->set_callback([parent, win, &config, accounts, commit_current,
+                       check_interval, cache_limit, save_contacts,
+                       on_saved, close]() {
+        commit_current();
+        MailConfig next = config;
+        next.accounts = *accounts;
+        int idx = check_interval->selected_index();
+        next.check_interval_min =
+            kIntervalMinutes[(idx >= 0 && idx < 4) ? idx : 1];
+        int cidx = cache_limit->selected_index();
+        next.cache_limit_mb = kCacheMb[(cidx >= 0 && cidx < 4) ? cidx : 1];
+        next.save_contacts = save_contacts->checked();
+        if (!save_config(next)) {
+            auto *dlg = new MessageDialog(parent, MessageDialog::Type::Warning,
+                "Save failed",
+                "Could not write " + config_path(), "OK", "", false);
+            dlg->center();
+            return;
+        }
+        config = std::move(next);
+        if (PopupMenu *pop = check_interval->popup())
+            pop->set_visible(false);
+        if (PopupMenu *pop = cache_limit->popup())
+            pop->set_visible(false);
+        if (on_saved) on_saved();
+        /* Destroy the prefs window after this callback returns so we
+           do not free the Save button while it is still running. */
+        close(win);
+        glfwPostEmptyEvent();
+    });
+
+    Button *cancel = new Button(buttons, "Cancel", FA_TIMES);
+    cancel->set_callback([close, win]() { close(win); });
+
+    win->center();
+    win->request_focus();
+}
 
 // ---------------------------------------------------------------------------
 // main
