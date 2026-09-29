@@ -23,6 +23,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <deque>
 #include <functional>
 #include <string_view>
 #include <unordered_map>
@@ -1548,19 +1549,35 @@ std::vector<std::string> elem_classes(GumboElement *el) {
 
 // Per-set_html memo: avoids 400k allocs (100 rules × 500 elements) when
 // css_sel_matches called from apply_cascade for every node.
-// StringView into the lowercased class buffer avoids per-class string alloc.
+// Class spans are offsets into classes_buf. string_view into that buffer
+// dangles once the memo is moved, and a hash node that holds the text
+// makes rehash load the bytes (an "https://" value faulted on macOS).
 struct ElemMemo {
     std::string tag; // lower
     std::string id;  // lower, empty if none
     std::string classes_buf; // lowercased "a b c" (single alloc)
-    std::vector<std::string_view> classes; // views into classes_buf
+    struct Span { uint32_t off, len; };
+    std::vector<Span> classes;
     bool has = false;
+
+    bool has_class(std::string_view need) const {
+        for (Span s : classes) {
+            if (s.len != need.size()) continue;
+            if (std::memcmp(classes_buf.data() + s.off, need.data(), s.len) == 0)
+                return true;
+        }
+        return false;
+    }
 };
-static thread_local std::unordered_map<GumboElement*, ElemMemo> g_elem_memo;
+/* Strings live in the deque. The hash table only stores an index, so
+ * rehash never walks a node whose first bytes are URL text. push_back
+ * does not move existing deque elements. */
+static thread_local std::deque<ElemMemo> g_elem_store;
+static thread_local std::unordered_map<GumboElement*, uint32_t> g_elem_index;
 
 static const ElemMemo &elem_memo(GumboElement *el) {
-    auto it = g_elem_memo.find(el);
-    if (it != g_elem_memo.end()) return it->second;
+    auto it = g_elem_index.find(el);
+    if (it != g_elem_index.end()) return g_elem_store[it->second];
     ElemMemo m;
     const char *n = gumbo_normalized_tagname(el->tag);
     m.tag = (n && *n) ? trim_lower(n) : std::string{};
@@ -1574,15 +1591,21 @@ static const ElemMemo &elem_memo(GumboElement *el) {
             while (i2 < m.classes_buf.size() && std::isspace((unsigned char)m.classes_buf[i2])) ++i2;
             size_t j = i2;
             while (j < m.classes_buf.size() && !std::isspace((unsigned char)m.classes_buf[j])) ++j;
-            if (j > i2) m.classes.emplace_back(m.classes_buf.data()+i2, j-i2);
+            if (j > i2 && j - i2 <= 0xffffffffu)
+                m.classes.push_back({ (uint32_t)i2, (uint32_t)(j - i2) });
             i2 = j;
         }
     }
     m.has = true;
-    auto pr = g_elem_memo.emplace(el, std::move(m));
-    return pr.first->second;
+    uint32_t idx = (uint32_t)g_elem_store.size();
+    g_elem_store.push_back(std::move(m));
+    g_elem_index.emplace(el, idx);
+    return g_elem_store[idx];
 }
-static inline void elem_memo_clear() { g_elem_memo.clear(); }
+static inline void elem_memo_clear() {
+    g_elem_index.clear();
+    g_elem_store.clear();
+}
 
 bool css_sel_matches(const CssSel &sel, GumboElement *el, GumboNode *node) {
     const ElemMemo &m = elem_memo(el);
@@ -1592,9 +1615,7 @@ bool css_sel_matches(const CssSel &sel, GumboElement *el, GumboNode *node) {
         return false;
     if (!sel.classes.empty()) {
         for (const auto &need : sel.classes) {
-            bool found=false;
-            for (auto sv : m.classes) if (sv == need) { found=true; break; }
-            if (!found) return false;
+            if (!m.has_class(need)) return false;
         }
     }
     if (!sel.ancestor_class.empty() || !sel.ancestor_tag.empty()) {
@@ -1604,8 +1625,7 @@ bool css_sel_matches(const CssSel &sel, GumboElement *el, GumboNode *node) {
             GumboElement *pe = &p->v.element;
             if (!sel.ancestor_class.empty()) {
                 const ElemMemo &pm = elem_memo(pe);
-                for (auto sv: pm.classes) if (sv == sel.ancestor_class) { ok = true; break; }
-                if (ok) break;
+                if (pm.has_class(sel.ancestor_class)) { ok = true; break; }
             }
             if (!sel.ancestor_tag.empty() &&
                 elem_memo(pe).tag == sel.ancestor_tag) {
@@ -1634,7 +1654,10 @@ void apply_css(GumboElement *el, Style &st, TextAlignment &align,
         cand.insert(cand.end(), b.begin(), b.end());
     };
     if (!mm.id.empty()) { auto it = sheet.by_id.find(mm.id); if (it!=sheet.by_id.end()) add_bucket(it->second); }
-    for (auto sv : mm.classes) { auto it = sheet.by_class.find(std::string(sv)); if (it!=sheet.by_class.end()) add_bucket(it->second); }
+    for (ElemMemo::Span s : mm.classes) {
+        auto it = sheet.by_class.find(mm.classes_buf.substr(s.off, s.len));
+        if (it != sheet.by_class.end()) add_bucket(it->second);
+    }
     if (!mm.tag.empty()) { auto it = sheet.by_tag.find(mm.tag); if (it!=sheet.by_tag.end()) add_bucket(it->second); }
     add_bucket(sheet.universal);
     // by_ancestor_* duplicates are already in by_class/tag buckets above — no extra union.
@@ -5008,10 +5031,10 @@ void HtmlDocument::set_html(const std::string &html) {
     Style base;
     base.fontSize = 17.0f;
     base.fgColor  = m_text;
-    g_elem_memo.clear(); // memo scoped to this set_html build
+    elem_memo_clear(); // memo scoped to this set_html build
     build_children(this, &out->root->v.document.children, base, B, 0,
                    TextAlignment::Left);
-    g_elem_memo.clear();
+    elem_memo_clear();
     gumbo_destroy_output(&kGumboDefaultOptions, out);
 
     if (m_children.empty())
