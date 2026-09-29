@@ -89,6 +89,9 @@ public:
     void schedule_seen(const std::string &folder, uint32_t uid,
                        uint64_t modseq, double delay_sec);
     void cancel_seen();
+    /* STORE \\Seen or clear it. Runs immediately, unlike schedule_seen. */
+    void set_seen_flag(const std::string &folder, uint32_t uid,
+                       uint64_t modseq, bool seen);
     void move_message(const std::string &folder, uint32_t uid,
                       const std::string &dest_folder);
     void ensure_visible_cached(const std::string &folder,
@@ -104,6 +107,7 @@ private:
         uint64_t epoch = 0;      // mailbox generation; stale cmds are dropped
         uint32_t uid = 0;
         uint64_t modseq = 0;     // for MarkSeen CONDSTORE UNCHANGEDSINCE
+        bool seen = true;        // MarkSeen: false clears \\Seen
     };
 
     void post(Type t, const std::string &folder = "", uint32_t uid = 0,

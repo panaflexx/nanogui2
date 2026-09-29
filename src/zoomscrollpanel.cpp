@@ -430,15 +430,11 @@ bool ZoomScrollPanel::mouse_drag_event(const Vector2i& p, const Vector2i& rel,
         return true;
     }
 
-    // Otherwise propagate to child.
-    if (!m_children.empty()) {
-        Widget* child = m_children[0];
-        Vector2i cp = to_child(p);
-        Vector2i crel = delta_to_child(rel);
-        if (child->visible() && (child->contains(cp) || child->contains(cp - crel)))
-            return child->mouse_drag_event(cp, crel, button, modifiers);
-    }
-
+    /* Do not hand the drag back to the child. Screen already delivers it
+     * to the widget that was pressed, and Widget::mouse_drag_event bubbles
+     * to the parent. Forwarding down here sends it to the child, which
+     * bubbles here again, until the stack overflows. Scrollbar and pan
+     * drags are handled above; anything else continues upward. */
     return Widget::mouse_drag_event(p, rel, button, modifiers);
 }
 

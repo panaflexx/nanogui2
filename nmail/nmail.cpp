@@ -16,6 +16,7 @@
  *   mail_worker.h/.cpp   — MailWorker, the IMAP worker thread
  *   mail_widgets.h/.cpp  — FolderView sidebar and EmailListView widgets
  *   mail_format.h/.cpp   — Markdown/Document/HTML conversion, header card
+ *   outgoing_mail.h/.cpp — OutgoingMail, the message being composed
  *   mail_debug.h         — mail_dbg() logging macro
  */
 
@@ -64,6 +65,7 @@
 
 #include "mail_debug.h"
 #include "smtp_client.h"
+#include "outgoing_mail.h"
 #include "message_arena.h"
 #include "http_fetch.h"
 #include "htmldocument.h"
@@ -197,8 +199,15 @@ public:
     /* First folder whose name matches an entry of `names`, else fallback. */
     std::string mailbox_named(const std::vector<std::string> &names,
                               const std::string &fallback) const;
-    /* Existing Sent mailbox, or "Sent Messages" when the server has none. */
+    /* Existing Sent mailbox by name, or "Sent Messages" when none matches. */
     std::string sent_mailbox() const;
+    /* \Drafts when the server flagged one, else a familiar name. */
+    std::string drafts_folder() const;
+    /* \Sent when the server flagged one, else sent_mailbox(). */
+    std::string sent_folder() const;
+
+private:
+    std::string folder_flagged(const std::string &use) const;
 };
 
 static std::string lower_copy(std::string s) {
@@ -252,6 +261,27 @@ std::string AccountSession::sent_mailbox() const {
     if (exact) return exact->name;
     if (other) return other->name;
     return "Sent Messages";
+}
+
+std::string AccountSession::folder_flagged(const std::string &use) const {
+    std::string want = lower_copy(use);
+    if (want.empty()) return {};
+    for (const MailFolder &f : folders)
+        if (lower_copy(f.attrs).find(want) != std::string::npos)
+            return f.name;
+    return {};
+}
+
+std::string AccountSession::drafts_folder() const {
+    std::string flagged = folder_flagged("\\Drafts");
+    if (!flagged.empty()) return flagged;
+    return mailbox_named({"drafts", "draft"}, "Drafts");
+}
+
+std::string AccountSession::sent_folder() const {
+    std::string flagged = folder_flagged("\\Sent");
+    if (!flagged.empty()) return flagged;
+    return sent_mailbox();
 }
 
 /* The accounts this process is connected to, and which one's folder is on
@@ -397,6 +427,10 @@ public:
      * has been idle for kPreviewSettleSec. */
     uint32_t                 m_pending_uid = 0;
     uint32_t                 m_rendered_uid = 0;
+    /* Open the composer once this UID's body arrives. */
+    uint32_t                 m_compose_after_uid = 0;
+    /* Stay unread while this message remains the one on screen. */
+    uint32_t                 m_hold_unread_uid = 0;
     double                   m_preview_settle_at = 0.0;
     EmailData                m_pending_email;
     static constexpr double  kPreviewSettleSec = 0.10;
@@ -494,6 +528,7 @@ public:
     std::set<std::string> m_expanded_addrs;
 
     PopupMenu *m_att_popup = nullptr;
+    PopupMenu *m_msg_popup = nullptr;
     struct AttTemp { std::string file; std::string dir; };
     std::vector<AttTemp> m_att_temps;
     bool     m_att_preview = false;
@@ -784,6 +819,8 @@ public:
             redraw();
             return;
         }
+        if (m_compose_after_uid == uid) m_compose_after_uid = 0;
+        if (m_hold_unread_uid == uid) m_hold_unread_uid = 0;
         if (m_rendered_uid == uid) {
             m_has_message = false;
             m_rendered_uid = 0;
@@ -1179,6 +1216,9 @@ public:
         list_flex->set_flex_item(m_email_list, FlexLayout::FlexItem(1.0f, 1.0f, 0));
         m_email_list->set_font_size(26);
         m_email_list->set_on_hit_bottom([this]() { maybe_fetch_older(); });
+        m_email_list->on_context_menu = [this](const Vector2i &screen_pos) {
+            show_message_menu(screen_pos);
+        };
         m_email_list->on_viewport_changed = [this]() {
             AccountSession &acct = current_acct();
             if (acct.current_folder.empty() || !m_email_list) return;
@@ -1201,10 +1241,6 @@ public:
         right->set_layout(rflex);
         right->set_min_width(100);
 
-        Widget *sep = new Widget(right);
-        sep->set_min_height(1);
-        sep->set_height(1);
-
         m_view_scroll = new ZoomScrollPanel(right, ZoomScrollPanel::ScrollTypes::Both);
         m_view_scroll->set_reflow_on_zoom(false);
         m_view_scroll->set_zoom_range(0.5, 3.0);
@@ -1224,6 +1260,19 @@ public:
         };
         m_view->embed_widget = [this](Widget *parent, const HtmlEmbedSpec &spec)
                 -> Widget * {
+            if (spec.id == "nmail-edit-send") {
+                /* FlexEnd pins the button to the cell's right edge. The
+                 * cell itself is the top-right of the parchment card. */
+                auto *row = new Widget(parent);
+                row->set_layout(new FlexLayout(FlexDirection::Row,
+                                               JustifyContent::FlexEnd,
+                                               AlignItems::Center, 0, 0));
+                auto *b = new Button(row, "Edit for send", FA_EDIT);
+                b->set_font_size(16);
+                b->set_tooltip("Open this message to edit and send");
+                b->set_callback([this]() { edit_for_send(); });
+                return row;
+            }
             if (spec.id == "nmail-att-preview-bar")
                 return make_att_preview_bar(parent);
             if (spec.id == "nmail-att-gallery")
@@ -1692,6 +1741,7 @@ public:
         if (m_fwd_btn) m_fwd_btn->set_enabled(true);
         if (m_save_btn) m_save_btn->set_enabled(true);
         render_current();
+        maybe_open_pending_compose(uid, msg);
     }
 
     void on_prefetched(const std::string &account_id, const std::string &folder, uint32_t uid,
@@ -1757,6 +1807,8 @@ public:
         m_loading_uid  = 0;
         m_pending_uid  = 0;
         m_rendered_uid = 0;
+        m_compose_after_uid = 0;
+        m_hold_unread_uid = 0;
         m_has_message  = false;
         acct.older_inflight = false;
         acct.move_inflight = false;
@@ -1796,6 +1848,8 @@ public:
     }
 
     void on_email_selected(int idx, const EmailData &d) {
+        if (d.uid != m_hold_unread_uid) m_hold_unread_uid = 0;
+        if (d.uid != m_compose_after_uid) m_compose_after_uid = 0;
         update_move_buttons();
         /* List highlight already moved.  Do not parse HTML or FETCH on
          * every GLFW_REPEAT — wait until this seq sits still. */
@@ -1859,6 +1913,10 @@ public:
      * needs no STORE, and a message with no folder cannot be addressed. */
     void arm_read_timer(uint32_t uid) {
         AccountSession &acct = current_acct();
+        if (uid && uid == m_hold_unread_uid) {
+            acct.worker->cancel_seen();
+            return;
+        }
         if (!uid || acct.current_folder.empty()) { acct.worker->cancel_seen(); return; }
         for (const MailSummary &s : shown()) if (s.uid == uid) {
             if (s.seen) { acct.worker->cancel_seen(); return; }
@@ -1988,6 +2046,8 @@ public:
             redraw();
             return;
         }
+        if (m_compose_after_uid == uid) m_compose_after_uid = 0;
+        if (m_hold_unread_uid == uid) m_hold_unread_uid = 0;
         if (m_rendered_uid == uid) {
             m_has_message = false;
             m_rendered_uid = 0;
@@ -2039,6 +2099,7 @@ public:
             if (m_save_btn) m_save_btn->set_enabled(true);
             render_current();
             arm_read_timer(uid);
+            maybe_open_pending_compose(uid, m_current_message);
             return;
         }
         m_loading_uid = uid;
@@ -3098,43 +3159,29 @@ public:
      * before the window is destroyed, so a failed save leaves it open. */
     void save_draft(Window *win, TextBox *to_box, TextBox *subj_box,
                     TextEditor *editor, std::shared_ptr<bool> busy,
-                    const std::string &account_id,
-                    const std::string &to, const std::string &subject,
-                    const std::string &body, const std::string &irt,
-                    MailFormat format,
-                    std::vector<MailAttachment> attachments) {
-        const AccountSession *acct = account(account_id);
+                    const OutgoingMail &mail,
+                    std::function<void()> unlock = {}) {
+        const AccountSession *acct = account(mail.account_id);
         const MailAccount &ma = acct ? acct->config : current_acct().config;
         std::string imap_host = ma.host;
         int imap_port = ma.port;
         std::string user = ma.username;
         std::string pass = ma.password;
-        std::string from = ma.username;
-        std::string draft_folder = acct
-            ? acct->mailbox_named({"drafts", "draft"}, "Drafts")
-            : "Drafts";
-        std::string raw = build_rfc822_message(from, to, subject, body, irt,
-                                               format, attachments);
+        std::string from = ma.from_address();
+        if (from.empty()) from = ma.username;
+        std::string draft_folder = acct ? acct->drafts_folder() : "Drafts";
+        std::string raw = mail.rfc822(from);
         auto alive = m_alive;
-        std::thread([this, win, to_box, subj_box, editor, busy, alive,
+        std::thread([this, win, to_box, subj_box, editor, busy, alive, unlock,
                      imap_host, imap_port, user, pass, draft_folder, raw]() {
-            ImapClient imap;
-            imap.set_use_compress(false);
-            std::string err, folder = draft_folder;
-            bool ok = imap.open(imap_host, imap_port, user, pass, err);
-            if (ok) {
-                std::string special, se;
-                if (imap.special_use_mailbox("\\Drafts", special, se) &&
-                    !special.empty())
-                    folder = special;
-                ok = imap.append_message(folder, raw, err, "\\Draft \\Seen");
-            }
-            imap.close();
+            std::string err;
+            bool ok = imap_upload(imap_host, imap_port, user, pass,
+                                  draft_folder, "\\Draft \\Seen", raw, err);
             nanogui::async(std::function<void()>(
-                [this, win, to_box, subj_box, editor, busy, alive, ok, err, folder]() {
+                [this, win, to_box, subj_box, editor, busy, alive, unlock, ok, err, draft_folder]() {
                     if (!*alive) return;
                     if (ok) {
-                        set_status("Draft saved to " + folder);
+                        set_status("Draft saved to " + draft_folder);
                         *busy = false;
                         close_dialog(win);
                         return;
@@ -3143,10 +3190,11 @@ public:
                     if (to_box && to_box->parent()) to_box->set_editable(true);
                     if (subj_box && subj_box->parent()) subj_box->set_editable(true);
                     if (editor && editor->parent()) editor->set_read_only(false);
+                    if (unlock) unlock();
                     set_status("Could not save draft");
                     auto *dlg = new MessageDialog(this, MessageDialog::Type::Warning,
                         "Draft not saved",
-                        "The message is still open. Saving to " + folder +
+                        "The message is still open. Saving to " + draft_folder +
                         " failed.\n\n" + err, "OK", "", false);
                     dlg->center();
                     redraw();
@@ -3155,19 +3203,145 @@ public:
         }).detach();
     }
 
-    /* ---- Reply / Forward / New compose window ---- */
+    void hide_msg_popup() {
+        if (!m_msg_popup) return;
+        m_msg_popup->set_visible(false);
+    }
+
+    /* Body is already in hand: open it for editing. Otherwise remember the
+     * UID and let the fetch that is already running (or one we start) call
+     * back through maybe_open_pending_compose. */
+    void edit_for_send() {
+        if (!m_email_list) return;
+        uint32_t uid = m_email_list->selected_uid();
+        if (!uid) { set_status("No message selected"); return; }
+        AccountSession &acct = current_acct();
+        if (m_has_message && m_rendered_uid == uid) {
+            m_compose_after_uid = 0;
+            open_composer(OutgoingMail::again(m_current_message, current_id()),
+                          "Edit Message");
+            return;
+        }
+        MailMessage cached;
+        if (body_get(acct, acct.current_folder, uid, cached)) {
+            m_compose_after_uid = 0;
+            open_composer(OutgoingMail::again(cached, current_id()),
+                          "Edit Message");
+            return;
+        }
+        m_compose_after_uid = uid;
+        set_status("Loading message to edit...");
+        if (m_loading_uid != uid)
+            acct.worker->fetch_body(acct.current_folder, uid);
+        m_loading_uid = uid;
+    }
+
+    void maybe_open_pending_compose(uint32_t uid, const MailMessage &msg) {
+        if (!uid || uid != m_compose_after_uid) return;
+        m_compose_after_uid = 0;
+        open_composer(OutgoingMail::again(msg, current_id()), "Edit Message");
+    }
+
+    void set_selected_seen(bool seen) {
+        AccountSession &acct = current_acct();
+        uint32_t uid = m_email_list ? m_email_list->selected_uid() : 0;
+        if (!uid || acct.current_folder.empty()) {
+            set_status("No message selected");
+            return;
+        }
+        uint64_t modseq = 0;
+        for (const MailSummary &s : shown())
+            if (s.uid == uid) { modseq = s.modseq; break; }
+        m_hold_unread_uid = seen ? 0 : uid;
+        acct.worker->cancel_seen();
+        acct.worker->set_seen_flag(acct.current_folder, uid, modseq, seen);
+        set_status(seen ? "Marking as read..." : "Marking as unread...");
+    }
+
+    void show_message_menu(const Vector2i &screen_pos) {
+        uint32_t uid = m_email_list ? m_email_list->selected_uid() : 0;
+        if (!uid) return;
+        Screen *s = screen();
+        Window *w = root_window();
+        if (!s || !w) return;
+        hide_att_popup();
+        if (m_msg_popup && m_msg_popup->parent_window() != w) {
+            m_msg_popup->set_visible(false);
+            m_msg_popup->dispose();
+            m_msg_popup = nullptr;
+        }
+        if (!m_msg_popup)
+            m_msg_popup = new PopupMenu(s, w, nullptr, false);
+        while (m_msg_popup->child_count() > 0)
+            m_msg_popup->remove_child_at(m_msg_popup->child_count() - 1);
+
+        AccountSession &acct = current_acct();
+        auto lower = [](std::string t) {
+            for (char &c : t) c = (char)std::tolower((unsigned char)c);
+            return t;
+        };
+        std::string cur = lower(acct.current_folder);
+        bool in_trash = !cur.empty() && lower(acct.dest_folder("Trash")) == cur;
+        bool in_junk  = !cur.empty() && lower(acct.dest_folder("Junk")) == cur;
+        auto alive = m_alive;
+        auto item = [&](const std::string &caption, int icon, bool enabled,
+                        std::function<void()> fn) {
+            auto *mi = new MenuItem(m_msg_popup, caption, icon);
+            mi->set_enabled(enabled);
+            mi->set_callback([this, alive, fn]() {
+                hide_msg_popup();
+                nanogui::async([this, alive, fn]() {
+                    if (*alive) fn();
+                });
+            });
+        };
+        item("Send Message Again", FA_PAPER_PLANE, true, [this]() { edit_for_send(); });
+        new Separator(m_msg_popup);
+        item("Delete", FA_TRASH, !in_trash, [this]() { move_selected_to("Trash"); });
+        item("Junk", FA_BROOM, !in_junk, [this]() { move_selected_to("Junk"); });
+        new Separator(m_msg_popup);
+        item("Mark as read", FA_ENVELOPE_OPEN, true, [this]() { set_selected_seen(true); });
+        item("Mark as unread", FA_ENVELOPE, true, [this]() { set_selected_seen(false); });
+
+        NVGcontext *ctx = s->nvg_context();
+        Vector2i pref = m_msg_popup->preferred_size(ctx);
+        m_msg_popup->set_size(pref);
+        m_msg_popup->perform_layout(ctx);
+        Vector2i pos = screen_pos;
+        pos.x() = std::min(pos.x(), std::max(0, s->width() - pref.x()));
+        if (pos.y() + pref.y() > s->height())
+            pos.y() = std::max(0, pos.y() - pref.y());
+        m_msg_popup->set_position(pos);
+        m_msg_popup->set_visible(true);
+        s->set_popup_visible(m_msg_popup);
+        m_msg_popup->set_highlighted_index(0);
+        m_msg_popup->request_focus();
+        redraw();
+    }
+
+    /* ---- Reply / Forward / New / Edit compose window ---- */
     /* reply: quote original, To = sender.  forward: quote original, empty To,
-     * Fwd: subject, original attachments.  neither: blank new message. */
+     * Fwd: subject, original attachments.  neither: blank new message.
+     * Edit uses OutgoingMail::again and the same window. */
     void show_compose(bool reply = true, bool forward = false) {
         if ((reply || forward) && !m_has_message) return;
-        const MailMessage orig = (reply || forward) ? m_current_message
-                                                    : MailMessage{};
+        std::string from_account_id = current_id();
+        if (from_account_id.empty() && !m_accounts.empty())
+            from_account_id = m_accounts.front()->config.id();
+        OutgoingMail mail =
+            forward ? OutgoingMail::forward(m_current_message, from_account_id)
+          : reply   ? OutgoingMail::reply(m_current_message, from_account_id)
+                    : OutgoingMail::fresh(from_account_id);
+        const char *title = forward ? "Forward" : reply ? "Reply" : "New Message";
+        open_composer(std::move(mail), title);
+    }
 
-        Window *win = new Window(this,
-            forward ? "Forward" : reply ? "Reply" : "New Message", true);
-        win->set_id(forward ? "nmail-forward"
-                  : reply   ? "nmail-reply"
-                            : "nmail-compose");
+    void open_composer(OutgoingMail mail, const std::string &title) {
+        Window *win = new Window(this, title, true);
+        win->set_id(title == "Forward" ? "nmail-forward"
+                  : title == "Reply" ? "nmail-reply"
+                  : title == "Edit Message" ? "nmail-edit"
+                  : "nmail-compose");
         win->set_close_callback([this, win] { close_dialog(win); });
         /* A single-column AdvancedGridLayout instead of a Vertical BoxLayout:
          * BoxLayout never grows children past their preferred size on the
@@ -3181,23 +3355,16 @@ public:
         win_layout->set_col_stretch(0, 1.0f);
         win_layout->set_row_stretch(4, 1.0f);
         win->set_layout(win_layout);
-        /* Width only: a floor smaller than the layout's own natural size is
-         * safe (there's a single column, so any slack just goes to it).
-         * Deliberately no set_min_height() — the fixed chrome rows (form,
-         * toolbar, buttons) can't shrink below their natural size, and the
-         * body row is already floored at its own min_height(300), so the
-         * layout's natural/intrinsic height *is* the right minimum; forcing
-         * a smaller one would just make something else get clipped. */
+        /* Width only. No set_min_height(): an explicit height replaces the
+         * content floor, and the body row is what gives space back when the
+         * window is capped to the screen. The toolbar and Send / Cancel
+         * stay at their own height. */
         win->set_min_width(760);
 
-        /* Which account this message goes out under.  Defaults to whichever
-         * account is currently on screen (the one owning the message being
-         * replied to/forwarded), falling back to the first configured
-         * account for a brand-new compose with nothing open yet. */
+        /* Which account this message goes out under. `mail.account_id` is
+         * the one on screen, or the first configured account when nothing
+         * is open yet. The From dropdown can change it before send. */
         const bool multi_account = m_accounts.size() > 1;
-        std::string from_account_id = current_id();
-        if (from_account_id.empty() && !m_accounts.empty())
-            from_account_id = m_accounts.front()->config.id();
 
         Widget *form = new Widget(win);
         win_layout->set_anchor(form, AdvancedGridLayout::Anchor(0, 0));
@@ -3221,7 +3388,7 @@ public:
             int sel_idx = 0;
             for (size_t i = 0; i < m_accounts.size(); ++i) {
                 const MailAccount &ma = m_accounts[i]->config;
-                if (ma.id() == from_account_id) sel_idx = (int)i;
+                if (ma.id() == mail.account_id) sel_idx = (int)i;
                 from_box->add_item({ma.display_name(), ma.id()}, FA_USER,
                                    [] {}, {{0, 0}}, true);
             }
@@ -3235,9 +3402,7 @@ public:
 
         Label *to_lbl = new Label(form, "To:", "sans-bold");
         AutoCompleteBox *to = new AutoCompleteBox(form);
-        to->set_value(reply ? (orig.from_addr.empty() ? orig.from
-                                                        : orig.from_addr)
-                            : "");
+        to->set_value(mail.to);
         to->set_editable(true);
         /* Complete one recipient at a time so "a@x.com, ja" offers Jane. */
         to->set_token_separator(',');
@@ -3260,42 +3425,73 @@ public:
 
         Label *subj_lbl = new Label(form, "Subject:", "sans-bold");
         TextBox *subj = new TextBox(form);
-        std::string s = (reply || forward) ? orig.subject : "";
-        if (reply && (s.size() < 3 || (s[0] != 'R' && s[0] != 'r') ||
-            (s[1] != 'e' && s[1] != 'E') || s[2] != ':'))
-            s = "Re: " + s;
-        if (forward) {
-            bool has_fwd = s.size() >= 4 &&
-                (s[0] == 'F' || s[0] == 'f') &&
-                (s[1] == 'W' || s[1] == 'w') &&
-                (s[2] == 'D' || s[2] == 'd') && s[3] == ':';
-            if (!has_fwd)
-                s = "Fwd: " + s;
-        }
-        subj->set_value(s);
+        subj->set_value(mail.subject);
         subj->set_editable(true);
         form_layout->set_anchor(subj_lbl,
             AdvancedGridLayout::Anchor(0, form_row, Alignment::Minimum, Alignment::Middle));
         form_layout->set_anchor(subj,
             AdvancedGridLayout::Anchor(2, form_row, Alignment::Fill, Alignment::Middle));
 
-        /* Format toolbar: WYSIWYG style toggles (Ctrl+B/I/U also work). */
+        /* Format toolbar: WYSIWYG style toggles (Ctrl+B/I/U also work).
+         * One row. The window is measured after these buttons exist, so
+         * showing or hiding them cannot leave Send / Cancel past the frame.
+         * The row can shrink a few pixels when the screen cap needs it. */
         Widget *fmt = new Widget(win);
         fmt->set_layout(new BoxLayout(Orientation::Horizontal,
                                       Alignment::Middle, 0, 4));
+        fmt->set_min_height(28);
+        fmt->set_max_height(40);
         win_layout->set_anchor(fmt, AdvancedGridLayout::Anchor(0, 2));
 
-        TextEditor *body = new TextEditor(win, TextEditor::Mode::RichText);
+        /* Preferred height is a comfortable editor. The minimum is lower
+         * so this stretch row absorbs a short screen and the Send row stays
+         * inside the window whether or not the formatting buttons are up. */
+        struct ComposeBodySlot : Widget {
+            TextEditor *editor = nullptr;
+            ScrollPanel *scroll = nullptr;
+            HtmlDocument *doc = nullptr;
+            Color bg;
+            ComposeBodySlot(Widget *parent, bool dark) : Widget(parent),
+                bg(dark ? Color(30, 31, 38, 255) : Color(250, 250, 252, 255)) {
+                set_min_height(140);
+                editor = new TextEditor(this, TextEditor::Mode::RichText);
+                scroll = new ScrollPanel(this, ScrollPanel::ScrollTypes::Vertical);
+                doc = new HtmlDocument(scroll);
+                doc->set_editable(true);
+                scroll->set_visible(false);
+            }
+            Vector2i preferred_size(NVGcontext *) const override {
+                return Vector2i(640, 300);
+            }
+            void perform_layout(NVGcontext *ctx) override {
+                for (Widget *c : m_children) {
+                    if (!c->visible()) continue;
+                    c->set_position(Vector2i(0, 0));
+                    c->set_size(m_size);
+                    c->perform_layout(ctx);
+                }
+            }
+            void draw(NVGcontext *ctx) override {
+                nvgBeginPath(ctx);
+                nvgRect(ctx, (float)m_pos.x(), (float)m_pos.y(),
+                        (float)m_size.x(), (float)m_size.y());
+                nvgFillColor(ctx, bg);
+                nvgFill(ctx);
+                Widget::draw(ctx);
+            }
+        };
+        auto *slot = new ComposeBodySlot(win, m_dark);
+        TextEditor *body = slot->editor;
+        HtmlDocument *html_doc = slot->doc;
+        auto html_view = std::make_shared<bool>(false);
         body->set_read_only(false);
-        body->set_background_color(m_dark ? Color(30, 31, 38, 255)
-                                          : Color(250, 250, 252, 255));
+        body->set_background_color(slot->bg);
         Style bs;
         bs.fgColor = text_color();
         bs.fontSize = (float)m_config.compose_font_size;
         body->set_default_style(bs);
-        body->set_min_height(300);
         body->set_padding(10);
-        win_layout->set_anchor(body, AdvancedGridLayout::Anchor(0, 4));
+        win_layout->set_anchor(slot, AdvancedGridLayout::Anchor(0, 4));
 
         /* Busy overlay shown over the body while a send is in flight:
          * same grid cell as the body, added after it so it draws on top
@@ -3306,12 +3502,12 @@ public:
 
         /* Attachment well: compact chips + an Add tile.  Reply/Forward
          * start with the original's files (user can Remove). */
-        auto compose_atts = std::make_shared<std::vector<MailAttachment>>();
-        if (reply || forward) {
-            for (const MailAttachment *a : visible_attachments(orig))
-                compose_atts->push_back(*a);
-        }
+        auto compose_atts =
+            std::make_shared<std::vector<MailAttachment>>(mail.attachments);
         auto *att_strip = new AttachmentStrip(win);
+        /* A long chip list must not become a floor the body cannot absorb. */
+        att_strip->set_min_height(36);
+        att_strip->set_max_height(180);
         win_layout->set_anchor(att_strip, AdvancedGridLayout::Anchor(0, 6));
         auto rebuild_atts = std::make_shared<std::function<void()>>();
         *rebuild_atts = [this, att_strip, compose_atts, rebuild_atts, win]() {
@@ -3385,28 +3581,31 @@ public:
         status_row->set_visible(false);
 
         auto make_fmt = [&](int icon, TextEditor::StyleFlag f,
+                            HtmlDocument::InlineStyle hs,
                             const std::string &tip) {
             Button *b = new Button(fmt, "", icon);
             b->set_flags(Button::Flags::ToggleButton);
             b->set_font_size(20);
             b->set_tooltip(tip);
-            b->set_callback([body, f]() {
-                body->toggle_style(f);
-                /* Widget::mouse_button_event() hands this button focus on
-                 * mouse-down (any unfocused widget gets it on click); give
-                 * it back so the caret stays live and the pending typing
-                 * style toggle_style() just set for an empty selection is
-                 * not wiped by having to click back into the editor. */
-                body->request_focus();
+            b->set_callback([body, html_doc, html_view, f, hs]() {
+                /* The click focuses this button. Hand focus back so the
+                 * caret stays live. */
+                if (*html_view) {
+                    html_doc->toggle_inline_style(hs);
+                    html_doc->focus_editor();
+                } else {
+                    body->toggle_style(f);
+                    body->request_focus();
+                }
             });
             return b;
         };
-        Button *fmt_b = make_fmt(FA_BOLD,      TextEditor::StyleFlag::Bold,
-                                 "Bold (Ctrl+B)");
-        Button *fmt_i = make_fmt(FA_ITALIC,    TextEditor::StyleFlag::Italic,
-                                 "Italic (Ctrl+I)");
+        Button *fmt_b = make_fmt(FA_BOLD, TextEditor::StyleFlag::Bold,
+                                 HtmlDocument::InlineStyle::Bold, "Bold (Ctrl+B)");
+        Button *fmt_i = make_fmt(FA_ITALIC, TextEditor::StyleFlag::Italic,
+                                 HtmlDocument::InlineStyle::Italic, "Italic (Ctrl+I)");
         Button *fmt_u = make_fmt(FA_UNDERLINE, TextEditor::StyleFlag::Underline,
-                                 "Underline (Ctrl+U)");
+                                 HtmlDocument::InlineStyle::Underline, "Underline (Ctrl+U)");
 
         /* Paragraph-level formatting: headings, code block, bullet list.
          * These restyle the whole caret paragraph (see TextEditor). */
@@ -3418,22 +3617,38 @@ public:
             b->set_flags(Button::Flags::ToggleButton);
             b->set_font_size(icon ? 20 : 15);
             b->set_tooltip(tip);
-            b->set_callback([fn, body]() {
+            b->set_callback([fn, body, html_doc, html_view]() {
                 fn();
-                body->request_focus();   // see make_fmt's callback for why
+                if (*html_view) html_doc->focus_editor();
+                else body->request_focus();
             });
             return b;
         };
         Button *fmt_h1 = make_par("H1", 0, "Heading 1",
-                                  [body]() { body->set_paragraph_header(1); });
+                                  [body, html_doc, html_view]() {
+            if (*html_view) html_doc->toggle_header(1);
+            else body->set_paragraph_header(1);
+        });
         Button *fmt_h2 = make_par("H2", 0, "Heading 2",
-                                  [body]() { body->set_paragraph_header(2); });
+                                  [body, html_doc, html_view]() {
+            if (*html_view) html_doc->toggle_header(2);
+            else body->set_paragraph_header(2);
+        });
         Button *fmt_h3 = make_par("H3", 0, "Heading 3",
-                                  [body]() { body->set_paragraph_header(3); });
+                                  [body, html_doc, html_view]() {
+            if (*html_view) html_doc->toggle_header(3);
+            else body->set_paragraph_header(3);
+        });
         Button *fmt_cb = make_par("</>", 0, "Code block",
-                                  [body]() { body->toggle_paragraph_code(); });
+                                  [body, html_doc, html_view]() {
+            if (*html_view) html_doc->toggle_code();
+            else body->toggle_paragraph_code();
+        });
         Button *fmt_ls = make_par("", FA_LIST_UL, "Bullet list",
-                                  [body]() { body->toggle_paragraph_bullet(); });
+                                  [body, html_doc, html_view]() {
+            if (*html_view) html_doc->toggle_bullet();
+            else body->toggle_paragraph_bullet();
+        });
 
         /* Base font size for the whole document.  Headings/code scale off
          * this (TextEditor::set_base_font_size), so raising it grows H1 etc.
@@ -3456,6 +3671,16 @@ public:
             m_config.compose_font_size = v;
             save_config(m_config);
             body->set_base_font_size((float)v);
+            Style cs = body->code_style();
+            cs.fontSize = (float)v;
+            body->set_code_style(cs);
+            if (body->mode() == TextEditor::Mode::Code) {
+                for (auto &p : body->document()->paragraphs)
+                    for (Text &r : p->runs)
+                        r.style.fontSize = (float)v;
+                body->document()->markLayoutDirty();
+                if (Screen *s = body->screen()) s->redraw();
+            }
         };
         font_size->set_callback(apply_font_size);
 
@@ -3483,58 +3708,74 @@ public:
 
         /* Toolbar state follows the caret. */
         std::function<void()> refresh_fmt =
-            [body, fmt_b, fmt_i, fmt_u,
+            [body, html_doc, html_view, fmt_b, fmt_i, fmt_u,
              fmt_h1, fmt_h2, fmt_h3, fmt_cb, fmt_ls]() {
-            Style st = body->style_at_caret();
+            Style st = *html_view ? html_doc->caret_style() : body->style_at_caret();
             fmt_b->set_pushed(st.bold);
             fmt_i->set_pushed(st.italic);
             fmt_u->set_pushed(st.underline);
-            int h = body->paragraph_header();
+            int h = *html_view ? html_doc->caret_header() : body->paragraph_header();
             fmt_h1->set_pushed(h == 1);
             fmt_h2->set_pushed(h == 2);
             fmt_h3->set_pushed(h == 3);
-            fmt_cb->set_pushed(body->paragraph_code());
-            fmt_ls->set_pushed(body->paragraph_bullet());
+            fmt_cb->set_pushed(*html_view ? html_doc->caret_code()
+                                          : body->paragraph_code());
+            fmt_ls->set_pushed(*html_view ? html_doc->caret_bullet()
+                                          : body->paragraph_bullet());
         };
         body->caret_callback = [refresh_fmt](TextEditor::Position) {
             refresh_fmt();
         };
         body->change_callback = refresh_fmt;
+        html_doc->on_caret = refresh_fmt;
 
-        /* Prefill (reply only): empty paragraph for the reply, then the
-         * quoted original as indented paragraphs (serialized back to
-         * "> " lines). */
+        /* A message opened for editing fills the body. Reply and forward
+         * leave an empty paragraph, then the quoted original.
+         * Plain and Markdown use the rich text editor. HTML uses
+         * HtmlDocument so the user edits the formatted message. The
+         * original HTML is kept until they type. */
         {
             Document *doc = body->document().get();
-            doc->paragraphs.clear();
-            doc->addParagraph();   // reply goes here
-
-            if (reply || forward) {
-                doc->addParagraph();   // spacer
-
-                Style meta_s = bs; meta_s.fgColor = meta_color();
-                if (forward) {
-                    doc->addParagraph("---------- Forwarded message ----------",
-                                      meta_s);
-                    if (!orig.from.empty())
-                        doc->addParagraph("From: " + orig.from, meta_s);
-                    if (!orig.date.empty())
-                        doc->addParagraph("Date: " + orig.date, meta_s);
-                    if (!orig.subject.empty())
-                        doc->addParagraph("Subject: " + orig.subject, meta_s);
-                    doc->addParagraph();
-                } else {
-                    doc->addParagraph("On " + orig.date + ", " + orig.from +
-                                      " wrote:", meta_s);
+            const bool quoted = !mail.quote.preface.empty() || !mail.quote.lines.empty();
+            if (!quoted && !mail.body.empty() && mail.format == MailFormat::Markdown) {
+                parse_markdown(*doc, mail.body, text_color(),
+                               (float)m_config.compose_font_size);
+            } else if (!quoted && !mail.body.empty() && mail.format == MailFormat::Html) {
+                *html_view = true;
+                body->set_visible(false);
+                slot->scroll->set_visible(true);
+                html_doc->set_colors(text_color(), meta_color());
+                html_doc->set_background(m_dark ? nvgRGBA(30, 31, 38, 255)
+                                                : nvgRGBA(250, 250, 252, 255));
+                html_doc->image_resolver = [this](const std::string &src) {
+                    return resolve_image(src);
+                };
+                html_doc->set_editable(true);
+                html_doc->set_html(mail.body);
+            } else if (!quoted && !mail.body.empty()) {
+                doc->paragraphs.clear();
+                std::istringstream iss(mail.body);
+                std::string line;
+                while (std::getline(iss, line)) {
+                    if (!line.empty() && line.back() == '\r') line.pop_back();
+                    doc->addParagraph(line, bs);
                 }
-
-                std::istringstream iss(orig.body);
-                std::string qline;
-                while (std::getline(iss, qline)) {
-                    if (!qline.empty() && qline.back() == '\r') qline.pop_back();
-                    if (qline.empty()) continue;
-                    Paragraph *qp = doc->addParagraph(qline, bs);
-                    qp->leftIndent = 16.0f;
+                if (doc->paragraphs.empty()) doc->addParagraph();
+            } else {
+                doc->paragraphs.clear();
+                doc->addParagraph();
+                if (quoted) {
+                    doc->addParagraph();
+                    Style meta_s = bs;
+                    meta_s.fgColor = meta_color();
+                    for (const std::string &line : mail.quote.preface) {
+                        if (line.empty()) doc->addParagraph();
+                        else doc->addParagraph(line, meta_s);
+                    }
+                    for (const std::string &qline : mail.quote.lines) {
+                        Paragraph *qp = doc->addParagraph(qline, bs);
+                        qp->leftIndent = 16.0f;
+                    }
                 }
             }
             doc->markLayoutDirty();
@@ -3570,10 +3811,18 @@ public:
                           [] {}, {{0, 0}}, true);
         fmt_box->add_item({"HTML", "fmt_html"}, FA_CODE,
                           [] {}, {{0, 0}}, true);
-        fmt_box->set_selected_index(1);   // Markdown
+        fmt_box->set_selected_index(mail.format == MailFormat::Plain ? 0
+                                  : mail.format == MailFormat::Html ? 2
+                                  : 1);
+        /* The HTML view stays HTML. Another format would flatten it. */
+        fmt_box->set_selected_callback([fmt_box, html_view](int idx) {
+            if (*html_view && idx != 2)
+                fmt_box->set_selected_index(2);
+        });
         fmt_box->set_tooltip(
-            "Plain: raw text.  Markdown: plain text with markup=markdown; "
-            "aware clients render it styled.  HTML: generated text/html");
+            "Plain: raw text.  Markdown: styled here, sent as markup=markdown.  "
+            "HTML: formatted editing. Untouched HTML is kept; after you type, "
+            "the saved body is paragraphs, headings, lists, links, and images.");
 
         Widget *action_group = new Widget(buttons);
         action_group->set_layout(new BoxLayout(Orientation::Horizontal,
@@ -3582,28 +3831,39 @@ public:
             AdvancedGridLayout::Anchor(2, 0, Alignment::Maximum, Alignment::Middle));
 
         auto compose_busy = std::make_shared<bool>(false);
-        auto request_close = [this, win, to, subj, body, fmt_box, compose_atts,
-                              from_box, from_account_id, compose_busy,
-                              irt = reply ? orig.message_id : ""]() {
-            if (*compose_busy) return;
+        /* Copy the form into the OutgoingMail that opened this window.
+         * in_reply_to stays whatever reply() set. */
+        auto snapshot = [this, mail, to, subj, body, fmt_box, compose_atts,
+                         from_box, html_doc, html_view]() {
+            OutgoingMail m = mail;
             int fmt = fmt_box->selected_index();
             if (fmt < 0) fmt = 1;
-            MailFormat format = fmt == 0 ? MailFormat::Plain
-                              : fmt == 2 ? MailFormat::Html
-                                         : MailFormat::Markdown;
-            std::string text = fmt == 0 ? body->plain_text()
-                             : fmt == 2 ? document_to_html(*body->document())
-                                        : document_to_markdown(*body->document());
-            std::string to_s = to->value();
-            std::string sub_s = subj->value();
-            std::vector<MailAttachment> atts =
-                compose_atts ? *compose_atts : std::vector<MailAttachment>{};
-            auto blank = [](const std::string &s) {
-                return std::find_if(s.begin(), s.end(), [](unsigned char c) {
-                    return !std::isspace(c);
-                }) == s.end();
-            };
-            if (blank(to_s) && blank(sub_s) && blank(text) && atts.empty()) {
+            m.format = fmt == 0 ? MailFormat::Plain
+                     : fmt == 2 ? MailFormat::Html
+                                : MailFormat::Markdown;
+            /* Unedited HTML comes back as the string that was opened.
+             * After a keystroke, edited_html() writes the paragraph view. */
+            if (html_view && *html_view)
+                m.body = html_doc->edited_html();
+            else
+                m.body = fmt == 0 ? body->plain_text()
+                       : fmt == 2 ? document_to_html(*body->document())
+                                  : document_to_markdown(*body->document());
+            m.to = to->value();
+            m.subject = subj->value();
+            m.attachments = compose_atts ? *compose_atts
+                                         : std::vector<MailAttachment>{};
+            if (from_box) {
+                int idx = from_box->selected_index();
+                if (idx >= 0 && idx < (int)m_accounts.size())
+                    m.account_id = m_accounts[idx]->config.id();
+            }
+            return m;
+        };
+        auto request_close = [this, win, to, subj, body, html_doc, snapshot, compose_busy]() {
+            if (*compose_busy) return;
+            OutgoingMail draft = snapshot();
+            if (draft.blank()) {
                 close_dialog(win);
                 return;
             }
@@ -3611,32 +3871,39 @@ public:
             to->set_editable(false);
             subj->set_editable(false);
             body->set_read_only(true);
+            html_doc->set_editable(false);
             set_status("Saving draft...");
-            std::string chosen = from_account_id;
-            if (from_box) {
-                int idx = from_box->selected_index();
-                if (idx >= 0 && idx < (int)m_accounts.size())
-                    chosen = m_accounts[idx]->config.id();
-            }
-            save_draft(win, to, subj, body, compose_busy, chosen,
-                       to_s, sub_s, text, irt, format, std::move(atts));
+            save_draft(win, to, subj, body, compose_busy, draft,
+                       [html_doc]() { html_doc->set_editable(true); });
         };
         win->set_close_callback(request_close);
 
         Button *send = new Button(action_group, "Send", FA_PAPER_PLANE);
-        send->set_callback([this, win, send, to, subj, body, fmt_box, spinner,
-                           status_row, send_bar, compose_atts, from_box,
-                           from_account_id, compose_busy,
-                           irt = reply ? orig.message_id : ""]() {
+        send->set_callback([this, win, send, to, subj, body, html_doc, spinner,
+                           status_row, send_bar, snapshot, compose_busy]() {
             if (*compose_busy) return;
-            std::string to_s  = to->value();
-            std::string sub_s = subj->value();
-            if (to_s.empty()) {
+            if (to->value().empty()) {
                 auto *dlg = new MessageDialog(this,
                     MessageDialog::Type::Warning, "Missing recipient",
                     "Enter a recipient address first.", "OK", "", false);
                 dlg->center();
                 return;
+            }
+            {
+                OutgoingMail outgoing = snapshot();
+                const AccountSession *acct = account(outgoing.account_id);
+                const MailAccount &ma = acct ? acct->config : current_acct().config;
+                if (ma.from_address().empty()) {
+                    std::string who = ma.display_name();
+                    auto *dlg = new MessageDialog(this,
+                        MessageDialog::Type::Warning, "From address",
+                        (who.empty() ? "This account" : who) +
+                        " has no email address. Set Email in Preferences. "
+                        "The username is used when it is already an email address.",
+                        "OK", "", false);
+                    dlg->center();
+                    return;
+                }
             }
             *compose_busy = true;
             send->set_enabled(false);
@@ -3644,34 +3911,23 @@ public:
             to->set_editable(false);
             subj->set_editable(false);
             body->set_read_only(true);
+            html_doc->set_editable(false);
             status_row->set_visible(true);
             send_bar->start();
             perform_layout();
             spinner->start();
-            int fmt = fmt_box->selected_index();
-            if (fmt < 0) fmt = 1;   // default to Markdown
-            MailFormat format = fmt == 0 ? MailFormat::Plain
-                              : fmt == 2 ? MailFormat::Html
-                                         : MailFormat::Markdown;
-            std::string text = fmt == 0 ? body->plain_text()
-                             : fmt == 2 ? document_to_html(*body->document())
-                                        : document_to_markdown(*body->document());
-            std::string chosen_account_id = from_account_id;
-            if (from_box) {
-                int idx = from_box->selected_index();
-                if (idx >= 0 && idx < (int)m_accounts.size())
-                    chosen_account_id = m_accounts[idx]->config.id();
-            }
             send_reply(win, send, spinner, status_row, send_bar, to, subj, body,
-                       chosen_account_id, to_s, sub_s, text, irt, format,
-                       compose_atts ? *compose_atts
-                                    : std::vector<MailAttachment>{},
-                       compose_busy);
+                       snapshot(), compose_busy,
+                       [html_doc]() { html_doc->set_editable(true); });
         });
 
         Button *cancel = new Button(action_group, "Cancel", FA_TIMES);
         cancel->set_callback(request_close);
 
+        /* The attachment rebuild above laid the window out before this
+         * toolbar and the Send row existed. Measure again now that the
+         * formatting buttons are shown or hidden, then cap to the screen. */
+        win->set_size(Vector2i(0, 0));
         win->center();
         win->request_focus();
     }
@@ -3682,61 +3938,46 @@ public:
                     Widget *status_row, IndeterminateBar *send_bar,
                     TextBox *to_box, TextBox *subj_box,
                     TextEditor *editor,
-                    const std::string &account_id,
-                    const std::string &to, const std::string &subject,
-                    const std::string &body, const std::string &irt,
-                    MailFormat format,
-                    std::vector<MailAttachment> attachments,
-                    std::shared_ptr<bool> compose_busy) {
-        const AccountSession *acct = account(account_id);
+                    OutgoingMail mail,
+                    std::shared_ptr<bool> compose_busy,
+                    std::function<void()> unlock = {}) {
+        const AccountSession *acct = account(mail.account_id);
         const MailAccount &ma = acct ? acct->config : current_acct().config;
         SmtpConfig sc;
         sc.host     = ma.smtp_host.empty() ? ma.host : ma.smtp_host;
         sc.port     = ma.smtp_port;
         sc.username = ma.username;
         sc.password = ma.password;
-        std::string from = ma.username;
+        std::string from = ma.from_address();
         std::string imap_host = ma.host;
         int imap_port = ma.port;
-        /* Maddy does not file a copy. Prefer an existing Sent mailbox;
-         * otherwise APPEND creates "Sent Messages". */
-        std::string sent_folder = acct ? acct->sent_mailbox() : "Sent Messages";
+        /* Maddy does not file a copy. Prefer a \Sent mailbox, else a
+         * familiar name; APPEND creates it when the server has neither. */
+        std::string sent_folder = acct ? acct->sent_folder() : "Sent Messages";
 
         set_status("Sending...");
+        auto alive = m_alive;
         std::thread([this, win, send_btn, spinner, status_row, send_bar, to_box,
-                     subj_box, editor, sc, from, to, subject, body,
-                     irt, format, attachments, imap_host, imap_port,
-                     sent_folder, compose_busy]() mutable {
+                     subj_box, editor, sc, from, mail = std::move(mail),
+                     imap_host, imap_port, sent_folder, compose_busy, alive,
+                     unlock]() mutable {
             SmtpClient smtp;
             std::string err, raw, save_err;
-            bool ok = smtp.send(sc, from, to, subject, body, irt, format,
-                                err, attachments, &raw);
+            bool ok = smtp.send(sc, from, mail.to, mail.subject, mail.body,
+                                mail.in_reply_to, mail.format,
+                                err, mail.attachments, &raw);
             bool saved = false;
             if (ok) {
-                ImapClient imap;
-                imap.set_use_compress(false);
-                std::string oerr;
-                if (!imap.open(imap_host, imap_port, sc.username, sc.password, oerr)) {
-                    save_err = oerr;
-                } else {
-                    std::string folder = sent_folder;
-                    std::string special, se;
-                    if (imap.special_use_mailbox("\\Sent", special, se) &&
-                        !special.empty())
-                        folder = special;
-                    if (!imap.append_message(folder, raw, save_err)) {
-                        if (save_err.empty()) save_err = "could not save a copy";
-                    } else {
-                        saved = true;
-                    }
-                    sent_folder = folder;
-                }
-                imap.close();
+                saved = imap_upload(imap_host, imap_port, sc.username, sc.password,
+                                    sent_folder, "\\Seen", raw, save_err);
+                if (!saved && save_err.empty())
+                    save_err = "could not save a copy";
             }
             nanogui::async(std::function<void()>(
                 [this, win, send_btn, spinner, status_row, send_bar, to_box,
                  subj_box, editor, ok, err, saved, save_err, sent_folder,
-                 compose_busy]() {
+                 compose_busy, alive, unlock]() {
+                    if (!*alive) return;
                     if (ok) {
                         if (saved) {
                             set_status("Sent");
@@ -3764,6 +4005,7 @@ public:
                         to_box->set_editable(true);
                         subj_box->set_editable(true);
                         editor->set_read_only(false);
+                        if (unlock) unlock();
                         perform_layout();
                         auto *dlg = new MessageDialog(this,
                             MessageDialog::Type::Warning,
@@ -3924,6 +4166,15 @@ void Preferences::show(Widget *parent, MailConfig &config,
     user->set_editable(true);
     user->set_alignment(TextBox::Alignment::Right);
 
+    new Label(form, "Email:", "sans-bold");
+    TextBox *email = new TextBox(form);
+    email->set_placeholder("name@example.com");
+    email->set_editable(true);
+    email->set_alignment(TextBox::Alignment::Right);
+    email->set_tooltip(
+        "Sent From when the username is not an email address. "
+        "Leave blank when the username already contains @.");
+
     new Label(form, "Password:", "sans-bold");
     TextBox *pass = new TextBox(form);
     pass->set_editable(true);
@@ -3953,6 +4204,7 @@ void Preferences::show(Widget *parent, MailConfig &config,
         a.host       = host->value();
         a.port       = port->value();
         a.username   = user->value();
+        a.email      = email->value();
         a.password   = pass->value();
         a.smtp_host  = smtp_host->value();
         a.smtp_port  = smtp_port->value();
@@ -3968,12 +4220,13 @@ void Preferences::show(Widget *parent, MailConfig &config,
         host->set_value(a.host);
         port->set_value(a.port);
         user->set_value(a.username);
+        email->set_value(a.email);
         pass->set_value(a.password);
         smtp_host->set_value(a.smtp_host);
         smtp_port->set_value(a.smtp_port);
         for (Widget *w : {(Widget*)name, (Widget*)host, (Widget*)port,
-                         (Widget*)user, (Widget*)pass, (Widget*)smtp_host,
-                         (Widget*)smtp_port})
+                         (Widget*)user, (Widget*)email, (Widget*)pass,
+                         (Widget*)smtp_host, (Widget*)smtp_port})
             w->set_enabled(have);
         remove_btn->set_enabled(have);
     };
@@ -4083,6 +4336,22 @@ void Preferences::show(Widget *parent, MailConfig &config,
                        check_interval, cache_limit, save_contacts,
                        on_saved, close]() {
         commit_current();
+        std::string missing;
+        for (const MailAccount &a : *accounts) {
+            if (!a.from_address().empty()) continue;
+            if (!missing.empty()) missing += "\n";
+            std::string who = a.display_name();
+            missing += who.empty() ? "An account" : who;
+        }
+        if (!missing.empty()) {
+            auto *dlg = new MessageDialog(parent, MessageDialog::Type::Warning,
+                "From address",
+                "Set Email for:\n\n" + missing +
+                "\n\nThe username is used when it is already an email address.",
+                "OK", "", false);
+            dlg->center();
+            return;
+        }
         MailConfig next = config;
         next.accounts = *accounts;
         int idx = check_interval->selected_index();

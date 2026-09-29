@@ -1215,18 +1215,20 @@ bool ImapClient::is_modified_error(const std::string &err) {
     return l.find("[modified") != std::string::npos;
 }
 
-bool ImapClient::mark_seen_uid(uint32_t uid, uint64_t modseq, std::string &err) {
+bool ImapClient::mark_seen_uid(uint32_t uid, uint64_t modseq, std::string &err,
+                               bool seen) {
     if (uid == 0) { err = "invalid uid"; return false; }
     if (m_fd < 0)  { err = "not connected"; return false; }
     std::vector<std::string> untagged;
+    const char *op = seen ? "+FLAGS.SILENT (\\Seen)" : "-FLAGS.SILENT (\\Seen)";
     std::string cmd;
     if (has_condstore() && modseq != 0) {
         // RFC 4551 §3.3: STORE modifier must appear before the sequence set.
         // Use UID variant so the uid is stable across EXPUNGE resequencing.
         cmd = "UID STORE " + std::to_string(uid) +
-              " (UNCHANGEDSINCE " + std::to_string(modseq) + ") +FLAGS.SILENT (\\Seen)";
+              " (UNCHANGEDSINCE " + std::to_string(modseq) + ") " + op;
     } else {
-        cmd = "UID STORE " + std::to_string(uid) + " +FLAGS.SILENT (\\Seen)";
+        cmd = "UID STORE " + std::to_string(uid) + " " + op;
     }
     bool ok = run(cmd, untagged, err);
     if (!ok && is_modified_error(err)) {
@@ -1700,8 +1702,23 @@ bool ImapClient::append_message(const std::string &folder,
     return once();
 }
 
+bool imap_upload(const std::string &host, int port,
+                 const std::string &user, const std::string &pass,
+                 const std::string &folder, const char *flags,
+                 const std::string &rfc822, std::string &err) {
+    ImapClient imap;
+    imap.set_use_compress(false);
+    if (!imap.open(host, port, user, pass, err)) {
+        imap.close();
+        return false;
+    }
+    bool ok = imap.append_message(folder, rfc822, err, flags);
+    imap.close();
+    return ok;
+}
+
 bool ImapClient::special_use_mailbox(const std::string &use, std::string &name,
-                                     std::string &err) {
+                                     std::string &err) { // UNUSED
     name.clear();
     std::string want = to_lower(use);
     std::vector<std::string> untagged;
@@ -2195,6 +2212,7 @@ bool ImapClient::list_folders(std::vector<MailFolder> &out, std::string &err) {
         MailFolder f;
         f.name = name;
         f.delimiter = delimiter;
+        f.attrs = flags;
         out.push_back(f);
     }
 
@@ -2586,7 +2604,7 @@ static bool parse_rfc822_into(const std::string &raw, MailMessage &msg) {
     };
     msg.from    = display_from(get("from"));
     msg.from_addr = address_of(get("from"));
-    msg.to      = display_from(get("to"));
+    msg.to      = decode_encoded_words(get("to"));
     msg.subject = decode_encoded_words(get("subject"));
     if (msg.subject.empty()) msg.subject = "(no subject)";
     msg.date       = decode_encoded_words(get("date"));

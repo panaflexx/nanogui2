@@ -3,7 +3,7 @@
  *
  *  - parse_markdown / document_to_markdown: Markdown <-> nanogui::Document
  *    (compose editor input and markup=markdown send path)
- *  - document_to_html: nanogui::Document -> HTML email body
+ *  - document_to_html / html_to_document: nanogui::Document <-> HTML email body
  *  - header_html / body_as_html: the parchment header card and the
  *    plain/Markdown body fallback used by the reading pane
  */
@@ -39,11 +39,22 @@ std::string document_to_markdown(const nanogui::Document &doc);
  * indent level, leftIndent -> <blockquote>, isRule -> <hr>). */
 std::string document_to_html(const nanogui::Document &doc);
 
+/* Load HTML the composer itself writes back into a Document: paragraphs,
+ * headings, bold/italic/underline, links, lists, quotes, code, rules.
+ * html/body wrappers and the whitespace between them do not become blank
+ * paragraphs.  Returns false for any other markup (tables, images, styles,
+ * layout) and leaves `doc` unchanged — that message is edited as HTML
+ * source instead of being flattened. */
+bool html_to_document(nanogui::Document &doc, const std::string &html,
+                      NVGcolor text_color = nvgRGBA(20, 20, 25, 255),
+                      float base_size = 16.0f);
+
 std::string html_escape(const std::string &s);
 
-/* One <div> card: subject, then the From/To/Date rows.  The card carries
- * its own fixed parchment palette (it does NOT follow the light/dark
- * theme) so it stays legible against any sender-chosen background. */
+/* One <div> card: subject and an Edit-for-send slot on the top row, then
+ * the From/To/Date rows.  The card carries its own fixed parchment palette
+ * (independent of the light/dark theme) and is marked data-nmail-chrome so
+ * it stays left-aligned and full width inside a right-aligned message. */
 std::string header_html(const MailMessage &msg,
                         const std::set<std::string> &expanded);
 

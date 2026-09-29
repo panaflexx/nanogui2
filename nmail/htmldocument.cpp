@@ -12,6 +12,7 @@
 
 #include <nanogui/layout.h>
 #include <nanogui/screen.h>
+#include <nanogui/scrollpanel.h>
 #include <GLFW/glfw3.h>
 #include "gumbo.h"
 
@@ -568,16 +569,21 @@ struct Flow {
     bool           cur_has_text = false;
     bool           pre = false;
     TextAlignment  align = TextAlignment::Left;
+    /* Heading level of the element currently being walked. brk() keeps
+     * it so a <br> inside <h1> starts another heading paragraph. */
+    int            pending_header = 0;
 
     Paragraph *para() {
         if (!cur) {
             cur = doc.addParagraph();
             cur->alignment = align;
+            cur->headerLevel = pending_header;
             cur_has_text = false;
         }
         return cur;
     }
-    /* End the current block: the next text starts a new paragraph. */
+    /* End the current block: the next text starts a new paragraph.
+     * Does not clear pending_header. */
     void brk() { cur = nullptr; cur_has_text = false; }
 
     /* Inline image run (a small icon next to text) — see Text::image. */
@@ -712,6 +718,38 @@ public:
         set_live(true);
     }
 
+    /* Caret lives on one leaf at a time. Image and rule paragraphs are
+     * not typed into; keystrokes open a text paragraph beside them. */
+    bool  m_have_caret = false;
+    size_t m_caret_para = 0;
+    size_t m_caret_col  = 0;
+    bool  m_typing_on = false;
+    Style m_typing;
+
+    HtmlDocument *owner() const;
+    bool editing() const;
+    void ensure_layout(NVGcontext *ctx);
+    void solo_caret();
+    void place_caret(size_t para, size_t col);
+    Style style_for_insert() const;
+    void insert_text(const std::string &s);
+    void insert_newline();
+    void ensure_text_para();
+    void break_paragraph();
+    void delete_backward();
+    void delete_forward();
+    void move_caret(int key, int mods);
+    void move_to_leaf(HtmlText *ht, bool at_end);
+    void toggle_inline(bool Style::*flag);
+    void toggle_header_level(int level);
+    void toggle_bullet_para();
+    void toggle_code_para();
+    void after_edit();
+    void after_move();
+    void scroll_caret();
+    bool keyboard_event(int key, int scancode, int action, int mods) override;
+    bool keyboard_character_event(unsigned int codepoint) override;
+
     virtual Vector2i preferred_size(NVGcontext *ctx) const override {
         /* Cap at the parent, not at our last laid-out m_size: using
          * m_size ratchets a shrink-wrapped chip (heart+"1") down until
@@ -784,6 +822,18 @@ public:
             m_doc.markLayoutDirty();
         m_doc.contentWidth = (float)w;
         m_doc.draw(ctx, x, y);
+        if (m_have_caret && editing() && focused()) {
+            Document::CaretInfo info = m_doc.richCaretInfo(ctx, m_caret_para, m_caret_col);
+            if (info.valid) {
+                float cx = info.x;
+                float y0 = info.y_top;
+                float y1 = std::max(info.y_bottom, info.y_top + 12.f);
+                nvgBeginPath(ctx);
+                nvgRect(ctx, cx, y0, 1.5f, y1 - y0);
+                nvgFillColor(ctx, nvgRGBA(80, 140, 255, 255));
+                nvgFill(ctx);
+            }
+        }
         int h = (int)std::ceil(m_doc.last_drawn_height);
         if (w != m_measured_w || h != m_measured_h) {
             /* Our reported preferred height was stale: ask the enclosing
@@ -822,6 +872,10 @@ public:
     virtual bool mouse_motion_event(const Vector2i &p, const Vector2i &rel, int b, int m) override {
         // set_cursor on the widget under the pointer; Screen::cursor_pos_callback_event copies widget->cursor() to GLFW.
         // Return true when hovering a link so the event is considered handled and not swallowed.
+        if (editing()) {
+            set_cursor(Cursor::IBeam);
+            return true;
+        }
         std::string url = hit_url(p);
         m_hover_url = url;
         bool is_link = !url.empty();
@@ -831,6 +885,10 @@ public:
         return is_link || handled;
     }
     virtual bool mouse_enter_event(const Vector2i &p, bool enter) override {
+        if (editing()) {
+            set_cursor(enter ? Cursor::IBeam : Cursor::Arrow);
+            return Widget::mouse_enter_event(p, enter);
+        }
         if(!enter){ set_cursor(Cursor::Arrow); m_hover_url.clear(); notify_hover(""); }
         else { std::string u=hit_url(p); m_hover_url=u; if(!u.empty()) set_cursor(Cursor::Hand); else set_cursor(Cursor::Arrow); notify_hover(u); }
         return Widget::mouse_enter_event(p, enter);
@@ -842,6 +900,25 @@ public:
         return false;
     }
     virtual bool mouse_button_event(const Vector2i &p, int button, bool down, int mods) override {
+        if (editing() && button == GLFW_MOUSE_BUTTON_1) {
+            if (down) {
+                request_focus();
+                NVGcontext *ctx = screen() ? screen()->nvg_context() : nullptr;
+                size_t para = 0, col = 0;
+                if (ctx) {
+                    ensure_layout(ctx);
+                    /* p and the document words are both in this leaf's
+                     * parent space (draw origin is m_pos). */
+                    std::pair<size_t, size_t> hit =
+                        m_doc.richHitTest(ctx, (float)p.x(), (float)p.y());
+                    para = hit.first;
+                    col = hit.second;
+                }
+                place_caret(para, col);
+                after_move();
+            }
+            return true;   // edit mode does not follow links
+        }
         if(button==GLFW_MOUSE_BUTTON_1 && !down){
             std::string u=hit_url(p);
             if(!u.empty()){
@@ -1579,6 +1656,24 @@ void apply_cascade(GumboElement *el, Style &st, TextAlignment &align,
         apply_style_attr(style_attr, st, align, has_align, box,
                          ApplyMode::Important);
     }
+    /* Host parchment card. Message rules (text-align:right !important,
+     * margin:auto, a fixed width) must not move it. Inline !important
+     * already ran; this still wins when the rule is on an ancestor and
+     * the paragraph stamps that inherited alignment. */
+    if (const char *chrome = attr(el, "data-nmail-chrome")) {
+        align = TextAlignment::Left;
+        st.displayNone = false;
+        if (box) {
+            box->center = false;
+            box->float_left = false;
+            box->inline_flex = false;
+            box->is_inline_flex = false;
+            box->align_middle = false;
+            box->max_width_px = 0.f;
+            box->width_px = 0.f;
+            box->width_pct = std::string(chrome) == "root" ? 100.f : 0.f;
+        }
+    }
 }
 
 /* Column weight for grouping consecutive siblings into one flex row, or
@@ -1970,6 +2065,7 @@ void walk_inline(GumboNode *node, Style st, Flow &F, Builder &B,
     }
     if (block) F.brk();
 
+    int saved_header = F.pending_header;
     switch (tag) {
     case GUMBO_TAG_B: case GUMBO_TAG_STRONG:
         st.bold = true; break;
@@ -2002,11 +2098,12 @@ void walk_inline(GumboNode *node, Style st, Flow &F, Builder &B,
         if (href && href[0]) st.linkUrl = href;
         break;
     }
-    case GUMBO_TAG_H1: st.bold = true; st.fontSize *= 1.6f;  break;
-    case GUMBO_TAG_H2: st.bold = true; st.fontSize *= 1.4f;  break;
-    case GUMBO_TAG_H3: st.bold = true; st.fontSize *= 1.2f;  break;
-    case GUMBO_TAG_H4: case GUMBO_TAG_H5: case GUMBO_TAG_H6:
-        st.bold = true; st.fontSize *= 1.1f; break;
+    case GUMBO_TAG_H1: st.bold = true; st.fontSize *= 1.6f; F.pending_header = 1; break;
+    case GUMBO_TAG_H2: st.bold = true; st.fontSize *= 1.4f; F.pending_header = 2; break;
+    case GUMBO_TAG_H3: st.bold = true; st.fontSize *= 1.2f; F.pending_header = 3; break;
+    case GUMBO_TAG_H4: st.bold = true; st.fontSize *= 1.1f; F.pending_header = 4; break;
+    case GUMBO_TAG_H5: st.bold = true; st.fontSize *= 1.1f; F.pending_header = 5; break;
+    case GUMBO_TAG_H6: st.bold = true; st.fontSize *= 1.1f; F.pending_header = 6; break;
     case GUMBO_TAG_BLOCKQUOTE:
         st.italic = true;
         st.fgColor = B.meta;
@@ -2092,6 +2189,7 @@ void walk_inline(GumboNode *node, Style st, Flow &F, Builder &B,
 
     walk_inline_children(&el->children, st, F, B, list_depth, depth+1);
 
+    F.pending_header = saved_header;
     F.align = save_align;
     if (block) F.brk();
 }
@@ -3074,6 +3172,639 @@ void build_children(Widget *container, GumboVector *kids, Style st,
     flush();
 }
 
+// ---------------------------------------------------------------------------
+// HtmlText editing. One leaf holds the caret. Typing never calls
+// Screen::perform_layout — that would fight the compose window's size.
+// ---------------------------------------------------------------------------
+
+static size_t utf8_step_next(const std::string &s, size_t col) {
+    if (col >= s.size()) return s.size();
+    ++col;
+    while (col < s.size() && ((unsigned char)s[col] & 0xC0) == 0x80) ++col;
+    return col;
+}
+
+static size_t utf8_step_prev(const std::string &s, size_t col) {
+    if (col == 0) return 0;
+    --col;
+    while (col > 0 && ((unsigned char)s[col] & 0xC0) == 0x80) --col;
+    return col;
+}
+
+struct EditHit { size_t run = 0; size_t in_run = 0; };
+
+/* Column is in the paragraph's text bytes. Image runs have no bytes. */
+static EditHit run_at(const Paragraph &p, size_t col) {
+    size_t acc = 0;
+    for (size_t i = 0; i < p.runs.size(); ++i) {
+        if (p.runs[i].isImageRun) continue;
+        size_t n = p.runs[i].content.size();
+        if (col <= acc + n) return { i, col > acc ? col - acc : 0 };
+        acc += n;
+    }
+    if (p.runs.empty()) return {};
+    return { p.runs.size() - 1, p.runs.back().isImageRun
+                                 ? 0 : p.runs.back().content.size() };
+}
+
+static void erase_cols(Paragraph *p, size_t a, size_t b) {
+    if (!p || b <= a) return;
+    size_t acc = 0;
+    for (Text &r : p->runs) {
+        if (r.isImageRun) continue;
+        size_t n = r.content.size();
+        size_t lo = acc, hi = acc + n;
+        size_t ea = std::max(a, lo), eb = std::min(b, hi);
+        if (ea < eb) r.content.erase(ea - lo, eb - ea);
+        acc = hi;
+    }
+    p->runs.erase(std::remove_if(p->runs.begin(), p->runs.end(),
+        [](const Text &t) { return !t.isImageRun && t.content.empty(); }),
+        p->runs.end());
+}
+
+static void collect_text_leaves(Widget *w, std::vector<HtmlText *> &out) {
+    if (!w) return;
+    if (auto *ht = dynamic_cast<HtmlText *>(w)) { out.push_back(ht); return; }
+    if (dynamic_cast<HtmlBlock *>(w) || dynamic_cast<HtmlDocument *>(w)) {
+        for (Widget *c : w->children())
+            collect_text_leaves(c, out);
+    }
+}
+
+HtmlDocument *HtmlText::owner() const {
+    for (const Widget *p = parent(); p; p = p->parent())
+        if (auto *hd = dynamic_cast<const HtmlDocument *>(p))
+            return const_cast<HtmlDocument *>(hd);
+    return nullptr;
+}
+
+bool HtmlText::editing() const {
+    HtmlDocument *hd = owner();
+    return hd && hd->editable();
+}
+
+void HtmlText::ensure_layout(NVGcontext *ctx) {
+    if (!ctx) return;
+    int w = m_size.x() > 0 ? m_size.x() : m_measured_w;
+    w = std::max(w, 10);
+    if (w == m_measured_w && m_measured_h > 0 && !m_doc.layoutDirty() &&
+        !m_doc.m_rich_layout.empty())
+        return;
+    m_doc.contentWidth = (float)w;
+    m_doc.layout_only = true;
+    m_doc.draw(ctx, (float)m_pos.x(), (float)m_pos.y());
+    m_doc.layout_only = false;
+    m_measured_h = (int)std::ceil(m_doc.last_drawn_height);
+    m_measured_w = w;
+}
+
+void HtmlText::solo_caret() {
+    HtmlDocument *hd = owner();
+    if (!hd) return;
+    std::vector<HtmlText *> leaves;
+    collect_text_leaves(hd, leaves);
+    for (HtmlText *ht : leaves) {
+        if (ht == this) continue;
+        ht->m_have_caret = false;
+        ht->m_typing_on = false;
+    }
+}
+
+void HtmlText::place_caret(size_t para, size_t col) {
+    solo_caret();
+    if (m_doc.paragraphs.empty()) m_doc.addParagraph();
+    if (para >= m_doc.paragraphs.size()) para = m_doc.paragraphs.size() - 1;
+    size_t n = m_doc.paragraphs[para]->byte_length();
+    if (col > n) col = n;
+    m_have_caret = true;
+    m_caret_para = para;
+    m_caret_col = col;
+    m_typing_on = false;
+}
+
+Style HtmlText::style_for_insert() const {
+    if (m_typing_on) return m_typing;
+    Style s;
+    s.fontSize = 17.f;
+    if (HtmlDocument *hd = owner()) s.fgColor = hd->text_color();
+    if (m_caret_para >= m_doc.paragraphs.size()) return s;
+    const Paragraph *p = m_doc.paragraphs[m_caret_para].get();
+    size_t acc = 0;
+    const Text *last = nullptr;
+    for (const Text &r : p->runs) {
+        if (r.isImageRun) continue;
+        last = &r;
+        if (m_caret_col <= acc + r.content.size()) return r.style;
+        acc += r.content.size();
+    }
+    if (last) return last->style;
+    return s;
+}
+
+void HtmlText::ensure_text_para() {
+    if (m_doc.paragraphs.empty()) {
+        m_doc.addParagraph();
+        m_caret_para = 0;
+        m_caret_col = 0;
+        return;
+    }
+    if (m_caret_para >= m_doc.paragraphs.size())
+        m_caret_para = m_doc.paragraphs.size() - 1;
+    Paragraph *p = m_doc.paragraphs[m_caret_para].get();
+    if (!p->isImage && !p->isRule) return;
+    Paragraph *n = m_doc.insertParagraph(m_caret_para + 1);
+    n->alignment = p->alignment;
+    m_caret_para += 1;
+    m_caret_col = 0;
+}
+
+static void inject_chunk(Paragraph *par, size_t col, const std::string &chunk,
+                         const Style &st, bool fresh_run) {
+    if (!par || chunk.empty()) return;
+    if (par->runs.empty()) {
+        par->addText(chunk, st);
+        return;
+    }
+    if (fresh_run) {
+        size_t ri = par->split_run_at(col);
+        Text t;
+        t.style = st;
+        t.content = chunk;
+        if (ri > par->runs.size()) ri = par->runs.size();
+        par->runs.insert(par->runs.begin() + (ptrdiff_t)ri, std::move(t));
+        return;
+    }
+    EditHit h = run_at(*par, col);
+    if (h.run >= par->runs.size() || par->runs[h.run].isImageRun) {
+        Text t;
+        t.style = st;
+        t.content = chunk;
+        size_t at = std::min(h.run + (h.run < par->runs.size() &&
+                                      par->runs[h.run].isImageRun ? 1 : 0),
+                             par->runs.size());
+        par->runs.insert(par->runs.begin() + (ptrdiff_t)at, std::move(t));
+        return;
+    }
+    par->runs[h.run].content.insert(h.in_run, chunk);
+}
+
+/* Split the caret paragraph. At the end of a heading the new paragraph
+ * is body text, so the heading size does not leak onto the next line. */
+void HtmlText::break_paragraph() {
+    ensure_text_para();
+    Paragraph *p = m_doc.paragraphs[m_caret_para].get();
+    size_t col = std::min(m_caret_col, p->byte_length());
+    bool at_end = col >= p->byte_length();
+    Paragraph *np = m_doc.insertParagraph(m_caret_para + 1);
+    np->alignment = p->alignment;
+    np->isBullet = p->isBullet;
+    np->leftIndent = p->leftIndent;
+    np->headerLevel = (at_end && p->headerLevel > 0) ? 0 : p->headerLevel;
+
+    std::vector<Text> tail;
+    size_t acc = 0;
+    for (size_t i = 0; i < p->runs.size();) {
+        Text &r = p->runs[i];
+        if (r.isImageRun) {
+            if (acc >= col) {
+                tail.push_back(std::move(r));
+                p->runs.erase(p->runs.begin() + (ptrdiff_t)i);
+                continue;
+            }
+            ++i;
+            continue;
+        }
+        size_t n = r.content.size();
+        if (acc + n <= col) { acc += n; ++i; continue; }
+        if (acc >= col) {
+            tail.push_back(std::move(r));
+            p->runs.erase(p->runs.begin() + (ptrdiff_t)i);
+            continue;
+        }
+        Text rest;
+        rest.style = r.style;
+        rest.linkUrl = r.linkUrl;
+        rest.content = r.content.substr(col - acc);
+        r.content.erase(col - acc);
+        tail.push_back(std::move(rest));
+        ++i;
+        while (i < p->runs.size()) {
+            tail.push_back(std::move(p->runs[i]));
+            p->runs.erase(p->runs.begin() + (ptrdiff_t)i);
+        }
+        break;
+    }
+    if (at_end && p->headerLevel > 0) {
+        Style body = style_for_insert();
+        body.bold = false;
+        body.fontSize = 17.f;
+        body.monospace = false;
+        m_typing = body;
+        m_typing_on = true;
+        for (Text &t : tail) {
+            if (t.isImageRun) continue;
+            t.style.bold = false;
+            t.style.fontSize = 17.f;
+        }
+    }
+    for (Text &t : tail) np->runs.push_back(std::move(t));
+    m_caret_para += 1;
+    m_caret_col = 0;
+}
+
+void HtmlText::insert_text(const std::string &s) {
+    if (!editing() || s.empty()) return;
+    size_t start = 0;
+    for (size_t i = 0; i <= s.size(); ++i) {
+        if (i != s.size() && s[i] != '\n') continue;
+        std::string chunk = s.substr(start, i - start);
+        if (!chunk.empty() && chunk.back() == '\r') chunk.pop_back();
+        ensure_text_para();
+        if (!chunk.empty()) {
+            Paragraph *par = m_doc.paragraphs[m_caret_para].get();
+            inject_chunk(par, m_caret_col, chunk, style_for_insert(), m_typing_on);
+            m_caret_col += chunk.size();
+        }
+        if (i < s.size()) break_paragraph();
+        start = i + 1;
+    }
+    after_edit();
+}
+
+void HtmlText::insert_newline() {
+    if (!editing()) return;
+    ensure_text_para();
+    Paragraph *p = m_doc.paragraphs[m_caret_para].get();
+    if (p->isBullet && p->byte_length() == 0) {
+        if (p->leftIndent > 16.f) p->leftIndent -= 16.f;
+        else { p->isBullet = false; p->leftIndent = 0.f; }
+        after_edit();
+        return;
+    }
+    break_paragraph();
+    after_edit();
+}
+
+void HtmlText::delete_backward() {
+    if (!editing() || m_doc.paragraphs.empty()) return;
+    if (m_caret_para >= m_doc.paragraphs.size())
+        m_caret_para = m_doc.paragraphs.size() - 1;
+    Paragraph *p = m_doc.paragraphs[m_caret_para].get();
+    if (p->isImage || p->isRule) {
+        m_doc.removeParagraph(m_caret_para);
+        if (m_doc.paragraphs.empty()) m_doc.addParagraph();
+        if (m_caret_para >= m_doc.paragraphs.size())
+            m_caret_para = m_doc.paragraphs.size() - 1;
+        m_caret_col = 0;
+        after_edit();
+        return;
+    }
+    if (m_caret_col > 0) {
+        size_t prev = utf8_step_prev(p->plain_text(), m_caret_col);
+        erase_cols(p, prev, m_caret_col);
+        m_caret_col = prev;
+        after_edit();
+        return;
+    }
+    if (m_caret_para == 0) return;
+    Paragraph *prevp = m_doc.paragraphs[m_caret_para - 1].get();
+    if (prevp->isImage || prevp->isRule) {
+        m_doc.removeParagraph(m_caret_para - 1);
+        --m_caret_para;
+        m_caret_col = 0;
+        after_edit();
+        return;
+    }
+    size_t join = prevp->byte_length();
+    for (Text &r : p->runs) prevp->runs.push_back(std::move(r));
+    m_doc.removeParagraph(m_caret_para);
+    --m_caret_para;
+    m_caret_col = join;
+    after_edit();
+}
+
+void HtmlText::delete_forward() {
+    if (!editing() || m_doc.paragraphs.empty()) return;
+    if (m_caret_para >= m_doc.paragraphs.size())
+        m_caret_para = m_doc.paragraphs.size() - 1;
+    Paragraph *p = m_doc.paragraphs[m_caret_para].get();
+    if (p->isImage || p->isRule) {
+        m_doc.removeParagraph(m_caret_para);
+        if (m_doc.paragraphs.empty()) m_doc.addParagraph();
+        m_caret_col = 0;
+        after_edit();
+        return;
+    }
+    if (m_caret_col < p->byte_length()) {
+        size_t nxt = utf8_step_next(p->plain_text(), m_caret_col);
+        erase_cols(p, m_caret_col, nxt);
+        after_edit();
+        return;
+    }
+    if (m_caret_para + 1 >= m_doc.paragraphs.size()) return;
+    Paragraph *next = m_doc.paragraphs[m_caret_para + 1].get();
+    if (next->isImage || next->isRule) {
+        m_doc.removeParagraph(m_caret_para + 1);
+        after_edit();
+        return;
+    }
+    for (Text &r : next->runs) p->runs.push_back(std::move(r));
+    m_doc.removeParagraph(m_caret_para + 1);
+    after_edit();
+}
+
+static HtmlText *neighbor_leaf(HtmlText *self, int dir) {
+    HtmlDocument *hd = self->owner();
+    if (!hd) return nullptr;
+    std::vector<HtmlText *> leaves;
+    collect_text_leaves(hd, leaves);
+    for (size_t i = 0; i < leaves.size(); ++i) {
+        if (leaves[i] != self) continue;
+        if (dir < 0 && i > 0) return leaves[i - 1];
+        if (dir > 0 && i + 1 < leaves.size()) return leaves[i + 1];
+        return nullptr;
+    }
+    return nullptr;
+}
+
+void HtmlText::move_to_leaf(HtmlText *ht, bool at_end) {
+    if (!ht) return;
+    if (ht->m_doc.paragraphs.empty()) ht->m_doc.addParagraph();
+    size_t para = 0;
+    if (at_end) {
+        para = ht->m_doc.paragraphs.size() - 1;
+        for (int i = (int)ht->m_doc.paragraphs.size() - 1; i >= 0; --i) {
+            Paragraph *p = ht->m_doc.paragraphs[(size_t)i].get();
+            if (!p->isImage && !p->isRule) { para = (size_t)i; break; }
+        }
+    } else {
+        for (size_t i = 0; i < ht->m_doc.paragraphs.size(); ++i) {
+            Paragraph *p = ht->m_doc.paragraphs[i].get();
+            if (!p->isImage && !p->isRule) { para = i; break; }
+        }
+    }
+    size_t col = at_end ? ht->m_doc.paragraphs[para]->byte_length() : 0;
+    ht->request_focus();
+    ht->place_caret(para, col);
+    ht->after_move();
+}
+
+void HtmlText::move_caret(int key, int mods) {
+    if (m_doc.paragraphs.empty()) m_doc.addParagraph();
+    if (m_caret_para >= m_doc.paragraphs.size())
+        m_caret_para = m_doc.paragraphs.size() - 1;
+    Paragraph *p = m_doc.paragraphs[m_caret_para].get();
+    bool para_jump = (mods & SYSTEM_COMMAND_MOD) != 0;
+
+    if (key == GLFW_KEY_HOME) {
+        if (para_jump) {
+            m_caret_para = 0;
+            m_caret_col = 0;
+        } else {
+            m_caret_col = 0;
+        }
+        after_move();
+        return;
+    }
+    if (key == GLFW_KEY_END) {
+        if (para_jump) m_caret_para = m_doc.paragraphs.size() - 1;
+        m_caret_col = m_doc.paragraphs[m_caret_para]->byte_length();
+        after_move();
+        return;
+    }
+    if (key == GLFW_KEY_LEFT || key == GLFW_KEY_RIGHT) {
+        int dir = key == GLFW_KEY_LEFT ? -1 : 1;
+        std::string text = p->plain_text();
+        if (dir < 0 && m_caret_col > 0) {
+            m_caret_col = utf8_step_prev(text, m_caret_col);
+            after_move();
+            return;
+        }
+        if (dir > 0 && m_caret_col < text.size()) {
+            m_caret_col = utf8_step_next(text, m_caret_col);
+            after_move();
+            return;
+        }
+        int step = dir < 0 ? -1 : 1;
+        for (int i = (int)m_caret_para + step;
+             i >= 0 && i < (int)m_doc.paragraphs.size(); i += step) {
+            Paragraph *q = m_doc.paragraphs[(size_t)i].get();
+            if (q->isImage || q->isRule) continue;
+            m_caret_para = (size_t)i;
+            m_caret_col = dir < 0 ? q->byte_length() : 0;
+            after_move();
+            return;
+        }
+        move_to_leaf(neighbor_leaf(this, dir), dir < 0);
+        return;
+    }
+
+    Screen *scr = screen();
+    NVGcontext *ctx = scr ? scr->nvg_context() : nullptr;
+    if (!ctx) { after_move(); return; }
+    ensure_layout(ctx);
+    Document::CaretInfo info = m_doc.richCaretInfo(ctx, m_caret_para, m_caret_col);
+    int dir = key == GLFW_KEY_UP ? -1 : 1;
+    if (m_doc.m_rich_layout.empty() || !info.valid) {
+        move_to_leaf(neighbor_leaf(this, dir), dir < 0);
+        return;
+    }
+    float x = info.x;
+    float y = dir < 0 ? info.y_top - 3.f : info.y_bottom + 3.f;
+    const Document::RichLine &first = m_doc.m_rich_layout.front();
+    const Document::RichLine &last = m_doc.m_rich_layout.back();
+    if ((dir < 0 && y < first.y_top) || (dir > 0 && y >= last.y_bottom)) {
+        move_to_leaf(neighbor_leaf(this, dir), dir < 0);
+        return;
+    }
+    std::pair<size_t, size_t> hit = m_doc.richHitTest(ctx, x, y);
+    m_caret_para = hit.first;
+    m_caret_col = hit.second;
+    if (m_caret_para >= m_doc.paragraphs.size())
+        m_caret_para = m_doc.paragraphs.size() - 1;
+    size_t n = m_doc.paragraphs[m_caret_para]->byte_length();
+    if (m_caret_col > n) m_caret_col = n;
+    m_typing_on = false;
+    after_move();
+}
+
+void HtmlText::toggle_inline(bool Style::*flag) {
+    if (!editing()) return;
+    ensure_text_para();
+    Style st = style_for_insert();
+    st.*flag = !(st.*flag);
+    m_typing = st;
+    m_typing_on = true;
+    Paragraph *p = m_doc.paragraphs[m_caret_para].get();
+    if (p->byte_length() > 0) {
+        EditHit h = run_at(*p, m_caret_col);
+        if (h.run < p->runs.size() && !p->runs[h.run].isImageRun)
+            p->runs[h.run].style.*flag = st.*flag;
+    }
+    after_edit();
+}
+
+void HtmlText::toggle_header_level(int level) {
+    if (!editing()) return;
+    ensure_text_para();
+    Paragraph *p = m_doc.paragraphs[m_caret_para].get();
+    if (p->isImage || p->isRule) return;
+    if (p->headerLevel == level) level = 0;
+    p->headerLevel = level;
+    float scale = level == 1 ? 1.6f : level == 2 ? 1.4f : level == 3 ? 1.2f :
+                  level >= 4 ? 1.1f : 1.f;
+    for (Text &r : p->runs) {
+        if (r.isImageRun) continue;
+        r.style.bold = level > 0;
+        r.style.fontSize = 17.f * scale;
+    }
+    m_typing_on = false;
+    after_edit();
+}
+
+void HtmlText::toggle_bullet_para() {
+    if (!editing()) return;
+    ensure_text_para();
+    Paragraph *p = m_doc.paragraphs[m_caret_para].get();
+    if (p->isImage || p->isRule) return;
+    p->isBullet = !p->isBullet;
+    if (p->isBullet) {
+        if (p->leftIndent < 16.f) p->leftIndent = 16.f;
+    } else if (p->leftIndent <= 16.f) {
+        p->leftIndent = 0.f;
+    }
+    after_edit();
+}
+
+void HtmlText::toggle_code_para() {
+    if (!editing()) return;
+    ensure_text_para();
+    Paragraph *p = m_doc.paragraphs[m_caret_para].get();
+    bool any = false, all = true;
+    for (const Text &r : p->runs) {
+        if (r.isImageRun || r.content.empty()) continue;
+        any = true;
+        if (!r.style.monospace) all = false;
+    }
+    bool on = any ? !all : !m_typing.monospace;
+    for (Text &r : p->runs) {
+        if (r.isImageRun) continue;
+        r.style.monospace = on;
+    }
+    m_typing = style_for_insert();
+    m_typing.monospace = on;
+    m_typing_on = true;
+    after_edit();
+}
+
+void HtmlText::scroll_caret() {
+    Screen *scr = screen();
+    if (!scr || !m_have_caret) return;
+    NVGcontext *ctx = scr->nvg_context();
+    if (!ctx) return;
+    ensure_layout(ctx);
+    Document::CaretInfo info = m_doc.richCaretInfo(ctx, m_caret_para, m_caret_col);
+    if (!info.valid) return;
+    ScrollPanel *sp = nullptr;
+    for (Widget *p = parent(); p && !sp; p = p->parent())
+        sp = dynamic_cast<ScrollPanel *>(p);
+    if (!sp || sp->child_count() < 1) return;
+    Widget *content = sp->child_at(0);
+    int content_h = content->height();
+    int view_h = sp->height();
+    if (view_h <= 0 || content_h <= view_h + 1) return;
+    int y = (int)info.y_top;
+    for (Widget *p = parent(); p && p != content; p = p->parent())
+        y += p->position().y();
+    int y1 = y + std::max(12, (int)(info.y_bottom - info.y_top));
+    int span = content_h - view_h;
+    int view_top = (int)(sp->scroll().y() * (float)span);
+    float frac = sp->scroll().y();
+    if (y < view_top)
+        frac = (float)std::max(0, y) / (float)span;
+    else if (y1 > view_top + view_h)
+        frac = (float)std::max(0, y1 - view_h) / (float)span;
+    else
+        return;
+    if (frac < 0.f) frac = 0.f;
+    if (frac > 1.f) frac = 1.f;
+    sp->set_scroll(frac);
+}
+
+void HtmlText::after_edit() {
+    m_doc.markLayoutDirty();
+    m_measured_w = -1;
+    m_natural_w = -1;
+    scroll_caret();
+    if (HtmlDocument *hd = owner()) {
+        hd->note_edit();
+        hd->request_reflow();
+    }
+    if (Screen *s = screen()) s->redraw();
+}
+
+void HtmlText::after_move() {
+    scroll_caret();
+    if (HtmlDocument *hd = owner()) hd->caret_moved();
+    if (Screen *s = screen()) s->redraw();
+}
+
+bool HtmlText::keyboard_event(int key, int, int action, int mods) {
+    if (!editing() || !m_have_caret) return false;
+    if (action != GLFW_PRESS && action != GLFW_REPEAT) {
+        switch (key) {
+        case GLFW_KEY_BACKSPACE: case GLFW_KEY_DELETE:
+        case GLFW_KEY_ENTER: case GLFW_KEY_KP_ENTER:
+        case GLFW_KEY_LEFT: case GLFW_KEY_RIGHT:
+        case GLFW_KEY_UP: case GLFW_KEY_DOWN:
+        case GLFW_KEY_HOME: case GLFW_KEY_END:
+            return true;
+        default:
+            return false;
+        }
+    }
+    bool cmd = (mods & SYSTEM_COMMAND_MOD) != 0;
+    if (cmd && key == GLFW_KEY_B) { toggle_inline(&Style::bold); return true; }
+    if (cmd && key == GLFW_KEY_I) { toggle_inline(&Style::italic); return true; }
+    if (cmd && key == GLFW_KEY_U) { toggle_inline(&Style::underline); return true; }
+    switch (key) {
+    case GLFW_KEY_BACKSPACE: delete_backward(); return true;
+    case GLFW_KEY_DELETE:    delete_forward();  return true;
+    case GLFW_KEY_ENTER:
+    case GLFW_KEY_KP_ENTER:  insert_newline();  return true;
+    case GLFW_KEY_LEFT: case GLFW_KEY_RIGHT:
+    case GLFW_KEY_UP: case GLFW_KEY_DOWN:
+    case GLFW_KEY_HOME: case GLFW_KEY_END:
+        move_caret(key, mods);
+        return true;
+    default:
+        return false;
+    }
+}
+
+bool HtmlText::keyboard_character_event(unsigned int codepoint) {
+    if (!editing() || !m_have_caret || codepoint < 32) return false;
+    char buf[5] = {0};
+    if (codepoint < 0x80) {
+        buf[0] = (char)codepoint;
+    } else if (codepoint < 0x800) {
+        buf[0] = (char)(0xC0 | (codepoint >> 6));
+        buf[1] = (char)(0x80 | (codepoint & 0x3F));
+    } else if (codepoint < 0x10000) {
+        buf[0] = (char)(0xE0 | (codepoint >> 12));
+        buf[1] = (char)(0x80 | ((codepoint >> 6) & 0x3F));
+        buf[2] = (char)(0x80 | (codepoint & 0x3F));
+    } else {
+        buf[0] = (char)(0xF0 | (codepoint >> 18));
+        buf[1] = (char)(0x80 | ((codepoint >> 12) & 0x3F));
+        buf[2] = (char)(0x80 | ((codepoint >> 6) & 0x3F));
+        buf[3] = (char)(0x80 | (codepoint & 0x3F));
+    }
+    insert_text(buf);
+    return true;
+}
+
 } // anonymous namespace
 
 // ---------------------------------------------------------------------------
@@ -3247,7 +3978,239 @@ bool html_is_parseable(const std::string &html) {
     return true;
 }
 
+static std::string html_esc(const std::string &s) {
+    std::string out;
+    out.reserve(s.size());
+    for (char c : s) {
+        switch (c) {
+        case '&': out += "&amp;"; break;
+        case '<': out += "&lt;"; break;
+        case '>': out += "&gt;"; break;
+        case '"': out += "&quot;"; break;
+        default:  out += c; break;
+        }
+    }
+    return out;
+}
+
+/* Inline runs. A link is underlined by the reader, so a link does not
+ * also emit <u>. Newlines inside a run become <br>. */
+static std::string inline_to_html(const Paragraph &para, bool in_heading) {
+    std::string out;
+    for (const Text &r : para.runs) {
+        if (r.isImageRun) {
+            out += "<img src=\"" + html_esc(r.image_src) + "\">";
+            continue;
+        }
+        if (r.content.empty()) continue;
+        std::string c = html_esc(r.content);
+        for (size_t pos = 0; (pos = c.find('\n', pos)) != std::string::npos; ) {
+            c.replace(pos, 1, "<br>");
+            pos += 4;
+        }
+        std::string open, close;
+        if (r.style.monospace) { open += "<code>"; close = "</code>" + close; }
+        if (r.style.bold && !in_heading) { open += "<strong>"; close = "</strong>" + close; }
+        if (r.style.italic) { open += "<em>"; close = "</em>" + close; }
+        if (r.style.underline && r.linkUrl.empty()) {
+            open += "<u>";
+            close = "</u>" + close;
+        }
+        if (!r.linkUrl.empty()) {
+            open += "<a href=\"" + html_esc(r.linkUrl) + "\">";
+            close = "</a>" + close;
+        }
+        out += open + c + close;
+    }
+    return out;
+}
+
+/* Paragraphs, headings, lists, links, and images. Empty paragraphs are
+ * kept (<p><br></p>) so a blank line the user typed survives. Tables
+ * and CSS are not represented once this runs. */
+static std::string leaves_to_html(const std::vector<HtmlText *> &leaves) {
+    std::string out;
+    int list_depth = 0;
+    bool in_pre = false;
+    auto close_lists = [&]() {
+        while (list_depth > 0) { out += "</ul>\n"; --list_depth; }
+    };
+    auto close_pre = [&]() {
+        if (in_pre) { out += "</code></pre>\n"; in_pre = false; }
+    };
+    for (HtmlText *ht : leaves) {
+        for (const auto &pp : ht->m_doc.paragraphs) {
+            const Paragraph &para = *pp;
+            if (para.isImage) {
+                close_pre(); close_lists();
+                out += "<p><img src=\"" + html_esc(para.image_src) + "\"></p>\n";
+                continue;
+            }
+            if (para.isRule) {
+                close_pre(); close_lists();
+                out += "<hr>\n";
+                continue;
+            }
+            bool is_code = !para.isBullet && para.headerLevel == 0 &&
+                           para.byte_length() > 0;
+            for (const Text &r : para.runs) {
+                if (r.isImageRun || r.content.empty()) continue;
+                if (!r.style.monospace) is_code = false;
+            }
+            if (is_code) {
+                close_lists();
+                if (!in_pre) { out += "<pre><code>"; in_pre = true; }
+                else out += '\n';
+                std::string t = para.plain_text();
+                while (!t.empty() && t.back() == '\n') t.pop_back();
+                out += html_esc(t);
+                continue;
+            }
+            close_pre();
+            if (para.isBullet) {
+                int lvl = (int)(para.leftIndent / 16.f + 0.5f);
+                if (lvl < 1) lvl = 1;
+                while (list_depth < lvl) { out += "<ul>\n"; ++list_depth; }
+                while (list_depth > lvl) { out += "</ul>\n"; --list_depth; }
+                std::string inner = inline_to_html(para, false);
+                if (inner.empty()) inner = "<br>";
+                out += "<li>" + inner + "</li>\n";
+                continue;
+            }
+            close_lists();
+            int level = para.headerLevel;
+            if (level < 0 || level > 6) level = 0;
+            std::string inner = inline_to_html(para, level > 0);
+            if (inner.empty()) inner = "<br>";
+            if (level) {
+                out += "<h" + std::to_string(level) + ">" + inner +
+                       "</h" + std::to_string(level) + ">\n";
+            } else if (para.leftIndent > 0.f) {
+                out += "<blockquote><p>" + inner + "</p></blockquote>\n";
+            } else {
+                out += "<p>" + inner + "</p>\n";
+            }
+        }
+    }
+    close_pre();
+    close_lists();
+    return out;
+}
+
+static HtmlText *find_caret_leaf(const HtmlDocument *doc) {
+    std::vector<HtmlText *> leaves;
+    collect_text_leaves(const_cast<HtmlDocument *>(doc), leaves);
+    for (HtmlText *ht : leaves)
+        if (ht->m_have_caret) return ht;
+    return nullptr;
+}
+
+static HtmlText *need_caret_leaf(HtmlDocument *doc) {
+    if (HtmlText *ht = find_caret_leaf(doc)) return ht;
+    std::vector<HtmlText *> leaves;
+    collect_text_leaves(doc, leaves);
+    if (leaves.empty()) return nullptr;
+    leaves.front()->place_caret(0, 0);
+    return leaves.front();
+}
+
+void HtmlDocument::set_editable(bool on) { m_editable = on; }
+
+std::string HtmlDocument::edited_html() const {
+    if (!m_edit_dirty) return m_source_html;
+    std::vector<HtmlText *> leaves;
+    collect_text_leaves(const_cast<HtmlDocument *>(this), leaves);
+    return "<!DOCTYPE html>\n<html><body>\n" + leaves_to_html(leaves) +
+           "</body></html>\n";
+}
+
+void HtmlDocument::toggle_inline_style(InlineStyle style) {
+    if (!m_editable) return;
+    HtmlText *ht = need_caret_leaf(this);
+    if (!ht) return;
+    if (style == InlineStyle::Bold) ht->toggle_inline(&Style::bold);
+    else if (style == InlineStyle::Italic) ht->toggle_inline(&Style::italic);
+    else ht->toggle_inline(&Style::underline);
+}
+
+void HtmlDocument::toggle_header(int level) {
+    if (!m_editable) return;
+    if (HtmlText *ht = need_caret_leaf(this)) ht->toggle_header_level(level);
+}
+
+void HtmlDocument::toggle_bullet() {
+    if (!m_editable) return;
+    if (HtmlText *ht = need_caret_leaf(this)) ht->toggle_bullet_para();
+}
+
+void HtmlDocument::toggle_code() {
+    if (!m_editable) return;
+    if (HtmlText *ht = need_caret_leaf(this)) ht->toggle_code_para();
+}
+
+Style HtmlDocument::caret_style() const {
+    if (HtmlText *ht = find_caret_leaf(this)) return ht->style_for_insert();
+    Style s;
+    s.fontSize = 17.f;
+    s.fgColor = m_text;
+    return s;
+}
+
+int HtmlDocument::caret_header() const {
+    HtmlText *ht = find_caret_leaf(this);
+    if (!ht || ht->m_caret_para >= ht->m_doc.paragraphs.size()) return 0;
+    return ht->m_doc.paragraphs[ht->m_caret_para]->headerLevel;
+}
+
+bool HtmlDocument::caret_bullet() const {
+    HtmlText *ht = find_caret_leaf(this);
+    if (!ht || ht->m_caret_para >= ht->m_doc.paragraphs.size()) return false;
+    return ht->m_doc.paragraphs[ht->m_caret_para]->isBullet;
+}
+
+bool HtmlDocument::caret_code() const {
+    HtmlText *ht = find_caret_leaf(this);
+    if (!ht || ht->m_caret_para >= ht->m_doc.paragraphs.size()) return false;
+    const Paragraph *p = ht->m_doc.paragraphs[ht->m_caret_para].get();
+    if (ht->m_typing_on && p->byte_length() == 0) return ht->m_typing.monospace;
+    bool any = false;
+    for (const Text &r : p->runs) {
+        if (r.isImageRun || r.content.empty()) continue;
+        any = true;
+        if (!r.style.monospace) return false;
+    }
+    return any;
+}
+
+void HtmlDocument::focus_editor() {
+    HtmlText *ht = find_caret_leaf(this);
+    if (!ht) {
+        std::vector<HtmlText *> leaves;
+        collect_text_leaves(this, leaves);
+        if (leaves.empty()) return;
+        ht = leaves.front();
+        ht->place_caret(0, 0);
+    }
+    ht->request_focus();
+}
+
+void HtmlDocument::note_edit() { touch_edit(); }
+
+void HtmlDocument::caret_moved() { notify_caret(); }
+
+void HtmlDocument::touch_edit() {
+    m_edit_dirty = true;
+    notify_caret();
+}
+
+void HtmlDocument::notify_caret() {
+    if (on_caret) on_caret();
+}
+
 void HtmlDocument::set_html(const std::string &html) {
+    /* Kept until the first keystroke so an unedited draft round-trips. */
+    m_source_html = html;
+    m_edit_dirty = false;
     clear();
 
     if (!html_is_parseable(html)) {

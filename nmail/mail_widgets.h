@@ -217,6 +217,9 @@ public:
 
     /* ---- events ---- */
     std::function<void()> on_viewport_changed; // MailApp hooks scroll/paging prefetch
+    /* Right-click on a row. The row is selected first. The point is in
+     * screen coordinates. */
+    std::function<void(const nanogui::Vector2i &screen_pos)> on_context_menu;
     void notify_viewport() { if (on_viewport_changed) on_viewport_changed(); }
 
     bool mouse_motion_event(const nanogui::Vector2i &p, const nanogui::Vector2i &,

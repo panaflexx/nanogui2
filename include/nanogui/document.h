@@ -105,6 +105,10 @@ public:
     // Bullet list item ("- " in markdown): draws a marker before the first
     // line; text is expected to be indented via leftIndent.
     bool              isBullet        = false;
+    // <h1>.. <h6> level, 0 for body text. Set while the HTML tree is built
+    // so a later edit can write the heading back. <br> inside a heading
+    // keeps the level on the following paragraph.
+    int               headerLevel     = 0;
     // Image block paragraph: skips text layout and draws a full-width
     // (aspect-preserving) image instead.  `image` is an NVG image id
     // owned by the caller; image_w/image_h are the intrinsic pixel size.

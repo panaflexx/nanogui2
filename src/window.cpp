@@ -432,6 +432,18 @@ void Window::perform_layout(NVGcontext* ctx) {
         }
     }
 
+    /* A content floor taller than the screen hangs the bottom row (compose
+     * Send / Cancel) off the viewport. Cap to the parent minus a 16px
+     * margin on each edge. Stretch rows in the child layout absorb it. */
+    Vector2i screen_cap(0, 0);
+    if (m_resizable && m_parent) {
+        screen_cap = m_parent->size() - Vector2i(32, 32);
+        if (screen_cap.x() > 80 && m_min_size.x() > screen_cap.x())
+            m_min_size.x() = screen_cap.x();
+        if (screen_cap.y() > 80 && m_min_size.y() > screen_cap.y())
+            m_min_size.y() = screen_cap.y();
+    }
+
     // If the window's current size (e.g. just set from preferred_size() by
     // Screen::center_window(), which can legitimately come out smaller than
     // an explicit set_min_width()/set_min_height() floor) sits below the
@@ -444,6 +456,10 @@ void Window::perform_layout(NVGcontext* ctx) {
         Vector2i corrected = m_size;
         if (m_min_size.x() > 0) corrected.x() = std::max(corrected.x(), m_min_size.x());
         if (m_min_size.y() > 0) corrected.y() = std::max(corrected.y(), m_min_size.y());
+        if (screen_cap.x() > 80 && corrected.x() > screen_cap.x())
+            corrected.x() = screen_cap.x();
+        if (screen_cap.y() > 80 && corrected.y() > screen_cap.y())
+            corrected.y() = screen_cap.y();
         if (corrected != m_size) {
             m_size = corrected;
             if (m_layout)

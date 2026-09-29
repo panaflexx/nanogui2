@@ -21,8 +21,31 @@ struct MailAccount {
     int         port = 143;
     std::string username;
     std::string password;
+    /* Sent From when `username` is not itself an email address. Login and
+     * mailbox differ for some accounts (an iCloud short name, for example). */
+    std::string email;
     std::string smtp_host;      // empty -> fall back to the IMAP host
     int         smtp_port = 587;
+
+    /* Envelope and header From. The username wins when it is a mailbox;
+     * otherwise Email. Empty when neither has text on both sides of '@'. */
+    std::string from_address() const {
+        auto mailbox = [](const std::string &s) -> std::string {
+            auto sp = [](char c) {
+                return c == ' ' || c == '\t' || c == '\r' || c == '\n';
+            };
+            size_t a = 0, b = s.size();
+            while (a < b && sp(s[a])) ++a;
+            while (b > a && sp(s[b - 1])) --b;
+            if (a >= b) return {};
+            size_t at = s.find('@', a);
+            if (at == std::string::npos || at == a || at + 1 >= b) return {};
+            return s.substr(a, b - a);
+        };
+        std::string u = mailbox(username);
+        if (!u.empty()) return u;
+        return mailbox(email);
+    }
 
     /* Stable-enough key for this account: not stored, derived on demand so
      * renaming `name` never invalidates anything keyed off it (QRESYNC

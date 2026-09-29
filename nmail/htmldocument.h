@@ -9,8 +9,12 @@
  *
  * Host widgets: `<nmail-widget id="...">` (or `data-nmail-widget`) is a
  * slot. During the Gumbo walk the host factory is asked to parent a live
- * Widget at that point in the tree — attachment chips, reply actions, etc.
- * Unknown ids are ignored; sender HTML cannot spawn widgets on its own.
+ * Widget at that point in the tree — attachment chips, the header's
+ * Edit-for-send button, etc. Unknown ids are ignored; sender HTML cannot
+ * spawn widgets on its own.
+ *
+ * `data-nmail-chrome` marks that header. Those elements stay left-aligned,
+ * and the root card stays full width, when the message is right-aligned.
  *
  * Host it in a ScrollPanel; it reports its laid-out content height as
  * its preferred size.
@@ -46,7 +50,9 @@ class HtmlDocument : public nanogui::Widget {
 public:
     explicit HtmlDocument(nanogui::Widget *parent);
 
-    /* Parse + rebuild the widget tree from an HTML fragment/document. */
+    /* Parse + rebuild the widget tree from an HTML fragment/document.
+     * The original string is kept until the user types; edited_html()
+     * returns it unchanged until then. */
     void set_html(const std::string &html);
     /* text/plain fallback: blank-line separated paragraphs, no markup. */
     void set_plain(const std::string &text);
@@ -111,12 +117,44 @@ public:
     /* One line per leaf widget: rect + text snippet (test harnesses). */
     std::string debug_summary() const;
 
+    /* Compose editing. Off for the reading pane. While editable, a click
+     * places a caret and keyboard input changes the text. edited_html()
+     * returns the source passed to set_html() until the first edit; after
+     * that it writes paragraphs, headings, lists, links, and images.
+     * Tables and CSS do not survive an edit. */
+    enum class InlineStyle { Bold, Italic, Underline };
+    void set_editable(bool on);
+    bool editable() const { return m_editable; }
+    std::string edited_html() const;
+    void toggle_inline_style(InlineStyle style);
+    void toggle_header(int level);
+    void toggle_bullet();
+    void toggle_code();
+    nanogui::Style caret_style() const;
+    int caret_header() const;
+    bool caret_bullet() const;
+    bool caret_code() const;
+    /* Put keyboard focus on the leaf that owns the caret. */
+    void focus_editor();
+    /* An edit (dirty, then the toolbar callback). A caret move only
+     * fires the callback. */
+    void note_edit();
+    void caret_moved();
+    /* Fired when the caret moves or the text changes, so a toolbar can
+     * refresh. Not cleared by set_html() / clear(). */
+    std::function<void()> on_caret;
+
 private:
+    void touch_edit();
+    void notify_caret();
     NVGcolor m_text = NVGcolor{ { { 0.f, 0.f, 0.f, 1.f } } };
     NVGcolor m_meta = NVGcolor{ { { 0.45f, 0.45f, 0.5f, 1.f } } };
     NVGcolor m_bg   = NVGcolor{ { { 0.f, 0.f, 0.f, 0.f } } };
     bool     m_has_remote = false;
     bool     m_reflow_pending = false;
+    bool     m_editable = false;
+    bool     m_edit_dirty = false;
+    std::string m_source_html;
     std::string m_last_hover_url;
 
     /* Some HTML tables produce a preferred-size measurement that never

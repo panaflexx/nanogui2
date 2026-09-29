@@ -276,6 +276,23 @@ void MailWorker::fetch_body(const std::string &folder, uint32_t uid) {
     m_cv.notify_one();
 }
 
+void MailWorker::set_seen_flag(const std::string &folder, uint32_t uid,
+                               uint64_t modseq, bool seen) {
+    if (uid == 0 || folder.empty()) return;
+    {
+        std::lock_guard<std::mutex> lock(m_mutex);
+        Cmd c;
+        c.type   = Type::MarkSeen;
+        c.folder = folder;
+        c.uid    = uid;
+        c.modseq = modseq;
+        c.epoch  = m_epoch;
+        c.seen   = seen;
+        m_queue.push_back(c);
+    }
+    m_cv.notify_one();
+}
+
 void MailWorker::schedule_seen(const std::string &folder, uint32_t uid,
                                uint64_t modseq, double delay_sec) {
     if (uid == 0) return;
@@ -1285,8 +1302,9 @@ void MailWorker::do_mark_seen(const Cmd &cmd) {
                 if (s.uid == uid) { modseq = s.modseq; break; }
     }
 
+    const bool want_seen = cmd.seen;
     auto do_store = [&]() -> bool {
-        return m_imap.mark_seen_uid(uid, modseq, err);
+        return m_imap.mark_seen_uid(uid, modseq, err, want_seen);
     };
 
     if (!do_store()) {
@@ -1312,9 +1330,15 @@ void MailWorker::do_mark_seen(const Cmd &cmd) {
             }
         }
     }
-    mail_dbg("[mail] MarkSeen ok uid=%u\n", uid);
+    mail_dbg("[mail] MarkSeen ok uid=%u seen=%d\n", uid, (int)want_seen);
     std::string folder = cmd.folder;
-    deliver([this, folder, uid]() { if (cb_seen) cb_seen(folder, uid); });
+    deliver([this, folder, uid, want_seen]() {
+        if (want_seen) {
+            if (cb_seen) cb_seen(folder, uid);
+        } else if (cb_flag_seen) {
+            cb_flag_seen(folder, uid, false);
+        }
+    });
 }
 
 bool MailWorker::already_prefetch_queued_locked(uint32_t uid, const std::string &folder) const {

@@ -26,6 +26,9 @@ struct MailFolder {
     int messages = 0;
     int unseen   = 0;
     std::string delimiter;   // server's hierarchy delimiter for this LIST entry ("/", ".", ...)
+    /* LIST flags, parentheses included. Special-use (\Sent, \Drafts, ...)
+     * is how a save finds the mailbox without listing the tree again. */
+    std::string attrs;
 };
 
 struct MailSummary {
@@ -64,7 +67,7 @@ struct MailAttachment {
 struct MailMessage {
     std::string from;
     std::string from_addr;     // bare address of the sender (for replies)
-    std::string to;
+    std::string to;            // decoded To header (address list, not a display name)
     std::string subject;
     std::string date;
     std::string body;          // decoded plain text (best effort)
@@ -88,6 +91,15 @@ bool parse_rfc822_message(std::string &&raw, MailMessage &msg);
 /* Derive a collapsed preview snippet (<=160 chars) from a fully fetched
  * message — prefers the plain body, falls back to stripped HTML. */
 std::string message_preview(const MailMessage &msg);
+
+/* APPEND `rfc822` on a short-lived connection with COMPRESS left off.
+ * A large literal through the reading connection's deflate stream hangs
+ * on some servers (maddy). `folder` is already resolved. `flags` is the
+ * flag list without parentheses, e.g. "\\Seen" or "\\Draft \\Seen". */
+bool imap_upload(const std::string &host, int port,
+                 const std::string &user, const std::string &pass,
+                 const std::string &folder, const char *flags,
+                 const std::string &rfc822, std::string &err);
 
 class ImapClient {
 public:
@@ -156,11 +168,11 @@ public:
     /* LIST and return the mailbox flagged \Sent, \Trash, \Drafts, ...
      * `use` is the attribute including the backslash, e.g. "\\Sent". */
     bool special_use_mailbox(const std::string &use, std::string &name,
-                             std::string &err);
+                             std::string &err); // UNUSED
 
-    /* The one-shot Sent upload must not turn on COMPRESS=DEFLATE: a large
-     * APPEND literal through the deflate stream never completes on some
-     * servers (maddy). Call before open(). */
+    /* imap_upload turns this off before open(). The reading connection
+     * leaves it on; a large APPEND through that deflate stream hangs
+     * on some servers (maddy). */
     void set_use_compress(bool on) { m_use_compress = on; }
 
     /* STORE +FLAGS.SILENT (\Seen) on one message, marking it read on the
@@ -174,7 +186,9 @@ public:
      * per RFC 4551 §3.3 so a concurrent flag change is not clobbered.
      * A NO [MODIFIED ...] response means the modseq guard failed — the
      * message was already modified elsewhere; treat as benign success. */
-    bool mark_seen_uid(uint32_t uid, uint64_t modseq, std::string &err);
+    /* `seen` false stores -FLAGS (\\Seen), marking the message unread. */
+    bool mark_seen_uid(uint32_t uid, uint64_t modseq, std::string &err,
+                       bool seen = true);
     static bool is_modified_error(const std::string &err);
 
     void close();

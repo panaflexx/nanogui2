@@ -229,6 +229,7 @@ static MailAccount parse_account(const DictValue *obj) {
     a.port       = config_get_int(obj, "port", 143);
     a.username   = config_get_str(obj, "username");
     a.password   = config_get_str(obj, "password");   /* legacy plain text */
+    a.email      = config_get_str(obj, "email");
     a.smtp_host  = config_get_str(obj, "smtp_host");
     a.smtp_port  = config_get_int(obj, "smtp_port", 587);
     const std::string enc = config_get_str(obj, "password_enc");
@@ -252,6 +253,7 @@ static DictValue *serialize_account(const MailAccount &a) {
     dict_object_set(obj, "host",     dict_create_string(a.host.c_str()));
     dict_object_set(obj, "port",     dict_create_int64(a.port));
     dict_object_set(obj, "username", dict_create_string(a.username.c_str()));
+    dict_object_set(obj, "email",    dict_create_string(a.email.c_str()));
     std::string enc;
     if (encrypt_secret(a.password, enc))
         dict_object_set(obj, "password_enc", dict_create_string(enc.c_str()));

@@ -367,6 +367,18 @@ bool EmailListView::mouse_enter_event(const Vector2i &p, bool enter) {
 
 bool EmailListView::mouse_button_event(const Vector2i &p, int button,
                                        bool down, int mods) {
+    if (button == GLFW_MOUSE_BUTTON_2) {
+        if (!down) return true;
+        request_focus();
+        int idx = idx_at(p.y());
+        if (idx < 0 || idx >= (int)m_emails.size()) return true;
+        m_selected = idx;
+        if (m_on_select) m_on_select(idx, m_emails[idx]);
+        if (on_context_menu)
+            on_context_menu(absolute_position() + (p - m_pos));
+        if (screen()) screen()->redraw();
+        return true;
+    }
     if (button != GLFW_MOUSE_BUTTON_1) return false;
     if (down) {
         request_focus();   // grab keyboard focus on any click

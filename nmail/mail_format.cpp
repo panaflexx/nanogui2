@@ -4,6 +4,8 @@
 
 #include "mail_format.h"
 
+#include "gumbo.h"
+
 #include <cctype>
 #include <cstring>
 #include <sstream>
@@ -368,7 +370,16 @@ static std::string html_inline(const Paragraph &para, bool in_heading = false) {
         if (r.style.monospace) { open += "<code>";    close = "</code>"    + close; }
         if (r.style.bold && !in_heading) { open += "<strong>";  close = "</strong>"  + close; }
         if (r.style.italic)    { open += "<em>";      close = "</em>"      + close; }
-        if (r.style.underline) { open += "<u>";       close = "</u>"       + close; }
+        /* A link is underlined by the reader.  Emitting <u> as well makes
+         * every save wrap the anchor again. */
+        if (r.style.underline && r.linkUrl.empty()) {
+            open += "<u>";
+            close = "</u>" + close;
+        }
+        if (!r.linkUrl.empty()) {
+            open += "<a href=\"" + html_escape(r.linkUrl) + "\">";
+            close = "</a>" + close;
+        }
         out += open + c + close;
     }
     return out;
@@ -449,6 +460,404 @@ std::string document_to_html(const Document &doc) {
            "</body></html>\n";
 }
 
+/* Inverse of document_to_html.  Tags outside the composer vocabulary fail
+ * the load; the caller then edits the original HTML as source. */
+namespace {
+
+struct HtmlMark {
+    bool bold = false, italic = false, underline = false;
+    bool mono = false, pre = false, quote = false;
+    int  heading = 0;   /* 0, or 1..3 */
+    int  list = 0;      /* ul nesting depth */
+    std::string link;
+};
+
+struct HtmlLoad {
+    Document doc;
+    Style normal, h1, h2, h3, code;
+    Paragraph *cur = nullptr;
+    bool cur_pre = false;
+    bool skip_pre_nl = false;
+    bool failed = false;
+};
+
+bool html_space_byte(unsigned char c) {
+    return c == ' ' || c == '\t' || c == '\n' || c == '\r' ||
+           c == '\f' || c == '\v';
+}
+
+bool html_only_space(const char *s) {
+    if (!s) return true;
+    for (size_t i = 0; s[i]; ++i) {
+        unsigned char c = (unsigned char)s[i];
+        if (c == 0xC2 && (unsigned char)s[i + 1] == 0xA0) { ++i; continue; }
+        if (!html_space_byte(c)) return false;
+    }
+    return true;
+}
+
+bool html_allowed_href(const std::string &href) {
+    auto starts = [&](const char *p) {
+        size_t n = std::strlen(p);
+        if (href.size() < n) return false;
+        for (size_t i = 0; i < n; ++i)
+            if (std::tolower((unsigned char)href[i]) != (unsigned char)p[i])
+                return false;
+        return true;
+    };
+    return starts("https://") || starts("http://") || starts("mailto:");
+}
+
+/* href only, and only http(s)/mailto.  Any other attribute fails the load
+ * so target/class/style survive in the source editor. */
+bool html_anchor_href(GumboElement *el, std::string &href, bool &present) {
+    present = false;
+    href.clear();
+    for (unsigned i = 0; i < el->attributes.length; ++i) {
+        auto *a = (GumboAttribute *)el->attributes.data[i];
+        if (!a || !a->name || std::strcmp(a->name, "href") != 0)
+            return false;
+        present = true;
+        if (a->value) href = a->value;
+    }
+    size_t b = 0, e = href.size();
+    while (b < e && html_space_byte((unsigned char)href[b])) ++b;
+    while (e > b && html_space_byte((unsigned char)href[e - 1])) --e;
+    href = href.substr(b, e - b);
+    if (present && !href.empty() && !html_allowed_href(href))
+        return false;
+    return true;
+}
+
+Style html_style_for(const HtmlLoad &L, const HtmlMark &m) {
+    Style s = m.heading == 1 ? L.h1 : m.heading == 2 ? L.h2 :
+              m.heading >= 3 ? L.h3 : L.normal;
+    if (m.bold && m.heading == 0) s.bold = true;
+    if (m.italic) s.italic = true;
+    if (m.underline) s.underline = true;
+    if ((m.mono || m.pre) && m.heading == 0) {
+        s.monospace = true;
+        s.fontSize  = L.code.fontSize;
+        s.bgColor   = L.code.bgColor;
+    }
+    return s;
+}
+
+void html_trim_trailing_space(Paragraph *p) {
+    while (p && !p->runs.empty()) {
+        Text &t = p->runs.back();
+        while (!t.content.empty() && t.content.back() == ' ')
+            t.content.pop_back();
+        if (!t.content.empty()) break;
+        p->runs.pop_back();
+    }
+}
+
+/* <pre> blocks usually carry one structural newline after the tag and
+ * before the close tag.  document_to_html drops trailing newlines, so the
+ * editor should too — otherwise a code line reopens with a blank line. */
+void html_trim_pre_newline(Paragraph *p) {
+    while (p && !p->runs.empty()) {
+        Text &t = p->runs.back();
+        if (t.content.size() >= 2 &&
+            t.content[t.content.size() - 2] == '\r' &&
+            t.content.back() == '\n') {
+            t.content.erase(t.content.size() - 2);
+        } else if (!t.content.empty() &&
+                   (t.content.back() == '\n' || t.content.back() == '\r')) {
+            t.content.pop_back();
+        } else {
+            break;
+        }
+        if (t.content.empty()) p->runs.pop_back();
+    }
+}
+
+void html_close_para(HtmlLoad &L) {
+    if (L.cur && L.cur_pre)
+        html_trim_pre_newline(L.cur);
+    else if (L.cur)
+        html_trim_trailing_space(L.cur);
+    if (L.cur && L.cur->runs.empty() && !L.cur->isRule &&
+        !L.doc.paragraphs.empty() &&
+        L.doc.paragraphs.back().get() == L.cur)
+        L.doc.paragraphs.pop_back();
+    L.cur = nullptr;
+    L.cur_pre = false;
+}
+
+void html_add_run(HtmlLoad &L, const HtmlMark &m, const std::string &text) {
+    if (L.failed || text.empty()) return;
+    if (!L.cur) {
+        L.cur = L.doc.addParagraph();
+        L.cur_pre = m.pre;
+        if (!m.pre && m.heading == 0 && m.list > 0) {
+            L.cur->isBullet = true;
+            L.cur->leftIndent = 16.f * (float)m.list;
+        } else if (!m.pre && m.heading == 0 && m.quote) {
+            L.cur->leftIndent = 16.f;
+        }
+    }
+    Text t(text, html_style_for(L, m));
+    if (!m.link.empty()) t.linkUrl = m.link;
+    L.cur->addText(t);
+}
+
+void html_emit(HtmlLoad &L, const HtmlMark &m, const char *raw) {
+    if (L.failed || !raw || !raw[0]) return;
+    std::string in = raw;
+    if (m.pre) {
+        if (L.skip_pre_nl) {
+            L.skip_pre_nl = false;
+            if (in.size() >= 2 && in[0] == '\r' && in[1] == '\n')
+                in.erase(0, 2);
+            else if (!in.empty() && (in[0] == '\n' || in[0] == '\r'))
+                in.erase(0, 1);
+        }
+        html_add_run(L, m, in);
+        return;
+    }
+    std::string out;
+    bool pending = false;
+    auto ends_space = [&]() {
+        if (!out.empty()) return out.back() == ' ';
+        if (!L.cur || L.cur->runs.empty()) return false;
+        const std::string &c = L.cur->runs.back().content;
+        return !c.empty() && c.back() == ' ';
+    };
+    auto has_text = [&]() {
+        return !out.empty() || (L.cur && !L.cur->runs.empty());
+    };
+    for (size_t i = 0; i < in.size(); ++i) {
+        unsigned char c = (unsigned char)in[i];
+        bool ws = html_space_byte(c);
+        if (c == 0xC2 && i + 1 < in.size() &&
+            (unsigned char)in[i + 1] == 0xA0) {
+            ws = true;
+            ++i;
+        }
+        if (ws) { pending = true; continue; }
+        if (pending) {
+            if (has_text() && !ends_space()) out.push_back(' ');
+            pending = false;
+        }
+        out.push_back((char)c);
+    }
+    if (pending && has_text() && !ends_space()) out.push_back(' ');
+    html_add_run(L, m, out);
+}
+
+void html_walk(HtmlLoad &L, GumboNode *node, HtmlMark mark, int depth);
+
+void html_walk_children(HtmlLoad &L, GumboVector *kids, const HtmlMark &mark,
+                        int depth) {
+    if (!kids) return;
+    for (unsigned i = 0; i < kids->length && !L.failed; ++i)
+        html_walk(L, (GumboNode *)kids->data[i], mark, depth + 1);
+}
+
+void html_walk(HtmlLoad &L, GumboNode *node, HtmlMark mark, int depth) {
+    if (!node || L.failed) return;
+    if (depth > 80) { L.failed = true; return; }
+
+    if (node->type == GUMBO_NODE_COMMENT ||
+        node->type == GUMBO_NODE_PROCESSING_INSTRUCTION)
+        return;
+    if (node->type == GUMBO_NODE_TEMPLATE) { L.failed = true; return; }
+    if (node->type == GUMBO_NODE_TEXT || node->type == GUMBO_NODE_CDATA ||
+        node->type == GUMBO_NODE_WHITESPACE) {
+        html_emit(L, mark, node->v.text.text);
+        return;
+    }
+    if (node->type == GUMBO_NODE_DOCUMENT) {
+        html_walk_children(L, &node->v.document.children, mark, depth);
+        return;
+    }
+    if (node->type != GUMBO_NODE_ELEMENT) { L.failed = true; return; }
+
+    GumboElement *el = &node->v.element;
+    GumboTag tag = el->tag;
+
+    auto attrs_forbidden = [&]() {
+        if (el->attributes.length) L.failed = true;
+        return L.failed;
+    };
+    auto block_around = [&](const HtmlMark &child) {
+        html_close_para(L);
+        html_walk_children(L, &el->children, child, depth);
+        html_close_para(L);
+    };
+
+    switch (tag) {
+    case GUMBO_TAG_HTML:
+    case GUMBO_TAG_BODY:
+        if (attrs_forbidden()) return;
+        html_walk_children(L, &el->children, mark, depth);
+        return;
+    case GUMBO_TAG_HEAD:
+        /* Gumbo inserts an empty head.  A real head (title, meta, style)
+         * is kept by refusing the load, so a later save does not drop it. */
+        if (attrs_forbidden()) return;
+        for (unsigned i = 0; i < el->children.length; ++i) {
+            GumboNode *c = (GumboNode *)el->children.data[i];
+            if (c->type == GUMBO_NODE_COMMENT ||
+                c->type == GUMBO_NODE_WHITESPACE)
+                continue;
+            if (c->type == GUMBO_NODE_TEXT || c->type == GUMBO_NODE_CDATA) {
+                if (!html_only_space(c->v.text.text)) L.failed = true;
+                continue;
+            }
+            L.failed = true;
+            return;
+        }
+        return;
+
+    case GUMBO_TAG_H1:
+    case GUMBO_TAG_H2:
+    case GUMBO_TAG_H3:
+        if (attrs_forbidden()) return;
+        if (mark.list || mark.quote || mark.pre) { L.failed = true; return; }
+        {
+            HtmlMark child = mark;
+            child.heading = tag == GUMBO_TAG_H1 ? 1 : tag == GUMBO_TAG_H2 ? 2 : 3;
+            child.pre = child.mono = child.quote = false;
+            block_around(child);
+        }
+        return;
+    case GUMBO_TAG_P:
+        if (attrs_forbidden()) return;
+        if (mark.pre) { L.failed = true; return; }
+        block_around(mark);
+        return;
+    case GUMBO_TAG_BLOCKQUOTE:
+        if (attrs_forbidden()) return;
+        if (mark.quote || mark.list || mark.pre || mark.heading) {
+            L.failed = true;
+            return;
+        }
+        {
+            HtmlMark child = mark;
+            child.quote = true;
+            block_around(child);
+        }
+        return;
+    case GUMBO_TAG_UL:
+        if (attrs_forbidden()) return;
+        if (mark.quote || mark.pre || mark.heading || mark.list >= 8) {
+            L.failed = true;
+            return;
+        }
+        {
+            HtmlMark child = mark;
+            child.list = mark.list + 1;
+            block_around(child);
+        }
+        return;
+    case GUMBO_TAG_LI:
+        if (attrs_forbidden()) return;
+        if (mark.list < 1) { L.failed = true; return; }
+        block_around(mark);
+        return;
+    case GUMBO_TAG_PRE:
+        if (attrs_forbidden()) return;
+        if (mark.list || mark.quote || mark.heading || mark.pre) {
+            L.failed = true;
+            return;
+        }
+        {
+            HtmlMark child = mark;
+            child.pre = true;
+            child.mono = true;
+            html_close_para(L);
+            bool saved = L.skip_pre_nl;
+            L.skip_pre_nl = true;
+            html_walk_children(L, &el->children, child, depth);
+            L.skip_pre_nl = saved;
+            html_close_para(L);
+        }
+        return;
+    case GUMBO_TAG_HR:
+        if (attrs_forbidden()) return;
+        if (mark.pre || mark.list || mark.quote) { L.failed = true; return; }
+        html_close_para(L);
+        L.doc.addParagraph()->isRule = true;
+        return;
+    case GUMBO_TAG_BR:
+        if (attrs_forbidden()) return;
+        if (L.cur)
+            html_add_run(L, mark, "\n");
+        else if (mark.pre)
+            html_add_run(L, mark, "\n");
+        else
+            L.doc.addParagraph();
+        return;
+
+    case GUMBO_TAG_B:
+    case GUMBO_TAG_STRONG:
+    case GUMBO_TAG_I:
+    case GUMBO_TAG_EM:
+    case GUMBO_TAG_U:
+    case GUMBO_TAG_CODE:
+        if (attrs_forbidden()) return;
+        {
+            HtmlMark child = mark;
+            if (tag == GUMBO_TAG_B || tag == GUMBO_TAG_STRONG) child.bold = true;
+            else if (tag == GUMBO_TAG_I || tag == GUMBO_TAG_EM) child.italic = true;
+            else if (tag == GUMBO_TAG_U) child.underline = true;
+            else child.mono = true;
+            html_walk_children(L, &el->children, child, depth);
+        }
+        return;
+    case GUMBO_TAG_A: {
+        std::string href;
+        bool present = false;
+        if (!html_anchor_href(el, href, present)) { L.failed = true; return; }
+        HtmlMark child = mark;
+        if (present && !href.empty()) {
+            child.link = std::move(href);
+            child.underline = true;
+        }
+        html_walk_children(L, &el->children, child, depth);
+        return;
+    }
+    default:
+        L.failed = true;
+        return;
+    }
+}
+
+} // namespace
+
+bool html_to_document(Document &doc, const std::string &html,
+                      NVGcolor text_color, float base_size) {
+    if (html.size() > 4u * 1024u * 1024u)
+        return false;
+
+    HtmlLoad L;
+    L.normal.fontSize = base_size;
+    L.normal.fgColor  = text_color;
+    L.code = L.normal;
+    L.code.monospace = true;
+    L.code.fontSize  = base_size * 0.875f;
+    L.code.bgColor   = nvgRGBA(220, 220, 228, 255);
+    L.h1 = L.normal; L.h1.fontSize = base_size * 1.625f;  L.h1.bold = true;
+    L.h2 = L.normal; L.h2.fontSize = base_size * 1.25f;   L.h2.bold = true;
+    L.h3 = L.normal; L.h3.fontSize = base_size * 1.0625f; L.h3.bold = true;
+
+    if (!html.empty()) {
+        GumboOutput *out = gumbo_parse(html.c_str());
+        if (!out) return false;
+        html_walk(L, out->root, HtmlMark{}, 0);
+        gumbo_destroy_output(&kGumboDefaultOptions, out);
+        if (L.failed) return false;
+    }
+    if (L.doc.paragraphs.empty())
+        L.doc.addParagraph();
+    doc.paragraphs.swap(L.doc.paragraphs);
+    doc.markLayoutDirty();
+    return true;
+}
+
 
 /* ---------------------------------------------------------------------------
  * Message header card.
@@ -476,6 +885,15 @@ namespace parchment {
  * inert rather than dangerous. */
 const char *kAddrScheme = "x-nmail-addr:";
 
+/* Every element of the card.  apply_cascade forces these left and full
+ * width; the inline !important is the same lock for color. */
+static const char kChrome[] = " data-nmail-chrome=\"1\"";
+
+static std::string chrome_color(const char *color) {
+    return std::string("color:") + color +
+           " !important;text-align:left !important";
+}
+
 /* Render an address header.  Entries that carry a display name become links
  * that swap to the bare address when clicked; entries that are already just
  * an address have nothing to reveal and stay plain text. */
@@ -484,8 +902,8 @@ static std::string address_row_html(const std::string &raw,
     using namespace parchment;
     std::vector<MailAddress> addrs = parse_address_list(raw);
     if (addrs.empty())                       // unparseable: show it verbatim
-        return "<span style=\"color:" + std::string(kInk) + "\">" +
-               html_escape(raw) + "</span>";
+        return "<span" + std::string(kChrome) + " style=\"" +
+               chrome_color(kInk) + "\">" + html_escape(raw) + "</span>";
 
     std::string out;
     for (size_t i = 0; i < addrs.size(); ++i) {
@@ -495,33 +913,50 @@ static std::string address_row_html(const std::string &raw,
         for (char &c : low) c = (char)std::tolower((unsigned char)c);
 
         if (a.name.empty()) {
-            out += "<span style=\"color:" + std::string(kInk) + "\">" +
-                   html_escape(a.address) + "</span>";
+            out += "<span" + std::string(kChrome) + " style=\"" +
+                   chrome_color(kInk) + "\">" + html_escape(a.address) +
+                   "</span>";
             continue;
         }
         const bool show_addr = expanded.count(low) > 0;
-        out += "<a href=\"" + std::string(kAddrScheme) + html_escape(a.address) +
-               "\" style=\"color:" + kInk + "\">" +
+        out += "<a" + std::string(kChrome) + " href=\"" +
+               std::string(kAddrScheme) + html_escape(a.address) +
+               "\" style=\"" + chrome_color(kInk) + "\">" +
                html_escape(show_addr ? a.address : a.name) + "</a>";
     }
     return out;
 }
 
-/* One <div> card: subject, then the From/To/Date rows. */
+/* One <div> card: subject and the Edit-for-send slot, then From/To/Date.
+ * The slot is a host widget so the button scrolls with the card. */
 std::string header_html(const MailMessage &msg,
                                const std::set<std::string> &expanded) {
     using namespace parchment;
     std::string h;
-    h += std::string("<div style=\"background-color:") + kPaper +
-         ";border:1px solid " + kEdge +
-         ";border-radius:8px;padding:14px 16px;color:" + kInk + "\">";
+    h += std::string("<div data-nmail-chrome=\"root\" style=\"background-color:") +
+         kPaper + " !important;border:1px solid " + kEdge +
+         " !important;border-radius:8px;padding:14px 16px !important;" +
+         chrome_color(kInk) + "\">";
 
-    h += std::string("<p style=\"font-size:24px;color:") + kInkBold +
-         "\"><b>" + html_escape(msg.subject) + "</b></p>";
+    /* width=200 keeps the button cell a fixed right slot.  The subject
+     * cell is the one that grows. */
+    h += std::string("<table") + kChrome +
+         " width=\"100%\" style=\"text-align:left !important\"><tr" +
+         kChrome + "><td" + kChrome +
+         " style=\"text-align:left !important;vertical-align:top\"><p" +
+         kChrome + " style=\"font-size:24px !important;" +
+         chrome_color(kInkBold) + "\"><b" + kChrome + " style=\"" +
+         chrome_color(kInkBold) + "\">" + html_escape(msg.subject) +
+         "</b></p></td><td" + kChrome +
+         " width=\"200\" style=\"text-align:left !important;vertical-align:top\">"
+         "<nmail-widget id=\"nmail-edit-send\"></nmail-widget>"
+         "</td></tr></table>";
 
     auto label_cell = [&](const char *label) {
-        return std::string("<p style=\"font-size:15px\"><b style=\"color:") +
-               kLabel + "\">" + label + " </b>";
+        return std::string("<p") + kChrome +
+               " style=\"font-size:15px !important;" + chrome_color(kInk) +
+               "\"><b" + kChrome + " style=\"" + chrome_color(kLabel) +
+               "\">" + label + " </b>";
     };
 
     h += label_cell("From:") + address_row_html(msg.from_addr.empty()
@@ -532,13 +967,14 @@ std::string header_html(const MailMessage &msg,
     if (!msg.to.empty())
         h += label_cell("To:") + address_row_html(msg.to, expanded) + "</p>";
     if (!msg.date.empty())
-        h += label_cell("Date:") +
-             "<span style=\"color:" + std::string(kMeta) + "\">" +
+        h += label_cell("Date:") + "<span" + std::string(kChrome) +
+             " style=\"" + chrome_color(kMeta) + "\">" +
              html_escape(msg.date) + "</span></p>";
 
     h += "</div>";
     /* Vertical margin is not supported by the renderer, so separate the card
-     * from the message body with an explicit spacer. */
+     * from the message body with an explicit spacer.  The spacer is not
+     * chrome: it should stay a plain gap. */
     h += "<div style=\"height:12px\"></div>";
     return h;
 }
