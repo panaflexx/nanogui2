@@ -58,11 +58,14 @@ int nmail_sock_connect(const char *host, int port, char *errbuf, int errlen) {
     {   int one = 1;
         setsockopt(fd, IPPROTO_TCP, TCP_NODELAY, &one, sizeof(one)); }
 
-    /* Safety net so a hung server cannot block the worker forever. */
+    /* Safety net so a hung server cannot block the worker forever.
+     * Send too: a peer that vanished overnight still accepts the local
+     * write until TCP retransmits give up. */
     {   struct timeval tv;
         tv.tv_sec = 60;
         tv.tv_usec = 0;
-        setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv)); }
+        setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
+        setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof(tv)); }
 
     /* Register in socket_server.h's connection table so socket_write()
      * and conn_del() work on this fd.  loopfd is unused bookkeeping. */
@@ -205,6 +208,7 @@ void nmail_sock_abort(int fd) {
     tv.tv_sec = 0;
     tv.tv_usec = 1000;
     setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
+    setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof(tv));
     shutdown(fd, SHUT_RDWR);
 }
 

@@ -191,9 +191,14 @@ int nmail_sock_connect(const char *host, int port, char *errbuf, int errlen) {
     setsockopt(s, IPPROTO_TCP, TCP_NODELAY, (const char *)&one, sizeof(one));
 
     /* Safety net so a hung server cannot block the worker forever.
-     * Windows SO_RCVTIMEO takes a DWORD millisecond count, not timeval. */
+     * Send too: a peer that vanished overnight still accepts the local
+     * write until TCP retransmits give up.
+     * Windows SO_RCVTIMEO / SO_SNDTIMEO take a DWORD millisecond count,
+     * not timeval. */
     timeout_ms = 60000;
     setsockopt(s, SOL_SOCKET, SO_RCVTIMEO, (const char *)&timeout_ms,
+               sizeof(timeout_ms));
+    setsockopt(s, SOL_SOCKET, SO_SNDTIMEO, (const char *)&timeout_ms,
                sizeof(timeout_ms));
 
     return (int)s;
@@ -341,10 +346,12 @@ int nmail_sock_wait_readable(int fd, int timeout_ms) {
 void nmail_sock_abort(int fd) {
     if (fd < 0)
         return;
-    /* 1 ms recv timeout so a blocking SSL_read/recv wakes on cancel.
-     * shutdown() alone does not reliably interrupt OpenSSL. */
+    /* 1 ms recv/send timeout so a blocking SSL_read/SSL_write wakes on
+     * cancel. shutdown() alone does not reliably interrupt OpenSSL. */
     DWORD ms = 1;
     setsockopt((SOCKET)fd, SOL_SOCKET, SO_RCVTIMEO, (const char *)&ms,
+               sizeof(ms));
+    setsockopt((SOCKET)fd, SOL_SOCKET, SO_SNDTIMEO, (const char *)&ms,
                sizeof(ms));
     shutdown((SOCKET)fd, SD_BOTH);
 }

@@ -1191,11 +1191,18 @@ bool MailWorker::do_move(const Cmd &cmd) {
                 if (s.uid == uid) { seq = s.seq; break; }
     }
     std::string dest = cmd.dest_folder;
-    if (folder.empty() || dest.empty() || seq <= 0)
+    if (folder.empty() || dest.empty() || uid == 0) {
+        report_error("Could not move message",
+                     "The message is no longer in this folder.");
+        report_status("Ready");
         return false;
-    if (!m_imap.is_open()) {
-        report_error("Not connected",
-                     "Set up the server in Preferences first.");
+    }
+    /* Selecting a cached message does not touch the socket, so a
+     * connection the server dropped overnight is still closed here.
+     * Reopen it. The move itself is by UID: a sequence number from the
+     * previous session is not stable across that SELECT. */
+    if (!m_imap.is_open() && !ensure_connected()) {
+        report_status("Not connected");
         return false;
     }
     // If user switched folders while this was queued, still operate on
@@ -1231,14 +1238,14 @@ bool MailWorker::do_move(const Cmd &cmd) {
     }
     report_status("Moving message to " + dest + "...");
     std::string err;
-    bool ok = m_imap.move_message(seq, dest, err);
+    bool ok = m_imap.move_uid(uid, dest, err);
     if (!ok && ImapClient::is_connection_error(err)) {
         std::string re;
-        if (m_imap.reconnect(re)) {
-            std::string se;
-            m_imap.ensure_selected(folder, se);
+        if (m_imap.reconnect(re) && m_imap.ensure_selected(folder, re)) {
             err.clear();
-            ok = m_imap.move_message(seq, dest, err);
+            ok = m_imap.move_uid(uid, dest, err);
+        } else if (err.empty()) {
+            err = re;
         }
     }
     if (!ok) {
@@ -1252,7 +1259,7 @@ bool MailWorker::do_move(const Cmd &cmd) {
         std::lock_guard<std::mutex> lock(m_mutex);
         cancel_prefetch_locked();
         if (m_last_known_exists > 0) --m_last_known_exists;
-        if (m_first_loaded > seq)    --m_first_loaded;
+        if (seq > 0 && m_first_loaded > seq) --m_first_loaded;
         auto itc = m_summaries_cache.find(folder);
         if (itc != m_summaries_cache.end()) {
             auto &v = itc->second;

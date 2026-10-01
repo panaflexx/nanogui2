@@ -169,6 +169,10 @@ public:
      * folder SELECTed. */
     bool move_message(int seq, const std::string &dest_folder,
                       std::string &err);
+    /* Same, addressed by UID. Sequence numbers from a previous
+     * connection are meaningless after a reconnect. */
+    bool move_uid(uint32_t uid, const std::string &dest_folder,
+                  std::string &err);
 
     /* Upload one RFC822 message into `folder`, flagged \Seen. Creates the
      * mailbox when the server answers [TRYCREATE]. Does not SELECT it.

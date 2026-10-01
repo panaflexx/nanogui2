@@ -2760,6 +2760,87 @@ bool ImapClient::move_message(int seq, const std::string &dest_folder,
     return true;
 }
 
+bool ImapClient::move_uid(uint32_t uid, const std::string &dest_folder,
+                          std::string &err) {
+    if (uid == 0) { err = "invalid uid"; return false; }
+    if (dest_folder.empty()) { err = "no destination folder"; return false; }
+    if (!is_open()) { err = "not connected"; return false; }
+    const std::string dest_q = quote(dest_folder);
+    const std::string uid_s  = std::to_string(uid);
+
+    if (m_caps.count("MOVE")) {
+        std::vector<std::string> un;
+        if (run("UID MOVE " + uid_s + " " + dest_q, un, err))
+            return true;
+        std::string low = to_lower(err);
+        if (low.find("[trycreate]") != std::string::npos) {
+            std::vector<std::string> cu; std::string ce;
+            if (run("CREATE " + dest_q, cu, ce)) {
+                err.clear();
+                std::vector<std::string> un2;
+                if (run("UID MOVE " + uid_s + " " + dest_q, un2, err))
+                    return true;
+            }
+        }
+        std::string le = to_lower(err);
+        bool unknown = le.find("unknown") != std::string::npos ||
+                       le.find("invalid") != std::string::npos ||
+                       le.find("bad") != std::string::npos;
+        if (!unknown)
+            return false;
+        err.clear();
+    }
+
+    {
+        std::vector<std::string> un; std::string copy_err;
+        if (!run("UID COPY " + uid_s + " " + dest_q, un, copy_err)) {
+            std::string low = to_lower(copy_err);
+            if (low.find("[trycreate]") != std::string::npos) {
+                std::vector<std::string> cu; std::string ce;
+                if (run("CREATE " + dest_q, cu, ce)) {
+                    copy_err.clear();
+                    if (!run("UID COPY " + uid_s + " " + dest_q, un, copy_err)) {
+                        err = copy_err; return false;
+                    }
+                } else {
+                    err = copy_err; return false;
+                }
+            } else {
+                err = copy_err; return false;
+            }
+        }
+    }
+    {
+        std::vector<std::string> un; std::string e2;
+        if (!run("UID STORE " + uid_s + " +FLAGS.SILENT (\\Deleted)", un, e2)) {
+            err = e2; return false;
+        }
+    }
+    {
+        std::vector<std::string> un; std::string e3;
+        if (m_caps.count("UIDPLUS")) {
+            if (run("UID EXPUNGE " + uid_s, un, e3)) {
+                err.clear();
+                return true;
+            }
+            std::string low = to_lower(e3);
+            bool unknown = low.find("unknown") != std::string::npos ||
+                           low.find("invalid") != std::string::npos ||
+                           low.find("bad") != std::string::npos;
+            if (!unknown) { err = e3; return false; }
+            e3.clear();
+            un.clear();
+        }
+        /* Without UIDPLUS, EXPUNGE clears every \Deleted message in the
+         * mailbox. The one we just flagged is one of them. */
+        if (!run("EXPUNGE", un, e3)) {
+            err = e3; return false;
+        }
+    }
+    err.clear();
+    return true;
+}
+
 // ── RFC 7162 QRESYNC helpers ─────────────────────────────────────────────
 std::string ImapClient::uids_to_seqset(const std::vector<uint32_t> &uids) {
     if (uids.empty()) return "";
