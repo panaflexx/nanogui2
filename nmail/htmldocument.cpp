@@ -4720,7 +4720,14 @@ static std::string leaves_to_html(const std::vector<HtmlText *> &leaves) {
     std::string out;
     int list_depth = 0;
     bool in_pre = false;
+    /* A plain <p> stays open so following Paragraph::softBreak lines
+     * rejoin it as <br>, the way they were parsed. */
+    bool in_p = false;
+    auto close_p = [&]() {
+        if (in_p) { out += "</p>\n"; in_p = false; }
+    };
     auto close_lists = [&]() {
+        close_p();
         while (list_depth > 0) { out += "</ul>\n"; --list_depth; }
     };
     auto close_pre = [&]() {
@@ -4756,6 +4763,7 @@ static std::string leaves_to_html(const std::vector<HtmlText *> &leaves) {
             }
             close_pre();
             if (para.isBullet) {
+                close_p();
                 int lvl = (int)(para.leftIndent / 16.f + 0.5f);
                 if (lvl < 1) lvl = 1;
                 while (list_depth < lvl) { out += "<ul>\n"; ++list_depth; }
@@ -4765,10 +4773,14 @@ static std::string leaves_to_html(const std::vector<HtmlText *> &leaves) {
                 out += "<li>" + inner + "</li>\n";
                 continue;
             }
-            close_lists();
             int level = para.headerLevel;
             if (level < 0 || level > 6) level = 0;
             std::string inner = inline_to_html(para, level > 0);
+            if (!level && para.leftIndent <= 0.f && para.softBreak && in_p) {
+                out += "<br>" + inner;
+                continue;
+            }
+            close_lists();
             if (inner.empty()) inner = "<br>";
             if (level) {
                 out += "<h" + std::to_string(level) + ">" + inner +
@@ -4776,7 +4788,8 @@ static std::string leaves_to_html(const std::vector<HtmlText *> &leaves) {
             } else if (para.leftIndent > 0.f) {
                 out += "<blockquote><p>" + inner + "</p></blockquote>\n";
             } else {
-                out += "<p>" + inner + "</p>\n";
+                out += "<p>" + inner;
+                in_p = true;
             }
         }
     }
