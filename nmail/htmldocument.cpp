@@ -1991,6 +1991,32 @@ bool element_is_hidden(GumboElement *el, const Builder &B) {
     return tmp.displayNone;
 }
 
+/* Chromium maps a NON-table element's align="center" attribute to
+ * text-align:-webkit-center, which — unlike plain CSS text-align:center —
+ * also centers block-level children that don't span the full width (the
+ * max-width wrapper div around a centered logo, app badge or emoji strip).
+ * align= on a <table> means margin:auto instead (handled in the TABLE
+ * case), and any CSS text-align on an element overrides the inherited
+ * -webkit-center, so only the attribute on non-table ancestors counts.
+ * Walk up from `node` and let the nearest such signal decide. */
+bool ancestor_webkit_center(GumboNode *node) {
+    for (GumboNode *p = node->parent; p; p = p->parent) {
+        if (p->type != GUMBO_NODE_ELEMENT)
+            continue;
+        GumboElement *pe = &p->v.element;
+        GumboTag t = pe->tag;
+        if (t == GUMBO_TAG_TABLE || t == GUMBO_TAG_THEAD ||
+            t == GUMBO_TAG_TBODY || t == GUMBO_TAG_TFOOT)
+            continue;   /* table align= is margin:auto, not inherited */
+        const char *style = attr(pe, "style");
+        if (style && std::string(style).find("text-align") != std::string::npos)
+            return false;   /* plain CSS text-align beats the attribute */
+        if (const char *a = attr(pe, "align"))
+            return trim_lower(a) == "center";
+    }
+    return false;
+}
+
 void build_children(Widget *container, GumboVector *kids, Style st,
                     Builder &B, int list_depth, TextAlignment align, int depth=0);
 void walk_inline(GumboNode *node, Style st, Flow &F, Builder &B,
@@ -2094,8 +2120,13 @@ void walk_inline(GumboNode *node, Style st, Flow &F, Builder &B,
     case GUMBO_TAG_IMG: {
         const char *src = attr(el, "src");
         const char *alt = attr(el, "alt");
-        if (src && src[0]) {
-            std::string s = src;
+        /* Strip surrounding whitespace/newlines like a real URL parser:
+         * marketing mail generators emit <img src="\n\nhttps://...\n\n">
+         * and the untrimmed string silently failed every scheme check
+         * below, so the image never fetched or painted (backmarket hero
+         * banner). */
+        std::string s = src ? trim(src) : std::string();
+        if (!s.empty()) {
             if (s.rfind("http://", 0) == 0 || s.rfind("https://", 0) == 0)
                 B.view->note_remote_image();
             HtmlImageInfo ri;
@@ -3213,10 +3244,17 @@ void build_children(Widget *container, GumboVector *kids, Style st,
                 bool shrink = (box.inline_flex && box.width_pct < 99.0f) ||
                               (box.center && box.width_px > 0.0f &&
                                box.width_pct < 99.0f);
+                /* align="center" on a non-table ancestor (-webkit-center):
+                 * a width-capped block like the max-width:114px emoji
+                 * wrapper centers as a whole instead of hugging the left
+                 * edge of its stretched cell. */
+                bool wc_center = !cap_triggered && !shrink &&
+                                 (cap > 0 || has_width_px) &&
+                                 ancestor_webkit_center(node);
                 bool parent_centers = false;
                 if (auto *pfl = dynamic_cast<FlexLayout *>(container->layout()))
                     parent_centers = pfl->align_items() == AlignItems::Center;
-                if ((cap_triggered || shrink) && !parent_centers) {
+                if ((cap_triggered || shrink || wc_center) && !parent_centers) {
                     /* Two different reasons land here, and they want
                      * opposite child alignment. `cap_triggered` (a
                      * max-width/no-width centered column, e.g. a
