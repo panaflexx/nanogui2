@@ -446,10 +446,26 @@ std::vector<std::string> file_dialog(const std::vector<std::pair<std::string, st
         cmd += "--multiple --separator=\"/\" ";
     if (save)
         cmd += "--save ";
-    cmd += "--file-filter=\"";
+    /* One --file-filter per type, "Name | *.ext": zenity shows each as its
+     * own dropdown entry.  The old code passed a single flag whose pattern
+     * was all extensions strung together, so the dropdown had ONE entry
+     * with every type lumped in.  Double quotes in a name would break the
+     * shell command; none are expected, but swap them out just in case. */
+    auto shell_safe = [](std::string s) {
+        for (char &c : s)
+            if (c == '"' || c == '`')
+                c = '\'';
+        return s;
+    };
+    if (!save && filetypes.size() > 1) {
+        cmd += "--file-filter=\"Supported file types |";
+        for (auto pair : filetypes)
+            cmd += " *." + pair.first;
+        cmd += "\" ";
+    }
     for (auto pair : filetypes)
-        cmd += "\"*." + pair.first + "\" ";
-    cmd += "\"";
+        cmd += "--file-filter=\"" + shell_safe(pair.second) +
+               " | *." + pair.first + "\" ";
     FILE *output = popen(cmd.c_str(), "r");
     if (output == nullptr)
         throw std::runtime_error("popen() failed -- could not launch zenity!");

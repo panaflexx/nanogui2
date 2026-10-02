@@ -1039,7 +1039,8 @@ public:
 
         MailToolbarGroup *message_group = toolbar->add_group();
         m_save_btn = message_group->add_button(FA_SAVE,
-            "Save this email as an .eml file (Ctrl+S)");
+            "Save this email as .eml, or as .html to compare rendering\n"
+            "against a browser (pick the format in the save dialog) (Ctrl+S)");
         m_save_btn->set_enabled(false);
         m_save_btn->set_callback([this]() { save_current_email(); });
 
@@ -3082,17 +3083,38 @@ public:
             return;
         }
         auto paths = file_dialog(
-            { {"eml", "Email message (RFC 822)"}, {"msg", "Email message"} },
+            { {"eml", "Email message (RFC 822)"},
+              {"html", "HTML body (browser view)"},
+              {"msg", "Email message"} },
             true, false, "");
         if (paths.empty() || paths[0].empty())
             return;
         std::string path = paths[0];
         std::string low = att_lower(path);
-        bool has_ext = low.size() >= 4 &&
-            (low.rfind(".eml") == low.size() - 4 ||
-             low.rfind(".msg") == low.size() - 4);
-        if (!has_ext)
-            path += ".eml";
+        /* The dialog can't report which filter was picked, so the
+         * extension decides: .html/.htm saves the message's HTML body
+         * verbatim (handy for A/B rendering checks against a browser);
+         * anything else is the RFC 822 original, defaulting to .eml. */
+        bool as_html = low.size() >= 4 &&
+            (low.rfind(".htm") == low.size() - 4 ||
+             (low.size() >= 5 && low.rfind(".html") == low.size() - 5));
+        if (!as_html) {
+            bool has_ext = low.size() >= 4 &&
+                (low.rfind(".eml") == low.size() - 4 ||
+                 low.rfind(".msg") == low.size() - 4);
+            if (!has_ext)
+                path += ".eml";
+        }
+
+        std::string data;
+        if (as_html) {
+            data = !msg.html.empty()
+                ? msg.html
+                : "<!DOCTYPE html>\n<html><body>\n" + body_as_html(msg) +
+                  "\n</body></html>\n";
+        } else {
+            data = msg.raw;
+        }
 
         std::ofstream out(path, std::ios::binary | std::ios::trunc);
         if (!out) {
@@ -3101,7 +3123,7 @@ public:
             dlg->center();
             return;
         }
-        out.write(msg.raw.data(), (std::streamsize)msg.raw.size());
+        out.write(data.data(), (std::streamsize)data.size());
         if (!out) {
             auto *dlg = new MessageDialog(this, MessageDialog::Type::Warning,
                 "Save failed", "Could not write " + path, "OK", "", false);
