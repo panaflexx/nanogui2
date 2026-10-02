@@ -279,8 +279,21 @@ static void apply_line_height(const std::string &v, float &lh, float fontSize) {
 }
 
 /* font-size value: Npx / Npt / Nem / N% (em and % are relative to the
- * inherited size). */
+ * inherited size), plus the CSS absolute-size keywords (browsers anchor
+ * medium at 16px — nmail's email base is 17, close enough that the
+ * classic values line up) and the relative smaller/larger.  The USAA nav
+ * links use font-size:xx-small; dropping the keyword left them at the
+ * 17px base, too wide for their 183px cell, so they wrapped. */
 void apply_font_size(const std::string &v, float &size) {
+    if (v == "xx-small") { size = 9.0f;  return; }
+    if (v == "x-small")  { size = 10.0f; return; }
+    if (v == "small")    { size = 13.0f; return; }
+    if (v == "medium")   { size = 16.0f; return; }
+    if (v == "large")    { size = 18.0f; return; }
+    if (v == "x-large")  { size = 24.0f; return; }
+    if (v == "xx-large") { size = 32.0f; return; }
+    if (v == "smaller")  { size = std::max(size / 1.2f, 6.0f);  return; }
+    if (v == "larger")   { size = std::min(size * 1.2f, 72.0f); return; }
     char *end = nullptr;
     float n = std::strtof(v.c_str(), &end);
     if (end == v.c_str() || n <= 0.0f || !css_finite(n))
@@ -293,6 +306,31 @@ void apply_font_size(const std::string &v, float &size) {
     size = std::min(std::max(size, 6.0f), 72.0f);
 }
 
+/* font: [style] [weight] size[/line-height] family… — take the
+ * style/weight/size, ignore the family list (families normalize
+ * elsewhere).  USAA's "font: bold 16px Arial, sans-serif" header. */
+static void handle_font_shorthand(const std::string &val, Style &st, TextAlignment&, bool&, BoxProps*, const char*, size_t) {
+    size_t p = 0;
+    bool got_size = false;
+    while (p < val.size()) {
+        while (p < val.size() && std::isspace((unsigned char)val[p])) ++p;
+        if (p >= val.size()) break;
+        size_t q = val.find_first_of(" \t", p);
+        std::string tok = val.substr(p, q == std::string::npos ? std::string::npos : q - p);
+        p = (q == std::string::npos) ? val.size() : q + 1;
+        if (tok == "bold" || tok == "bolder") { st.bold = true; continue; }
+        if (tok == "italic" || tok == "oblique") { st.italic = true; continue; }
+        if (tok == "normal") { st.bold = false; st.italic = false; continue; }
+        if (!got_size) {
+            size_t slash = tok.find('/');
+            float before = st.fontSize;
+            apply_font_size(slash == std::string::npos ? tok : tok.substr(0, slash),
+                            st.fontSize);
+            if (st.fontSize != before)
+                got_size = true;
+        }
+    }
+}
 /* CSS length: px / pt / % / unitless.  "auto"/"none" are ignored. */
 bool parse_css_len(const std::string &val, float &px, float &pct) {
     px = 0.0f;
@@ -321,7 +359,7 @@ bool parse_css_len(const std::string &val, float &px, float &pct) {
  * Helpers are the small per-property functions below. */
 enum PropId {
     P_NONE, P_COLOR, P_BG, P_BG_COLOR, P_BG_IMAGE, P_FONT_SIZE, P_FONT_WEIGHT, P_FONT_STYLE,
-    P_TEXT_DECOR, P_FONT_FAMILY, P_DISPLAY, P_MSO_HIDE, P_TEXT_ALIGN, P_LINE_HEIGHT, P_VERT_ALIGN,
+    P_TEXT_DECOR, P_FONT_FAMILY, P_FONT, P_DISPLAY, P_MSO_HIDE, P_TEXT_ALIGN, P_LINE_HEIGHT, P_VERT_ALIGN,
     P_FLOAT, P_PADDING, P_PADDING_TOP, P_PADDING_RIGHT, P_PADDING_BOTTOM, P_PADDING_LEFT,
     P_WIDTH, P_MAX_WIDTH, P_HEIGHT, P_MAX_HEIGHT, P_MIN_WIDTH, P_MIN_HEIGHT,
     P_BORDER, P_BORDER_WIDTH, P_BORDER_COLOR, P_BORDER_STYLE, P_BORDER_RADIUS,
@@ -332,7 +370,7 @@ static const std::pair<const char*,PropId> kPropMap[] = {
     {"background-color",P_BG_COLOR},{"background-image",P_BG_IMAGE},{"background",P_BG},
     {"border-radius",P_BORDER_RADIUS},{"border-color",P_BORDER_COLOR},{"border-style",P_BORDER_STYLE},{"border-width",P_BORDER_WIDTH},{"border",P_BORDER},
     {"box-sizing",P_BOX_SIZING},{"color",P_COLOR},{"display",P_DISPLAY},
-    {"float",P_FLOAT},{"font-family",P_FONT_FAMILY},{"font-size",P_FONT_SIZE},{"font-style",P_FONT_STYLE},{"font-weight",P_FONT_WEIGHT},
+    {"float",P_FLOAT},{"font-family",P_FONT_FAMILY},{"font-size",P_FONT_SIZE},{"font-style",P_FONT_STYLE},{"font-weight",P_FONT_WEIGHT},{"font",P_FONT},
     {"height",P_HEIGHT},{"letter-spacing",P_LETTER_SPACING},{"line-height",P_LINE_HEIGHT},
     {"margin",P_MARGIN},{"margin-left",P_MARGIN_LEFT},{"margin-right",P_MARGIN_RIGHT},
     {"max-height",P_MAX_HEIGHT},{"max-width",P_MAX_WIDTH},{"min-height",P_MIN_HEIGHT},{"min-width",P_MIN_WIDTH},
@@ -351,6 +389,7 @@ static void handle_color(const std::string &v, Style &st, TextAlignment&, bool&,
 static void handle_bg(const std::string &v, Style &st, TextAlignment&, bool&, BoxProps*, const char*, size_t);
 static void handle_bg_image(const std::string &v, Style &st, TextAlignment&, bool&, BoxProps*, const char*, size_t);
 static void handle_font_size(const std::string &v, Style &st, TextAlignment&, bool&, BoxProps*, const char*, size_t);
+static void handle_font_shorthand(const std::string &v, Style &st, TextAlignment&, bool&, BoxProps*, const char*, size_t);
 static void handle_font_weight(const std::string &v, Style &st, TextAlignment&, bool&, BoxProps*, const char*, size_t);
 static void handle_font_style(const std::string &v, Style &st, TextAlignment&, bool&, BoxProps*, const char*, size_t);
 static void handle_text_decor(const std::string &v, Style &st, TextAlignment&, bool&, BoxProps*, const char*, size_t);
@@ -381,7 +420,7 @@ static void handle_margin(const std::string &v, Style &st, TextAlignment&, bool&
 struct PropHandler { PropId id; void (*fn)(const std::string&,Style&,TextAlignment&,bool&,BoxProps*,const char*,size_t); };
 static const PropHandler kHandlers[] = {
     {P_COLOR,handle_color},{P_BG,handle_bg},{P_BG_COLOR,handle_bg},{P_BG_IMAGE,handle_bg_image},
-    {P_FONT_SIZE,handle_font_size},{P_FONT_WEIGHT,handle_font_weight},{P_FONT_STYLE,handle_font_style},{P_TEXT_DECOR,handle_text_decor},{P_FONT_FAMILY,handle_font_family},
+    {P_FONT_SIZE,handle_font_size},{P_FONT,handle_font_shorthand},{P_FONT_WEIGHT,handle_font_weight},{P_FONT_STYLE,handle_font_style},{P_TEXT_DECOR,handle_text_decor},{P_FONT_FAMILY,handle_font_family},
     {P_DISPLAY,handle_display},{P_MSO_HIDE,handle_mso_hide},{P_TEXT_ALIGN,handle_text_align},{P_LINE_HEIGHT,handle_line_height},
     {P_VERT_ALIGN,handle_vert_align},{P_FLOAT,handle_float},
     {P_PADDING,handle_padding_shorthand},{P_PADDING_TOP,handle_padding_side},{P_PADDING_RIGHT,handle_padding_side},{P_PADDING_BOTTOM,handle_padding_side},{P_PADDING_LEFT,handle_padding_side},
@@ -1189,6 +1228,11 @@ struct Builder {
      * them so a Benchmark-style grid lines up instead of each <tr> sizing
      * itself from that row's text. Nested tables save/restore this. */
     std::vector<float> table_col_grow;
+    /* Minimum width for rows of the current table when a CSS width:Npx
+     * table is block-aligned (-webkit-center/-webkit-right) — pins the
+     * shrink-wrapped rows to the exact CSS width (the 188px USAA security
+     * stamp).  Nested tables save/restore this.  0 = content-sized. */
+    int           table_row_min_w = 0;
 };
 
 const char *attr(GumboElement *el, const char *name) {
@@ -1991,15 +2035,17 @@ bool element_is_hidden(GumboElement *el, const Builder &B) {
     return tmp.displayNone;
 }
 
-/* Chromium maps a NON-table element's align="center" attribute to
- * text-align:-webkit-center, which — unlike plain CSS text-align:center —
- * also centers block-level children that don't span the full width (the
- * max-width wrapper div around a centered logo, app badge or emoji strip).
+/* Chromium maps a NON-table element's align="center"/"right" attribute to
+ * text-align:-webkit-center / -webkit-right, which — unlike plain CSS
+ * text-align — also aligns BLOCK-level children that don't span the full
+ * width (the max-width wrapper div around a centered logo or emoji strip,
+ * the 188px security stamp table inside a 367px align="right" cell).
  * align= on a <table> means margin:auto instead (handled in the TABLE
  * case), and any CSS text-align on an element overrides the inherited
- * -webkit-center, so only the attribute on non-table ancestors counts.
+ * -webkit- value, so only the attribute on non-table ancestors counts.
  * Walk up from `node` and let the nearest such signal decide. */
-bool ancestor_webkit_center(GumboNode *node) {
+enum class WebkitAlign { None, Center, Right };
+WebkitAlign ancestor_webkit_align(GumboNode *node) {
     for (GumboNode *p = node->parent; p; p = p->parent) {
         if (p->type != GUMBO_NODE_ELEMENT)
             continue;
@@ -2010,11 +2056,17 @@ bool ancestor_webkit_center(GumboNode *node) {
             continue;   /* table align= is margin:auto, not inherited */
         const char *style = attr(pe, "style");
         if (style && std::string(style).find("text-align") != std::string::npos)
-            return false;   /* plain CSS text-align beats the attribute */
-        if (const char *a = attr(pe, "align"))
-            return trim_lower(a) == "center";
+            return WebkitAlign::None;   /* plain CSS text-align beats the attribute */
+        if (const char *a = attr(pe, "align")) {
+            std::string v = trim_lower(a);
+            if (v == "center")
+                return WebkitAlign::Center;
+            if (v == "right")
+                return WebkitAlign::Right;
+            return WebkitAlign::None;
+        }
     }
-    return false;
+    return WebkitAlign::None;
 }
 
 void build_children(Widget *container, GumboVector *kids, Style st,
@@ -2127,6 +2179,13 @@ void walk_inline(GumboNode *node, Style st, Flow &F, Builder &B,
          * banner). */
         std::string s = src ? trim(src) : std::string();
         if (!s.empty()) {
+            /* width="0" height="0" read-receipt pixel: skip it entirely —
+             * the unknown-size fallback in size_html_image() would
+             * otherwise draw a stray 160x100 placeholder box. */
+            const char *w0 = attr(el, "width");
+            const char *h0 = attr(el, "height");
+            if (w0 && h0 && trim(w0) == "0" && trim(h0) == "0")
+                return;
             if (s.rfind("http://", 0) == 0 || s.rfind("https://", 0) == 0)
                 B.view->note_remote_image();
             HtmlImageInfo ri;
@@ -2894,6 +2953,7 @@ void build_children(Widget *container, GumboVector *kids, Style st,
         case GUMBO_TAG_TFOOT: {
             bool save_fw = B.in_full_width;
             std::vector<float> save_cols;
+            int save_row_min_w = B.table_row_min_w;
             if (tag == GUMBO_TAG_TABLE) {
                 B.in_full_width = element_is_full_width(el, B);
                 save_cols = B.table_col_grow;
@@ -2929,7 +2989,21 @@ void build_children(Widget *container, GumboVector *kids, Style st,
                                      (has_explicit_shrink_width(el) ||
                                       !has_any_width_signal) &&
                                      !table_has_multicell_row(node);
-                if (cap || center_shrink) {
+                /* align="center"/"right" on a non-table ancestor
+                 * (-webkit-center/-webkit-right) also block-aligns a
+                 * shrink-wrapped table as a whole: the classic icon strip
+                 * (<td align="center"><table width="173px">…social
+                 * icons…) and the USAA security stamp (<td align="right"
+                 * width="367"><table style="width:188px">…).  Rows align
+                 * individually (Center/FlexEnd) since the table builds no
+                 * single widget of its own; a CSS width:Npx pins them to
+                 * the exact width via B.table_row_min_w. */
+                WebkitAlign wc_table = WebkitAlign::None;
+                if (!cap && !center_shrink && !box.center &&
+                    (has_explicit_shrink_width(el) ||
+                     (box.width_px > 0.0f && box.width_pct <= 0.0f)))
+                    wc_table = ancestor_webkit_align(node);
+                if (cap || center_shrink || wc_table != WebkitAlign::None) {
                     /* `outer` centers the TABLE AS A WHOLE within its own
                      * parent (the shrink-wrap/margin:auto semantic) — its
                      * own ROWS must stay flush against each other
@@ -2939,8 +3013,20 @@ void build_children(Widget *container, GumboVector *kids, Style st,
                      * narrower single-cell button row) into staggered
                      * left edges instead of one shared left margin. */
                     HtmlBlock *outer = make_block(container, FlexDirection::Column,
-                                                  0, AlignItems::Stretch);
+                                                  0, wc_table == WebkitAlign::Center
+                                                         ? AlignItems::Center
+                                                     : wc_table == WebkitAlign::Right
+                                                         ? AlignItems::FlexEnd
+                                                         : AlignItems::Stretch);
                     target = outer;
+                    /* The width= attribute form (the 173px social strip)
+                     * stays content-sized — its measured content
+                     * legitimately exceeds the nominal attribute. */
+                    if (wc_table != WebkitAlign::None && box.width_px > 80.0f &&
+                        box.width_px < 4000.0f)
+                        B.table_row_min_w = (int)std::lround(box.width_px);
+                    else
+                        B.table_row_min_w = 0;
                 }
                 if (bg.a > 0.0f || cap || box.radius_px > 0.0f) {
                     HtmlBlock *inner = make_block(target, FlexDirection::Column, 0);
@@ -2951,6 +3037,7 @@ void build_children(Widget *container, GumboVector *kids, Style st,
             }
             build_children(target, &el->children, st, B, list_depth, align, depth+1);
             B.in_full_width = save_fw;
+            B.table_row_min_w = save_row_min_w;
             if (tag == GUMBO_TAG_TABLE)
                 B.table_col_grow = std::move(save_cols);
             break;
@@ -3022,6 +3109,10 @@ void build_children(Widget *container, GumboVector *kids, Style st,
             }
             HtmlBlock *row = make_block(container, FlexDirection::Row, row_gap);
             row->m_bg = block_background(el, B);
+            /* CSS width:Npx on a block-aligned table pins every row to the
+             * exact width (the 188px USAA stamp inside a 367px cell). */
+            if (B.table_row_min_w > 0)
+                row->set_min_width(B.table_row_min_w);
             float explicit_sum = 0.0f;
             int auto_cells = 0;
             for (unsigned j = 0; j < el->children.length; ++j) {
@@ -3067,8 +3158,11 @@ void build_children(Widget *container, GumboVector *kids, Style st,
                     cst.bold = true;
                 build_children(cell, &ce->children, cst, B, list_depth, ta, depth+1);
                 int px = cell_px_width(ce, B);
-                if (px < 0)
+                bool content_sized = false;
+                if (px < 0) {
                     px = cell_content_px_width(ce, B);
+                    content_sized = px > 0;
+                }
                 float grow = auto_grow;
                 float shrink = 1.0f;
                 /* -1 ("auto"): FlexLayout::preferred_size() falls back to
@@ -3083,6 +3177,17 @@ void build_children(Widget *container, GumboVector *kids, Style st,
                  * owns the width and every row's columns line up. */
                 int basis = -1;
                 if (px > 0) {
+                    /* A content-drilled width measures the CONTENT box
+                     * only — the cell's own horizontal padding sits
+                     * outside it.  The social-icon cells (padding:0 0 0
+                     * 15px around a 32px <img>) otherwise pinned the cell
+                     * to 32px and squeezed the icon into the 2px
+                     * remainder. */
+                    if (content_sized) {
+                        BoxProps cbox;
+                        element_box(ce, B, cbox);
+                        px += (int)std::lround(2.0f * cbox.pad_x);
+                    }
                     grow = 0.0f;
                     shrink = 0.0f;
                     basis = px;
@@ -3244,17 +3349,19 @@ void build_children(Widget *container, GumboVector *kids, Style st,
                 bool shrink = (box.inline_flex && box.width_pct < 99.0f) ||
                               (box.center && box.width_px > 0.0f &&
                                box.width_pct < 99.0f);
-                /* align="center" on a non-table ancestor (-webkit-center):
-                 * a width-capped block like the max-width:114px emoji
-                 * wrapper centers as a whole instead of hugging the left
-                 * edge of its stretched cell. */
-                bool wc_center = !cap_triggered && !shrink &&
-                                 (cap > 0 || has_width_px) &&
-                                 ancestor_webkit_center(node);
+                /* align="center"/"right" on a non-table ancestor
+                 * (-webkit-center/-webkit-right): a width-capped block
+                 * like the max-width:114px emoji wrapper aligns as a
+                 * whole instead of hugging the left edge of its
+                 * stretched cell. */
+                WebkitAlign wc_align = WebkitAlign::None;
+                if (!cap_triggered && !shrink && (cap > 0 || has_width_px))
+                    wc_align = ancestor_webkit_align(node);
                 bool parent_centers = false;
                 if (auto *pfl = dynamic_cast<FlexLayout *>(container->layout()))
                     parent_centers = pfl->align_items() == AlignItems::Center;
-                if ((cap_triggered || shrink || wc_center) && !parent_centers) {
+                if ((cap_triggered || shrink || wc_align != WebkitAlign::None) &&
+                    !parent_centers) {
                     /* Two different reasons land here, and they want
                      * opposite child alignment. `cap_triggered` (a
                      * max-width/no-width centered column, e.g. a
@@ -3270,8 +3377,11 @@ void build_children(Widget *container, GumboVector *kids, Style st,
                      * hands `outer` (this turned the Instagram
                      * notification pill into a full-width red bar). */
                     HtmlBlock *outer = make_block(container, FlexDirection::Column,
-                                                  0, cap_triggered ? AlignItems::Stretch
-                                                                   : AlignItems::Center);
+                                                  0, cap_triggered
+                                                         ? AlignItems::Stretch
+                                                     : wc_align == WebkitAlign::Right
+                                                         ? AlignItems::FlexEnd
+                                                         : AlignItems::Center);
                     host = outer;
                 }
                 HtmlBlock *blk = make_block(host, FlexDirection::Column, 0);
