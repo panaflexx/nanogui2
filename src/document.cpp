@@ -385,6 +385,7 @@ void Document::draw(NVGcontext* ctx, float originX, float originY) {
                 img_line.y_bottom   = iy + dh + pad;
                 img_line.baseline   = iy;
                 img_line.x_start    = ix;
+                img_line.block_image = true;
                 WordLayout iw;
                 iw.byte_start = 0;
                 iw.byte_end   = 0;
@@ -469,7 +470,7 @@ void Document::draw(NVGcontext* ctx, float originX, float originY) {
     // ---- Fast path: content/width unchanged (selection drag, hover, move).
     // Replay from the layout cache — no nvgTextBounds reflow.
     for (const RichLine& rl : m_rich_layout) {
-        if (rl.words.size() == 1 && rl.words[0].text == "\x01IMAGE") {
+        if (rl.block_image && !rl.words.empty()) {
             const WordLayout& iw = rl.words[0];
             draw_image_block(ctx, iw.image, iw.x, rl.baseline,
                              iw.advance, iw.style.fontSize);

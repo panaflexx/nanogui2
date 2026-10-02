@@ -266,6 +266,12 @@ public:
         float                x_start;     ///< x where first word begins
         std::vector<WordLayout> words;
 
+        /// Whole-paragraph block image: baseline holds the image *top*.
+        /// An inline image run alone on its line has the same one-word
+        /// "\x01IMAGE" shape but a bottom-aligned baseline, so the fast
+        /// path must not tell them apart by shape.
+        bool     block_image   = false;
+
         /// Unified monospace code-block background (from blockWidth pass).
         /// Replayed on the fast path so blocks don't flash once then vanish.
         bool     mono_bg       = false;
