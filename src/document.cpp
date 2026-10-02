@@ -444,7 +444,9 @@ void Document::draw(NVGcontext* ctx, float originX, float originY) {
                                  // Single-image -> short-text is a captioned image, not two paragraphs.
                                  (para->isImage && next.runs.size()==1 && next.runs[0].content.size()<80) ||
                                  // Empty spacer paragraph between rows (common in Madeleine's table gaps)
-                                 (next.runs.empty() || (next.runs.size()==1 && next.runs[0].content.size()==0));
+                                 (next.runs.empty() || (next.runs.size()==1 && next.runs[0].content.size()==0)) ||
+                                 // <br>: a line break, not a new block
+                                 next.softBreak;
                     y += tight ? 0.0f : paragraphSpacing;
                 }
             }
@@ -551,7 +553,10 @@ void Document::draw(NVGcontext* ctx, float originX, float originY) {
                 const float lineAsc = std::max(1.f, rl.baseline - rl.y_top - vpad);
                 ty = rl.baseline - (lineAsc - metricsFor(ctx, st).ascender);
             } else if (st.verticalMiddle) {
-                float lineH = rl.y_bottom - rl.y_top - 4.f; // approx; matches y+lineHeight+spacing
+                // y_bottom includes the line gap, which drawParagraph drops
+                // when any word carries an explicit line-height.
+                bool cssLH = false; for (auto &w : rl.words) if (w.style.lineHeight > 0.f) cssLH = true;
+                float lineH = rl.y_bottom - rl.y_top - (cssLH ? 0.f : lineSpacing);
                 // Use stored lineHeight if available via baseline offset
                 float vpad = 0.f; for (auto &w : rl.words) vpad = std::max(vpad, w.style.padY + w.style.borderWidth);
                 float fontH = metricsFor(ctx, st).lineh > 1.f ? metricsFor(ctx, st).lineh : (metricsFor(ctx, st).ascender - metricsFor(ctx, st).descender);
@@ -605,7 +610,11 @@ float Document::drawParagraph(NVGcontext* ctx, const Paragraph& para,
         const Style es = para.runs.empty() ? Style{}
                                            : para.runs.front().style;
         const VMetrics m = metricsFor(ctx, es);
-        const float lineHeight = m.ascender - m.descender;  // descender < 0
+        /* A blank <br><br> line in CSS-styled text is one line-height
+         * tall, like its neighbours (see the line loop below). */
+        const float lineHeight = std::max(m.ascender - m.descender,  // descender < 0
+                                          es.lineHeight);
+        const float lineGap    = es.lineHeight > 0.f ? 0.f : lineSpacing;
         const float baseline   = startY + m.ascender;
         const float indent     = para.leftIndent + para.firstLineIndent;
         /* Blank line inside a code block: paint a one-column background
@@ -640,7 +649,7 @@ float Document::drawParagraph(NVGcontext* ctx, const Paragraph& para,
             rl.byte_start = 0;
             rl.byte_end   = 0;
             rl.y_top      = startY;
-            rl.y_bottom   = startY + lineHeight + lineSpacing;
+            rl.y_bottom   = startY + lineHeight + lineGap;
             rl.baseline   = baseline;
             rl.x_start    = originX + indent;
             if (mono_bg) {
@@ -661,7 +670,7 @@ float Document::drawParagraph(NVGcontext* ctx, const Paragraph& para,
             }
             m_rich_layout.push_back(std::move(rl));
         }
-        return startY + lineHeight + lineSpacing;
+        return startY + lineHeight + lineGap;
     };
 
     if (para.runs.empty())
@@ -832,6 +841,10 @@ float Document::drawParagraph(NVGcontext* ctx, const Paragraph& para,
         }
         float lineHeight = line.ascent + line.descent + 2.f * boxPadY;
         if (lineHeightOverride > lineHeight) lineHeight = lineHeightOverride;
+        /* lineSpacing stands in for CSS "normal" leading.  An explicit
+         * line-height already is the whole line pitch (USAA's 12px stamp
+         * lines, 18px body text), so don't add more on top of it. */
+        const float lineGap = lineHeightOverride > 0.f ? 0.f : lineSpacing;
         float baseline = y + boxPadY + line.ascent;
         // If line-height > metrics or vertical-align:middle on a mixed line
         // (pill icon + text), center the baseline in the line box so the
@@ -886,7 +899,7 @@ float Document::drawParagraph(NVGcontext* ctx, const Paragraph& para,
             rich_line.byte_start = line.words.empty() ? 0 : line.words.front().byte_start;
             rich_line.byte_end   = line.words.empty() ? 0 : line.words.back().byte_end;
             rich_line.y_top      = y;
-            rich_line.y_bottom   = y + lineHeight + lineSpacing;
+            rich_line.y_bottom   = y + lineHeight + lineGap;
             rich_line.baseline   = baseline;
             rich_line.x_start    = lineX;
         }
@@ -1126,7 +1139,7 @@ float Document::drawParagraph(NVGcontext* ctx, const Paragraph& para,
             nvgStroke(ctx);
         }
 
-        y += lineHeight + lineSpacing;
+        y += lineHeight + lineGap;
     }
 
     if (debugDraw) {

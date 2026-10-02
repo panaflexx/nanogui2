@@ -109,6 +109,10 @@ public:
     // so a later edit can write the heading back. <br> inside a heading
     // keeps the level on the following paragraph.
     int               headerLevel     = 0;
+    // Started by an HTML <br> rather than a block boundary: it continues
+    // the previous paragraph's text on a new line, so no paragraphSpacing
+    // is inserted above it.
+    bool              softBreak       = false;
     // Image block paragraph: skips text layout and draws a full-width
     // (aspect-preserving) image instead.  `image` is an NVG image id
     // owned by the caller; image_w/image_h are the intrinsic pixel size.

@@ -249,6 +249,14 @@ struct BoxProps {
     bool  align_middle  = false;
     /* float:left — email nav bars (PennyMac header-menu LIs). */
     bool  float_left    = false;
+    /* display:block on an <img>: no line-box gap under the image. */
+    bool  display_block = false;
+    /* line-height:0 (or 0px) on the element itself — Outlook spacer
+     * cells holding only an &nbsp;. */
+    bool  zero_line_height = false;
+    /* CSS vertical-align as a table-cell placement: 't'op, 'm'iddle,
+     * 'b'ottom, or 0 if unset (see decorate_cell). */
+    char  cell_valign   = 0;
     /* CSS `background-image:url(...)` on a plain <div> — common in
      * marketing/notification email (Meta digests use it for every real
      * photo, never <img src>).  Resolved and painted like an <img>. */
@@ -468,11 +476,11 @@ static void handle_font_weight(const std::string &v, Style &st, TextAlignment&, 
 static void handle_font_style(const std::string &v, Style &st, TextAlignment&, bool&, BoxProps*, const char*, size_t){ if(v=="italic"||v=="oblique") st.italic=true; else if(v=="normal") st.italic=false; }
 static void handle_text_decor(const std::string &v, Style &st, TextAlignment&, bool&, BoxProps*, const char*, size_t){ if(v.find("none")!=std::string::npos){ st.underline=false; st.strike=false; } else { if(v.find("underline")!=std::string::npos) st.underline=true; if(v.find("line-through")!=std::string::npos) st.strike=true; } }
 static void handle_font_family(const std::string &v, Style &st, TextAlignment&, bool&, BoxProps*, const char*, size_t){ if(v.find("mono")!=std::string::npos||v.find("courier")!=std::string::npos||v.find("consol")!=std::string::npos||v.find("menlo")!=std::string::npos) st.monospace=true; }
-static void handle_display(const std::string &v, Style &st, TextAlignment&, bool&, BoxProps *box, const char*, size_t){ if(v=="none") st.displayNone=true; else st.displayNone=false; if(box && v=="table-cell") box->table_cell=true; if(box && (v=="inline-flex"||v=="inline-block"||v=="inline")) box->inline_flex=true; if(box && v=="inline-flex") box->is_inline_flex=true; }
+static void handle_display(const std::string &v, Style &st, TextAlignment&, bool&, BoxProps *box, const char*, size_t){ if(v=="none") st.displayNone=true; else st.displayNone=false; if(box && v=="table-cell") box->table_cell=true; if(box && (v=="inline-flex"||v=="inline-block"||v=="inline")) box->inline_flex=true; if(box && v=="inline-flex") box->is_inline_flex=true; if(box) box->display_block=(v=="block"); }
 static void handle_mso_hide(const std::string &v, Style &st, TextAlignment&, bool&, BoxProps*, const char*, size_t){ if(v=="all") st.displayNone=true; }
 static void handle_text_align(const std::string &v, Style &, TextAlignment &a, bool &ha, BoxProps*, const char*, size_t){ if(v=="center"){a=TextAlignment::Center; ha=true;} else if(v=="right"){a=TextAlignment::Right; ha=true;} else if(v=="justify"){a=TextAlignment::Justify; ha=true;} else if(v=="left"){a=TextAlignment::Left; ha=true;} }
-static void handle_line_height(const std::string &v, Style &st, TextAlignment&, bool&, BoxProps*, const char*, size_t){ apply_line_height(v, st.lineHeight, st.fontSize); }
-static void handle_vert_align(const std::string &v, Style &st, TextAlignment&, bool&, BoxProps *box, const char*, size_t){ if(v=="super"){ st.superscript=true; st.verticalMiddle=false; } else if(v=="baseline"||v=="bottom"||v=="top"){ st.superscript=false; st.verticalMiddle=false; } else if(v=="middle"||v=="center"){ st.superscript=false; st.verticalMiddle=true; } if(box && (v=="middle"||v=="center")) box->align_middle=true; }
+static void handle_line_height(const std::string &v, Style &st, TextAlignment&, bool&, BoxProps *box, const char*, size_t){ apply_line_height(v, st.lineHeight, st.fontSize); if(box){ char *e=nullptr; float n=std::strtof(v.c_str(),&e); box->zero_line_height=(e!=v.c_str() && n==0.f); } }
+static void handle_vert_align(const std::string &v, Style &st, TextAlignment&, bool&, BoxProps *box, const char*, size_t){ if(v=="super"){ st.superscript=true; st.verticalMiddle=false; } else if(v=="baseline"||v=="bottom"||v=="top"){ st.superscript=false; st.verticalMiddle=false; } else if(v=="middle"||v=="center"){ st.superscript=false; st.verticalMiddle=true; } if(box && (v=="middle"||v=="center")) box->align_middle=true; if(box) box->cell_valign=(v=="middle"||v=="center")?'m':(v=="bottom")?'b':(v=="top"||v=="baseline")?'t':0; }
 static void handle_float(const std::string &v, Style&, TextAlignment&, bool&, BoxProps *box, const char*, size_t){ if(box) box->float_left=(v=="left"); }
 static void handle_padding_shorthand(const std::string &val, Style &st, TextAlignment&, bool&, BoxProps *box, const char*, size_t) {
     std::vector<std::string> tok;
@@ -613,19 +621,37 @@ struct Flow {
     /* Heading level of the element currently being walked. brk() keeps
      * it so a <br> inside <h1> starts another heading paragraph. */
     int            pending_header = 0;
+    /* The last thing walked was a <br>: the next paragraph is a soft line
+     * break (Paragraph::softBreak), not a new block. */
+    bool           pending_br = false;
 
     Paragraph *para() {
         if (!cur) {
             cur = doc.addParagraph();
             cur->alignment = align;
             cur->headerLevel = pending_header;
+            cur->softBreak = pending_br;
             cur_has_text = false;
+            pending_br = false;
         }
         return cur;
     }
     /* End the current block: the next text starts a new paragraph.
      * Does not clear pending_header. */
-    void brk() { cur = nullptr; cur_has_text = false; }
+    void brk() { cur = nullptr; cur_has_text = false; pending_br = false; }
+
+    /* <br>: the next text goes on a new line of the same block, with no
+     * paragraph gap.  The second <br> of <br><br> leaves a blank line in
+     * the surrounding font, as browsers do.  A <br> right after a block
+     * boundary keeps the existing paragraph gap and adds nothing. */
+    void lineBreak(const Style &st) {
+        if (!cur && !pending_br)
+            return;
+        if (!cur)
+            para()->addText(Text("", st));
+        brk();
+        pending_br = true;
+    }
 
     /* Inline image run (a small icon next to text) — see Text::image. */
     void emitImage(int image, float w, float h, std::string src) {
@@ -1962,11 +1988,14 @@ bool mso_size_hint(GumboNode *node, float &w, float &h) {
  * and any loaded pixels. */
 void size_html_image(GumboElement *el, const Builder &B,
                      const HtmlImageInfo &ri, float &pw, float &ph,
-                     float hint_w = 0.0f, float hint_h = 0.0f) {
+                     float hint_w = 0.0f, float hint_h = 0.0f,
+                     bool *display_block = nullptr) {
     BoxProps box;
     Style dummy;
     TextAlignment a = TextAlignment::Left;
     apply_cascade(el, dummy, a, B, &box);
+    if (display_block)
+        *display_block = box.display_block;
 
     const char *wattr = attr(el, "width");
     const char *hattr = attr(el, "height");
@@ -2162,7 +2191,7 @@ void walk_inline(GumboNode *node, Style st, Flow &F, Builder &B,
 
     switch (tag) {
     case GUMBO_TAG_BR:
-        F.brk();
+        F.lineBreak(st);
         return;
     case GUMBO_TAG_HR:
         F.brk();
@@ -2195,7 +2224,8 @@ void walk_inline(GumboNode *node, Style st, Flow &F, Builder &B,
             float hint_w = 0.0f, hint_h = 0.0f;
             mso_size_hint(node, hint_w, hint_h);
             float pw = 0.0f, ph = 0.0f;
-            size_html_image(el, B, ri, pw, ph, hint_w, hint_h);
+            bool display_block = false;
+            size_html_image(el, B, ri, pw, ph, hint_w, hint_h, &display_block);
 
             constexpr float kInlineIconMaxPx = 32.0f;
             if (pw > 0.0f && ph > 0.0f &&
@@ -2203,6 +2233,11 @@ void walk_inline(GumboNode *node, Style st, Flow &F, Builder &B,
                 Text t;
                 t.isImageRun = true;
                 t.image = ri.id; t.image_w = pw; t.image_h = ph; t.image_src = s;
+                /* display:block has no line box, so no gap under the
+                 * image: pin the line to exactly the image height (the
+                 * USAA stamp's 8x29 / 14x29 lock slices). */
+                if (display_block)
+                    t.style.lineHeight = ph;
                 if (!st.linkUrl.empty()) t.linkUrl = st.linkUrl;
                 F.para()->addText(t); F.cur_has_text = true;
                 return;
@@ -2552,6 +2587,28 @@ void element_box(GumboElement *el, const Builder &B, BoxProps &box) {
     apply_cascade(el, dummy, a, B, &box);
 }
 
+/* <td style="line-height:0">&nbsp;</td>: an Outlook spacer whose only
+ * line box is 0px tall, so the cell is exactly its height= (the 7px
+ * bottom row of the USAA stamp).  Built as a text leaf, the &nbsp; made
+ * it a full line of body text. */
+bool cell_is_zero_line_spacer(GumboElement *ce, const Builder &B) {
+    for (unsigned i = 0; i < ce->children.length; ++i) {
+        GumboNode *cn = (GumboNode *)ce->children.data[i];
+        if (cn->type == GUMBO_NODE_ELEMENT)
+            return false;
+        if (cn->type != GUMBO_NODE_TEXT)
+            continue;
+        for (const unsigned char *p = (const unsigned char *)cn->v.text.text; *p; ++p) {
+            if (p[0] == 0xC2 && p[1] == 0xA0) { ++p; continue; }  // &nbsp;
+            if (!std::isspace(*p))
+                return false;
+        }
+    }
+    BoxProps box;
+    element_box(ce, B, box);
+    return box.zero_line_height;
+}
+
 int element_height_px(GumboElement *el, const BoxProps &box) {
     if (box.height_px > 1.0f)
         return (int)box.height_px;
@@ -2788,6 +2845,51 @@ void decorate_block(HtmlBlock *b, GumboElement *el, const Builder &B) {
             b->m_bg_image_h = ri.h;
         }
     }
+}
+
+/* cellpadding= of the table that owns row `tr` (0 if none). */
+int table_cellpadding(GumboNode *tr) {
+    for (GumboNode *p = tr->parent; p && p->type == GUMBO_NODE_ELEMENT;
+         p = p->parent) {
+        if (p->v.element.tag != GUMBO_TAG_TABLE)
+            continue;
+        const char *cp = attr(&p->v.element, "cellpadding");
+        int n = cp ? atoi(cp) : 0;
+        return (n > 0 && n <= 32) ? n : 0;
+    }
+    return 0;
+}
+
+/* HTML table-cell behavior the CSS box doesn't cover: the table's
+ * cellpadding= insets a cell with no CSS padding of its own, and the
+ * content sits at the cell's vertical-align — CSS, else valign= on the
+ * cell or its row, else the HTML default of middle.  The USAA security
+ * stamp's text column needs both to sit centered and clear of the lock. */
+void decorate_cell(HtmlBlock *cell, GumboElement *td, GumboNode *tr,
+                   const Builder &B, bool place_vertically = true) {
+    auto *fl = dynamic_cast<FlexLayout *>(cell->layout());
+    if (!fl)
+        return;
+    BoxProps box;
+    element_box(td, B, box);
+    if (box.pad_x <= 0.5f && box.pad_y <= 0.5f) {
+        int n = table_cellpadding(tr);
+        if (n > 0)
+            fl->set_padding(n, n);
+    }
+    if (!place_vertically)
+        return;
+    char va = box.cell_valign;
+    if (!va) {
+        const char *a = attr(td, "valign");
+        if (!a)
+            a = attr(&tr->v.element, "valign");
+        std::string v = a ? trim_lower(a) : std::string("middle");
+        va = (v == "top" || v == "baseline") ? 't' : (v == "bottom") ? 'b' : 'm';
+    }
+    fl->set_justify_content(va == 'm' ? JustifyContent::Center
+                            : va == 'b' ? JustifyContent::FlexEnd
+                                        : JustifyContent::FlexStart);
 }
 
 /* Only introduce a widget when the element actually paints a background.
@@ -3068,13 +3170,20 @@ void build_children(Widget *container, GumboVector *kids, Style st,
                     }
                     if (paint)
                         cell = wrap_if_bg(target, ce, 2, B);
+                    /* Stacked cells have no row height to place within,
+                     * but cellpadding still insets them (the USAA stamp's
+                     * one-cell text table). */
+                    const bool cpad = table_cellpadding(node) > 0;
                     if (cell == target && (h > 1 || box.radius_px > 0.0f ||
-                                           box.max_width_px > 80.0f)) {
+                                           box.max_width_px > 80.0f || cpad)) {
                         HtmlBlock *sp = make_block(target, FlexDirection::Column, 0);
                         sp->m_bg = block_background(ce, B);
                         decorate_block(sp, ce, B);
                         cell = sp;
                     }
+                    if (cell != target && cpad)
+                        if (auto *hb = dynamic_cast<HtmlBlock *>(cell))
+                            decorate_cell(hb, ce, node, B, false);
                     Style cst = st;
                     TextAlignment cascade_align = ta;
                     apply_cascade(ce, cst, cascade_align, B);
@@ -3148,6 +3257,7 @@ void build_children(Widget *container, GumboVector *kids, Style st,
                 HtmlBlock *cell = make_block(row, FlexDirection::Column, 0);
                 cell->m_bg = block_background(ce, B);
                 decorate_block(cell, ce, B);
+                decorate_cell(cell, ce, node, B);
                 bool ch = false;
                 TextAlignment ta = element_align(ce, align, ch, B);
                 Style cst = st;
@@ -3156,7 +3266,8 @@ void build_children(Widget *container, GumboVector *kids, Style st,
                 reset_box_style(cst);
                 if (ce->tag == GUMBO_TAG_TH)
                     cst.bold = true;
-                build_children(cell, &ce->children, cst, B, list_depth, ta, depth+1);
+                if (!cell_is_zero_line_spacer(ce, B))
+                    build_children(cell, &ce->children, cst, B, list_depth, ta, depth+1);
                 int px = cell_px_width(ce, B);
                 bool content_sized = false;
                 if (px < 0) {
