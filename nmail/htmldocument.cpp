@@ -233,6 +233,10 @@ struct BoxProps {
      * pill (`padding: 8px 16px`) actually insets the heart+"1". */
     float pad_x         = 0.0f;
     float pad_y         = 0.0f;
+    /* The same padding per side, in cascade order (later declarations
+     * win, unlike the per-axis max above): LinkedIn's one-sided
+     * padding-top:16px must not also pad the bottom. */
+    float pad_l = 0.0f, pad_t = 0.0f, pad_r = 0.0f, pad_b = 0.0f;
     float min_width_px  = 0.0f;
     float min_height_px = 0.0f;
     bool  border_box    = false; // box-sizing: border-box
@@ -472,7 +476,7 @@ static void handle_bg_image(const std::string &val, Style &st, TextAlignment&, b
         box->bg_image_url = url;
 }
 static void handle_font_size(const std::string &v, Style &st, TextAlignment&, bool&, BoxProps*, const char*, size_t){ apply_font_size(v, st.fontSize); }
-static void handle_font_weight(const std::string &v, Style &st, TextAlignment&, bool&, BoxProps*, const char*, size_t){ if(v=="bold"||v=="bolder"||atoi(v.c_str())>=600) st.bold=true; else if(v=="normal"||v=="lighter"||atoi(v.c_str())==400) st.bold=false; }
+static void handle_font_weight(const std::string &v, Style &st, TextAlignment&, bool&, BoxProps*, const char*, size_t){ if(v=="bold"||v=="bolder"||atoi(v.c_str())>=600) st.bold=true; else if(v=="normal"||v=="lighter"||(atoi(v.c_str())>0&&atoi(v.c_str())<600)) st.bold=false; }
 static void handle_font_style(const std::string &v, Style &st, TextAlignment&, bool&, BoxProps*, const char*, size_t){ if(v=="italic"||v=="oblique") st.italic=true; else if(v=="normal") st.italic=false; }
 static void handle_text_decor(const std::string &v, Style &st, TextAlignment&, bool&, BoxProps*, const char*, size_t){ if(v.find("none")!=std::string::npos){ st.underline=false; st.strike=false; } else { if(v.find("underline")!=std::string::npos) st.underline=true; if(v.find("line-through")!=std::string::npos) st.strike=true; } }
 static void handle_font_family(const std::string &v, Style &st, TextAlignment&, bool&, BoxProps*, const char*, size_t){ if(v.find("mono")!=std::string::npos||v.find("courier")!=std::string::npos||v.find("consol")!=std::string::npos||v.find("menlo")!=std::string::npos) st.monospace=true; }
@@ -515,6 +519,16 @@ static void handle_padding_shorthand(const std::string &val, Style &st, TextAlig
         left = tok[3];
     }
     float py = 0, pxv = 0, px1 = 0, pct1 = 0, px2 = 0, pct2 = 0;
+    auto side_px = [](const std::string &v) {
+        float px = 0, pct = 0;
+        return (parse_css_len(v, px, pct) && pct == 0.f) ? std::max(px, 0.f) : 0.f;
+    };
+    if (box) {
+        box->pad_t = side_px(top);
+        box->pad_r = side_px(right);
+        box->pad_b = side_px(bottom);
+        box->pad_l = side_px(left);
+    }
     if (parse_css_len(top, px1, pct1) && pct1 == 0.f)
         py = std::max(py, px1);
     if (parse_css_len(bottom, px1, pct1) && pct1 == 0.f)
@@ -539,7 +553,7 @@ static void handle_padding_side(const std::string &valRaw, Style &st, TextAlignm
     (void)colon_unused; // side is encoded in valRaw? We dispatch via PropId so need key. Instead peek key via st trick: caller passes val, not key. So split by PropId at call: we handle generically.
     // This entry is called only for single side; the key distinction is which Pad it sets — we collapse to max based on which handler was chosen.
     // To avoid key re-parse, we use a thread_local last_key stored by dispatcher (set before call).
-    PropId side=t_last_pad_side; float px=0,pct=0; if(!parse_css_len(valRaw,px,pct)||pct!=0.f) return; if(side==P_PADDING_TOP||side==P_PADDING_BOTTOM){ st.padY=std::max(st.padY,px); if(box) box->pad_y=std::max(box->pad_y,px);} else { st.padX=std::max(st.padX,px); if(box) box->pad_x=std::max(box->pad_x,px);} }
+    PropId side=t_last_pad_side; float px=0,pct=0; if(!parse_css_len(valRaw,px,pct)||pct!=0.f) return; if(box){ float v=std::max(px,0.f); if(side==P_PADDING_TOP) box->pad_t=v; else if(side==P_PADDING_BOTTOM) box->pad_b=v; else if(side==P_PADDING_LEFT) box->pad_l=v; else box->pad_r=v; } if(side==P_PADDING_TOP||side==P_PADDING_BOTTOM){ st.padY=std::max(st.padY,px); if(box) box->pad_y=std::max(box->pad_y,px);} else { st.padX=std::max(st.padX,px); if(box) box->pad_x=std::max(box->pad_x,px);} }
 static void handle_width(const std::string &v, Style&, TextAlignment&, bool&, BoxProps *box, const char*, size_t){ if(!box) return; float px=0,pct=0; if(!parse_css_len(v,px,pct)) return; if(pct>0) box->width_pct=pct; else box->width_px=px; }
 static void handle_max_width(const std::string &v, Style&, TextAlignment&, bool&, BoxProps *box, const char*, size_t){ if(!box) return; float px=0,pct=0; if(!parse_css_len(v,px,pct)) return; if(pct<=0) box->max_width_px=px; else if(box->width_pct<=0) box->width_pct=pct; }
 static void handle_height(const std::string &v, Style&, TextAlignment&, bool&, BoxProps *box, const char*, size_t){ if(!box) return; float px=0,pct=0; if(!parse_css_len(v,px,pct)) return; if(pct<=0) box->height_px=px; }
@@ -553,7 +567,9 @@ static void handle_border(const std::string &val, Style &st, TextAlignment&, boo
     size_t rp=0; while(rp<val.size()){ while(rp<val.size()&&std::isspace((unsigned char)val[rp])) ++rp; if(rp>=val.size()) break; size_t sp=val.find_first_of(" \t",rp); std::string tok=val.substr(rp, sp==std::string::npos?std::string::npos:sp-rp); rp=(sp==std::string::npos)?val.size():sp+1; if(tok=="solid"||tok=="dashed"||tok=="dotted"||tok=="double"||tok=="groove"||tok=="ridge") continue; float px=0,pct=0; if(parse_css_len(tok,px,pct)&&pct==0.f){ st.borderWidth=px; continue; } bool ok=false; NVGcolor c=parse_html_color(tok.c_str(),ok); if(ok){ st.borderColor=c; if(st.borderWidth<=0.f && k==P_BORDER_COLOR) st.borderWidth=1; } }
 }
 static void handle_border_radius(const std::string &val, Style&, TextAlignment&, bool&, BoxProps *box, const char*, size_t){ if(!box) return; float px=0,pct=0; size_t sp=val.find_first_of(" \t"); std::string a=(sp==std::string::npos)?val:val.substr(0,sp); if(parse_css_len(a,px,pct)){ if(pct>0) box->radius_px=9999.f; else if(px>0) box->radius_px=px; } }
-static void handle_letter_spacing(const std::string &val, Style &st, TextAlignment&, bool&, BoxProps*, const char*, size_t){ float px=0,pct=0; if(parse_css_len(val,px,pct)&&pct==0.f) st.letterSpacing=std::max(st.letterSpacing,px); }
+/* Cascaded like any property: priceline's title cell resets an inherited
+ * letter-spacing:1px with `normal`, which used to be ignored (max()). */
+static void handle_letter_spacing(const std::string &val, Style &st, TextAlignment&, bool&, BoxProps*, const char*, size_t){ if(val=="normal"){ st.letterSpacing=0.f; return; } float px=0,pct=0; if(parse_css_len(val,px,pct)&&pct==0.f) st.letterSpacing=px; }
 static void handle_text_transform(const std::string &val, Style &st, TextAlignment&, bool&, BoxProps*, const char*, size_t){ if(val.find("uppercase")!=std::string::npos) st.allCaps=true; else if(val.find("none")!=std::string::npos) st.allCaps=false; }
 static void handle_opacity(const std::string &val, Style &st, TextAlignment&, bool&, BoxProps*, const char*, size_t){ char *e=nullptr; float v=strtof(val.c_str(),&e); if(e!=val.c_str()) st.opacity=std::clamp(v,0.f,1.f); }
 static void handle_white_space(const std::string &val, Style &st, TextAlignment&, bool&, BoxProps*, const char*, size_t){ if(val=="nowrap") st.whiteSpace=WhiteSpace::Nowrap; else if(val=="pre"||val=="pre-wrap") st.whiteSpace=WhiteSpace::Pre; else if(val=="normal") st.whiteSpace=WhiteSpace::Normal; }
@@ -665,7 +681,23 @@ struct Flow {
         cur_has_text = true;
     }
 
-    void emit(const std::string &raw, const Style &st) {
+    void emit(const std::string &raw0, const Style &st) {
+        /* Zero-width format characters (ZWSP/ZWNJ/ZWJ/word joiner/BOM,
+         * U+200B-200D, U+2060, U+FEFF) have no glyph in the UI font and
+         * drew as a wide gap: LinkedIn's "1&zwnj;000 West Maude Avenue". */
+        std::string raw;
+        raw.reserve(raw0.size());
+        for (size_t i = 0; i < raw0.size(); ++i) {
+            const unsigned char *p = (const unsigned char *)raw0.data() + i;
+            if (i + 2 < raw0.size() &&
+                ((p[0] == 0xE2 && p[1] == 0x80 && p[2] >= 0x8B && p[2] <= 0x8D) ||
+                 (p[0] == 0xE2 && p[1] == 0x81 && p[2] == 0xA0) ||
+                 (p[0] == 0xEF && p[1] == 0xBB && p[2] == 0xBF))) {
+                i += 2;
+                continue;
+            }
+            raw += raw0[i];
+        }
         std::string t;
         if (pre) {
             t = raw;
@@ -775,6 +807,90 @@ class HtmlBlock;
 
 static std::string ancestor_block_link(const Widget *from);
 
+/* Width `w`'s parent lays its children out in: the parent's width minus
+ * its FlexLayout margin and padding.  0 before the first layout. */
+static int parent_content_width(const Widget *w) {
+    const Widget *p = w->parent();
+    if (!p || p->size().x() <= 0)
+        return 0;
+    int cw = p->size().x();
+    if (auto *fl = dynamic_cast<const FlexLayout *>(p->layout()))
+        cw -= 2 * fl->margin() + fl->padding_x() + fl->padding_right();
+    return std::max(cw, 1);
+}
+
+/* Sibling inline-blocks flow like words: left to right, wrapping at the
+ * width, each line placed per text-align (priceline's footer nav is eight
+ * 270px inline-block tables, two to a line).  FlexLayout can't wrap.  The
+ * gap stands in for the whitespace between the boxes in the source. */
+class InlineFlowLayout : public Layout {
+public:
+    explicit InlineFlowLayout(TextAlignment a) : m_align(a) {}
+
+    Vector2i preferred_size(NVGcontext *ctx, const Widget *w) const override {
+        int avail = w->size().x() > 0 ? w->size().x() : parent_content_width(w);
+        return flow(ctx, const_cast<Widget *>(w), avail, false);
+    }
+    void perform_layout(NVGcontext *ctx, Widget *w) const override {
+        flow(ctx, w, w->size().x(), true);
+    }
+
+private:
+    static constexpr int kGap = 4;
+    TextAlignment m_align;
+
+    Vector2i flow(NVGcontext *ctx, Widget *w, int avail, bool place) const {
+        if (avail <= 0)
+            avail = INT_MAX / 4;
+        std::vector<Widget *> line;
+        std::vector<Vector2i> sizes;
+        int line_w = 0, line_h = 0, y = 0, max_w = 0;
+        auto flush = [&]() {
+            if (line.empty())
+                return;
+            int x = 0;
+            if (avail < INT_MAX / 4) {
+                if (m_align == TextAlignment::Center)
+                    x = std::max(0, (avail - line_w) / 2);
+                else if (m_align == TextAlignment::Right)
+                    x = std::max(0, avail - line_w);
+            }
+            for (size_t i = 0; i < line.size(); ++i) {
+                if (place) {
+                    line[i]->set_position(Vector2i(x, y));
+                    line[i]->set_size(Vector2i(sizes[i].x(), line_h));
+                    line[i]->perform_layout(ctx);
+                }
+                x += sizes[i].x() + kGap;
+            }
+            max_w = std::max(max_w, line_w);
+            y += line_h;
+            line.clear();
+            sizes.clear();
+            line_w = line_h = 0;
+        };
+        for (Widget *c : w->children()) {
+            if (!c->visible())
+                continue;
+            Vector2i p = c->preferred_size(ctx);
+            p.x() = std::max(p.x(), c->min_size().x());
+            if (c->max_size().x() > 0)
+                p.x() = std::min(p.x(), c->max_size().x());
+            p.x() = std::min(p.x(), avail);
+            p.y() = std::max(p.y(), c->min_size().y());
+            const int need = line.empty() ? p.x() : line_w + kGap + p.x();
+            if (!line.empty() && need > avail)
+                flush();
+            line_w = line.empty() ? p.x() : line_w + kGap + p.x();
+            line_h = std::max(line_h, p.y());
+            line.push_back(c);
+            sizes.push_back(p);
+        }
+        flush();
+        return Vector2i(max_w, y);
+    }
+};
+
 /* Press and release can both try to open the same address: the leaf
  * gets the release, then the block under the pointer does too. */
 static bool follow_link(Widget *from, const std::string &url) {
@@ -806,11 +922,18 @@ public:
     int      m_measured_h = 0;
     int      m_measured_w = -1;
     int      m_natural_w  = -1;  // cached max-content width
+    int      m_min_w      = -1;  // cached min-content width (widest word/image)
     mutable std::string m_hover_url;
 
     HtmlText(Widget *parent, Document &&doc, NVGcolor bg)
         : Widget(parent), m_doc(std::move(doc)), m_bg(bg) {
         set_live(true);
+    }
+
+    int min_content_width(NVGcontext *ctx) {
+        if (m_min_w < 0 && ctx)
+            m_min_w = (int)std::ceil(m_doc.measure_min_content_width(ctx));
+        return std::max(m_min_w, 0);
     }
 
     /* Caret lives on one leaf at a time. Image and rule paragraphs are
@@ -863,8 +986,12 @@ public:
         /* Cap at the parent, not at our last laid-out m_size: using
          * m_size ratchets a shrink-wrapped chip (heart+"1") down until
          * the icon and text wrap onto two lines. */
-        int parent_w = (parent() && parent()->size().x() > 10)
-                           ? parent()->size().x() : 0;
+        /* The parent's content box: measuring at the full width of a
+         * padded cell (usaa2's 56px letter margins) counted one line too
+         * few, and the paragraph overflowed into the spacer below it. */
+        int parent_w = parent_content_width(this);
+        if (parent_w <= 10)
+            parent_w = 0;
         int cap = parent_w > 0 ? parent_w : 600;
         HtmlText *self = const_cast<HtmlText *>(this);
         /* Returning 0 for stretched leaves collapsed Amazon's 50/50
@@ -1061,10 +1188,16 @@ public:
     }
 };
 
+static int min_content_width(const Widget *w, NVGcontext *ctx, int depth = 0);
+
 class HtmlBlock : public Widget {
 public:
     NVGcolor m_bg = NVGcolor{ { { 0.f, 0.f, 0.f, 0.f } } };
     float    m_radius = 0.0f;
+    /* CSS border, drawn inside the box (decorate_block insets the
+     * children by the same width). */
+    float    m_border_w = 0.0f;
+    NVGcolor m_border_color = NVGcolor{ { { 0.f, 0.f, 0.f, 0.f } } };
     /* CSS background-image (see BoxProps::bg_image_url).  m_bg_image is
      * an nvg image handle, 0 until resolved; m_bg_image_src lets
      * HtmlDocument::bind_loaded_images() re-resolve it once bytes land. */
@@ -1073,16 +1206,36 @@ public:
     float       m_bg_image_h = 0.0f;
     std::string m_bg_image_src;
     std::string m_link_url; // if this block is inside <a href> (block_anchor)
+    /* <table width="N">: sized like a browser sizes it, max(N, content
+     * min-content) — text wraps to N instead of the table growing to its
+     * unwrapped width — but no wider than the parent unless something
+     * really can't wrap, so a narrow reading pane still fits it.  Shrink-
+     * wrapping to content instead let usaa2's paragraphs push its two
+     * width="550" tables 1600px wide, and left percentage cells unsettled
+     * (aa.html's greeting row flip-flopped on every layout pass). */
+    int         m_soft_min_w = 0;
 
     explicit HtmlBlock(Widget *parent) : Widget(parent) { set_live(true); }
 
     virtual Vector2i preferred_size(NVGcontext *ctx) const override {
         Vector2i p = Widget::preferred_size(ctx);
+        const int avail_w = parent_content_width(this);
         if (m_max_size.x() > 0) {
             /* Block boxes with max-width want to fill that width (CSS
-             * width:100%; max-width:N).  HtmlDocument::preferred_size
-             * still reports 0 so the split can shrink. */
+             * width:100%; max-width:N) — but max-width is a ceiling, never
+             * wider than the space the parent has: under a centering
+             * parent priceline's max-width:650px help pill reported 650
+             * in a 618px column and hung off its right edge.
+             * HtmlDocument::preferred_size still reports 0 so the split
+             * can shrink. */
             p.x() = m_max_size.x();
+            if (avail_w > 0 && m_max_size.x() != m_min_size.x())
+                p.x() = std::min(p.x(), avail_w);
+        }
+        if (m_soft_min_w > 0) {
+            int avail = avail_w > 0 ? avail_w : m_soft_min_w;
+            p.x() = std::max(std::min(m_soft_min_w, avail),
+                             min_content_width(this, ctx));
         }
         return p;
     }
@@ -1183,6 +1336,23 @@ public:
                 nvgStroke(ctx);
             }
         }
+        if (m_border_w > 0.0f && m_border_color.a > 0.0f) {
+            const float bw = m_border_w;
+            float x = (float)m_pos.x() + bw * 0.5f, y = (float)m_pos.y() + bw * 0.5f;
+            float w = (float)m_size.x() - bw, h = (float)m_size.y() - bw;
+            if (w > 0.0f && h > 0.0f) {
+                float rad = std::min(std::max(m_radius - bw * 0.5f, 0.0f),
+                                     std::min(w, h) * 0.5f);
+                nvgBeginPath(ctx);
+                if (rad > 0.5f)
+                    nvgRoundedRect(ctx, x, y, w, h, rad);
+                else
+                    nvgRect(ctx, x, y, w, h);
+                nvgStrokeColor(ctx, m_border_color);
+                nvgStrokeWidth(ctx, bw);
+                nvgStroke(ctx);
+            }
+        }
         if (shifted)
             nvgTranslate(ctx, (float)m_pos.x(), (float)m_pos.y());
         for (Widget *c : children()) {
@@ -1193,6 +1363,36 @@ public:
             nvgRestore(ctx);
     }
 };
+
+/* CSS min-content width of a built subtree — as narrow as it gets with
+ * every line wrapped: a text leaf's widest word or image, a fixed width
+ * as-is, a row's cells side by side, a column's widest child, plus the
+ * box's own padding.  Sizes width="N" tables (HtmlBlock::m_soft_min_w). */
+static int min_content_width(const Widget *w, NVGcontext *ctx, int depth) {
+    if (!w->visible() || depth > 64)
+        return 0;
+    if (auto *ht = dynamic_cast<const HtmlText *>(w))
+        return const_cast<HtmlText *>(ht)->min_content_width(ctx);
+    if (w->min_size().x() > 0 && w->min_size().x() == w->max_size().x())
+        return w->min_size().x();
+    auto *fl = dynamic_cast<const FlexLayout *>(w->layout());
+    const bool row = fl && (fl->direction() == FlexDirection::Row ||
+                            fl->direction() == FlexDirection::RowReverse);
+    int inner = 0, n = 0;
+    for (const Widget *c : w->children()) {
+        if (!c->visible())
+            continue;
+        int cw = min_content_width(c, ctx, depth + 1);
+        inner = row ? inner + cw : std::max(inner, cw);
+        ++n;
+    }
+    if (fl) {
+        if (row && n > 1)
+            inner += fl->gap() * (n - 1);
+        inner += 2 * fl->margin() + fl->padding_x() + fl->padding_right();
+    }
+    return std::max(inner, w->min_size().x());
+}
 
 static std::string ancestor_block_link(const Widget *from) {
     for (const Widget *w = from; w; w = w->parent()) {
@@ -1249,6 +1449,10 @@ struct Builder {
     /* Nested <table> without width=100% shrinks to content (CTA chips).
      * Flattened 1-cell TDs must not stretch a bgcolor across the column. */
     bool          in_full_width = true;
+    /* The current table has an explicit pixel width (width="550" /
+     * width:550px): like a full-width one, its flattened 1-cell rows span
+     * that width, so their bgcolor paints (usaa2's white letter column). */
+    bool          in_sized_table = false;
     /* Column flex-grow weights for the current table, taken from the first
      * multi-cell row (HTML width="N%" or CSS width:N%).  Later rows reuse
      * them so a Benchmark-style grid lines up instead of each <tr> sizing
@@ -1989,13 +2193,16 @@ bool mso_size_hint(GumboNode *node, float &w, float &h) {
 void size_html_image(GumboElement *el, const Builder &B,
                      const HtmlImageInfo &ri, float &pw, float &ph,
                      float hint_w = 0.0f, float hint_h = 0.0f,
-                     bool *display_block = nullptr) {
+                     bool *display_block = nullptr,
+                     float *radius = nullptr) {
     BoxProps box;
     Style dummy;
     TextAlignment a = TextAlignment::Left;
     apply_cascade(el, dummy, a, B, &box);
     if (display_block)
         *display_block = box.display_block;
+    if (radius)
+        *radius = box.radius_px;
 
     const char *wattr = attr(el, "width");
     const char *hattr = attr(el, "height");
@@ -2052,6 +2259,19 @@ void size_html_image(GumboElement *el, const Builder &B,
             aw = 160.0f;
             ah = 100.0f;
         }
+        /* max-width/max-height bound the intrinsic size too: priceline's
+         * width="auto" icons (max-width:24px; max-height:24px) drew at
+         * their full bitmap size. */
+        if (aspect <= 0.0f && aw > 0.0f)
+            aspect = ah / aw;
+        if (maxw > 0.0f && aw > maxw) {
+            ah = aspect > 0.0f ? maxw * aspect : ah;
+            aw = maxw;
+        }
+        if (maxh > 0.0f && ah > maxh) {
+            aw = aspect > 0.0f ? maxh / aspect : aw;
+            ah = maxh;
+        }
     }
     pw = aw;
     ph = ah;
@@ -2102,6 +2322,7 @@ void build_children(Widget *container, GumboVector *kids, Style st,
                     Builder &B, int list_depth, TextAlignment align, int depth=0);
 void walk_inline(GumboNode *node, Style st, Flow &F, Builder &B,
                  int list_depth, int depth=0);
+NVGcolor block_background(GumboElement *el, const Builder &B);
 
 void walk_inline_children(GumboVector *kids, Style st, Flow &F, Builder &B,
                           int list_depth, int depth) {
@@ -2193,11 +2414,27 @@ void walk_inline(GumboNode *node, Style st, Flow &F, Builder &B,
     case GUMBO_TAG_BR:
         F.lineBreak(st);
         return;
-    case GUMBO_TAG_HR:
+    case GUMBO_TAG_HR: {
         F.brk();
-        F.doc.addParagraph()->isRule = true;
+        Paragraph *rp = F.doc.addParagraph();
+        rp->isRule = true;
+        /* An HTML <hr> spans its container, painted in its CSS color
+         * (LinkedIn's footer: height:1px; background-color:#e0dfdd). */
+        rp->ruleWidth = 1.0f;
+        Style hs;
+        TextAlignment ha = TextAlignment::Left;
+        BoxProps hb;
+        apply_cascade(el, hs, ha, B, &hb);
+        NVGcolor bg = block_background(el, B);
+        if (bg.a > 0.0f)
+            rp->ruleColor = bg;
+        else if (hs.borderWidth > 0.0f && hs.borderColor.a > 0.0f)
+            rp->ruleColor = hs.borderColor;
+        if (hb.height_px > 0.0f && hb.height_px <= 8.0f)
+            rp->ruleThickness = hb.height_px;
         F.brk();
         return;
+    }
     case GUMBO_TAG_IMG: {
         const char *src = attr(el, "src");
         const char *alt = attr(el, "alt");
@@ -2223,16 +2460,28 @@ void walk_inline(GumboNode *node, Style st, Flow &F, Builder &B,
 
             float hint_w = 0.0f, hint_h = 0.0f;
             mso_size_hint(node, hint_w, hint_h);
-            float pw = 0.0f, ph = 0.0f;
+            float pw = 0.0f, ph = 0.0f, radius = 0.0f;
             bool display_block = false;
-            size_html_image(el, B, ri, pw, ph, hint_w, hint_h, &display_block);
+            size_html_image(el, B, ri, pw, ph, hint_w, hint_h, &display_block,
+                            &radius);
 
+            /* Icons stay in the text flow, and so do other short images
+             * that aren't display:block: a browser sets LinkedIn's App
+             * Store / Google Play badges (120x40, 134x40) side by side on
+             * one line, not one per line. */
             constexpr float kInlineIconMaxPx = 32.0f;
+            constexpr float kInlineMaxH = 48.0f, kInlineMaxW = 200.0f;
             if (pw > 0.0f && ph > 0.0f &&
-                pw <= kInlineIconMaxPx && ph <= kInlineIconMaxPx) {
-                Text t;
+                ((pw <= kInlineIconMaxPx && ph <= kInlineIconMaxPx) ||
+                 (!display_block && pw <= kInlineMaxW && ph <= kInlineMaxH))) {
+                /* The run carries the surrounding inline style: a line's
+                 * pill background is painted from its first run, and
+                 * priceline's green "✓ Added" pill starts with the
+                 * checkmark image. */
+                Text t(std::string(), st);
                 t.isImageRun = true;
                 t.image = ri.id; t.image_w = pw; t.image_h = ph; t.image_src = s;
+                t.image_radius = radius;
                 /* display:block has no line box, so no gap under the
                  * image: pin the line to exactly the image height (the
                  * USAA stamp's 8x29 / 14x29 lock slices). */
@@ -2250,6 +2499,7 @@ void walk_inline(GumboNode *node, Style st, Flow &F, Builder &B,
             ip->image     = ri.id;
             ip->image_w   = pw;
             ip->image_h   = ph;
+            ip->image_radius = radius;
             ip->image_src = std::move(s);
             if (!st.linkUrl.empty()) ip->linkUrl = st.linkUrl;
             F.brk();
@@ -2534,6 +2784,43 @@ bool cell_is_table_passthrough(GumboElement *td) {
  * cell_is_table_passthrough) isn't a real boundary — keep looking inside
  * it for the grid it forwards to, instead of stopping and reporting "no
  * grid here" for what is really just an Outlook centering wrapper. */
+int cell_px_width(GumboElement *el, const Builder &B);
+
+/* Every cell of every row of this table (not nested ones) has a pixel
+ * width — its width is just their sum, so shrink-wrapping it can't
+ * collapse anything (priceline's 58/20/58px social icon strip). */
+bool table_cells_all_fixed(GumboNode *node, const Builder &B, int depth = 0) {
+    if (node->type != GUMBO_NODE_ELEMENT || depth > 4)
+        return false;
+    GumboElement *el = &node->v.element;
+    bool any = false;
+    for (unsigned i = 0; i < el->children.length; ++i) {
+        GumboNode *cn = (GumboNode *)el->children.data[i];
+        if (cn->type != GUMBO_NODE_ELEMENT)
+            continue;
+        GumboElement *ce = &cn->v.element;
+        if (ce->tag == GUMBO_TAG_TBODY || ce->tag == GUMBO_TAG_THEAD ||
+            ce->tag == GUMBO_TAG_TFOOT) {
+            if (!table_cells_all_fixed(cn, B, depth + 1))
+                return false;
+            any = true;
+        } else if (ce->tag == GUMBO_TAG_TR) {
+            for (unsigned j = 0; j < ce->children.length; ++j) {
+                GumboNode *td = (GumboNode *)ce->children.data[j];
+                if (td->type != GUMBO_NODE_ELEMENT)
+                    continue;
+                GumboTag t = td->v.element.tag;
+                if (t != GUMBO_TAG_TD && t != GUMBO_TAG_TH)
+                    continue;
+                if (cell_px_width(&td->v.element, B) <= 0)
+                    return false;
+                any = true;
+            }
+        }
+    }
+    return any;
+}
+
 bool table_has_multicell_row(GumboNode *node, bool is_root = true, int depth = 0) {
     if (node->type != GUMBO_NODE_ELEMENT || depth > 200)
         return false;
@@ -2581,6 +2868,21 @@ bool element_is_full_width(GumboElement *el, const Builder &B) {
     return box.width_pct >= 99.0f;
 }
 
+/* An inline-block whose content is a width=100% table: the table asks to
+ * fill, so the box is as wide as its container rather than shrink-wrapped
+ * (LinkedIn wraps every post card in <a style="display:inline-block">;
+ * shrink-wrapping let the card's text push it past the 512px column). */
+bool wraps_full_width_table(GumboElement *el, const Builder &B) {
+    for (unsigned i = 0; i < el->children.length; ++i) {
+        GumboNode *cn = (GumboNode *)el->children.data[i];
+        if (cn->type != GUMBO_NODE_ELEMENT)
+            continue;
+        return cn->v.element.tag == GUMBO_TAG_TABLE &&
+               element_is_full_width(&cn->v.element, B);
+    }
+    return false;
+}
+
 void element_box(GumboElement *el, const Builder &B, BoxProps &box) {
     Style dummy;
     TextAlignment a = TextAlignment::Left;
@@ -2607,6 +2909,37 @@ bool cell_is_zero_line_spacer(GumboElement *ce, const Builder &B) {
     BoxProps box;
     element_box(ce, B, box);
     return box.zero_line_height;
+}
+
+/* display:inline-block (inline-table, inline-flex) box with its own
+ * pixel width — flows beside its siblings (see InlineFlowLayout). */
+bool is_sized_inline_block(GumboElement *e, const Builder &B) {
+    if (!is_container_tag(e->tag) || is_skipped_tag(e->tag) ||
+        e->tag == GUMBO_TAG_TD || e->tag == GUMBO_TAG_TH || e->tag == GUMBO_TAG_TR)
+        return false;
+    BoxProps b;
+    element_box(e, B, b);
+    if (!b.inline_flex)
+        return false;
+    if (b.width_px > 0.0f && b.width_pct <= 0.0f)
+        return true;
+    if (b.width_pct > 0.0f)
+        return false;
+    const char *w = attr(e, "width");
+    if (!w)
+        return false;
+    char *end = nullptr;
+    float v = std::strtof(w, &end);
+    std::string unit = end ? trim_lower(end) : std::string();
+    return end != w && v > 1.0f && (unit.empty() || unit == "px");
+}
+
+/* A visible CSS border on the element itself (see decorate_block). */
+bool element_has_border(GumboElement *el, const Builder &B) {
+    Style s;
+    TextAlignment a = TextAlignment::Left;
+    apply_cascade(el, s, a, B);
+    return s.borderWidth > 0.0f && s.borderColor.a > 0.0f;
 }
 
 int element_height_px(GumboElement *el, const BoxProps &box) {
@@ -2768,16 +3101,17 @@ void decorate_block(HtmlBlock *b, GumboElement *el, const Builder &B) {
     float bw = 0; // border width for border-box adjustment
     // Capture borderWidth if present on the box via cascaded Style — we need it for border-box
     // Since element_box already applied borderWidth to Style, peek it here:
-    { Style tmp; TextAlignment a=TextAlignment::Left; apply_cascade(el, tmp, a, B); bw = tmp.borderWidth; }
-    float padX = box.pad_x, padY = box.pad_y;
-    auto apply_len = [&](float v, bool isMin){
-        (void)isMin;
-        if (box.border_box && (padX>0 || padY>0 || bw>0)) {
-            // For fixed width/height, content box = outer - 2*pad - border
-            // Only adjust the fixed outer we set via min==max; otherwise flex handles content.
-        }
-        return v;
-    };
+    NVGcolor border_color = nvgRGBA(0, 0, 0, 0);
+    { Style tmp; TextAlignment a=TextAlignment::Left; apply_cascade(el, tmp, a, B); bw = tmp.borderWidth; border_color = tmp.borderColor; }
+    /* Horizontal / vertical padding+border totals (per side, see
+     * BoxProps::pad_l). */
+    const float padW = box.pad_l + box.pad_r, padH = box.pad_t + box.pad_b;
+    /* The widget's size is its border box (FlexLayout padding sits
+     * inside it).  border-box CSS widths are that size as-is; content-box
+     * ones grow by padding+border.  A <table>'s width is always its border
+     * box in browsers — priceline's width:115px JOIN VIP pill with 5px
+     * padding grew to 127px and slid over the Manage pill. */
+    const bool border_box = box.border_box || el->tag == GUMBO_TAG_TABLE;
     if (box.max_width_px > 80.0f && box.max_width_px < 4000.0f)
         b->set_max_width((int)box.max_width_px);
     if (box.min_width_px > 0.5f)
@@ -2785,9 +3119,8 @@ void decorate_block(HtmlBlock *b, GumboElement *el, const Builder &B) {
     if (box.width_px > 0.0f && box.width_px < 4000.0f &&
         box.width_pct <= 0.0f) {
         float outer = box.width_px;
-        if (box.border_box) outer = std::max(box.min_width_px, outer - 2.f*padX - 2.f*bw);
-        else outer += 2.f*padX + 2.f*bw;
-        (void)apply_len;
+        if (border_box) outer = std::max(outer, padW + 2.f*bw);
+        else outer += padW + 2.f*bw;
         int w = (int)std::lround(std::max(outer, 1.f));
         b->set_min_width(std::max(b->min_size().x(), w));
         if (box.min_width_px <= 0.5f) b->set_max_width(w);
@@ -2802,16 +3135,27 @@ void decorate_block(HtmlBlock *b, GumboElement *el, const Builder &B) {
         b->m_radius = box.radius_px;
     int h = element_height_px(el, box);
     if (h > 1) {
-        if (box.border_box) h = std::max((int)box.min_height_px, h - (int)std::lround(2.f*padY) - (int)std::lround(2.f*bw));
-        else h += (int)std::lround(2.f*padY) + (int)std::lround(2.f*bw);
+        if (border_box) h = std::max(h, (int)std::lround(padH + 2.f*bw));
+        else h += (int)std::lround(padH) + (int)std::lround(2.f*bw);
         b->set_min_height(std::max(b->min_size().y(), h));
+    }
+    /* CSS border on the box itself (the LinkedIn post cards' 1px #e6e6e6
+     * frame, the "View all posts" outline): HtmlBlock paints it, and like
+     * padding it insets the children. */
+    int bwi = 0;
+    if (bw > 0.f && bw < 20.f && border_color.a > 0.f) {
+        b->m_border_w = bw;
+        b->m_border_color = border_color;
+        bwi = std::max(1, (int)std::lround(bw));
     }
     if (auto *fl = dynamic_cast<FlexLayout *>(b->layout())) {
         /* reset_box_style() strips padding from descendant runs; this is
          * where CSS padding actually insets the widget's children. */
-        if (box.pad_x > 0.5f || box.pad_y > 0.5f)
-            fl->set_padding((int)std::lround(box.pad_x),
-                            (int)std::lround(box.pad_y));
+        if (padW > 0.5f || padH > 0.5f || bwi > 0)
+            fl->set_padding((int)std::lround(box.pad_l) + bwi,
+                            (int)std::lround(box.pad_t) + bwi,
+                            (int)std::lround(box.pad_r) + bwi,
+                            (int)std::lround(box.pad_b) + bwi);
         /* Instagram's notification chip is `display:inline-flex;
          * vertical-align:middle; text-align:center` — a painted pill
          * whose heart+"1" must sit in the geometric middle, not at
@@ -2973,8 +3317,23 @@ void build_children(Widget *container, GumboVector *kids, Style st,
         }
 
         bool block_anchor = tag == GUMBO_TAG_A && element_has_block_child(el);
+        /* <a style="display:block; padding:12px 8px"> around plain text is
+         * a padded block box, not inline text: priceline's Change Flight
+         * button is that padding inside a blue rounded table, and walked
+         * inline it collapsed to a 16px stripe. */
+        if (tag == GUMBO_TAG_A && !block_anchor) {
+            BoxProps ab;
+            element_box(el, B, ab);
+            block_anchor = ab.display_block &&
+                           ab.pad_l + ab.pad_r + ab.pad_t + ab.pad_b > 0.5f;
+        }
+        /* Apple Mail wraps a whole forwarded HTML message in
+         * <blockquote type="cite">.  Walked inline, its tables flattened
+         * into one paragraph of text; with block content it is a box. */
+        bool block_quote = tag == GUMBO_TAG_BLOCKQUOTE && element_has_block_child(el);
 
-        if ((!is_container_tag(tag) || is_skipped_tag(tag)) && !block_anchor) {
+        if ((!is_container_tag(tag) || is_skipped_tag(tag)) && !block_anchor &&
+            !block_quote) {
             walk_inline(node, st, F, B, list_depth, depth+1);
             continue;
         }
@@ -3038,6 +3397,43 @@ void build_children(Widget *container, GumboVector *kids, Style st,
             }
         }
 
+        /* Consecutive pixel-width inline-blocks flow side by side and wrap
+         * (see InlineFlowLayout).  Each keeps its own column box so a
+         * table's rows stay together. */
+        if (is_sized_inline_block(el, B)) {
+            std::vector<GumboNode *> items;
+            items.push_back(node);
+            unsigned k = i + 1;
+            while (k < kids->length) {
+                GumboNode *n2 = (GumboNode *)kids->data[k];
+                if (n2->type == GUMBO_NODE_WHITESPACE ||
+                    n2->type == GUMBO_NODE_COMMENT) {
+                    ++k;
+                    continue;
+                }
+                if (n2->type != GUMBO_NODE_ELEMENT ||
+                    !is_sized_inline_block(&n2->v.element, B))
+                    break;
+                items.push_back(n2);
+                ++k;
+            }
+            if (items.size() >= 2) {
+                HtmlBlock *flowbox = make_block(container, FlexDirection::Column, 0);
+                flowbox->set_layout(new InlineFlowLayout(align));
+                for (GumboNode *it : items) {
+                    HtmlBlock *item = make_block(flowbox, FlexDirection::Column, 0);
+                    GumboVector one;
+                    void *slot = it;
+                    one.data = &slot;
+                    one.length = 1;
+                    one.capacity = 1;
+                    build_children(item, &one, st, B, list_depth, align, depth+1);
+                }
+                i = k - 1;
+                continue;
+            }
+        }
+
         // Block-anchor <a> wrapping a div/table: propagate href to the wrapper block
         // so the whole block is clickable (and shows Hand), not just inline text.
         std::string anchor_href;
@@ -3054,10 +3450,12 @@ void build_children(Widget *container, GumboVector *kids, Style st,
         case GUMBO_TAG_THEAD:
         case GUMBO_TAG_TFOOT: {
             bool save_fw = B.in_full_width;
+            bool save_sized = B.in_sized_table;
             std::vector<float> save_cols;
             int save_row_min_w = B.table_row_min_w;
             if (tag == GUMBO_TAG_TABLE) {
                 B.in_full_width = element_is_full_width(el, B);
+                B.in_sized_table = false;
                 save_cols = B.table_col_grow;
                 B.table_col_grow.clear();
             }
@@ -3090,7 +3488,8 @@ void build_children(Widget *container, GumboVector *kids, Style st,
                 bool center_shrink = !cap && box.center &&
                                      (has_explicit_shrink_width(el) ||
                                       !has_any_width_signal) &&
-                                     !table_has_multicell_row(node);
+                                     (!table_has_multicell_row(node) ||
+                                      table_cells_all_fixed(node, B));
                 /* align="center"/"right" on a non-table ancestor
                  * (-webkit-center/-webkit-right) also block-aligns a
                  * shrink-wrapped table as a whole: the classic icon strip
@@ -3100,12 +3499,43 @@ void build_children(Widget *container, GumboVector *kids, Style st,
                  * individually (Center/FlexEnd) since the table builds no
                  * single widget of its own; a CSS width:Npx pins them to
                  * the exact width via B.table_row_min_w. */
+                /* align="left"/"right" on the table itself floats it to
+                 * that side, which overrides an inherited -webkit-center:
+                 * aa.html's greeting row is a <table width="600px"
+                 * align="left"> under <td align="center">.  Centering it
+                 * shrink-wrapped the row to its text, and the 55%/45%
+                 * cells then flip-flopped between two widths on every
+                 * layout pass (the view shook while scrolling). */
+                const char *talign = attr(el, "align");
+                const std::string talign_v = talign ? trim_lower(talign) : std::string();
+                const bool table_floats = talign_v == "left" || talign_v == "right";
                 WebkitAlign wc_table = WebkitAlign::None;
-                if (!cap && !center_shrink && !box.center &&
+                if (!cap && !center_shrink && !box.center && !table_floats &&
                     (has_explicit_shrink_width(el) ||
                      (box.width_px > 0.0f && box.width_pct <= 0.0f)))
                     wc_table = ancestor_webkit_align(node);
-                if (cap || center_shrink || wc_table != WebkitAlign::None) {
+                /* Only a clean pixel width ("600" / "600px") — HubSpot's
+                 * width="100% !important" is a percentage — and only when
+                 * no CSS width overrides the attribute (priceline's
+                 * width="650" style="width:100%" fills its column). */
+                int attr_w = 0;
+                if (box.width_px > 0.0f && box.width_pct <= 0.0f)
+                    attr_w = (int)std::lround(box.width_px);  // CSS px wins
+                const char *wa = (box.width_px <= 0.0f && box.width_pct <= 0.0f)
+                                     ? attr(el, "width") : nullptr;
+                if (wa) {
+                    char *e = nullptr;
+                    float v = std::strtof(wa, &e);
+                    std::string unit = e ? trim_lower(e) : std::string();
+                    if (e != wa && css_finite(v) && v > 1.0f &&
+                        (unit.empty() || unit == "px") && trim_lower(wa) != "100")
+                        attr_w = (int)std::lround(v);
+                }
+                B.in_sized_table = attr_w > 0 ||
+                                   (box.width_px > 0.0f && box.width_pct <= 0.0f);
+                const bool centered_whole = cap || center_shrink ||
+                                            wc_table != WebkitAlign::None;
+                if (centered_whole) {
                     /* `outer` centers the TABLE AS A WHOLE within its own
                      * parent (the shrink-wrap/margin:auto semantic) — its
                      * own ROWS must stay flush against each other
@@ -3114,10 +3544,23 @@ void build_children(Widget *container, GumboVector *kids, Style st,
                      * multi-row table (e.g. a paragraph row next to a
                      * narrower single-cell button row) into staggered
                      * left edges instead of one shared left margin. */
+                    /* A max-width table keeps its own width (its inner box
+                     * below), so it is placed as a whole: margin:auto or an
+                     * inherited align centers it, like priceline's
+                     * max-width:286px "Add Protection" button in a
+                     * <td align="center">. */
+                    WebkitAlign place_tbl = wc_table;
+                    if (cap && place_tbl == WebkitAlign::None)
+                        place_tbl = box.center ? WebkitAlign::Center
+                                               : ancestor_webkit_align(node);
+                    /* align="center" / margin:auto with no width: shrink to
+                     * content and center (its rows go in the inner box). */
+                    if (center_shrink)
+                        place_tbl = WebkitAlign::Center;
                     HtmlBlock *outer = make_block(container, FlexDirection::Column,
-                                                  0, wc_table == WebkitAlign::Center
+                                                  0, place_tbl == WebkitAlign::Center
                                                          ? AlignItems::Center
-                                                     : wc_table == WebkitAlign::Right
+                                                     : place_tbl == WebkitAlign::Right
                                                          ? AlignItems::FlexEnd
                                                          : AlignItems::Stretch);
                     target = outer;
@@ -3130,15 +3573,32 @@ void build_children(Widget *container, GumboVector *kids, Style st,
                     else
                         B.table_row_min_w = 0;
                 }
-                if (bg.a > 0.0f || cap || box.radius_px > 0.0f) {
+                /* A centered width="N" table gets its own box too, so the
+                 * width attribute can floor the table as a whole (see
+                 * HtmlBlock::m_soft_min_w). */
+                if (bg.a > 0.0f || cap || box.radius_px > 0.0f ||
+                    box.pad_l + box.pad_r + box.pad_t + box.pad_b > 0.5f ||
+                    (centered_whole && attr_w > 0) || center_shrink) {
                     HtmlBlock *inner = make_block(target, FlexDirection::Column, 0);
                     inner->m_bg = bg;
                     decorate_block(inner, el, B);
+                    inner->m_soft_min_w = attr_w;
                     target = inner;
                 }
             }
-            build_children(target, &el->children, st, B, list_depth, align, depth+1);
+            /* The table's own inheritable CSS (LinkedIn's footer
+             * <table style="font-size:12px">) reaches its cells.  Its
+             * alignment does not: align= on a <table> places the table. */
+            Style tst = st;
+            if (tag == GUMBO_TAG_TABLE) {
+                TextAlignment ignored = align;
+                apply_cascade(el, tst, ignored, B);
+                tst.superscript = st.superscript;
+                reset_box_style(tst);
+            }
+            build_children(target, &el->children, tst, B, list_depth, align, depth+1);
             B.in_full_width = save_fw;
+            B.in_sized_table = save_sized;
             B.table_row_min_w = save_row_min_w;
             if (tag == GUMBO_TAG_TABLE)
                 B.table_col_grow = std::move(save_cols);
@@ -3159,7 +3619,8 @@ void build_children(Widget *container, GumboVector *kids, Style st,
                     BoxProps box;
                     element_box(ce, B, box);
                     int h = element_height_px(ce, box);
-                    bool paint = B.in_full_width || element_is_full_width(ce, B);
+                    bool paint = B.in_full_width || B.in_sized_table ||
+                                 element_is_full_width(ce, B);
                     /* Shrink-wrapped chip tables (Learn More): the TD's
                      * text-align:center is for a content-sized table, not
                      * a stretched HtmlText across the 67% column. */
@@ -3172,10 +3633,14 @@ void build_children(Widget *container, GumboVector *kids, Style st,
                         cell = wrap_if_bg(target, ce, 2, B);
                     /* Stacked cells have no row height to place within,
                      * but cellpadding still insets them (the USAA stamp's
-                     * one-cell text table). */
+                     * one-cell text table), and so do the cell's own CSS
+                     * padding and border (every LinkedIn card and spacer
+                     * is a one-cell table with padding:16px/24px). */
                     const bool cpad = table_cellpadding(node) > 0;
+                    const bool boxed = box.pad_l + box.pad_r + box.pad_t +
+                                       box.pad_b > 0.5f || element_has_border(ce, B);
                     if (cell == target && (h > 1 || box.radius_px > 0.0f ||
-                                           box.max_width_px > 80.0f || cpad)) {
+                                           box.max_width_px > 80.0f || cpad || boxed)) {
                         HtmlBlock *sp = make_block(target, FlexDirection::Column, 0);
                         sp->m_bg = block_background(ce, B);
                         decorate_block(sp, ce, B);
@@ -3245,6 +3710,9 @@ void build_children(Widget *container, GumboVector *kids, Style st,
                 ? std::max(100.0f - explicit_sum, 5.0f) / (float)auto_cells
                 : 1.0f;
             std::vector<float> row_grows;
+            struct ContentCell { HtmlBlock *cell; int px; size_t idx; };
+            std::vector<ContentCell> content_cells;
+            bool any_grow = false, any_explicit = false;
             int col_i = 0;
             for (unsigned j = 0; j < el->children.length; ++j) {
                 GumboNode *cn = (GumboNode *)el->children.data[j];
@@ -3294,15 +3762,32 @@ void build_children(Widget *container, GumboVector *kids, Style st,
                      * 15px around a 32px <img>) otherwise pinned the cell
                      * to 32px and squeezed the icon into the 2px
                      * remainder. */
+                    BoxProps cbox;
+                    element_box(ce, B, cbox);
+                    const int cpad = (int)std::lround(cbox.pad_l + cbox.pad_r);
+                    int min_px = px;
                     if (content_sized) {
-                        BoxProps cbox;
-                        element_box(ce, B, cbox);
-                        px += (int)std::lround(2.0f * cbox.pad_x);
+                        px += cpad;
+                        min_px = px;
+                        content_cells.push_back({cell, px, row_grows.size()});
+                    } else {
+                        any_explicit = true;
+                        /* A cell's width is its content box, like any
+                         * content-box CSS width: priceline's icon cell
+                         * (width:24px; padding:0 10px) is 44px wide, not a
+                         * 4px slot that squeezed the icon.  Rows whose
+                         * explicit widths already fill the table can
+                         * shrink the padding back out. */
+                        if (!cbox.border_box && cpad > 0) {
+                            px += cpad;
+                            shrink = 1.0f;
+                        }
                     }
                     grow = 0.0f;
-                    shrink = 0.0f;
+                    if (min_px == px)
+                        shrink = 0.0f;
                     basis = px;
-                    cell->set_min_width(px);
+                    cell->set_min_width(min_px);
                     cell->set_max_width(px);
                 } else if (px == 0 || cell_is_empty(ce)) {
                     grow = 0.0f;
@@ -3321,10 +3806,28 @@ void build_children(Widget *container, GumboVector *kids, Style st,
                     if (B.in_full_width)
                         basis = 0;
                 }
+                if (grow > 0.0f)
+                    any_grow = true;
                 row_grows.push_back(grow);
                 col_i++;
                 if (auto *fl = dynamic_cast<FlexLayout *>(row->layout()))
                     fl->set_flex_item(cell, FlexLayout::FlexItem(grow, shrink, basis));
+            }
+            /* A full-width table hands leftover width to its auto-width
+             * columns: usaa2's header puts a logo cell with no width
+             * beside a width="180" security-zone cell, and a browser
+             * pushes the zone to the far right.  When nothing else grows,
+             * let the content-sized cells absorb the slack instead of the
+             * fixed cell hugging them.  (All-content-sized rows, the photo
+             * grid case, stay snug.) */
+            if (B.in_full_width && !any_grow && any_explicit) {
+                if (auto *fl = dynamic_cast<FlexLayout *>(row->layout())) {
+                    for (const ContentCell &cc : content_cells) {
+                        cc.cell->set_max_width(0);
+                        fl->set_flex_item(cc.cell, FlexLayout::FlexItem(1.0f, 0.0f, cc.px));
+                        row_grows[cc.idx] = 1.0f;
+                    }
+                }
             }
             if (B.table_col_grow.empty() && row_grows.size() >= 2)
                 B.table_col_grow = std::move(row_grows);
@@ -3404,6 +3907,26 @@ void build_children(Widget *container, GumboVector *kids, Style st,
             build_children(target, &el->children, cst, B, list_depth, TextAlignment::Center, depth+1);
             break;
         }
+        case GUMBO_TAG_BLOCKQUOTE: {
+            /* Only block content gets here (see block_quote above).  The
+             * browser default margin is 1em 40px; CSS padding replaces it. */
+            HtmlBlock *q = make_block(container, FlexDirection::Column, 0);
+            q->m_bg = block_background(el, B);
+            decorate_block(q, el, B);
+            if (auto *fl = dynamic_cast<FlexLayout *>(q->layout())) {
+                if (fl->padding_x() == 0 && fl->padding_right() == 0) {
+                    int em2 = (int)std::lround(st.fontSize * 0.5f);
+                    fl->set_padding(40, em2, 40, em2);
+                }
+            }
+            Style cst = st;
+            TextAlignment ta = align;
+            apply_cascade(el, cst, ta, B);
+            cst.superscript = st.superscript;
+            reset_box_style(cst);
+            build_children(q, &el->children, cst, B, list_depth, ta, depth+1);
+            break;
+        }
         case GUMBO_TAG_HTML:
         case GUMBO_TAG_BODY: {
             NVGcolor bg = block_background(el, B);
@@ -3457,7 +3980,8 @@ void build_children(Widget *container, GumboVector *kids, Style st,
                  * (an MJML column uses display:inline-block purely to
                  * sit side-by-side, not to shrink) — width wins. */
                 bool cap_triggered = cap > 0 && box.center;
-                bool shrink = (box.inline_flex && box.width_pct < 99.0f) ||
+                bool shrink = (box.inline_flex && box.width_pct < 99.0f &&
+                               !wraps_full_width_table(el, B)) ||
                               (box.center && box.width_px > 0.0f &&
                                box.width_pct < 99.0f);
                 /* align="center"/"right" on a non-table ancestor
@@ -3487,12 +4011,26 @@ void build_children(Widget *container, GumboVector *kids, Style st,
                      * not stretch to fill whatever width an ancestor
                      * hands `outer` (this turned the Instagram
                      * notification pill into a full-width red bar). */
+                    /* A shrink-wrapped inline-block/inline-flex box is
+                     * inline-level: like text, it sits where the parent's
+                     * text-align puts it (LinkedIn's "View all posts"
+                     * button in a <td align="left">), not always centered. */
+                    AlignItems place = AlignItems::Center;
+                    if (shrink && box.inline_flex && !box.center &&
+                        wc_align == WebkitAlign::None)
+                        place = align == TextAlignment::Right ? AlignItems::FlexEnd
+                              : align == TextAlignment::Center ? AlignItems::Center
+                                                               : AlignItems::FlexStart;
+                    /* cap_triggered: a max-width + margin:auto column.  Its
+                     * block keeps the max width (HtmlBlock::preferred_size)
+                     * and its own children stretch inside it, so centering
+                     * the block as a whole no longer collapses rows. */
                     HtmlBlock *outer = make_block(container, FlexDirection::Column,
                                                   0, cap_triggered
-                                                         ? AlignItems::Stretch
+                                                         ? AlignItems::Center
                                                      : wc_align == WebkitAlign::Right
                                                          ? AlignItems::FlexEnd
-                                                         : AlignItems::Center);
+                                                         : place);
                     host = outer;
                 }
                 HtmlBlock *blk = make_block(host, FlexDirection::Column, 0);
@@ -4215,6 +4753,7 @@ void HtmlText::after_edit() {
     m_doc.markLayoutDirty();
     m_measured_w = -1;
     m_natural_w = -1;
+    m_min_w = -1;
     scroll_caret();
     if (HtmlDocument *hd = owner()) {
         hd->note_edit();
@@ -4411,6 +4950,7 @@ void HtmlText::mark_dirty_leaf() {
     m_doc.markLayoutDirty();
     m_measured_w = -1;
     m_natural_w = -1;
+    m_min_w = -1;
     m_have_caret = false;
     m_typing_on = false;
 }
@@ -4572,6 +5112,10 @@ int HtmlDocument::bind_loaded_images() {
                          * bitmap. */
                         if (p->image_w > 0.0f && ri.w > 0.0f && ri.h > 0.0f)
                             p->image_h = p->image_w * (ri.h / ri.w);
+                        else if (p->image_h > 0.0f && ri.w > 0.0f && ri.h > 0.0f)
+                            /* height="24" width="auto" (priceline's social
+                             * icons): keep the height, derive the width. */
+                            p->image_w = p->image_h * (ri.w / ri.h);
                         else if (ri.w > 0.0f && ri.h > 0.0f) {
                             p->image_w = ri.w;
                             p->image_h = ri.h;
@@ -4595,6 +5139,7 @@ int HtmlDocument::bind_loaded_images() {
                 ht->m_doc.markLayoutDirty();
                 ht->m_measured_w = -1;
                 ht->m_natural_w  = -1;
+                ht->m_min_w  = -1;
             }
         } else if (auto *hb = dynamic_cast<HtmlBlock *>(w)) {
             if (hb->m_bg_image <= 0 && !hb->m_bg_image_src.empty()) {
@@ -5238,6 +5783,7 @@ void HtmlDocument::restyle_selection(bool Style::*flag) {
         ht->m_doc.markLayoutDirty();
         ht->m_measured_w = -1;
         ht->m_natural_w = -1;
+        ht->m_min_w = -1;
     }
     note_edit();
     request_reflow();

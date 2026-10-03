@@ -81,6 +81,7 @@ public:
     int         image      = 0;
     float       image_w    = 0.0f;
     float       image_h    = 0.0f;
+    float       image_radius = 0.0f; ///< corner radius (CSS border-radius; >= h/2 is a circle)
     std::string image_src;  ///< original <img src>, for async texture rebind
 
     Text() = default;
@@ -102,6 +103,7 @@ public:
     bool              isRule          = false;
     NVGcolor          ruleColor       = NVGcolor{ { { 0.65f, 0.65f, 0.70f, 1.f } } };
     float             ruleThickness   = 1.0f;
+    float             ruleWidth       = 0.5f;  // fraction of the content width (HTML <hr>: 1)
     // Bullet list item ("- " in markdown): draws a marker before the first
     // line; text is expected to be indented via leftIndent.
     bool              isBullet        = false;
@@ -120,6 +122,7 @@ public:
     int               image           = 0;
     float             image_w         = 0.0f;
     float             image_h         = 0.0f;
+    float             image_radius    = 0.0f;  // corner radius, as Text::image_radius
     /* Original <img src>, used to bind a texture after an async fetch. */
     std::string       image_src;
     std::string       linkUrl;  ///< href if this image block is inside <a>
@@ -196,6 +199,11 @@ public:
     /// from preferred_size() without disturbing a real draw()'s cache.
     float      measure_natural_width(NVGcontext* ctx);
 
+    /// Widest thing that can't wrap (CSS "min-content" width): the widest
+    /// word, inline image or image paragraph, or a whole line of a
+    /// nowrap/pre run.  Pure measurement, like measure_natural_width().
+    float      measure_min_content_width(NVGcontext* ctx);
+
     // -------------------------------------------------------------------
     // Lower-level helpers exposed so editor widgets can do their own
     // line-by-line layout (e.g. monospace code mode with no wrap).
@@ -256,6 +264,7 @@ public:
         Style  style;        ///< style snapshot for cheap re-draw without re-layout
         std::string text;    ///< word / glyph cluster text
         int    image = 0;    ///< NVG image id for "\x01IMAGE" sentinel words
+        float  image_radius = 0.f; ///< corner radius of that image
         std::string linkUrl; ///< href for link words (empty if not a link)
     };
 

@@ -41,6 +41,7 @@
 #include <iterator>
 #include <memory>
 #include <string>
+#include <chrono>
 #include <thread>
 #include <deque>
 #include <unordered_map>
@@ -561,6 +562,30 @@ public:
         nvgRestore(ctx);
         Screen::draw(ctx);
         maybe_save_pending();
+        /* maybe_save_pending() only runs from draw(), and mainloop(-1)
+         * draws nothing until an event arrives: a save still waiting out
+         * the image grace period or timeout sat idle until the mouse
+         * crossed the window.  Ask for another frame shortly instead. */
+        if ((!m_screenshot_path.empty() && !m_screenshot_done) ||
+            !m_pending_save_path.empty())
+            arm_save_wakeup();
+    }
+
+    void arm_save_wakeup() {
+        if (m_save_wakeup_armed)
+            return;
+        m_save_wakeup_armed = true;
+        auto alive = m_alive;
+        std::thread([this, alive]() {
+            std::this_thread::sleep_for(std::chrono::milliseconds(100));
+            nanogui::async([this, alive]() {
+                if (!alive || !*alive)
+                    return;
+                m_save_wakeup_armed = false;
+                redraw();
+            });
+            glfwPostEmptyEvent();
+        }).detach();
     }
 
     bool has_pending_images() const {
@@ -580,6 +605,17 @@ public:
             for (int k=0;k<2;++k) { perform_layout(); draw_all(); }
         } else {
             draw_all();
+        }
+        /* --scroll Y: the window can't grow past the screen, so a long
+         * letter is captured in slices — scroll Y px down after the final
+         * layout above (which would otherwise reset the view). */
+        if (m_shot_scroll_y > 0 && m_view && m_scroll) {
+            int range = m_view->size().y() - m_scroll->size().y();
+            if (range > 0) {
+                m_scroll->set_scroll(Vector2f(
+                    0.f, std::min(1.f, (float)m_shot_scroll_y / (float)range)));
+                draw_all();
+            }
         }
         int W = size().x(), H = size().y();
         std::vector<unsigned char> buf((size_t)W * (size_t)H * 4);
@@ -612,6 +648,8 @@ public:
         }
         save_png(p);
     }
+
+    void set_screenshot_scroll(int y) { m_shot_scroll_y = y; }
 
     void set_screenshot_path(const std::string &p) {
         m_screenshot_path = p;
@@ -913,6 +951,8 @@ private:
     double        m_screenshot_deadline = 0;
     double        m_screenshot_grace = -1;
     bool          m_screenshot_done = false;
+    bool          m_save_wakeup_armed = false;
+    int           m_shot_scroll_y = 0;
 
     std::shared_ptr<bool> m_alive = std::make_shared<bool>(true);
     std::unordered_map<std::string, int>         m_img_tex;
@@ -925,17 +965,20 @@ private:
 };
 
 int main(int argc, char **argv) {
-    // nmail_view [html] [--dump] [--gold path] [--screenshot out.png]
+    // nmail_view [html] [--dump] [--gold path] [--screenshot out.png [--scroll Y]]
     // --screenshot opens, waits for remote images (or 30s), saves PNG, exits.
+    // --scroll Y captures Y px further down a long message.
     // --dump legacy raw dump retained; --screenshot is the new image path API.
     bool dump = false; std::string gold;
     std::string screenshot;
+    int shot_scroll = 0;
     std::string path;
     for (int i=1;i<argc;++i) {
         std::string a=argv[i];
         if (a=="--dump") dump=true;
         else if (a=="--screenshot" && i+1<argc) screenshot=argv[++i];
         else if (a=="--gold" && i+1<argc) gold=argv[++i];
+        else if (a=="--scroll" && i+1<argc) shot_scroll=std::max(0, atoi(argv[++i]));
         else if (!a.empty() && a[0]!='-') path=a;
     }
     if (!screenshot.empty()) {
@@ -953,6 +996,7 @@ int main(int argc, char **argv) {
             app->set_visible(true);
             for(int k=0;k<4;++k){ app->perform_layout(); app->draw_all(); }
             if (!gold.empty() && gold.find("dark")!=std::string::npos) app->apply_theme(ThemeMode::Dark);
+            app->set_screenshot_scroll(shot_scroll);
             app->set_screenshot_path(screenshot);
             app->draw_all();
             nanogui::mainloop(-1);

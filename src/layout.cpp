@@ -1176,7 +1176,7 @@ FlexLayout::FlexLayout(FlexDirection direction, JustifyContent justify_content,
 }
 
 Vector2i FlexLayout::preferred_size(NVGcontext *ctx, const Widget *widget) const {
-    Vector2i size(2 * total_pad_x(), 2 * total_pad_y());
+    Vector2i size(pad_start(0) + pad_end(0), pad_start(1) + pad_end(1));
 
     int y_offset = 0;
     const Window *window = dynamic_cast<const Window*>(widget);
@@ -1277,11 +1277,12 @@ void FlexLayout::perform_layout(NVGcontext *ctx, Widget *widget) const {
 
     int main_axis_idx = main_axis();
     int cross_axis_idx = cross_axis();
-    const int inset_main = pad_main();
-    const int inset_cross = pad_cross();
+    const int inset_main = pad_start(main_axis_idx);
+    const int inset_cross = pad_start(cross_axis_idx);
+    const int inset_cross_end = pad_end(cross_axis_idx);
 
-    int available_main_space = container_size[main_axis_idx] - 2 * inset_main;
-    int available_cross_space = container_size[cross_axis_idx] - 2 * inset_cross;
+    int available_main_space = container_size[main_axis_idx] - inset_main - pad_end(main_axis_idx);
+    int available_cross_space = container_size[cross_axis_idx] - inset_cross - inset_cross_end;
 
     std::vector<int> base_sizes;
     std::vector<int> final_sizes;
@@ -1477,7 +1478,7 @@ void FlexLayout::perform_layout(NVGcontext *ctx, Widget *widget) const {
                 child_size[cross_axis_idx] = cross_size;
                 break;
             case AlignItems::FlexEnd:
-                child_pos[cross_axis_idx] = container_size[cross_axis_idx] - cross_size - inset_cross;
+                child_pos[cross_axis_idx] = container_size[cross_axis_idx] - cross_size - inset_cross_end;
                 child_size[cross_axis_idx] = cross_size;
                 break;
             case AlignItems::Center:

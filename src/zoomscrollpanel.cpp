@@ -530,7 +530,14 @@ void ZoomScrollPanel::draw(NVGcontext* ctx) {
             if (std::abs(m_vel_x) < 0.5) m_vel_x = 0.0;
             moving = true;
         }
-        if (moving) { m_update_layout = true; screen()->redraw(); }
+        /* Panning moves the view, not the content: like set_scroll(),
+         * only reflow-on-zoom mode re-lays the child out.  Relaying out an
+         * email on every coasting frame made any layout that doesn't
+         * settle in one pass visibly shake while scrolling. */
+        if (moving) {
+            if (m_reflow_on_zoom) m_update_layout = true;
+            screen()->redraw();
+        }
     }
 
     if (m_update_layout) {

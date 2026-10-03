@@ -165,6 +165,10 @@ const char* Document::faceForStyle(const Style& s) {
 void Document::applyFont(NVGcontext* ctx, const Style& s) const {
     nvgFontSize(ctx, s.fontSize);
     nvgFontFace(ctx, faceForStyle(s));
+    /* Glyph spacing is part of the font state, so measured advances and
+     * drawn glyphs agree.  Padding only the word advance drew CSS
+     * letter-spacing as extra space *between* words instead. */
+    nvgTextLetterSpacing(ctx, s.letterSpacing);
 }
 
 Document::VMetrics Document::metricsFor(NVGcontext* ctx, const Style& s) {
@@ -179,17 +183,20 @@ Document::VMetrics Document::metricsFor(NVGcontext* ctx, const Style& s) {
 }
 
 float Document::spaceWidthFor(NVGcontext* ctx, const Style& s) {
+    /* Cached per face/size without letter-spacing, which is added on top
+     * (CSS spaces the space glyph like any other). */
     uint64_t k = makeKey(faceForStyle(s), s.fontSize);
     auto it = m_spaceCache.find(k);
-    if (it != m_spaceCache.end()) return it->second;
+    if (it != m_spaceCache.end()) return it->second + s.letterSpacing;
     applyFont(ctx, s);
+    nvgTextLetterSpacing(ctx, 0.0f);
     float b[4];
     float w1 = nvgTextBounds(ctx, 0, 0, "x",   nullptr, b);
     float w2 = nvgTextBounds(ctx, 0, 0, "x x", nullptr, b);
     float sp = w2 - 2.0f * w1;
     if (sp <= 0.0f) sp = s.fontSize * 0.25f;
     m_spaceCache.emplace(k, sp);
-    return sp;
+    return sp + s.letterSpacing;
 }
 
 void Document::measureWord(NVGcontext* ctx, const Style& s,
@@ -285,30 +292,74 @@ float Document::measure_natural_width(NVGcontext* ctx) {
         }
         maxw = std::max(maxw, lineW);
     }
+    nvgTextLetterSpacing(ctx, 0.0f);  // don't leak into other widgets' text
     return maxw;
+}
+
+float Document::measure_min_content_width(NVGcontext* ctx) {
+    float minw = 0.0f;
+    for (const auto& para : paragraphs) {
+        if (para->isImage) {
+            minw = std::max(minw, para->image_w);
+            continue;
+        }
+        const float indent = para->leftIndent + std::max(para->firstLineIndent, 0.0f);
+        for (const Text& run : para->runs) {
+            if (run.isImageRun) {
+                minw = std::max(minw, indent + run.image_w);
+                continue;
+            }
+            const bool nowrap = run.style.whiteSpace == WhiteSpace::Nowrap ||
+                                run.style.whiteSpace == WhiteSpace::Pre;
+            forEachLine(run.content, [&](std::string_view piece) {
+                if (nowrap) {
+                    float adv, lb, vr;
+                    measureWord(ctx, run.style, piece.data(),
+                                piece.data() + piece.size(), adv, lb, vr);
+                    minw = std::max(minw, indent + adv);
+                    return;
+                }
+                forEachWord(piece, [&](std::string_view word) {
+                    float adv, lb, vr;
+                    measureWord(ctx, run.style, word.data(),
+                                word.data() + word.size(), adv, lb, vr);
+                    minw = std::max(minw, indent + adv);
+                });
+            });
+        }
+    }
+    nvgTextLetterSpacing(ctx, 0.0f);  // don't leak into other widgets' text
+    return minw;
 }
 
 /* Draw an NVG image into a rect (used by image block paragraphs).
  * id <= 0 is a loading placeholder so layout can reserve space before
- * the texture arrives. */
+ * the texture arrives.  radius rounds the corners (CSS border-radius on
+ * the <img>); half the short side or more makes a circular avatar. */
 static void draw_image_block(NVGcontext* ctx, int image,
-                             float x, float y, float w, float h) {
+                             float x, float y, float w, float h,
+                             float radius = 0.0f) {
     if (w <= 0.0f || h <= 0.0f) return;
-    if (image <= 0) {
+    const float rad = std::min(radius, std::min(w, h) * 0.5f);
+    auto shape = [&](float sx, float sy, float sw, float sh, float sr) {
         nvgBeginPath(ctx);
-        nvgRect(ctx, x, y, w, h);
+        if (sr > 0.5f)
+            nvgRoundedRect(ctx, sx, sy, sw, sh, sr);
+        else
+            nvgRect(ctx, sx, sy, sw, sh);
+    };
+    if (image <= 0) {
+        shape(x, y, w, h, rad);
         nvgFillColor(ctx, nvgRGBA(128, 128, 136, 40));
         nvgFill(ctx);
-        nvgBeginPath(ctx);
-        nvgRect(ctx, x + 0.5f, y + 0.5f, w - 1.0f, h - 1.0f);
+        shape(x + 0.5f, y + 0.5f, w - 1.0f, h - 1.0f, std::max(rad - 0.5f, 0.0f));
         nvgStrokeColor(ctx, nvgRGBA(128, 128, 136, 90));
         nvgStrokeWidth(ctx, 1.0f);
         nvgStroke(ctx);
         return;
     }
     NVGpaint p = nvgImagePattern(ctx, x, y, w, h, 0.0f, image, 1.0f);
-    nvgBeginPath(ctx);
-    nvgRect(ctx, x, y, w, h);
+    shape(x, y, w, h, rad);
     nvgFillPaint(ctx, p);
     nvgFill(ctx);
 }
@@ -393,13 +444,15 @@ void Document::draw(NVGcontext* ctx, float originX, float originY) {
                 iw.advance    = dw;                 // draw width
                 iw.style.fontSize = dh;             // draw height (piggy-back)
                 iw.image      = para->image;
+                iw.image_radius = para->image_radius;
                 iw.text       = "\x01IMAGE";
                 iw.linkUrl    = para->linkUrl;
                 img_line.words.push_back(std::move(iw));
                 m_rich_layout.push_back(std::move(img_line));
 
                 if (!layout_only)
-                    draw_image_block(ctx, para->image, ix, iy, dw, dh);
+                    draw_image_block(ctx, para->image, ix, iy, dw, dh,
+                                     para->image_radius);
                 y = iy + dh + pad;
             } else if (para->isRule) {
                 float pad = paragraphSpacing * 0.5f;
@@ -418,7 +471,7 @@ void Document::draw(NVGcontext* ctx, float originX, float originY) {
                 rw.byte_start = 0;
                 rw.byte_end   = 0;
                 rw.x          = originX;
-                rw.advance    = contentWidth * 0.5f;
+                rw.advance    = contentWidth * para->ruleWidth;
                 rw.style.fgColor = para->ruleColor;
                 rw.style.fontSize = para->ruleThickness; // thickness piggy-back
                 rw.text       = "\x01RULE"; // sentinel
@@ -428,7 +481,7 @@ void Document::draw(NVGcontext* ctx, float originX, float originY) {
                 if (!layout_only) {
                     nvgBeginPath(ctx);
                     nvgMoveTo(ctx, originX, ry);
-                    nvgLineTo(ctx, originX + contentWidth * 0.5f, ry);
+                    nvgLineTo(ctx, originX + contentWidth * para->ruleWidth, ry);
                     nvgStrokeColor(ctx, para->ruleColor);
                     nvgStrokeWidth(ctx, para->ruleThickness);
                     nvgStroke(ctx);
@@ -457,6 +510,7 @@ void Document::draw(NVGcontext* ctx, float originX, float originY) {
         m_laid_origin_x = originX;
         m_laid_origin_y = originY;
         m_layout_dirty = false;
+        nvgTextLetterSpacing(ctx, 0.0f);  // don't leak into other widgets' text
         return;
     }
 
@@ -475,7 +529,7 @@ void Document::draw(NVGcontext* ctx, float originX, float originY) {
         if (rl.block_image && !rl.words.empty()) {
             const WordLayout& iw = rl.words[0];
             draw_image_block(ctx, iw.image, iw.x, rl.baseline,
-                             iw.advance, iw.style.fontSize);
+                             iw.advance, iw.style.fontSize, iw.image_radius);
             continue;
         }
         if (rl.words.size() == 1 && rl.words[0].text == "\x01RULE") {
@@ -540,7 +594,7 @@ void Document::draw(NVGcontext* ctx, float originX, float originY) {
                     imgY = textMid - ih * 0.5f;
                 }
                 draw_image_block(ctx, wl.image, wl.x, imgY,
-                                 wl.advance, ih);
+                                 wl.advance, ih, wl.image_radius);
                 continue;
             }
             const Style& st = wl.style;
@@ -594,6 +648,7 @@ void Document::draw(NVGcontext* ctx, float originX, float originY) {
         }
     }
     last_drawn_height = m_laid_height;
+    nvgTextLetterSpacing(ctx, 0.0f);  // don't leak into other widgets' text
 }
 
 // ---------------------------------------------------------------------------
@@ -706,11 +761,7 @@ float Document::drawParagraph(NVGcontext* ctx, const Paragraph& para,
         const float indent = lineIndent();
         const float avail  = contentWidth - indent;
 
-        float lsExtra = 0.f;
-        if (run.style.letterSpacing != 0.f && !run.isImageRun && text.size()>1) {
-            lsExtra = run.style.letterSpacing * (float)(text.size() - 1);
-        }
-        float effAdv = advance + lsExtra;
+        const float effAdv = advance;  // includes letter-spacing (applyFont)
         bool noWrap = (run.style.whiteSpace == WhiteSpace::Nowrap);
         const float needed = current.words.empty()
                              ? effAdv
@@ -864,7 +915,9 @@ float Document::drawParagraph(NVGcontext* ctx, const Paragraph& para,
                 lineX = originX + (contentWidth - line.advanceWidth) * 0.5f;
                 break;
             case TextAlignment::Right:
-                lineX = rightEdge - line.advanceWidth;
+                /* Keep a right-aligned pill's fill inside the box, as the
+                 * left-aligned case does (priceline's "✓ Added"). */
+                lineX = rightEdge - line.advanceWidth - boxPadX;
                 break;
             case TextAlignment::Left:
             case TextAlignment::Justify:
@@ -1028,6 +1081,7 @@ float Document::drawParagraph(NVGcontext* ctx, const Paragraph& para,
                     wl.x              = wx;
                     wl.advance        = word.advance;
                     wl.image          = word.run->image;
+                    wl.image_radius   = word.run->image_radius;
                     wl.style          = st;
                     wl.style.fontSize = ih; // piggy-back height, like the
                                             // block-image/rule sentinels
@@ -1036,7 +1090,7 @@ float Document::drawParagraph(NVGcontext* ctx, const Paragraph& para,
                 }
                 if (!layout_only)
                     draw_image_block(ctx, word.run->image, wx, imgY,
-                                     word.advance, ih);
+                                     word.advance, ih, word.run->image_radius);
             } else {
             // Capture word position + draw data for cheap re-paint
             if (capture_layout) {
