@@ -1889,6 +1889,12 @@ std::string ImapClient::send_with_tag(const std::string &cmd) {
     std::string shown = cmd;
     if (starts_with(shown, "LOGIN "))
         shown = "LOGIN (redacted)";
+    else if (starts_with(shown, "AUTHENTICATE ")) {
+        /* SASL-IR: "AUTHENTICATE PLAIN <base64 user\0user\0pass>". */
+        size_t sp = shown.find(' ', 13);
+        if (sp != std::string::npos)
+            shown = shown.substr(0, sp) + " (redacted)";
+    }
     imap_dbg(">> %s %s  (fd=%d gen=%llu com=%d)", tag.c_str(), shown.c_str(),
              m_fd, (unsigned long long)m_op_gen.load(std::memory_order_acquire), (int)m_compressed);
     if (m_compressed && m_deflate_state) {
@@ -2512,14 +2518,30 @@ bool ImapClient::fetch_summaries(int first, int last,
         err.clear();
         return run(cmd, untagged, err);
     };
+    /* The lighter FETCHes below are for a server that REJECTED the item
+     * list.  A cancelled FETCH (folder switch) or a lost connection is
+     * not that: run() has closed the socket and the mailbox with it, so
+     * a "fallback" silently re-logged in with nothing selected and got
+     * "BAD Please select a mailbox first" -- reported as an error after
+     * switching accounts during iCloud's slow header FETCH. */
+    auto rejected = [&]() {
+        return !is_cancelled_error(err) && !is_connection_error(err) && is_open();
+    };
+    auto give_up = [&]() {
+        imap_dbg("FETCH summaries %s stopped: %s", range.c_str(), err.c_str());
+        clear_progress();
+        return false;
+    };
     if (!try_fetch("FETCH " + range + rich + " BODY.PEEK[TEXT]<0.512>)")) {
+        if (!rejected()) return give_up();
         imap_dbg("FETCH+STRUCTURE %s failed (%s), retrying without BODYSTRUCTURE",
                  range.c_str(), err.c_str());
         if (!try_fetch("FETCH " + range + sized + " BODY.PEEK[TEXT]<0.512>)")) {
+            if (!rejected()) return give_up();
             imap_dbg("FETCH+SIZE %s failed (%s), falling back to headers",
                      range.c_str(), err.c_str());
             if (!try_fetch("FETCH " + range + plain + " BODY.PEEK[TEXT]<0.512>)") &&
-                !try_fetch("FETCH " + range + plain + ")")) {
+                (!rejected() || !try_fetch("FETCH " + range + plain + ")"))) {
                 imap_dbg("FETCH headers %s FAILED: %s", range.c_str(), err.c_str());
                 clear_progress();
                 return false;

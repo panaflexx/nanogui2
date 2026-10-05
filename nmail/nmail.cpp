@@ -177,6 +177,12 @@ public:
     std::string              wanted_folder;     // folder the user last clicked, for this account
     bool                     folder_loading = false;
     bool                     older_inflight = false;
+    /* Folder whose oldest message is already in the list: hitting the
+     * bottom must not ask again until the folder is reloaded. */
+    std::string              older_exhausted;
+    /* After a failed or abandoned older-page request, wait until this
+     * glfwGetTime() before asking again (the list fires every frame). */
+    double                   older_retry_at = 0.0;
     bool                     move_inflight  = false;
     /* UID of a message we just MOVE'd. The server's EXPUNGE echo of that
      * MOVE must not run on_expunged after we have already removed the row. */
@@ -918,6 +924,9 @@ public:
             if (total == 0) {
                 if (acct->older_inflight) {
                     acct->older_inflight = false;
+                    /* Abandoned (folder not selected yet, stale
+                     * connection): retry later, not on the next frame. */
+                    acct->older_retry_at = glfwGetTime() + 2.0;
                     if (m_email_list) m_email_list->set_loading_more(false);
                 }
                 if (m_load_bar && !acct->folder_loading) m_load_bar->stop();
@@ -1428,6 +1437,10 @@ public:
         }
 
         m_folder_view->update_account(account_id, label, folders, highlight);
+        /* Other accounts' INBOX lists arrive on their own: the worker's
+         * first background check preloads the newest page, and
+         * on_summaries files it in summary_cache (wanted_folder is empty,
+         * so nothing on screen changes). */
     }
 
     void on_summaries(const std::string &account_id, const std::string &folder,
@@ -1545,6 +1558,8 @@ public:
         acct.current_folder = folder;
         shown()      = sums;
         acct.older_inflight = false;
+        acct.older_exhausted.clear();   // a fresh newest page: older ones exist again
+        acct.older_retry_at = 0.0;
         acct.move_inflight = false;
         m_email_list->set_loading_more(false);
         apply_filter();
@@ -1669,6 +1684,9 @@ public:
             return;
         if (acct.wanted_folder != acct.current_folder)
             return;
+        if (acct.older_exhausted == acct.wanted_folder ||
+            glfwGetTime() < acct.older_retry_at)
+            return;
         acct.older_inflight = true;
         m_email_list->set_loading_more(true);
         if (m_load_bar) m_load_bar->set_progress(0.f);
@@ -1686,7 +1704,11 @@ public:
         if (m_load_bar && !acct.folder_loading) m_load_bar->stop();
         if (account_id != current_id()) return;   // not looking at this account
         m_email_list->set_loading_more(false);
-        if (sums.empty()) return;
+        if (sums.empty()) {
+            acct.older_exhausted = folder;   // reached the oldest message
+            set_status(folder + ": no older messages");
+            return;
+        }
 
         shown().insert(shown().end(), sums.begin(), sums.end());
         harvest(sums);
@@ -1753,7 +1775,20 @@ public:
         body_put(acct, folder, uid, msg);
         harvest(msg);
         if (account_id != current_id() ||
-            folder != acct.wanted_folder || folder != acct.current_folder) return;
+            folder != acct.wanted_folder || folder != acct.current_folder) {
+            /* A list that isn't on screen (a background account's
+             * preloaded INBOX): keep the preview so the rows are complete
+             * when the user switches to it. */
+            auto it = acct.summary_cache.find(folder);
+            if (it != acct.summary_cache.end()) {
+                for (auto &s : it->second) {
+                    if (s.uid != uid) continue;
+                    if (preview.size() > s.preview.size()) s.preview = preview;
+                    break;
+                }
+            }
+            return;
+        }
         bool enriched = false;
         for (auto &s : shown()) {
             if (s.uid != uid) continue;
@@ -1767,7 +1802,12 @@ public:
     void on_worker_error(const std::string &account_id, const std::string &title,
                         const std::string &msg) {
         AccountSession *acct = account(account_id);
-        if (acct) { acct->older_inflight = false; acct->move_inflight = false; }
+        if (acct) {
+            if (acct->older_inflight)   // don't re-request every frame
+                acct->older_retry_at = glfwGetTime() + 15.0;
+            acct->older_inflight = false;
+            acct->move_inflight = false;
+        }
         if (account_id == current_id()) {
             if (m_email_list) m_email_list->set_loading_more(false);
             set_folder_busy(false, title);
@@ -1812,6 +1852,8 @@ public:
         m_hold_unread_uid = 0;
         m_has_message  = false;
         acct.older_inflight = false;
+        acct.older_exhausted.clear();
+        acct.older_retry_at = 0.0;
         acct.move_inflight = false;
         m_email_list->set_loading_more(false);
         m_reply_btn->set_enabled(false);

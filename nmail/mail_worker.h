@@ -214,6 +214,10 @@ private:
      * check records EXISTS and does not download the mailbox; later
      * checks fetch only the growth. */
     bool                    m_inbox_baseline = false;
+    /* The background INBOX preload's header FETCH is in flight (slow on
+     * iCloud: ~7 s for 150).  Opening that INBOX meanwhile lets it finish
+     * and uses it, instead of aborting and starting the same FETCH over. */
+    bool                    m_preloading_inbox = false;
     // background prefetch backlog (low priority, viewport-aware)
     std::string                  m_prefetch_folder;
     std::deque<uint32_t>         m_prefetch_queue;

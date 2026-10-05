@@ -232,6 +232,8 @@ void MailWorker::stop() {
         m_thread.join();
 }
 
+static bool same_mailbox(const std::string &a, const std::string &b);
+
 void MailWorker::select_folder(const std::string &name) {
     if (name.empty()) return;
     bool abort_io = false;
@@ -252,7 +254,8 @@ void MailWorker::select_folder(const std::string &name) {
                    m_inflight != Type::Move &&
                    m_inflight != Type::Connect &&
                    m_inflight != Type::Prefetch &&
-                   m_inflight != Type::MarkSeen;
+                   m_inflight != Type::MarkSeen &&
+                   !(m_preloading_inbox && same_mailbox(name, "INBOX"));
         mail_dbg("[mail] select_folder '%s' epoch=%llu busy=%d inflight=%d abort=%d q=%zu\n",
                 name.c_str(), (unsigned long long)m_epoch, (int)m_busy,
                 (int)m_inflight, (int)abort_io, m_queue.size());
@@ -495,6 +498,12 @@ bool MailWorker::do_connect() {
     m_first_loaded = 0;
     m_last_known_exists = 0;
     m_idle_disabled = false;   // a fresh connection may accept IDLE
+    {
+        /* The INBOX baseline (and EXISTS above) belonged to the old
+         * connection; the next background check re-takes it. */
+        std::lock_guard<std::mutex> lock(m_mutex);
+        m_inbox_baseline = false;
+    }
     return do_list_folders();
 }
 
@@ -1076,9 +1085,19 @@ void MailWorker::do_fetch_older(const Cmd &cmd) {
         abandon();
         return;
     }
-    if (m_selected_folder != folder || m_first_loaded <= 1) {
+    if (m_selected_folder != folder) {
         abandon();
-        return;   // Select hasn't landed, or nothing older
+        return;   // Select hasn't landed
+    }
+    if (m_first_loaded <= 1) {
+        /* Nothing older: say so with an empty page, so the GUI stops
+         * asking.  abandon() looked like a transient miss, and the list
+         * re-requested on every frame it sat at the bottom, flashing
+         * "Loading older messages". */
+        deliver([this, folder]() {
+            if (cb_older) cb_older(folder, {});
+        });
+        return;
     }
     if (m_imap.selected_folder() != folder) {
         std::string se;
@@ -1534,7 +1553,16 @@ void MailWorker::run() {
 
         switch (cmd.type) {
         case Type::Connect:
-            do_connect();
+            /* A background account checks right away rather than at the
+             * next interval: its first check also preloads the INBOX list,
+             * and the folder list this connect delivers just made the GUI
+             * drop the old one.  (At startup the periodic check can even
+             * run first, then this Connect reconnects over it.) */
+            if (do_connect()) {
+                std::lock_guard<std::mutex> lock(m_mutex);
+                if (m_wanted_folder.empty())
+                    m_queue.push_back({Type::AutoRefresh, "", "", m_epoch});
+            }
             break;
         case Type::AutoRefresh: {
             if (!m_imap.is_open()) {
@@ -1560,12 +1588,67 @@ void MailWorker::run() {
                 if (background && !m_inbox_baseline) {
                     std::string err;
                     int exists = 0;
+                    bool still_background = false;
                     if (m_imap.select_folder("INBOX", exists, err)) {
+                        /* Some servers' SELECT reply carries no EXISTS
+                         * (the same fallback do_select uses): without the
+                         * count the preload below never ran. */
+                        if (exists <= 0) {
+                            int status_n = 0, unseen = 0;
+                            std::string se;
+                            if (m_imap.status_counts("INBOX", status_n, unseen, se) &&
+                                status_n > 0)
+                                exists = status_n;
+                        }
                         std::lock_guard<std::mutex> lock(m_mutex);
                         if (m_wanted_folder.empty()) {
                             m_selected_folder = "INBOX";
                             m_last_known_exists = std::max(0, exists);
                             m_inbox_baseline = true;
+                            still_background = true;
+                        }
+                    }
+                    /* Preload the newest page for the GUI's cache, so
+                     * switching to this account shows its mail at once.
+                     * The account stays in background mode: no wanted
+                     * folder, no body prefetch, and the worker's paging /
+                     * QRESYNC state is left for the real open to set up
+                     * (selecting INBOX through select_folder() instead
+                     * left the second account erroring "Please select a
+                     * mailbox first" when opened). */
+                    if (still_background && exists > 0) {
+                        std::vector<MailSummary> sums;
+                        std::string ferr;
+                        {
+                            std::lock_guard<std::mutex> lock(m_mutex);
+                            m_preloading_inbox = true;
+                        }
+                        m_progress_quiet = true;
+                        bool ok = m_imap.fetch_summaries(std::max(1, exists - 149),
+                                                         exists, sums, ferr);
+                        m_progress_quiet = false;
+                        /* Still in the background: file it under "INBOX".
+                         * The user opened this INBOX while it ran: deliver
+                         * it as that open's list (under the GUI's spelling)
+                         * -- the queued Select then refreshes it. */
+                        std::string deliver_as;
+                        {
+                            std::lock_guard<std::mutex> lock(m_mutex);
+                            m_preloading_inbox = false;
+                            if (ok && !m_quit) {
+                                if (m_wanted_folder.empty())
+                                    deliver_as = "INBOX";
+                                else if (same_mailbox(m_wanted_folder, "INBOX"))
+                                    deliver_as = m_wanted_folder;
+                            }
+                        }
+                        if (!deliver_as.empty()) {
+                            std::reverse(sums.begin(), sums.end());   // newest first
+                            deliver([this, deliver_as, sums]() {
+                                if (cb_summaries) cb_summaries(deliver_as, sums);
+                            });
+                        } else if (!ok) {
+                            mail_dbg("[mail] INBOX preload failed: %s\n", ferr.c_str());
                         }
                     }
                     break;
@@ -1627,7 +1710,10 @@ void MailWorker::run() {
             do_select(cmd.folder);
             break;
         case Type::FetchBody: {
-            if (!m_imap.is_open()) {
+            /* A folder switch cancel()s the in-flight FETCH, which closes
+             * the socket; work queued behind it re-logs in like Select
+             * does instead of reporting "Not connected". */
+            if (!m_imap.is_open() && !ensure_connected()) {
                 report_error("Not connected",
                              "Set up the server in Preferences first.");
                 break;
@@ -1704,7 +1790,7 @@ void MailWorker::run() {
             break;
         }
         case Type::FetchOlder:
-            if (!m_imap.is_open()) {
+            if (!m_imap.is_open() && !ensure_connected()) {   // see FetchBody
                 report_error("Not connected",
                              "Set up the server in Preferences first.");
                 break;
