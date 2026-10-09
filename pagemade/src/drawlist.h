@@ -42,7 +42,17 @@ struct DrawGlyphs {
     Transform       xf;
 };
 
-using DrawOp = std::variant<DrawFill, DrawStroke, DrawGlyphs>;
+/* A placed picture. The frame (0, 0)–(clip_w, clip_h) in item space clips
+ * the picture rectangle (x, y, w, h). The pixels are not here: the screen
+ * asks the ImageStore for a display view, and PDF asks it for the source. */
+struct DrawImage {
+    uint32_t  asset = 0;
+    float     x = 0, y = 0, w = 0, h = 0;
+    float     clip_w = 0, clip_h = 0;
+    Transform xf;
+};
+
+using DrawOp = std::variant<DrawFill, DrawStroke, DrawGlyphs, DrawImage>;
 using DrawList = std::vector<DrawOp>;
 
 /* `comps` holds one composition per story, in PageDoc::stories order. */

@@ -16,12 +16,17 @@
 
 #include "drawlist.h"
 
+#include <functional>
+
 struct NVGcontext;
 
 namespace pagemade {
 
 void draw_glyph_run(NVGcontext *ctx, const GlyphRun &run);
-void draw_list(NVGcontext *ctx, const DrawList &list, float px);
+/* `texture` returns a NanoVG image for a picture, or 0 to draw a stand-in.
+ * The id is the display view, not the source file. */
+void draw_list(NVGcontext *ctx, const DrawList &list, float px,
+               const std::function<int(const DrawImage &)> &texture = {});
 void apply_transform(NVGcontext *ctx, const Transform &t);
 
 } // namespace pagemade

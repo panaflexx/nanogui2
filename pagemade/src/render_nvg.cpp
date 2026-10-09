@@ -133,9 +133,25 @@ void draw_stroke(NVGcontext *ctx, const DrawStroke &s, float px) {
     }
 }
 
+void draw_missing_image(NVGcontext *ctx, const DrawImage &im) {
+    nvgBeginPath(ctx);
+    nvgRect(ctx, 0, 0, im.clip_w, im.clip_h);
+    nvgFillColor(ctx, nvgRGB(230, 230, 230));
+    nvgFill(ctx);
+    nvgStrokeColor(ctx, nvgRGB(160, 50, 50));
+    nvgStrokeWidth(ctx, 1.f);
+    nvgBeginPath(ctx);
+    nvgMoveTo(ctx, 0, 0);
+    nvgLineTo(ctx, im.clip_w, im.clip_h);
+    nvgMoveTo(ctx, im.clip_w, 0);
+    nvgLineTo(ctx, 0, im.clip_h);
+    nvgStroke(ctx);
+}
+
 } // namespace
 
-void draw_list(NVGcontext *ctx, const DrawList &list, float px) {
+void draw_list(NVGcontext *ctx, const DrawList &list, float px,
+               const std::function<int(const DrawImage &)> &texture) {
     for (const DrawOp &op : list) {
         nvgSave(ctx);
         if (const auto *g = std::get_if<DrawGlyphs>(&op)) {
@@ -150,6 +166,21 @@ void draw_list(NVGcontext *ctx, const DrawList &list, float px) {
         } else if (const auto *s = std::get_if<DrawStroke>(&op)) {
             apply_transform(ctx, s->xf);
             draw_stroke(ctx, *s, px);
+        } else if (const auto *im = std::get_if<DrawImage>(&op)) {
+            apply_transform(ctx, im->xf);
+            /* Intersect, so the pasteboard's window clip stays in force.
+             * The frame itself is exact, including when the picture is rotated. */
+            nvgIntersectScissor(ctx, 0, 0, im->clip_w, im->clip_h);
+            int img = texture ? texture(*im) : 0;
+            if (img && im->w != 0.f && im->h != 0.f) {
+                nvgBeginPath(ctx);
+                nvgRect(ctx, im->x, im->y, im->w, im->h);
+                NVGpaint paint = nvgImagePattern(ctx, im->x, im->y, im->w, im->h, 0, img, 1.f);
+                nvgFillPaint(ctx, paint);
+                nvgFill(ctx);
+            } else {
+                draw_missing_image(ctx, *im);
+            }
         }
         nvgRestore(ctx);
     }

@@ -6,7 +6,7 @@
  * reordered and hidden from Layout, and Arrange lives under Element.
  * Page icons along the bottom of the window show the document — click one
  * to turn to it, drag to rearrange. The toolbar holds the toolbox
- * (pointer, rotate, text, line, rectangle, ellipse, polygon), snap to
+ * (pointer, crop, rotate, text, line, rectangle, ellipse, polygon), snap to
  * guides, undo/redo (Ctrl+Z / Ctrl+Shift+Z), a zoom dropdown, and switches
  * for alignment, kerning and ligatures. Below it, the control palette
  * switches between the object view (position, size, angle, fill and
@@ -18,10 +18,10 @@
  *   pagemade
  *   pagemade --screenshot out.png [--export-pdf out.pdf] [--zoom 4 --at 150,400] [--select 1,1]
  *            [--baselines] [--loose] [--no-kerning] [--no-snap]
- *            [--tool pointer|text|rotate|line|rect|ellipse|polygon ...]
+ *            [--tool pointer|crop|text|rotate|line|rect|ellipse|polygon ...]
  *            [--fill swatch[,tint] ...] [--stroke swatch,weight[,style] ...]
  *            [--drag x0,y0:x1,y1 ...] [--click x,y ...] [--type txt ...]
- *            [--key [mod+]name ...] [--open file.pagemade]
+ *            [--key [mod+]name ...] [--open file.pagemade] [--place picture.png]
  *            [--save file.pagemade ...] [--save-embedded file.pagemade ...]
  *            [--dialog save|changes] [--print-title]
  *
@@ -54,6 +54,7 @@
 
 #include <algorithm>
 #include <array>
+#include <cmath>
 #include <filesystem>
 #include <cctype>
 #include <cstdio>
@@ -234,6 +235,9 @@ public:
         tool_btn(Tool::Pointer, FA_MOUSE_POINTER,
                  "Pointer tool (Shift+click adds, drag a marquee; Delete removes; "
                  "arrows nudge; Ctrl+F front, Ctrl+] forward, Ctrl+[ backward, Ctrl+B back)");
+        tool_btn(Tool::Crop, FA_CROP,
+                 "Crop tool (drag a handle to trim the frame, drag inside to slide; "
+                 "Shift locks one axis)");
         tool_btn(Tool::Rotate, FA_SYNC_ALT, "Rotate tool (Shift snaps to 15\u00B0)");
         tool_btn(Tool::Text, FA_I_CURSOR, "Text tool (drag on empty space for a new block)");
         tool_btn(Tool::Line, FA_SLASH, "Line tool (Shift: 45\u00B0 steps)");
@@ -302,6 +306,7 @@ public:
         root_flex->set_flex_item(m_scroll, FlexLayout::FlexItem(1.0f));
 
         m_view = new ComposerView(m_scroll, &m_fonts, &m_hyphenator);
+        m_view->set_image_store(&m_images);
         m_view->on_recompose = [this] { update_status(); };
         m_view->on_tool_change = [this](ComposerView::Tool t) {
             sync_tool_buttons(t);
@@ -377,7 +382,8 @@ public:
 
     bool write_to(const std::string &path, bool embed) {
         std::string error;
-        if (!save_document(m_view->document(), m_fonts, path, SaveOptions{embed}, &error)) {
+        if (!save_document(m_view->document(), m_fonts, path, SaveOptions{embed}, &error,
+                           &m_images)) {
             show_alert(this, "The publication couldn't be saved.", error);
             return false;
         }
@@ -391,6 +397,7 @@ public:
     void new_document() {
         close_document_then([this] {
             m_fonts.clear_document_fonts();
+            m_images.clear();
             m_view->set_document(PageDoc());
             m_doc_path.clear();
             m_embed_assets = false;
@@ -410,6 +417,20 @@ public:
         });
     }
 
+    void place_dialog() {
+        const std::string folder = m_doc_path.empty()
+            ? std::string() : std::filesystem::path(m_doc_path).parent_path().string();
+        auto paths = file_dialog({{"png", "PNG"}, {"jpg", "JPEG"}, {"jpeg", "JPEG"}},
+                                 false, false, folder);
+        if (paths.empty() || paths[0].empty())
+            return;
+        std::string error;
+        if (!m_view->place_image_file(paths[0], &error))
+            show_alert(this, "The picture couldn't be placed.", error);
+        else
+            set_note("placed " + std::filesystem::path(paths[0]).filename().string());
+    }
+
     /* Open without asking about the current publication (callers do that). */
     bool open_path(const std::string &path) {
         OpenResult r = open_document(path, m_fonts);
@@ -423,6 +444,7 @@ public:
         m_fonts.clear_document_fonts();
         for (const DocumentFont &f : r.fonts)
             m_fonts.add_document_font(f.family, f.style, f.font);
+        m_images = std::move(r.images);
         m_view->set_document(std::move(r.doc));
         m_doc_path = path;
         m_embed_assets = r.embed_assets;
@@ -491,6 +513,7 @@ public:
         Dropdown *file = m_menubar->add_menu("File");
         add_cmd(file, "New", {{SYSTEM_COMMAND_MOD, GLFW_KEY_N}}, [this] { new_document(); });
         add_cmd(file, "Open...", {{SYSTEM_COMMAND_MOD, GLFW_KEY_O}}, [this] { open_document_dialog(); });
+        add_cmd(file, "Place...", {{SYSTEM_COMMAND_MOD, GLFW_KEY_D}}, [this] { place_dialog(); });
         new Separator(file->popup());
         add_cmd(file, "Save", {{SYSTEM_COMMAND_MOD, GLFW_KEY_S}}, [this] { save(); });
         add_cmd(file, "Save As...", {{SYSTEM_COMMAND_MOD | GLFW_MOD_SHIFT, GLFW_KEY_S}},
@@ -935,7 +958,17 @@ public:
                       "  Page %zu of %zu%s   |   %zu items, %zu stories, %zu lines, composed in %.2f ms%s   |   zoom %.0f%%",
                       page + 1, np, hidden ? " (hidden)" : "", nitems, comps.size(), lines, ms,
                       overset ? "   |   story overset (red arrow)" : "", m_scroll->zoom() * 100.0);
-        m_status->set_caption(std::string(buf) + m_note);
+        std::string picture;
+        if (m_view->selection().size() == 1)
+            if (const Item *it = doc.find_item(m_view->selection().front()))
+                if (const PlacedImage *im = it->image())
+                    if (const ImageAsset *a = doc.find_image(im->asset)) {
+                        const int ppi = a->meta.ppi_x > 0 ? (int) std::lround(a->meta.ppi_x) : 72;
+                        picture = "   |   " + a->name + "  " + std::to_string(a->meta.width_px) +
+                                  "\u00D7" + std::to_string(a->meta.height_px) + " px  " +
+                                  std::to_string(ppi) + " ppi";
+                    }
+        m_status->set_caption(std::string(buf) + picture + m_note);
         if (m_remove_page) {
             m_remove_page->set_enabled(np > 1);
             m_move_earlier->set_enabled(page > 0);
@@ -962,7 +995,7 @@ public:
     }
 
     bool export_pdf_to(const std::string &path) {
-        return export_pdf(path, m_view->document(), m_view->compositions());
+        return export_pdf(path, m_view->document(), m_view->compositions(), &m_images);
     }
 
     void export_pdf_dialog() {
@@ -1017,6 +1050,7 @@ public:
         case GLFW_KEY_P: print_document(); return true;
         case GLFW_KEY_N: new_document(); return true;
         case GLFW_KEY_O: open_document_dialog(); return true;
+        case GLFW_KEY_D: place_dialog(); return true;
         case GLFW_KEY_S:
             if (modifiers & GLFW_MOD_SHIFT) save_as(); else save();
             return true;
@@ -1118,7 +1152,8 @@ public:
         }
         if (what == "tool") {
             static const std::pair<const char *, ComposerView::Tool> tools[] = {
-                {"pointer", ComposerView::Tool::Pointer}, {"text", ComposerView::Tool::Text},
+                {"pointer", ComposerView::Tool::Pointer}, {"crop", ComposerView::Tool::Crop},
+                {"text", ComposerView::Tool::Text},
                 {"rotate", ComposerView::Tool::Rotate},   {"line", ComposerView::Tool::Line},
                 {"rect", ComposerView::Tool::Rect},       {"ellipse", ComposerView::Tool::Ellipse},
                 {"polygon", ComposerView::Tool::Polygon},
@@ -1155,6 +1190,7 @@ public:
 
 private:
     FontLibrary     m_fonts;
+    ImageStore      m_images;
     Hyphenator      m_hyphenator;
     MenuBar         *m_menubar = nullptr;
     ZoomScrollPanel *m_scroll = nullptr;
@@ -1238,7 +1274,7 @@ static bool parse_key(const std::string &spec, int &key, int &mods) {
 }
 
 int main(int argc, char **argv) {
-    std::string shot, pdf, open_path, dialog;
+    std::string shot, pdf, open_path, place_path, dialog;
     bool print_title = false;
     double zoom = 0;
     float at_x = -1, at_y = -1, sel_a = -1, sel_b = -1;
@@ -1250,6 +1286,7 @@ int main(int argc, char **argv) {
         if (a == "--screenshot" && i + 1 < argc) shot = argv[++i];
         else if (a == "--export-pdf" && i + 1 < argc) pdf = argv[++i];
         else if (a == "--open" && i + 1 < argc) open_path = argv[++i];
+        else if (a == "--place" && i + 1 < argc) place_path = argv[++i];
         else if (a == "--print-title") print_title = true;
         else if (a == "--dialog" && i + 1 < argc) dialog = argv[++i];
         else if ((a == "--save" || a == "--save-embedded") && i + 1 < argc) {
@@ -1300,6 +1337,13 @@ int main(int argc, char **argv) {
         for (int k = 0; k < 3; ++k) { app->perform_layout(); app->draw_all(); }
         if (!open_path.empty() && !app->open_path(open_path))
             std::printf("open FAILED %s\n", open_path.c_str());
+        if (!place_path.empty()) {
+            std::string error;
+            if (app->view()->place_image_file(place_path, &error))
+                std::printf("place ok\n");
+            else
+                std::printf("place FAILED %s\n", error.c_str());
+        }
 
         if (baselines) { app->baselines_box()->set_checked(true); app->view()->set_show_baselines(true); }
         if (loose)     { app->loose_box()->set_checked(true); app->view()->set_show_loose_tight(true); }

@@ -3,6 +3,7 @@
  */
 #include "composerview.h"
 #include "render_nvg.h"
+#include "uri.h"
 
 #include <nanogui/screen.h>
 #include <nanogui/zoomscrollpanel.h>
@@ -652,6 +653,29 @@ bool ComposerView::mouse_drag_event(const Vector2i &p, const Vector2i &, int, in
     }
 
     if (m_drag == Handle::Move) {
+        /* Crop slides the picture inside the frame. The frame stays. */
+        if (m_tool == Tool::Crop) {
+            bool panned = false;
+            for (const Item &o : m_drag_items) {
+                Item *it = m_doc.find_item(o.id);
+                if (!it || !o.image() || !it->image())
+                    continue;
+                Point dl = o.xf.inverse().apply_vector(d);
+                if (shift) {
+                    if (std::fabs(dl.x) >= std::fabs(dl.y)) dl.y = 0;
+                    else dl.x = 0;
+                }
+                PlacedImage im = *o.image();
+                im.x += dl.x;
+                im.y += dl.y;
+                it->content = im;
+                panned = true;
+            }
+            if (panned) {
+                selection_changed();
+                return true;
+            }
+        }
         const Point sd = snap_move(m_drag_bounds, d);
         for (const Item &o : m_drag_items)
             if (Item *it = m_doc.find_item(o.id))
@@ -690,6 +714,14 @@ bool ComposerView::mouse_drag_event(const Vector2i &p, const Vector2i &, int, in
     it->w = x1 - x0;
     it->h = y1 - y0;
     it->xf = o.xf * Transform::translate(x0, y0);
+    if (const PlacedImage *im = o.image()) {
+        /* Crop moves the frame and leaves the picture on the page.
+         * The pointer scales the picture with the frame. */
+        if (m_tool == Tool::Crop)
+            it->content = crop_placement(*im, x0, y0);
+        else
+            it->content = scale_placement(*im, o.w, o.h, it->w, it->h);
+    }
     if (it->is_text())
         recompose();
     selection_changed();
@@ -726,6 +758,21 @@ bool ComposerView::mouse_motion_event(const Vector2i &p, const Vector2i &rel, in
         default: set_cursor(Cursor::Arrow); break;
         }
         break;
+    case Tool::Crop: {
+        Hit hit = hit_test(pt);
+        switch (hit.handle) {
+        case Handle::TopLeft: case Handle::TopRight:
+        case Handle::BottomLeft: case Handle::BottomRight:
+            set_cursor(Cursor::HVResize); break;
+        case Handle::Move:
+            if (const Item *it = m_doc.find_item(hit.item))
+                if (it->is_image()) { set_cursor(Cursor::Hand); break; }
+            set_cursor(Cursor::Arrow); break;
+        default:
+            set_cursor(Cursor::Arrow); break;
+        }
+        break;
+    }
     default:
         set_cursor(Cursor::Crosshair);   // rotate and the drawing tools
         break;
@@ -864,6 +911,7 @@ void ComposerView::set_geometry(const Geometry &g) {
     if (!it)
         return;
     push_undo();
+    const float ow = it->w, oh = it->h;
     const float target = -g.angle * kPi / 180.f;
     const float delta = target - it->xf.rotation();
     if (std::fabs(delta) > 1e-6f)
@@ -875,6 +923,8 @@ void ComposerView::set_geometry(const Geometry &g) {
         it->w = std::max(g.w, 1.f);
         it->h = std::max(g.h, 1.f);
     }
+    if (const PlacedImage *im = it->image())
+        it->content = scale_placement(*im, ow, oh, it->w, it->h);
     const Point o = it->xf.apply({0, 0});
     it->xf = Transform::translate(g.x - o.x, g.y - o.y) * it->xf;
     if (it->is_text())
@@ -1752,6 +1802,125 @@ void ComposerView::draw_chrome(NVGcontext *ctx, float px) {
     }
 }
 
+void ComposerView::set_image_store(ImageStore *images) {
+    m_images = images;
+    m_tex_gen = 0;                       // the next draw drops whatever was cached
+}
+
+void ComposerView::place_frame(uint32_t asset, const ImageMetadata &meta) {
+    const PageSetup &s = m_doc.setup;
+    float pw = image_print_points(meta.width_px, meta.ppi_x);
+    float ph = image_print_points(meta.height_px, meta.ppi_y);
+    if (!(pw > 0.f)) pw = 36.f;
+    if (!(ph > 0.f)) ph = 36.f;
+    const float live_w = std::max(36.f, s.width - s.margin_inside - s.margin_outside);
+    const float live_h = std::max(36.f, s.height - s.margin_top - s.margin_bottom);
+    if (pw > live_w || ph > live_h) {
+        const float scale = std::min(live_w / pw, live_h / ph);
+        pw *= scale;
+        ph *= scale;
+    }
+    Item it;
+    it.w = pw;
+    it.h = ph;
+    it.xf = Transform::translate(s.margin_inside, s.margin_top);
+    PlacedImage im;
+    im.asset = asset;
+    im.x = 0;
+    im.y = 0;
+    im.w = pw;
+    im.h = ph;
+    it.content = im;
+    m_sel = {m_doc.add_item(m_page, it)};
+    m_edit_story = 0;
+    if (m_tool != Tool::Pointer)
+        set_tool(Tool::Pointer);
+    else
+        selection_changed();
+    if (screen())
+        screen()->redraw();
+}
+
+bool ComposerView::place_image_file(const std::string &path, std::string *error) {
+    if (!m_images) {
+        if (error) *error = "pictures aren't available";
+        return false;
+    }
+    /* Taken before the read, and not given back: undo must not hand this
+     * id to a later picture while a redo still names it. */
+    const uint32_t id = m_images->take_id();
+    ImageMetadata meta;
+    if (!m_images->load_file(id, path, &meta, error))
+        return false;
+    push_undo();
+    ImageAsset asset;
+    asset.id = id;
+    const size_t slash = path.find_last_of("/\\");
+    asset.name = slash == std::string::npos ? path : path.substr(slash + 1);
+    asset.source = file_uri(path);
+    asset.meta = meta;
+    m_doc.add_image(std::move(asset));
+    place_frame(id, meta);
+    return true;
+}
+
+void ComposerView::place_image(uint32_t asset) {
+    if (!m_images)
+        return;
+    const ImageStore::Entry *e = m_images->find(asset);
+    if (!e)
+        return;
+    push_undo();
+    if (!m_doc.find_image(asset)) {
+        ImageAsset a;
+        a.id = asset;
+        a.name = "image";
+        a.meta = e->meta;
+        m_doc.add_image(std::move(a));
+    }
+    place_frame(asset, e->meta);
+}
+
+void ComposerView::sync_textures(NVGcontext *ctx) {
+    const uint64_t gen = m_images ? m_images->generation() : 0;
+    if (gen == m_tex_gen)
+        return;
+    for (auto &kv : m_tex)
+        if (kv.second.id)
+            nvgDeleteImage(ctx, kv.second.id);
+    m_tex.clear();
+    m_tex_gen = gen;
+}
+
+int ComposerView::texture_for(NVGcontext *ctx, const DrawImage &im, float px) {
+    if (!m_images || !im.asset)
+        return 0;
+    const ImageStore::Entry *e = m_images->find(im.asset);
+    if (!e)
+        return 0;
+    int src_long = std::max(e->meta.width_px, e->meta.height_px);
+    if (src_long < 1)
+        src_long = 1;
+    const float pts = std::max(std::fabs(im.w), std::fabs(im.h));
+    int want = px > 0.f ? (int) std::ceil(pts / px) : src_long;
+    int q = 64;
+    while (q < want && q < 8192)
+        q *= 2;
+    want = std::min(q, src_long);
+    const uint8_t *rgba = nullptr;
+    int w = 0, h = 0;
+    if (!m_images->display(im.asset, want, &rgba, &w, &h) || !rgba || w < 1 || h < 1)
+        return 0;
+    auto it = m_tex.find(im.asset);
+    if (it != m_tex.end() && it->second.id && it->second.w == w && it->second.h == h)
+        return it->second.id;
+    if (it != m_tex.end() && it->second.id)
+        nvgDeleteImage(ctx, it->second.id);
+    const int id = nvgCreateImageRGBA(ctx, w, h, 0, rgba);
+    m_tex[im.asset] = {id, w, h};
+    return id;
+}
+
 void ComposerView::draw(NVGcontext *ctx) {
     float xf[6];
     nvgCurrentTransform(ctx, xf);
@@ -1777,7 +1946,9 @@ void ComposerView::draw(NVGcontext *ctx) {
         nvgText(ctx, 0, -4.f * px, "Hidden \u2014 not printed", nullptr);
     }
     draw_page(ctx, px);
-    draw_list(ctx, build_page(m_doc, m_page, m_comp), px);
+    sync_textures(ctx);
+    draw_list(ctx, build_page(m_doc, m_page, m_comp), px,
+              [&](const DrawImage &im) { return texture_for(ctx, im, px); });
     for (const Item &it : items())
         if (it.is_text())
             draw_text_overlays(ctx, it, px);

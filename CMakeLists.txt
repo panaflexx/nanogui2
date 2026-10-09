@@ -972,6 +972,7 @@ if (NANOGUI_BUILD_EXAMPLES)
         pagemade/src/drawlist.cpp
         pagemade/src/uri.cpp
         pagemade/src/docfile.cpp
+        pagemade/src/image.cpp
         pagemade/src/dialogs.cpp
         pagemade/src/sample.cpp)
     add_executable(pagemade_compose_test
@@ -983,10 +984,15 @@ if (NANOGUI_BUILD_EXAMPLES)
         pagemade/src/drawlist.cpp
         pagemade/src/uri.cpp
         pagemade/src/docfile.cpp
+        pagemade/src/image.cpp
+        pagemade/src/image_stb.cpp
         pagemade/src/sample.cpp)
     foreach(_t pagemade_app pagemade_compose_test)
       # dict.h (the JSON reader) lives at the repository root.
-      target_include_directories(${_t} PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+      # nanovg_exif.h and stb_image.h live with nanovgd.
+      target_include_directories(${_t} PRIVATE
+          ${CMAKE_CURRENT_SOURCE_DIR}
+          ${CMAKE_CURRENT_SOURCE_DIR}/ext/nanovgd/src)
       target_compile_definitions(${_t} PRIVATE
           PAGEMADE_RESOURCE_DIR="${CMAKE_CURRENT_SOURCE_DIR}/resources"
           PAGEMADE_DATA_DIR="${CMAKE_CURRENT_SOURCE_DIR}/pagemade/resources")

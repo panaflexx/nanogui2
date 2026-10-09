@@ -61,21 +61,30 @@ and its nanovgd renderer. The composer lays out in points and every backend
   source URI so it can be relinked. Save writes beside the target and renames
   over it. New, Open and Quit ask before discarding changes. The window title
   shows a star until the publication is saved again, including after undo.
+- **Images, with cropping**: a picture is a publication asset. The page item
+  stores the asset id and a crop rectangle; the bytes live in an ImageStore
+  beside the document, so undo stays small. File > Place (Ctrl/Cmd+D) puts a
+  PNG or JPEG at the margin at print size. The composer draws a screen-sized
+  display view; PDF export embeds the source (a JPEG's own DCT stream, anything
+  else the full-resolution pixels), so a RIP samples the file and not the
+  proxy. The crop tool trims the frame or pans the picture inside it (Shift
+  locks one axis); the pointer scales the picture with the frame. The frame is
+  a rectangle: the screen intersects the scissor, and PDF clips with `W n`.
+  Clipping to an arbitrary path stays with SVG import. Another format registers
+  an ImageDecoder (TIFF and HEIC are not built in). The asset table is what a
+  later library will move between documents and pages; that window is not built.
 
 ## Next, in order
 
-1. **Images, with cropping**: placing PNG/JPEG makes an image item, linked or
-   embedded through the file format's asset table. Cropping is a clip, so this
-   step brings clipping to a path to nanovgd (stencil clip; PDF clips natively
-   with `W n`).
-2. **SVG import**: nanosvg makes a group of path items in the shape format. This
+1. **SVG import**: nanosvg makes a group of path items in the shape format. This
    step brings even-odd fill and per-subpath winding to nanovgd. The fill rule
    reaches the backend through the `renderFill` hook, which the Metal backend
    (`ext/nanovg_metal`) implements too, so Mac builds need the matching change.
-   Multi-stop gradients come with it.
-3. **Text wrap**: lines ask which horizontal spans are free at their height,
+   Multi-stop gradients come with it. Rectangular picture crops are already
+   clipped; this step is where a clip becomes an arbitrary path.
+2. **Text wrap**: lines ask which horizontal spans are free at their height,
    from the wrap outlines of items in front of the text.
-4. **Print dialog**: choose the printer, copies and page range. Linux first (the
+3. **Print dialog**: choose the printer, copies and page range. Linux first (the
    CUPS API with our own dialog, or GTK's), then Mac (NSPrintOperation on the
    PDF), then Windows. Today printing exports a PDF and hands it to `lp`.
 
@@ -86,7 +95,8 @@ and its nanovgd renderer. The composer lays out in points and every backend
 - Paragraph-at-a-time (Knuth-Plass) composer; right-to-left text.
 - Text colors as swatches (character styles still carry RGB).
 - Groups; master pages; spreads or a continuous page view (the view shows one
-  page at a time).
+  page at a time). An asset library that moves pictures between documents and
+  pages; the publication's asset table is the record it will move.
 - Import: Markdown/HTML (gumbo), RTF, DOCX; old PageMaker files via libpagemaker.
 - Story editor; Styles and Colors palettes; the rest of the Control palette
   (its object and type views are done).

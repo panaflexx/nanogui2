@@ -5,6 +5,7 @@
 
 #include "composer/font.h"
 #include "drawlist.h"
+#include "image.h"
 #include "page.h"
 
 #include <hb.h>
@@ -98,6 +99,11 @@ struct Writer {
         std::string z = flate(data);
         return add("<< " + dict + " /Length " + std::to_string(z.size()) +
                    " /Filter /FlateDecode >>\nstream\n" + z + "\nendstream");
+    }
+    /* A stream already encoded (a JPEG's own bytes). `dict` includes /Filter. */
+    int add_raw_stream(const std::string &dict, const std::string &data) {
+        return add("<< " + dict + " /Length " + std::to_string(data.size()) +
+                   " >>\nstream\n" + data + "\nendstream");
     }
 
     bool write(const std::string &path, int root) {
@@ -343,10 +349,88 @@ void emit_glyphs(std::string &s, const GlyphRun &r, int res) {
     s += "ET\n";
 }
 
+/* One XObject for the picture's source. JPEG keeps its DCT stream and its
+ * stored (unrotated) pixel size; the page stream turns it upright. Anything
+ * else is decoded upright at full resolution and Flate-encoded — still the
+ * source samples, not the screen proxy. 0 when there is nothing to embed. */
+struct PdfPicture {
+    int obj = 0;
+    bool upright = false;               // pixels already oriented (not a raw JPEG)
+};
+
+PdfPicture embed_picture(Writer &w, const ImageStore::Entry &e) {
+    PdfPicture out;
+    const ImageMetadata &m = e.meta;
+    const bool jpeg = m.format == "jpeg" ||
+                      (e.source.size() >= 3 && e.source[0] == 0xFF && e.source[1] == 0xD8 &&
+                       e.source[2] == 0xFF);
+    if (jpeg && m.stored_width_px > 0 && m.stored_height_px > 0) {
+        const char *cs = (m.model == ColorModel::Gray || m.channels == 1) ? "DeviceGray"
+                       : (m.model == ColorModel::CMYK || m.channels == 4) ? "DeviceCMYK"
+                       : "DeviceRGB";
+        int bits = m.bit_depth == 12 ? 12 : 8;
+        std::string dict = "/Type /XObject /Subtype /Image /Width " +
+                           std::to_string(m.stored_width_px) + " /Height " +
+                           std::to_string(m.stored_height_px) + " /ColorSpace /" + cs +
+                           " /BitsPerComponent " + std::to_string(bits) +
+                           " /Interpolate true /Filter /DCTDecode";
+        out.obj = w.add_raw_stream(dict, std::string((const char *) e.source.data(), e.source.size()));
+        out.upright = false;
+        return out;
+    }
+
+    DecodedImage full;
+    std::string err;
+    if (!image_loader().decode(e.source.data(), e.source.size(), &full, &err) ||
+        full.width <= 0 || full.height <= 0)
+        return out;
+    const size_t n = (size_t) full.width * (size_t) full.height;
+    bool alpha = false;
+    for (size_t i = 0; i < n; ++i)
+        if (full.rgba[i * 4 + 3] != 255) { alpha = true; break; }
+    const bool gray = full.meta.model == ColorModel::Gray && !alpha;
+    std::string samples(n * (gray ? 1 : 3), '\0');
+    std::string mask;
+    if (alpha)
+        mask.resize(n);
+    for (size_t i = 0; i < n; ++i) {
+        const uint8_t *p = full.rgba.data() + i * 4;
+        if (gray) {
+            samples[i] = (char) p[0];
+        } else {
+            samples[i * 3] = (char) p[0];
+            samples[i * 3 + 1] = (char) p[1];
+            samples[i * 3 + 2] = (char) p[2];
+        }
+        if (alpha)
+            mask[i] = (char) p[3];
+    }
+    std::string dict = "/Type /XObject /Subtype /Image /Width " + std::to_string(full.width) +
+                       " /Height " + std::to_string(full.height) + " /ColorSpace /" +
+                       std::string(gray ? "DeviceGray" : "DeviceRGB") +
+                       " /BitsPerComponent 8 /Interpolate true";
+    if (alpha) {
+        int sm = w.add_stream("/Type /XObject /Subtype /Image /Width " + std::to_string(full.width) +
+                              " /Height " + std::to_string(full.height) +
+                              " /ColorSpace /DeviceGray /BitsPerComponent 8", mask);
+        dict += " /SMask " + std::to_string(sm) + " 0 R";
+    }
+    out.obj = w.add_stream(dict, samples);
+    out.upright = true;
+    return out;
+}
+
+void emit_missing_image(std::string &s, const DrawImage &im) {
+    s += "0.9 0.9 0.9 rg\n0 0 " + num(im.clip_w) + " " + num(im.clip_h) + " re\nf\n";
+    s += "0.6 0.25 0.25 RG\n1 w\n";
+    s += "0 0 m " + num(im.clip_w) + " " + num(im.clip_h) + " l S\n";
+    s += num(im.clip_w) + " 0 m 0 " + num(im.clip_h) + " l S\n";
+}
+
 } // namespace
 
 bool export_pdf(const std::string &path, const PageDoc &doc,
-                const std::vector<Composition> &comps) {
+                const std::vector<Composition> &comps, const ImageStore *images) {
     /* Draw lists for every page, and the fonts they use. */
     std::vector<DrawList> pages;
     for (size_t i = 0; i < doc.pages.size(); ++i)
@@ -367,11 +451,35 @@ bool export_pdf(const std::string &path, const PageDoc &doc,
         font_res[kv.first] = res;
     }
 
+    /* One XObject per picture, from the source bytes. A missing file is a
+     * gray stand-in on that placement; it does not fail the export. */
+    std::map<uint32_t, PdfPicture> image_res;
+    if (images) {
+        for (const DrawList &list : pages)
+            for (const DrawOp &op : list)
+                if (const auto *im = std::get_if<DrawImage>(&op))
+                    if (im->asset && !image_res.count(im->asset))
+                        if (const ImageStore::Entry *e = images->find(im->asset))
+                            image_res[im->asset] = embed_picture(w, *e);
+    }
+
     std::string res_dict = "<< /Font <<";
     for (const auto &kv : font_res)
         res_dict += " /F" + std::to_string(kv.second) + " " + std::to_string(kv.second) +
                     " 0 R";
-    res_dict += " >> >>";
+    res_dict += " >>";
+    bool any_image = false;
+    for (const auto &kv : image_res)
+        any_image |= kv.second.obj != 0;
+    if (any_image) {
+        res_dict += " /XObject <<";
+        for (const auto &kv : image_res)
+            if (kv.second.obj)
+                res_dict += " /Im" + std::to_string(kv.first) + " " +
+                            std::to_string(kv.second.obj) + " 0 R";
+        res_dict += " >>";
+    }
+    res_dict += " >>";
 
     int pages_kids_placeholder = 0;   // filled once the page objects exist
     std::vector<int> page_objs;
@@ -406,6 +514,30 @@ bool export_pdf(const std::string &path, const PageDoc &doc,
                                            : s->join == LineJoin::Bevel ? 2 : 0) + " j\n";
                 emit_path(content, s->path);
                 content += "S\nQ\n";
+            } else if (const auto *im = std::get_if<DrawImage>(&op)) {
+                if (!(im->clip_w > 0.f) || !(im->clip_h > 0.f))
+                    continue;
+                emit_cm(content, im->xf);
+                auto found = image_res.find(im->asset);
+                const bool have = found != image_res.end() && found->second.obj &&
+                                  im->w != 0.f && im->h != 0.f;
+                if (!have) {
+                    emit_missing_image(content, *im);
+                } else {
+                    /* The frame clips in item space; the picture's own matrix
+                     * then maps the unit square onto the placement rect. */
+                    content += "0 0 " + num(im->clip_w) + " " + num(im->clip_h) + " re W n\n";
+                    int orient = 1;
+                    if (!found->second.upright && images)
+                        if (const ImageStore::Entry *e = images->find(im->asset))
+                            orient = e->meta.orientation >= 1 ? e->meta.orientation : 1;
+                    float m[6];
+                    image_pdf_matrix(orient, im->x, im->y, im->w, im->h, m);
+                    content += num(m[0]) + " " + num(m[1]) + " " + num(m[2]) + " " +
+                               num(m[3]) + " " + num(m[4]) + " " + num(m[5]) + " cm\n";
+                    content += "/Im" + std::to_string(im->asset) + " Do\n";
+                }
+                content += "Q\n";
             }
         }
         int contents = w.add_stream("", content);

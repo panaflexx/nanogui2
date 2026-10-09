@@ -16,12 +16,18 @@
  * Pages stay in document order. A hidden page is still edited here; print
  * and PDF export leave it out.
  *
+ * Pictures are assets of the publication, not of one page. An item only
+ * names the asset; the file bytes live in an ImageStore (image.h), so a
+ * snapshot of this document stays the metadata and the placements. A later
+ * asset library moves those records between documents.
+ *
  * The whole model is plain values: copying a PageDoc is a snapshot, which
  * is how undo works.
  */
 #pragma once
 
 #include "composer/composer.h"
+#include "image.h"
 
 #include <cstdint>
 #include <string>
@@ -115,15 +121,46 @@ struct Shape {
     Stroke stroke;
 };
 
+/* A picture from the publication's asset table. The frame, the item's
+ * (0, 0)–(w, h), clips it. x, y, w, h here are the whole picture in that
+ * same item space: a crop is the frame cutting the picture, not a second
+ * copy of the pixels. The pointer tool scales this rectangle with the
+ * frame. The crop tool moves the frame and leaves the picture where it is
+ * on the page, or drags the picture around inside the frame. */
+struct PlacedImage {
+    uint32_t asset = 0;
+    float x = 0, y = 0, w = 0, h = 0;
+};
+
+/* Scale the picture with a frame resize, so the crop stays the same
+ * fraction of the picture. */
+PlacedImage scale_placement(PlacedImage im, float old_w, float old_h, float new_w, float new_h);
+/* The frame's top-left moved to (left, top) in the old item space. The
+ * picture stays put on the page. */
+PlacedImage crop_placement(PlacedImage im, float left, float top);
+
 struct Item {
     ItemId    id = 0;
     float     w = 0, h = 0;
     Transform xf;                // item space -> page
-    std::variant<TextFrame, Shape> content;
+    std::variant<TextFrame, Shape, PlacedImage> content;
 
     bool is_text() const { return std::holds_alternative<TextFrame>(content); }
+    bool is_image() const { return std::holds_alternative<PlacedImage>(content); }
     const Shape *shape() const { return std::get_if<Shape>(&content); }
     Shape *shape() { return std::get_if<Shape>(&content); }
+    const PlacedImage *image() const { return std::get_if<PlacedImage>(&content); }
+    PlacedImage *image() { return std::get_if<PlacedImage>(&content); }
+};
+
+/* One picture the publication owns. Page items store the id. `source` is
+ * the file: URI it was placed from, so a linked copy can be found again
+ * and an embedded copy can be relinked. */
+struct ImageAsset {
+    uint32_t id = 0;
+    std::string name;
+    std::string source;
+    ImageMetadata meta;
 };
 
 struct Page {
@@ -145,13 +182,22 @@ struct PageDoc {
     std::vector<Page>       pages{1};
     std::vector<StoryEntry> stories;
     std::vector<Swatch>     swatches = default_swatches();
+    std::vector<ImageAsset> images;        // the publication's pictures
     uint32_t                next_id = 1;   // shared by items and stories
+    uint32_t                next_asset = 1;
 
     const Swatch *find_swatch(SwatchId id) const;
     /* The screen color of a paint; transparent for none. */
     Color resolve(const Paint &p) const;
     /* Adds a swatch (ids above the built-ins) and returns its id. */
     SwatchId add_swatch(const std::string &name, Color rgb);
+
+    const ImageAsset *find_image(uint32_t id) const;
+    ImageAsset       *find_image(uint32_t id);
+    /* Assigns an id when `asset.id` is 0. */
+    uint32_t add_image(ImageAsset asset);
+    /* True when some item still shows this picture. */
+    bool image_placed(uint32_t id) const;
 
     /* Lookups. `page` (when given) receives the item's page index. */
     Item       *find_item(ItemId id, size_t *page = nullptr);
@@ -174,7 +220,8 @@ struct PageDoc {
     ItemId  add_text_frame(size_t page, StoryId story, float w, float h, const Transform &xf,
                            size_t thread_index = SIZE_MAX);
     /* Removes the item and takes it out of its thread; a story left with no
-     * frames is removed too. */
+     * frames is removed too. A picture's asset leaves with its last frame
+     * (the bytes stay in the ImageStore, so undo can bring it back). */
     void    remove_item(ItemId id);
     void    bring_to_front(ItemId id);
     void    send_to_back(ItemId id);

@@ -137,6 +137,55 @@ std::vector<Frame> PageDoc::thread_frames(const StoryEntry &s) const {
 
 /* ---- Edits -------------------------------------------------------------- */
 
+PlacedImage scale_placement(PlacedImage im, float old_w, float old_h, float new_w, float new_h) {
+    if (old_w != 0.f) {
+        float s = new_w / old_w;
+        im.x *= s;
+        im.w *= s;
+    }
+    if (old_h != 0.f) {
+        float s = new_h / old_h;
+        im.y *= s;
+        im.h *= s;
+    }
+    return im;
+}
+
+PlacedImage crop_placement(PlacedImage im, float left, float top) {
+    im.x -= left;
+    im.y -= top;
+    return im;
+}
+
+const ImageAsset *PageDoc::find_image(uint32_t id) const {
+    for (const ImageAsset &a : images)
+        if (a.id == id)
+            return &a;
+    return nullptr;
+}
+
+ImageAsset *PageDoc::find_image(uint32_t id) {
+    return const_cast<ImageAsset *>(static_cast<const PageDoc *>(this)->find_image(id));
+}
+
+uint32_t PageDoc::add_image(ImageAsset asset) {
+    if (asset.id == 0)
+        asset.id = next_asset++;
+    else if (asset.id >= next_asset)
+        next_asset = asset.id + 1;
+    images.push_back(std::move(asset));
+    return images.back().id;
+}
+
+bool PageDoc::image_placed(uint32_t id) const {
+    for (const Page &p : pages)
+        for (const Item &it : p.items)
+            if (const PlacedImage *im = it.image())
+                if (im->asset == id)
+                    return true;
+    return false;
+}
+
 ItemId PageDoc::add_item(size_t page, Item item) {
     if (page >= pages.size())
         pages.resize(page + 1);
@@ -169,6 +218,10 @@ ItemId PageDoc::add_text_frame(size_t page, StoryId story, float w, float h,
 }
 
 void PageDoc::remove_item(ItemId id) {
+    uint32_t asset = 0;
+    if (const Item *it = find_item(id))
+        if (const PlacedImage *im = it->image())
+            asset = im->asset;
     for (Page &p : pages)
         p.items.erase(std::remove_if(p.items.begin(), p.items.end(),
                                      [&](const Item &it) { return it.id == id; }),
@@ -178,6 +231,10 @@ void PageDoc::remove_item(ItemId id) {
     stories.erase(std::remove_if(stories.begin(), stories.end(),
                                  [](const StoryEntry &s) { return s.thread.empty(); }),
                   stories.end());
+    if (asset && !image_placed(asset))
+        images.erase(std::remove_if(images.begin(), images.end(),
+                                    [&](const ImageAsset &a) { return a.id == asset; }),
+                     images.end());
 }
 
 void PageDoc::bring_to_front(ItemId id) {

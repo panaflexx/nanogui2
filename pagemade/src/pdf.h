@@ -10,6 +10,9 @@
  * under Identity-H) and embedded as CIDFontType0 (CFF) or CIDFontType2
  * (TrueType), with a ToUnicode map for search and copy. Colors are device
  * RGB for now; CMYK/spot and trim/bleed/marks come later.
+ * Pictures are embedded from the source file in `images` (a JPEG's own
+ * DCT stream, anything else the full-resolution pixels), clipped to the
+ * frame. The screen's display view is not what gets written.
  */
 #pragma once
 
@@ -20,10 +23,13 @@ namespace pagemade {
 
 struct Composition;
 struct PageDoc;
+class ImageStore;
 
 /* `comps` holds one composition per story, in PageDoc::stories order.
+ * `images` supplies picture sources; null draws a stand-in for each one.
  * False when the file can't be written or a font fails to subset. */
 bool export_pdf(const std::string &path, const PageDoc &doc,
-                const std::vector<Composition> &comps);
+                const std::vector<Composition> &comps,
+                const ImageStore *images = nullptr);
 
 } // namespace pagemade

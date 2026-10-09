@@ -10,18 +10,28 @@
 #include "default_fonts.h"
 #include "drawlist.h"
 #include "geometry.h"
+#include "image.h"
 #include "page.h"
 #include "pdf.h"
 #include "docfile.h"
 #include "uri.h"
+#include "nanovg_exif.h"
 
 #include <miniz.h>
 
+#define STB_IMAGE_WRITE_IMPLEMENTATION
+#define STB_IMAGE_WRITE_STATIC
+#include "../../ext/glfw/deps/stb_image_write.h"
+
 #include <algorithm>
 #include <cmath>
+#include <cstdint>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
+#include <memory>
 #include <string>
+#include <vector>
 
 #ifndef PAGEMADE_DATA_DIR
 #define PAGEMADE_DATA_DIR "pagemade/resources"
@@ -834,6 +844,12 @@ static void check_doc(const PageDoc &a, const PageDoc &b) {
             CHECK(near(x.xf.a, y.xf.a) && near(x.xf.b, y.xf.b) && near(x.xf.c, y.xf.c) &&
                   near(x.xf.d, y.xf.d) && near(x.xf.e, y.xf.e) && near(x.xf.f, y.xf.f),
                   "item %zu transform", i);
+            CHECK(x.is_image() == y.is_image(), "item %zu picture", i);
+            if (x.image() && y.image()) {
+                const PlacedImage &xi = *x.image(), &yi = *y.image();
+                CHECK(xi.asset == yi.asset && near(xi.x, yi.x) && near(xi.y, yi.y) &&
+                      near(xi.w, yi.w) && near(xi.h, yi.h), "item %zu placement", i);
+            }
             if (x.shape() && y.shape()) {
                 const Shape &sx = *x.shape(), &sy = *y.shape();
                 CHECK(sx.kind == sy.kind && sx.sides == sy.sides &&
@@ -865,6 +881,23 @@ static void check_doc(const PageDoc &a, const PageDoc &b) {
         }
     }
     CHECK(a.next_id == b.next_id, "next id %u vs %u", a.next_id, b.next_id);
+    CHECK(a.next_asset == b.next_asset, "next asset %u vs %u", a.next_asset, b.next_asset);
+    CHECK(a.images.size() == b.images.size(), "pictures %zu vs %zu",
+          a.images.size(), b.images.size());
+    for (size_t i = 0; i < std::min(a.images.size(), b.images.size()); ++i) {
+        const ImageAsset &x = a.images[i], &y = b.images[i];
+        CHECK(x.id == y.id && x.name == y.name && x.source == y.source, "picture %zu identity", i);
+        CHECK(x.meta.format == y.meta.format && x.meta.width_px == y.meta.width_px &&
+              x.meta.height_px == y.meta.height_px &&
+              x.meta.stored_width_px == y.meta.stored_width_px &&
+              x.meta.stored_height_px == y.meta.stored_height_px &&
+              x.meta.bit_depth == y.meta.bit_depth && x.meta.channels == y.meta.channels &&
+              x.meta.model == y.meta.model && x.meta.alpha == y.meta.alpha &&
+              x.meta.orientation == y.meta.orientation, "picture %zu metadata", i);
+        CHECK(std::fabs(x.meta.ppi_x - y.meta.ppi_x) < 1e-3 &&
+              std::fabs(x.meta.ppi_y - y.meta.ppi_y) < 1e-3, "picture %zu resolution", i);
+        CHECK(x.meta.icc == y.meta.icc, "picture %zu profile", i);
+    }
 }
 
 static void test_uri() {
@@ -1008,7 +1041,12 @@ static void test_docfile(const FontLibrary &fonts) {
     CHECK(!repaired.warnings.empty(), "damage and a newer version are reported");
     if (repaired.ok) {
         CHECK(repaired.doc.pages.size() == 1 && repaired.doc.pages[0].hidden, "the page survived");
-        CHECK(repaired.doc.pages[0].items.size() == 2, "duplicate, zero and unknown items drop");
+        CHECK(repaired.doc.pages[0].items.size() == 3,
+              "duplicate and zero ids drop; a picture item stays");
+        int pictures = 0;
+        for (const Item &it : repaired.doc.pages[0].items)
+            pictures += it.is_image() ? 1 : 0;
+        CHECK(pictures == 1, "the picture item is kept (%d)", pictures);
         CHECK(repaired.doc.stories.size() == 2, "the empty story drops; the stray frame gets one");
         bool kept_text = false;
         for (const StoryEntry &se : repaired.doc.stories)
@@ -1044,6 +1082,473 @@ static void test_docfile(const FontLibrary &fonts) {
     std::remove(bad.c_str());
 }
 
+/* A tiny uncompressed-filter PNG. `rgb` is width * height * 3, or null for black.
+ * ppm is pixels per metre (0 omits pHYs). 300 ppi is 11811 ppm. */
+static std::vector<uint8_t> make_png(int w, int h, const uint8_t *rgb, uint32_t ppm_x, uint32_t ppm_y) {
+    auto be = [](std::vector<uint8_t> &o, uint32_t v) {
+        o.push_back((uint8_t) (v >> 24));
+        o.push_back((uint8_t) (v >> 16));
+        o.push_back((uint8_t) (v >> 8));
+        o.push_back((uint8_t) v);
+    };
+    auto chunk = [&](std::vector<uint8_t> &o, const char *type, const uint8_t *data, size_t n) {
+        be(o, (uint32_t) n);
+        const size_t at = o.size();
+        o.insert(o.end(), type, type + 4);
+        if (n)
+            o.insert(o.end(), data, data + n);
+        be(o, (uint32_t) mz_crc32(0, o.data() + at, 4 + n));
+    };
+    std::vector<uint8_t> raw((size_t) h * (1 + (size_t) w * 3));
+    for (int y = 0; y < h; ++y) {
+        uint8_t *row = raw.data() + (size_t) y * (1 + (size_t) w * 3);
+        row[0] = 0;
+        for (int x = 0; x < w; ++x) {
+            const uint8_t *p = rgb ? rgb + ((size_t) y * w + x) * 3 : nullptr;
+            row[1 + x * 3] = p ? p[0] : 0;
+            row[2 + x * 3] = p ? p[1] : 0;
+            row[3 + x * 3] = p ? p[2] : 0;
+        }
+    }
+    mz_ulong zlen = mz_compressBound((mz_ulong) raw.size());
+    std::vector<uint8_t> z(zlen);
+    CHECK(mz_compress(z.data(), &zlen, raw.data(), (mz_ulong) raw.size()) == MZ_OK, "png deflate");
+    z.resize(zlen);
+
+    uint8_t ihdr[13] = {};
+    ihdr[0] = (uint8_t) (w >> 24); ihdr[1] = (uint8_t) (w >> 16);
+    ihdr[2] = (uint8_t) (w >> 8);  ihdr[3] = (uint8_t) w;
+    ihdr[4] = (uint8_t) (h >> 24); ihdr[5] = (uint8_t) (h >> 16);
+    ihdr[6] = (uint8_t) (h >> 8);  ihdr[7] = (uint8_t) h;
+    ihdr[8] = 8;
+    ihdr[9] = 2;                     // RGB
+    std::vector<uint8_t> out = {137, 80, 78, 71, 13, 10, 26, 10};
+    chunk(out, "IHDR", ihdr, 13);
+    if (ppm_x || ppm_y) {
+        uint8_t phys[9] = {};
+        phys[0] = (uint8_t) (ppm_x >> 24); phys[1] = (uint8_t) (ppm_x >> 16);
+        phys[2] = (uint8_t) (ppm_x >> 8);  phys[3] = (uint8_t) ppm_x;
+        phys[4] = (uint8_t) (ppm_y >> 24); phys[5] = (uint8_t) (ppm_y >> 16);
+        phys[6] = (uint8_t) (ppm_y >> 8);  phys[7] = (uint8_t) ppm_y;
+        phys[8] = 1;
+        chunk(out, "pHYs", phys, 9);
+    }
+    chunk(out, "IDAT", z.data(), z.size());
+    chunk(out, "IEND", nullptr, 0);
+    return out;
+}
+
+/* JPEG header only: JFIF density, EXIF orientation 6, SOF. It need not decode. */
+static std::vector<uint8_t> make_jpeg_header(int stored_w, int stored_h, int dpi) {
+    auto be16 = [](std::vector<uint8_t> &o, unsigned v) {
+        o.push_back((uint8_t) (v >> 8));
+        o.push_back((uint8_t) v);
+    };
+    std::vector<uint8_t> tiff = {
+        'I', 'I', 42, 0, 8, 0, 0, 0,
+        1, 0,
+        0x12, 0x01, 3, 0, 1, 0, 0, 0, 6, 0, 0, 0,
+        0, 0, 0, 0
+    };
+    std::vector<uint8_t> o = {0xFF, 0xD8};
+    o.insert(o.end(), {0xFF, 0xE0});
+    be16(o, 16);
+    o.insert(o.end(), {'J', 'F', 'I', 'F', 0, 1, 1, 1});
+    be16(o, (unsigned) dpi);
+    be16(o, (unsigned) dpi);
+    o.insert(o.end(), {0, 0});
+    o.insert(o.end(), {0xFF, 0xE1});
+    be16(o, (unsigned) (tiff.size() + 8));
+    o.insert(o.end(), {'E', 'x', 'i', 'f', 0, 0});
+    o.insert(o.end(), tiff.begin(), tiff.end());
+    o.insert(o.end(), {0xFF, 0xC0});
+    be16(o, 17);
+    o.push_back(8);
+    be16(o, (unsigned) stored_h);
+    be16(o, (unsigned) stored_w);
+    o.push_back(3);
+    o.insert(o.end(), {1, 0x11, 0, 2, 0x11, 0, 3, 0x11, 0});
+    return o;
+}
+
+static std::vector<uint8_t> make_jpeg_rgb(int w, int h, uint8_t r, uint8_t g, uint8_t b) {
+    std::vector<uint8_t> rgb((size_t) w * h * 3);
+    for (size_t i = 0; i < rgb.size(); i += 3) {
+        rgb[i] = r; rgb[i + 1] = g; rgb[i + 2] = b;
+    }
+    struct Buf { std::vector<uint8_t> bytes; } buf;
+    stbi_write_jpg_to_func([](void *ctx, void *data, int n) {
+        auto *b = (Buf *) ctx;
+        const auto *p = (const uint8_t *) data;
+        b->bytes.insert(b->bytes.end(), p, p + n);
+    }, &buf, w, h, 3, rgb.data(), 90);
+    return buf.bytes;
+}
+
+static std::string read_bin(const std::string &path) {
+    std::string bytes;
+    FILE *f = std::fopen(path.c_str(), "rb");
+    if (!f)
+        return bytes;
+    char buf[4096];
+    size_t n;
+    while ((n = std::fread(buf, 1, sizeof buf, f)) > 0)
+        bytes.append(buf, n);
+    std::fclose(f);
+    return bytes;
+}
+
+/* Content streams are Flate. Append each inflated stream so a search sees `W n`. */
+static std::string pdf_plain(const std::string &pdf) {
+    std::string out = pdf;
+    for (size_t at = 0; (at = pdf.find("stream\n", at)) != std::string::npos; ) {
+        const size_t data = at + 7;
+        const size_t dict = pdf.rfind("<<", at);
+        at = data;
+        if (dict == std::string::npos)
+            continue;
+        if (pdf.find("/FlateDecode", dict) > data && pdf.find("/FlateDecode", dict) != std::string::npos)
+            continue;
+        if (pdf.find("/FlateDecode", dict) == std::string::npos)
+            continue;
+        const size_t lp = pdf.find("/Length ", dict);
+        if (lp == std::string::npos || lp > data)
+            continue;
+        const int len = std::atoi(pdf.c_str() + lp + 8);
+        if (len <= 0 || data + (size_t) len > pdf.size())
+            continue;
+        mz_ulong dest_len = (mz_ulong) len * 16 + 1024;
+        std::vector<unsigned char> dest(dest_len);
+        if (mz_uncompress(dest.data(), &dest_len,
+                          (const unsigned char *) pdf.data() + data, (mz_ulong) len) != MZ_OK)
+            continue;
+        out.append((const char *) dest.data(), dest_len);
+        at = data + (size_t) len;
+    }
+    return out;
+}
+
+/* `/Width 8` must not count as `/Width 80`. */
+static bool pdf_has_number(const std::string &pdf, const std::string &key, int value) {
+    const std::string token = key + std::to_string(value);
+    for (size_t at = 0; (at = pdf.find(token, at)) != std::string::npos; ) {
+        const size_t end = at + token.size();
+        if (end >= pdf.size() || !std::isdigit((unsigned char) pdf[end]))
+            return true;
+        at = end;
+    }
+    return false;
+}
+
+class TiffStub : public ImageDecoder {
+public:
+    const char *id() const override { return "tiff"; }
+    bool sniff(const uint8_t *d, size_t n) const override {
+        return n >= 4 && d[0] == 'I' && d[1] == 'I' && d[2] == '*' && d[3] == 0;
+    }
+    bool probe(const uint8_t *, size_t, ImageMetadata *meta, std::string *) const override {
+        if (meta) meta->format = id();
+        return true;
+    }
+    bool decode(const uint8_t *, size_t, DecodedImage *, std::string *error) const override {
+        if (error) *error = "tiff stub does not decode";
+        return false;
+    }
+};
+
+static void test_images(const FontLibrary &fonts) {
+    CHECK(std::fabs(image_print_points(300, 300) - 72.f) < 0.01f, "300 px at 300 ppi is 72 pt");
+    CHECK(std::fabs(image_print_points(100, 0) - 100.f) < 0.01f, "unspecified resolution is 72 ppi");
+
+    uint8_t px[2 * 2 * 3] = {
+        255, 0, 0,  0, 255, 0,
+        0, 0, 255,  255, 255, 0
+    };
+    const uint32_t ppm300 = 11811;       // 11811 * 0.0254 ≈ 299.999
+    std::vector<uint8_t> png = make_png(2, 2, px, ppm300, ppm300);
+    ImageMetadata meta;
+    std::string err;
+    CHECK(image_loader().probe(png.data(), png.size(), &meta, &err), "probe png: %s", err.c_str());
+    CHECK(meta.format == "png" && meta.width_px == 2 && meta.height_px == 2, "png size");
+    CHECK(meta.model == ColorModel::RGB && meta.channels == 3 && !meta.alpha, "png is RGB");
+    CHECK(std::fabs(meta.ppi_x - 300.0) < 0.1 && std::fabs(meta.ppi_y - 300.0) < 0.1,
+          "png ppi %.3f", meta.ppi_x);
+    DecodedImage decoded;
+    CHECK(image_loader().decode(png.data(), png.size(), &decoded, &err), "decode png: %s", err.c_str());
+    CHECK(decoded.width == 2 && decoded.rgba.size() == 16 && decoded.rgba[0] == 255 &&
+          decoded.rgba[2] == 0 && decoded.rgba[8] == 0 && decoded.rgba[10] == 255,
+          "png pixels come back upright");
+
+    std::vector<uint8_t> jpeg = make_jpeg_header(20, 8, 300);
+    CHECK(image_loader().probe(jpeg.data(), jpeg.size(), &meta, &err), "probe jpeg: %s", err.c_str());
+    CHECK(meta.format == "jpeg" && meta.orientation == 6, "jpeg orientation 6 (%d)", meta.orientation);
+    CHECK(meta.stored_width_px == 20 && meta.stored_height_px == 8, "jpeg stored size");
+    CHECK(meta.width_px == 8 && meta.height_px == 20, "orientation 6 swaps the size");
+    CHECK(std::fabs(meta.ppi_x - 300.0) < 0.1, "jfif density %.3f", meta.ppi_x);
+
+    {
+        ImageLoader loader;
+        register_builtin_decoders(loader);
+        loader.add(std::make_unique<TiffStub>());
+        const uint8_t tiff[] = {'I', 'I', '*', 0, 1, 2, 3, 4};
+        const uint8_t nope[] = {'n', 'o', 'p', 'e'};
+        ImageMetadata m;
+        CHECK(loader.probe(png.data(), png.size(), &m, &err) && m.format == "png",
+              "png still matches the png decoder");
+        CHECK(loader.probe(tiff, sizeof tiff, &m, &err) && m.format == "tiff",
+              "tiff magic matches the registered decoder");
+        CHECK(!loader.probe(nope, sizeof nope, &m, &err), "an unknown file is declined");
+        CHECK(!loader.decode(tiff, sizeof tiff, &decoded, &err), "the tiff stub does not decode");
+    }
+
+    {
+        std::vector<uint8_t> wide = make_png(32, 8, nullptr, 0, 0);
+        ImageStore store;
+        const uint32_t id = store.take_id();
+        const std::vector<uint8_t> source = wide;
+        CHECK(store.add(id, std::move(wide), &meta, &err), "store add: %s", err.c_str());
+        const uint8_t *rgba = nullptr;
+        int w = 0, h = 0;
+        CHECK(store.display(id, 8, &rgba, &w, &h), "display proxy");
+        CHECK(std::max(w, h) <= 8 && std::max(w, h) <= 32 && w > 0 && h > 0,
+              "proxy long edge %d is within the request and the source", std::max(w, h));
+        CHECK(store.find(id) && store.find(id)->source == source, "display leaves the source bytes");
+        const int kept_w = w, kept_h = h;
+        CHECK(store.display(id, 4, &rgba, &w, &h) && w == kept_w && h == kept_h,
+              "a smaller request keeps the proxy already built");
+    }
+
+    {
+        PlacedImage im;
+        im.x = 0; im.y = 0; im.w = 100; im.h = 40;
+        PlacedImage scaled = scale_placement(im, 50, 20, 100, 40);
+        CHECK(near(scaled.x, 0) && near(scaled.y, 0) && near(scaled.w, 200) && near(scaled.h, 80),
+              "scale keeps the crop's fraction of the picture");
+        PlacedImage cropped = crop_placement(im, 20, 5);
+        CHECK(near(cropped.x, -20) && near(cropped.y, -5) && near(cropped.w, 100) && near(cropped.h, 40),
+              "crop leaves the picture where it was");
+    }
+
+    {
+        PageDoc doc;
+        Item it;
+        it.w = 40; it.h = 20;
+        it.xf = Transform::translate(3, 4);
+        PlacedImage im;
+        im.asset = 7; im.x = -5; im.y = 1; im.w = 80; im.h = 40;
+        it.content = im;
+        doc.add_item(0, std::move(it));
+        DrawList list = build_page(doc, 0, {});
+        const DrawImage *d = list.size() == 1 ? std::get_if<DrawImage>(&list[0]) : nullptr;
+        CHECK(d && d->asset == 7 && near(d->x, -5) && near(d->y, 1) && near(d->w, 80) &&
+              near(d->h, 40) && near(d->clip_w, 40) && near(d->clip_h, 20) &&
+              near(d->xf.e, 3) && near(d->xf.f, 4), "build_page emits the placement");
+    }
+
+    {
+        ImageStore store;
+        PageDoc doc;
+        const uint32_t id = store.take_id();
+        const std::vector<uint8_t> kept = make_png(2, 2, px, 0, 0);
+        CHECK(store.add(id, kept, &meta, &err), "asset bytes");
+        ImageAsset asset;
+        asset.id = id;
+        asset.name = "two.png";
+        doc.add_image(asset);
+        Item a, b;
+        a.w = a.h = b.w = b.h = 10;
+        a.content = PlacedImage{id, 0, 0, 10, 10};
+        b.content = PlacedImage{id, 0, 0, 10, 10};
+        ItemId ia = doc.add_item(0, a), ib = doc.add_item(0, b);
+        doc.remove_item(ia);
+        CHECK(doc.find_image(id), "one placement keeps the asset");
+        doc.remove_item(ib);
+        CHECK(!doc.find_image(id), "the last placement removes the asset");
+        CHECK(store.find(id) && store.find(id)->source == kept,
+              "the bytes stay in the store for undo");
+        const uint32_t next = store.take_id();
+        CHECK(next == id + 1, "ids keep moving forward (%u)", next);
+    }
+
+    const std::string linked_png = "/tmp/pagemade-pic.png";
+    const std::string emb_path = "/tmp/pagemade-img-emb.pagemade";
+    const std::string link_path = "/tmp/pagemade-img-link.pagemade";
+    {
+        FILE *f = std::fopen(linked_png.c_str(), "wb");
+        CHECK(f != nullptr, "write the linked png");
+        if (f) {
+            std::fwrite(png.data(), 1, png.size(), f);
+            std::fclose(f);
+        }
+        ImageStore store;
+        PageDoc doc;
+        const uint32_t id = store.take_id();
+        CHECK(store.load_file(id, linked_png, &meta, &err), "load linked png: %s", err.c_str());
+        ImageAsset asset;
+        asset.id = id;
+        asset.name = "pic.png";
+        asset.source = file_uri(linked_png);
+        asset.meta = store.find(id)->meta;
+        doc.add_image(asset);
+        Item it;
+        it.w = 30; it.h = 16;
+        it.xf = Transform::translate(12, 18);
+        it.content = PlacedImage{id, -4, 2, 40, 20};
+        doc.add_item(0, it);
+        CHECK(save_document(doc, fonts, emb_path, SaveOptions{true}, &err, &store),
+              "embed save: %s", err.c_str());
+        OpenResult emb = open_document(emb_path, fonts);
+        CHECK(emb.ok, "open embedded: %s", emb.error.c_str());
+        if (emb.ok) {
+            check_doc(doc, emb.doc);
+            const ImageStore::Entry *e = emb.images.find(id);
+            CHECK(e && e->source == png, "embedded bytes match the file that was placed");
+            CHECK(emb.doc.find_image(id) && emb.doc.find_image(id)->meta.format == "png" &&
+                  std::fabs(emb.doc.find_image(id)->meta.ppi_x - 300) < 0.1,
+                  "opened metadata comes from the file");
+        }
+        const std::string json = document_json(doc, fonts, SaveOptions{false}, &store);
+        CHECK(json.find("\"uri\": \"file:///") != std::string::npos, "a linked picture names its file");
+        CHECK(save_document(doc, fonts, link_path, SaveOptions{false}, &err, &store),
+              "link save: %s", err.c_str());
+        OpenResult link = open_document(link_path, fonts);
+        CHECK(link.ok, "open linked: %s", link.error.c_str());
+        if (link.ok) {
+            const ImageStore::Entry *e = link.images.find(id);
+            CHECK(e && e->source == png, "opening a link reads the file again");
+        }
+        std::remove(linked_png.c_str());
+        OpenResult gone = open_document(link_path, fonts);
+        CHECK(gone.ok, "a missing linked file still opens");
+        bool warned = false;
+        for (const std::string &w : gone.warnings)
+            warned |= w.find("couldn't read the picture") != std::string::npos;
+        CHECK(warned, "a missing linked file is reported");
+        CHECK(gone.images.find(id) == nullptr, "no bytes when the file is gone");
+    }
+
+    const std::string pdf_path = "/tmp/pagemade-img.pdf";
+    {
+        std::vector<uint8_t> photo = make_jpeg_rgb(8, 4, 200, 10, 10);
+        ImageStore store;
+        PageDoc doc;
+        const uint32_t id = store.take_id();
+        CHECK(store.add(id, photo, &meta, &err), "real jpeg: %s", err.c_str());
+        CHECK(meta.stored_width_px == 8 && meta.stored_height_px == 4, "stb jpeg size");
+        ImageAsset asset;
+        asset.id = id; asset.name = "photo.jpg"; asset.meta = meta;
+        doc.add_image(std::move(asset));
+        Item it;
+        it.w = 72; it.h = 36;
+        it.content = PlacedImage{id, 0, 0, 72, 36};
+        doc.add_item(0, it);
+        std::vector<Composition> comps;
+        CHECK(export_pdf(pdf_path, doc, comps, &store), "export a jpeg");
+        std::string plain = pdf_plain(read_bin(pdf_path));
+        CHECK(plain.find("/Subtype /Image") != std::string::npos, "an image XObject");
+        CHECK(plain.find("/DCTDecode") != std::string::npos, "the JPEG stream is passed through");
+        CHECK(pdf_has_number(plain, "/Width ", 8), "width is the source's 8 pixels");
+        CHECK(plain.find("re W n") != std::string::npos, "the frame clips with W n");
+        CHECK(plain.find("72 0 0 -36 0 36 cm") != std::string::npos,
+              "an upright JPEG uses the orientation-1 matrix");
+
+        doc.pages[0].hidden = true;
+        CHECK(export_pdf(pdf_path, doc, comps, &store), "export with the picture page hidden");
+        plain = pdf_plain(read_bin(pdf_path));
+        CHECK(plain.find("/DCTDecode") == std::string::npos, "a hidden page is left out of the PDF");
+
+        std::vector<uint8_t> orient = make_jpeg_header(20, 8, 72);
+        const uint32_t id6 = store.take_id();
+        CHECK(store.add(id6, orient, &meta, &err) && meta.orientation == 6, "orient-6 jpeg");
+        PageDoc turned;
+        ImageAsset a6;
+        a6.id = id6; a6.name = "turn.jpg"; a6.meta = meta;
+        turned.add_image(std::move(a6));
+        Item frame;
+        frame.w = 20; frame.h = 10;
+        frame.content = PlacedImage{id6, 0, 0, 20, 10};
+        turned.add_item(0, frame);
+        CHECK(export_pdf(pdf_path, turned, comps, &store), "export an oriented jpeg");
+        plain = pdf_plain(read_bin(pdf_path));
+        CHECK(pdf_has_number(plain, "/Width ", 20), "oriented JPEG keeps the stored width");
+        CHECK(!pdf_has_number(plain, "/Width ", 8), "the oriented height is not the XObject width");
+        CHECK(plain.find("0 10 20 0 0 0 cm") != std::string::npos, "orientation 6 matrix");
+
+        std::vector<uint8_t> big = make_png(32, 16, nullptr, 0, 0);
+        ImageStore pngs;
+        const uint32_t pid = pngs.take_id();
+        CHECK(pngs.add(pid, big, &meta, &err), "png for pdf");
+        PageDoc sheet;
+        ImageAsset pa;
+        pa.id = pid; pa.name = "sheet.png"; pa.meta = meta;
+        sheet.add_image(std::move(pa));
+        Item box;
+        box.w = 32; box.h = 16;
+        box.content = PlacedImage{pid, 0, 0, 32, 16};
+        sheet.add_item(0, box);
+        CHECK(export_pdf(pdf_path, sheet, comps, &pngs), "export a png");
+        plain = pdf_plain(read_bin(pdf_path));
+        CHECK(plain.find("/Subtype /Image") != std::string::npos &&
+              plain.find("/FlateDecode") != std::string::npos, "PNG pixels are Flate");
+        CHECK(pdf_has_number(plain, "/Width ", 32), "PNG width is the source pixel count");
+        CHECK(plain.find("/DCTDecode") == std::string::npos, "a PNG is not passed through as JPEG");
+
+        PageDoc bare;
+        Item missing;
+        missing.w = 10; missing.h = 10;
+        missing.content = PlacedImage{99, 0, 0, 10, 10};
+        bare.add_item(0, missing);
+        CHECK(export_pdf(pdf_path, bare, comps, &pngs), "a missing picture still exports");
+        plain = pdf_plain(read_bin(pdf_path));
+        CHECK(plain.find("0.9 0.9 0.9 rg") != std::string::npos, "a missing picture is a stand-in");
+    }
+
+    {
+        const int W = 16, H = 8;
+        std::vector<uint8_t> src((size_t) W * H * 4, 0);
+        auto paint = [&](int x, int y, uint8_t r) {
+            src[((size_t) y * W + x) * 4] = r;
+        };
+        paint(0, 0, 10);
+        paint(W - 1, 0, 20);
+        paint(0, H - 1, 30);
+        paint(W - 1, H - 1, 40);
+        for (int orient = 1; orient <= 8; ++orient) {
+            int w = W, h = H;
+            unsigned char *turned = nvg__exifApply(src.data(), &w, &h, 4, orient);
+            const uint8_t *pix = turned ? turned : src.data();
+            const int dw = turned ? w : W, dh = turned ? h : H;
+            float m[6];
+            image_pdf_matrix(orient, 0, 0, (float) dw, (float) dh, m);
+            const int corners[4][3] = {{0, 0, 10}, {W - 1, 0, 20}, {0, H - 1, 30}, {W - 1, H - 1, 40}};
+            for (const auto &c : corners) {
+                int px = -1, py = -1;
+                for (int y = 0; y < dh && px < 0; ++y)
+                    for (int x = 0; x < dw; ++x)
+                        if (pix[((size_t) y * dw + x) * 4] == c[2]) { px = x; py = y; break; }
+                const float u = ((float) c[0] + 0.5f) / W;
+                const float v = 1.f - ((float) c[1] + 0.5f) / H;
+                const float x = m[0] * u + m[2] * v + m[4];
+                const float y = m[1] * u + m[3] * v + m[5];
+                const bool same = px >= 0 && (px >= dw / 2) == (x >= dw * 0.5f) &&
+                                  (py >= dh / 2) == (y >= dh * 0.5f);
+                CHECK(same, "orient %d corner %d pixel (%d,%d) matrix (%.2f,%.2f)",
+                      orient, c[2], px, py, x, y);
+            }
+            std::free(turned);
+        }
+        float m[6];
+        image_pdf_matrix(1, 10, 20, 30, 40, m);
+        CHECK(near(m[0], 30) && near(m[1], 0) && near(m[2], 0) && near(m[3], -40) &&
+              near(m[4], 10) && near(m[5], 60), "orientation 1 is {w 0 0 -h x y+h}");
+    }
+
+    std::remove(emb_path.c_str());
+    std::remove(link_path.c_str());
+    std::remove(pdf_path.c_str());
+    std::remove(linked_png.c_str());
+}
+
 int main(int argc, char **argv) {
     bool verbose = argc > 1 && std::strcmp(argv[1], "-v") == 0;
     FontLibrary fonts;
@@ -1071,6 +1576,7 @@ int main(int argc, char **argv) {
     test_geometry();
     test_drawlist(fonts);
     test_docfile(fonts);
+    test_images(fonts);
     if (verbose)
         dump_sample(fonts);
 

@@ -28,6 +28,11 @@
  * square, circle or 45 degree line). New shapes take the default fill and
  * stroke, which the control palette sets while nothing is selected.
  *
+ * Crop tool: drag a corner to trim the frame (the picture stays where it
+ * is on the page) or drag inside a picture to slide it. Shift locks that
+ * slide to the larger axis. The pointer tool scales the picture with the
+ * frame. Place drops a picture at the margin, at its print size.
+ *
  * Threading (PageMaker's manual text flow): click the red overset arrow
  * and the story is picked up — a new text block, sized to hold what
  * didn't fit, follows the pointer with its text already flowed in. Click
@@ -52,6 +57,7 @@
 
 #include <deque>
 #include <functional>
+#include <map>
 #include <vector>
 
 class ComposerView : public nanogui::Widget {
@@ -73,10 +79,20 @@ public:
     bool snap() const                  { return m_snap; }
 
     /* The toolbox. */
-    enum class Tool { Pointer, Rotate, Text, Line, Rect, Ellipse, Polygon };
+    enum class Tool { Pointer, Crop, Rotate, Text, Line, Rect, Ellipse, Polygon };
     void set_tool(Tool t);
     Tool tool() const { return m_tool; }
     bool editing() const { return edit_story() != nullptr; }
+
+    /* Picture bytes live outside the document (undo snapshots stay small).
+     * The view does not own the store. */
+    void set_image_store(pagemade::ImageStore *images);
+    /* Place a file: one undo step, selected, then back to the pointer.
+     * The id is taken before the file is read, and a failure does not
+     * reuse it. False leaves the document unchanged. */
+    bool place_image_file(const std::string &path, std::string *error);
+    /* Another frame of a picture the publication already has. */
+    void place_image(uint32_t asset);
 
     /* The selection, in the order items were picked. */
     const std::vector<pagemade::ItemId> &selection() const { return m_sel; }
@@ -249,6 +265,14 @@ private:
     void update_creation(pagemade::Point pt, bool constrain);
     void finish_creation();
 
+    /* A new frame of `asset` at print size, at the margin. Caller recorded
+     * the undo step and added the asset. */
+    void place_frame(uint32_t asset, const pagemade::ImageMetadata &meta);
+    /* Drop GPU copies when the store is replaced. Called from draw(). */
+    void sync_textures(NVGcontext *ctx);
+    /* Display view for one placement. 0 draws the stand-in. */
+    int texture_for(NVGcontext *ctx, const pagemade::DrawImage &im, float px);
+
     /* ---- Text tool ------------------------------------------------- */
     pagemade::Story *edit_story();
     const pagemade::Story *edit_story() const;
@@ -318,4 +342,11 @@ private:
     bool m_show_baselines = false;
     bool m_show_loose_tight = false;
     bool m_show_guides = true;
+
+    pagemade::ImageStore *m_images = nullptr;
+    /* Screen copies of display views. Freed when the store's generation
+     * changes, not from the destructor: the screen may already be gone. */
+    struct Tex { int id = 0; int w = 0, h = 0; };
+    std::map<uint32_t, Tex> m_tex;
+    uint64_t m_tex_gen = 0;
 };

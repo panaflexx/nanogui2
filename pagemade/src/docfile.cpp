@@ -53,6 +53,7 @@ public:
     void value(const char *s)        { value(std::string(s)); }
     void value(bool b)               { prefix(); text += b ? "true" : "false"; }
     void value(float f)              { prefix(); number(f); }
+    void value(double d)             { prefix(); number(d); }
     void value(int i)                { prefix(); text += std::to_string(i); }
     void value(uint32_t u)           { prefix(); text += std::to_string(u); }
     /* A short list of numbers on one line: [1, 0, 0, 1, 54, 54]. */
@@ -107,6 +108,13 @@ private:
             f = 0.f;
         char buf[32];
         auto r = std::to_chars(buf, buf + sizeof buf, f);
+        text.append(buf, r.ptr);
+    }
+    void number(double d) {
+        if (!std::isfinite(d))
+            d = 0;
+        char buf[64];
+        auto r = std::to_chars(buf, buf + sizeof buf, d, std::chars_format::general);
         text.append(buf, r.ptr);
     }
     void quote(const std::string &s) {
@@ -279,6 +287,12 @@ void write_item(JsonOut &j, const Item &it) {
         j.key("weight").value(sh->stroke.weight);
         if (sh->stroke.style != LineStyle::Solid) j.key("style").value(line_style_name(sh->stroke.style));
         j.end_object();
+    } else if (const PlacedImage *im = it.image()) {
+        j.key("type").value("image");
+        j.key("asset").value(im->asset);
+        /* The frame itself is the placement when the picture fills it. */
+        if (im->x != 0.f || im->y != 0.f || im->w != it.w || im->h != it.h)
+            j.key("image").numbers({im->x, im->y, im->w, im->h});
     } else {
         j.key("type").value("text");
     }
@@ -315,11 +329,25 @@ struct FontPlan {
     std::map<const Font *, std::string> uri;
 };
 
-std::string safe_file_name(std::string name) {
+std::string safe_file_name(std::string name, const char *fallback = "font") {
     for (char &c : name)
         if (!std::isalnum((unsigned char) c) && c != '.' && c != '-' && c != '_')
             c = '_';
-    return name.empty() ? std::string("font") : name;
+    return name.empty() ? std::string(fallback) : name;
+}
+
+/* `names` are the leaves already used in one package folder. */
+std::string unique_file_name(std::string name, std::set<std::string> &names, const char *fallback) {
+    name = safe_file_name(std::move(name), fallback);
+    const std::string base = name;
+    for (int n = 2; names.count(name); ++n) {
+        const size_t dot = base.find_last_of('.');
+        name = dot == std::string::npos ? base + "-" + std::to_string(n)
+                                        : base.substr(0, dot) + "-" + std::to_string(n) +
+                                          base.substr(dot);
+    }
+    names.insert(name);
+    return name;
 }
 
 FontPlan plan_fonts(const std::vector<FontRef> &refs, const SaveOptions &opts) {
@@ -329,15 +357,7 @@ FontPlan plan_fonts(const std::vector<FontRef> &refs, const SaveOptions &opts) {
         if (!r.font || plan.uri.count(r.font))
             continue;
         if (opts.embed_assets || r.font->path().empty()) {
-            std::string name = safe_file_name(r.font->name());
-            const std::string base = name;
-            for (int n = 2; names.count(name); ++n) {
-                const size_t dot = base.find_last_of('.');
-                name = dot == std::string::npos ? base + "-" + std::to_string(n)
-                                                : base.substr(0, dot) + "-" + std::to_string(n) +
-                                                  base.substr(dot);
-            }
-            names.insert(name);
+            const std::string name = unique_file_name(r.font->name(), names, "font");
             plan.embedded.push_back({r.font, "assets/fonts/" + name});
             plan.uri[r.font] = package_ref("assets/fonts", name);
         } else {
@@ -347,8 +367,102 @@ FontPlan plan_fonts(const std::vector<FontRef> &refs, const SaveOptions &opts) {
     return plan;
 }
 
+/* Pictures. A linked asset names its source file; anything else is copied
+ * into the package. Bytes come from the store, then from that file. */
+struct ImagePlan {
+    struct Embedded {
+        uint32_t id = 0;
+        std::string entry;
+        std::vector<uint8_t> bytes;
+    };
+    std::vector<Embedded> embedded;
+    std::map<uint32_t, std::string> uri;
+    std::string error;
+};
+
+bool read_whole_file(const std::string &path, std::vector<uint8_t> *out) {
+    FILE *f = std::fopen(path.c_str(), "rb");
+    if (!f)
+        return false;
+    if (std::fseek(f, 0, SEEK_END) != 0) { std::fclose(f); return false; }
+    long n = std::ftell(f);
+    if (n < 0) { std::fclose(f); return false; }
+    std::rewind(f);
+    out->resize((size_t) n);
+    size_t got = n ? std::fread(out->data(), 1, (size_t) n, f) : 0;
+    std::fclose(f);
+    return (long) got == n;
+}
+
+std::vector<uint8_t> picture_bytes(const ImageAsset &a, const ImageStore *images) {
+    if (images)
+        if (const ImageStore::Entry *e = images->find(a.id))
+            if (!e->source.empty())
+                return e->source;
+    std::string path;
+    std::vector<uint8_t> bytes;
+    if (!a.source.empty() && file_path_from_uri(a.source, path) && read_whole_file(path, &bytes))
+        return bytes;
+    return {};
+}
+
+std::string image_leaf(const ImageAsset &a) {
+    std::string name = a.name.empty() ? std::string("image") : a.name;
+    if (name.find('.') == std::string::npos) {
+        const std::string ext = a.meta.format == "jpeg" ? "jpg"
+                               : a.meta.format.empty() ? "bin" : a.meta.format;
+        name += "." + ext;
+    }
+    return name;
+}
+
+void write_image_meta(JsonOut &j, const ImageMetadata &m) {
+    j.key("meta").begin_object();
+    j.key("format").value(m.format);
+    j.key("width").value(m.width_px);
+    j.key("height").value(m.height_px);
+    if (m.stored_width_px != m.width_px || m.stored_height_px != m.height_px) {
+        j.key("stored_width").value(m.stored_width_px);
+        j.key("stored_height").value(m.stored_height_px);
+    }
+    if (m.bit_depth != 8) j.key("bit_depth").value(m.bit_depth);
+    j.key("channels").value(m.channels);
+    j.key("model").value(color_model_name(m.model));
+    if (m.alpha) j.key("alpha").value(true);
+    if (m.ppi_x != 0 || m.ppi_y != 0) {
+        j.key("ppi_x").value(m.ppi_x);
+        j.key("ppi_y").value(m.ppi_y);
+    }
+    if (m.orientation != 1) j.key("orientation").value(m.orientation);
+    j.end_object();
+}
+
+ImagePlan plan_images(const PageDoc &doc, const SaveOptions &opts, const ImageStore *images) {
+    ImagePlan plan;
+    std::set<std::string> names;
+    for (const ImageAsset &a : doc.images) {
+        /* No source file means there is nothing to link, so the bytes go in
+         * the package even when the publication is otherwise linked. */
+        const bool link = !opts.embed_assets && !a.source.empty();
+        if (link) {
+            plan.uri[a.id] = a.source;
+            continue;
+        }
+        std::vector<uint8_t> bytes = picture_bytes(a, images);
+        if (bytes.empty()) {
+            plan.error = "the picture \"" + (a.name.empty() ? std::to_string(a.id) : a.name) +
+                         "\" has no file to embed";
+            return plan;
+        }
+        const std::string name = unique_file_name(image_leaf(a), names, "image");
+        plan.uri[a.id] = package_ref("assets/images", name);
+        plan.embedded.push_back({a.id, "assets/images/" + name, std::move(bytes)});
+    }
+    return plan;
+}
+
 std::string make_json(const PageDoc &doc, const SaveOptions &opts, const std::vector<FontRef> &refs,
-                      const FontPlan &plan) {
+                      const FontPlan &plan, const ImagePlan &images) {
     JsonOut j;
     j.begin_object();
     j.key("format").value("pagemade");
@@ -386,6 +500,20 @@ std::string make_json(const PageDoc &doc, const SaveOptions &opts, const std::ve
         j.key("uri").value(plan.uri.at(r.font));
         if (!r.font->path().empty())
             j.key("source").value(file_uri(r.font->path()));
+        j.end_object();
+    }
+    for (const ImageAsset &a : doc.images) {
+        auto uri = images.uri.find(a.id);
+        if (uri == images.uri.end())
+            continue;
+        j.begin_object();
+        j.key("kind").value("image");
+        j.key("id").value(a.id);
+        j.key("name").value(a.name);
+        j.key("uri").value(uri->second);
+        if (!a.source.empty())
+            j.key("source").value(a.source);
+        write_image_meta(j, a.meta);
         j.end_object();
     }
     j.end_array();
@@ -429,6 +557,7 @@ std::string make_json(const PageDoc &doc, const SaveOptions &opts, const std::ve
     j.end_array();
 
     j.key("next_id").value(doc.next_id);
+    j.key("next_asset").value(doc.next_asset);
     j.end_object();
     j.text += '\n';
     return j.text;
@@ -561,6 +690,24 @@ bool read_item(const DictValue *o, Item &it) {
         it.content = TextFrame{};
         return true;
     }
+    if (type == "image") {
+        PlacedImage im;
+        get(o, "asset", im.asset);
+        float box[4] = {0, 0, it.w, it.h};
+        if (floats(o, "image", box, 4) == 4) {
+            im.x = box[0];
+            im.y = box[1];
+            im.w = box[2];
+            im.h = box[3];
+        } else {
+            im.x = 0;
+            im.y = 0;
+            im.w = it.w;
+            im.h = it.h;
+        }
+        it.content = im;
+        return true;
+    }
     if (type != "shape")
         return false;
     Shape sh;
@@ -645,6 +792,35 @@ void repair(PageDoc &d, std::vector<std::string> &warnings) {
                 d.stories.push_back(std::move(se));
             }
     d.next_id = std::max(d.next_id, max_id + 1);
+
+    /* Picture ids: drop 0 and duplicates (keep the first). A frame that
+     * names a picture the publication doesn't have stays, and draws as a
+     * stand-in, so the layout isn't thrown away with the file. */
+    std::set<uint32_t> asset_ids;
+    uint32_t max_asset = 0;
+    size_t dropped_assets = 0;
+    auto bad_asset = [&](const ImageAsset &a) {
+        if (a.id == 0 || !asset_ids.insert(a.id).second)
+            return true;
+        max_asset = std::max(max_asset, a.id);
+        return false;
+    };
+    auto asset_end = std::remove_if(d.images.begin(), d.images.end(), bad_asset);
+    dropped_assets = (size_t) (d.images.end() - asset_end);
+    d.images.erase(asset_end, d.images.end());
+    if (dropped_assets)
+        warnings.push_back(std::to_string(dropped_assets) +
+                           " pictures with missing or repeated ids were dropped");
+    size_t missing = 0;
+    for (const Page &p : d.pages)
+        for (const Item &it : p.items)
+            if (const PlacedImage *im = it.image())
+                if (!d.find_image(im->asset))
+                    ++missing;
+    if (missing)
+        warnings.push_back(std::to_string(missing) +
+                           " pictures point at a picture the publication doesn't have");
+    d.next_asset = std::max(d.next_asset, max_asset + 1);
 }
 
 std::vector<char> extract(mz_zip_archive &zip, const std::string &entry, bool *found) {
@@ -664,16 +840,23 @@ std::vector<char> extract(mz_zip_archive &zip, const std::string &entry, bool *f
 
 /* ---- Public API ------------------------------------------------------------ */
 
-std::string document_json(const PageDoc &doc, const FontLibrary &fonts, const SaveOptions &opts) {
+std::string document_json(const PageDoc &doc, const FontLibrary &fonts, const SaveOptions &opts,
+                          const ImageStore *images) {
     const std::vector<FontRef> refs = used_fonts(doc, fonts);
-    return make_json(doc, opts, refs, plan_fonts(refs, opts));
+    return make_json(doc, opts, refs, plan_fonts(refs, opts), plan_images(doc, opts, images));
 }
 
 bool save_document(const PageDoc &doc, const FontLibrary &fonts, const std::string &path,
-                   const SaveOptions &opts, std::string *error) {
+                   const SaveOptions &opts, std::string *error, const ImageStore *images) {
     const std::vector<FontRef> refs = used_fonts(doc, fonts);
     const FontPlan plan = plan_fonts(refs, opts);
-    const std::string json = make_json(doc, opts, refs, plan);
+    const ImagePlan pictures = plan_images(doc, opts, images);
+    if (!pictures.error.empty()) {
+        if (error)
+            *error = pictures.error;
+        return false;
+    }
+    const std::string json = make_json(doc, opts, refs, plan, pictures);
     const std::string tmp = path + ".saving";
 
     mz_zip_archive zip;
@@ -696,6 +879,9 @@ bool save_document(const PageDoc &doc, const FontLibrary &fonts, const std::stri
         const char *data = e.font->data(&n);
         ok = ok && mz_zip_writer_add_mem(&zip, e.entry.c_str(), data, n, MZ_DEFAULT_COMPRESSION);
     }
+    for (const auto &e : pictures.embedded)
+        ok = ok && mz_zip_writer_add_mem(&zip, e.entry.c_str(), e.bytes.data(), e.bytes.size(),
+                                         MZ_DEFAULT_COMPRESSION);
     ok = ok && mz_zip_writer_finalize_archive(&zip);
     const std::string zip_error = mz_zip_get_error_string(mz_zip_get_last_error(&zip));
     mz_zip_writer_end(&zip);
@@ -831,12 +1017,89 @@ OpenResult open_document(const std::string &path, const FontLibrary &installed) 
     if (unknown)
         r.warnings.push_back(std::to_string(unknown) + " items of kinds this version doesn't know were left out");
     get(root, "next_id", d.next_id);
+    get(root, "next_asset", d.next_asset);
+
+    /* Pictures, before repair, so a bad id can be dropped and a frame that
+     * names one can be reported. Bytes are loaded after, once the ids that
+     * survive are known. The profile stays in the file bytes: probe fills
+     * it back in, and it is not stored in document.json. */
+    std::map<uint32_t, std::string> image_uris;
+    const DictValue *assets = field(root, "assets");
+    for (size_t i = 0; i < count(assets); ++i) {
+        const DictValue *a = at(assets, i);
+        std::string kind;
+        get(a, "kind", kind);
+        if (kind != "image")
+            continue;
+        ImageAsset asset;
+        get(a, "id", asset.id);
+        get(a, "name", asset.name);
+        get(a, "source", asset.source);
+        std::string uri;
+        get(a, "uri", uri);
+        if (const DictValue *meta = field(a, "meta")) {
+            std::string model;
+            get(meta, "format", asset.meta.format);
+            get(meta, "width", asset.meta.width_px);
+            get(meta, "height", asset.meta.height_px);
+            get(meta, "stored_width", asset.meta.stored_width_px);
+            get(meta, "stored_height", asset.meta.stored_height_px);
+            get(meta, "bit_depth", asset.meta.bit_depth);
+            get(meta, "channels", asset.meta.channels);
+            get(meta, "model", model);
+            asset.meta.model = color_model_from(model);
+            get(meta, "alpha", asset.meta.alpha);
+            double ppi = 0;
+            if (number(field(meta, "ppi_x"), ppi)) asset.meta.ppi_x = ppi;
+            if (number(field(meta, "ppi_y"), ppi)) asset.meta.ppi_y = ppi;
+            get(meta, "orientation", asset.meta.orientation);
+        }
+        if (asset.meta.stored_width_px <= 0) asset.meta.stored_width_px = asset.meta.width_px;
+        if (asset.meta.stored_height_px <= 0) asset.meta.stored_height_px = asset.meta.height_px;
+        if (asset.meta.orientation < 1 || asset.meta.orientation > 8) asset.meta.orientation = 1;
+        if (asset.meta.bit_depth <= 0) asset.meta.bit_depth = 8;
+        if (!image_uris.count(asset.id))
+            image_uris[asset.id] = uri;
+        d.images.push_back(std::move(asset));
+    }
     repair(d, r.warnings);
+
+    for (ImageAsset &asset : d.images) {
+        r.images.note_id(asset.id);
+        const std::string uri = image_uris.count(asset.id) ? image_uris[asset.id] : std::string();
+        std::vector<uint8_t> bytes;
+        std::string where = asset.name.empty() ? uri : asset.name;
+        bool got = false;
+        if (is_package_ref(uri)) {
+            const std::string entry = package_entry(uri);
+            where = entry;
+            bool found_entry = false;
+            std::vector<char> raw = extract(zip, entry, &found_entry);
+            if (found_entry) {
+                bytes.assign(raw.begin(), raw.end());
+                got = true;
+            }
+        } else if (std::string path; file_path_from_uri(uri, path)) {
+            where = path;
+            got = read_whole_file(path, &bytes);
+        }
+        if (!got || bytes.empty()) {
+            if (!uri.empty())
+                r.warnings.push_back("couldn't read the picture " + where);
+            continue;                    // JSON metadata stays; the frame is a stand-in
+        }
+        ImageMetadata probed;
+        std::string err;
+        if (r.images.add(asset.id, std::move(bytes), &probed, &err))
+            asset.meta = std::move(probed);   // the file wins over the JSON copy
+        else
+            r.warnings.push_back("couldn't read the picture " + where +
+                                 (err.empty() ? "" : ": " + err));
+    }
 
     /* Fonts: embedded copies always; linked files only for families that
      * aren't installed here. */
     std::set<std::string> provided;      // "family/style" found
-    const DictValue *assets = field(root, "assets");
     for (size_t i = 0; i < count(assets); ++i) {
         const DictValue *a = at(assets, i);
         std::string kind, family, style, uri;

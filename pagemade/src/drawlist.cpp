@@ -27,6 +27,19 @@ DrawList build_page(const PageDoc &doc, size_t page, const std::vector<Compositi
             }
             continue;
         }
+        if (const PlacedImage *im = it.image()) {
+            DrawImage d;
+            d.asset = im->asset;
+            d.x = im->x;
+            d.y = im->y;
+            d.w = im->w;
+            d.h = im->h;
+            d.clip_w = it.w;
+            d.clip_h = it.h;
+            d.xf = it.xf;
+            out.push_back(d);
+            continue;
+        }
         size_t ti = 0;
         const StoryEntry *se = doc.story_of(it.id, &ti);
         const size_t si = se ? doc.story_index(se->id) : SIZE_MAX;
