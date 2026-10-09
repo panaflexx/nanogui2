@@ -57,6 +57,8 @@ struct GlyphRun {
     float size = 12.f;
     float hscale = 100.f;
     Color color;
+    bool underline = false;
+    bool strike = false;
     std::vector<PlacedGlyph> glyphs;
 };
 

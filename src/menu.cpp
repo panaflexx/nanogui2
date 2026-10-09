@@ -16,6 +16,8 @@
 #include <nanogui/scrollpanel.h>
 #include <nanogui/zoomscrollpanel.h>
 #include <stdexcept> // for runtime_error
+#include <algorithm>
+#include <cmath>
 #include <map>
 
 using std::runtime_error;
@@ -40,6 +42,31 @@ namespace
 {
 constexpr int menu_item_height = 20;
 constexpr int seperator_height = 8;
+
+void paint_menu_star(NVGcontext *ctx, float cx, float cy, float radius, bool filled, NVGcolor color)
+{
+    const float inner = radius * 0.42f;
+    nvgBeginPath(ctx);
+    for (int i = 0; i < 10; ++i) {
+        const float rad = (i % 2 == 0) ? radius : inner;
+        const float angle = -1.5707963f + (float) i * 0.62831853f;
+        const float x = cx + rad * cosf(angle);
+        const float y = cy + rad * sinf(angle);
+        if (i == 0)
+            nvgMoveTo(ctx, x, y);
+        else
+            nvgLineTo(ctx, x, y);
+    }
+    nvgClosePath(ctx);
+    if (filled) {
+        nvgFillColor(ctx, color);
+        nvgFill(ctx);
+    } else {
+        nvgStrokeColor(ctx, color);
+        nvgStrokeWidth(ctx, 1.15f);
+        nvgStroke(ctx);
+    }
+}
 } // namespace
 
 
@@ -193,19 +220,60 @@ Vector2i MenuItem::preferred_size(NVGcontext *ctx) const
     // nvgFontSize(ctx, ih);
     // iw = nvgTextBounds(ctx, 0, 0, utf8(m_icon).data(), nullptr, nullptr) + m_size.y() * 0.15f;
     float iw = font_size * icon_scale();
-    if (!shortcut().text.size())
-        return preferred_text_size(ctx) + Vector2i((int)iw, 0);
+    Vector2i size;
+    if (!shortcut().text.size()) {
+        size = preferred_text_size(ctx) + Vector2i((int)iw, 0);
+    } else {
+        // Shortcut text is measured separately, so it belongs in the cache key.
+        TextSizeCache::Key key{m_caption + '\x1f' + shortcut().text, font_size,
+                               m_icon, m_theme.get(),
+                               m_theme ? m_theme->generation() : 0};
+        if (m_size_cache.hit(key))
+            size = m_size_cache.size;
+        else {
+            float sw = nvgTextBounds(ctx, 0, 0, shortcut().text.c_str(), nullptr, nullptr) + iw * 5;
+            size = m_size_cache.store(
+                key, preferred_text_size(ctx) + Vector2i((int)(iw + sw), 0));
+        }
+    }
+    if (m_has_mark)
+        size.x() += 22;
+    return size;
+}
 
-    // Shortcut text is measured separately, so it belongs in the cache key.
-    TextSizeCache::Key key{m_caption + '\x1f' + shortcut().text, font_size,
-                           m_icon, m_theme.get(),
-                           m_theme ? m_theme->generation() : 0};
-    if (m_size_cache.hit(key))
-        return m_size_cache.size;
+void MenuItem::set_mark(bool on, const std::function<void()> &callback)
+{
+    m_has_mark = true;
+    m_mark_on = on;
+    m_mark_callback = callback;
+}
 
-    float sw = nvgTextBounds(ctx, 0, 0, shortcut().text.c_str(), nullptr, nullptr) + iw * 5;
-    return m_size_cache.store(
-        key, preferred_text_size(ctx) + Vector2i((int)(iw + sw), 0));
+void MenuItem::clear_mark()
+{
+    m_has_mark = false;
+    m_mark_on = false;
+    m_mark_armed = false;
+    m_mark_callback = nullptr;
+}
+
+bool MenuItem::over_mark(const Vector2i &p) const
+{
+    if (!m_has_mark || !m_enabled || !m_visible)
+        return false;
+    if (!contains(p))
+        return false;
+    return p.x() >= m_pos.x() + m_size.x() - 28;
+}
+
+void MenuItem::release_mark(bool fire)
+{
+    m_mark_armed = false;
+    if (!fire || !m_mark_callback)
+        return;
+    /* The callback may rebuild this menu. Defer it so the click that armed
+       the star is finished before the item is destroyed. */
+    auto callback = m_mark_callback;
+    async([callback] { callback(); });
 }
 
 void MenuItem::set_highlighted(bool highlight, bool unhighlight_siblings, bool run_callbacks)
@@ -327,7 +395,21 @@ void MenuItem::draw(NVGcontext *ctx)
     nvgFontFace(ctx, "sans");
     nvgTextAlign(ctx, NVG_ALIGN_LEFT | NVG_ALIGN_MIDDLE);
     nvgFillColor(ctx, text_color);
+    if (m_has_mark) {
+        nvgSave(ctx);
+        nvgIntersectScissor(ctx, m_pos.x(), m_pos.y(), std::max(1.f, (float) m_size.x() - 30.f),
+                            (float) m_size.y());
+    }
     nvgText(ctx, text_pos.x(), text_pos.y(), m_caption.c_str(), nullptr);
+    if (m_has_mark)
+        nvgRestore(ctx);
+
+    if (m_has_mark) {
+        NVGcolor star = m_mark_on
+                            ? (m_highlighted ? nvgRGBA(255, 214, 90, 255) : nvgRGBA(186, 132, 18, 255))
+                            : (m_highlighted ? nvgRGBA(255, 255, 255, 230) : nvgRGBA(130, 130, 130, 220));
+        paint_menu_star(ctx, m_pos.x() + m_size.x() - 16.f, center.y(), 6.2f, m_mark_on, star);
+    }
 
     if (!shortcut().text.size())
         return;
@@ -430,8 +512,201 @@ void PopupMenu::set_selected_index(int idx)
     m_selected_idx = idx;
 }
 
+Vector2i PopupMenu::preferred_size(NVGcontext *ctx) const
+{
+    return Widget::preferred_size(ctx);
+}
+
+int PopupMenu::max_scroll() const
+{
+    int bottom = 0;
+    for (Widget *c : m_children) {
+        if (!c->visible())
+            continue;
+        bottom = std::max(bottom, c->position().y() + m_scroll + c->size().y());
+    }
+    /* BoxLayout's bottom margin matches the top margin the items were placed with. */
+    return std::max(0, bottom + 3 - m_size.y());
+}
+
+void PopupMenu::perform_layout(NVGcontext *ctx)
+{
+    if (!ctx)
+        return;
+
+    /* A menu taller than its popup must keep full-height rows. BoxLayout
+       squashes children when the preferred height exceeds the widget, so
+       lay the items out at the content height and then clip the popup back. */
+    const int shown_w = m_size.x();
+    const int shown_h = m_size.y();
+    const int natural_h = preferred_size(ctx).y();
+    const bool overflow = shown_h > 0 && natural_h > shown_h;
+    if (overflow) {
+        m_size.y() = natural_h;
+        m_size.x() = std::max(1, shown_w - 12);
+    }
+
+    Widget::perform_layout(ctx);
+
+    int bottom = 0;
+    for (Widget *c : m_children) {
+        if (!c->visible())
+            continue;
+        bottom = std::max(bottom, c->position().y() + c->size().y());
+    }
+    if (shown_w > 0)
+        m_size.x() = shown_w;
+    if (shown_h > 0)
+        m_size.y() = shown_h;
+
+    const int limit = std::max(0, bottom + 3 - m_size.y());
+    if (m_scroll < 0)
+        m_scroll = 0;
+    if (m_scroll > limit)
+        m_scroll = limit;
+    if (m_scroll == 0)
+        return;
+
+    for (Widget *c : m_children) {
+        Vector2i pos = c->position();
+        pos.y() -= m_scroll;
+        c->set_position(pos);
+    }
+}
+
+void PopupMenu::reveal(int idx)
+{
+    MenuItem *it = item(idx);
+    if (!it || !it->visible())
+        return;
+    const int top = it->position().y() + m_scroll;
+    const int bot = top + std::max(1, it->size().y());
+    const int view_top = 3;
+    const int view_bot = std::max(view_top + 1, m_size.y() - 3);
+    if (top < m_scroll + view_top)
+        m_scroll = top - view_top;
+    else if (bot > m_scroll + view_bot)
+        m_scroll = bot - view_bot;
+    if (m_scroll < 0)
+        m_scroll = 0;
+}
+
+bool PopupMenu::over_scrollbar(const Vector2i &p) const
+{
+    if (max_scroll() <= 0)
+        return false;
+    const Vector2i local = p - m_pos;
+    return local.x() >= m_size.x() - 12 && local.x() < m_size.x() &&
+           local.y() >= 0 && local.y() < m_size.y();
+}
+
+void PopupMenu::scroll_from_track(int local_y)
+{
+    const int limit = max_scroll();
+    if (limit <= 0 || m_size.y() <= 8)
+        return;
+    const float track_h = (float)m_size.y() - 8.f;
+    const float total = (float)(limit + m_size.y());
+    const float thumb_h = std::max(18.f, track_h * ((float)m_size.y() / total));
+    const float travel = std::max(1.f, track_h - thumb_h);
+    float rel = ((float)local_y - 4.f - thumb_h * 0.5f) / travel;
+    if (rel < 0.f)
+        rel = 0.f;
+    if (rel > 1.f)
+        rel = 1.f;
+    m_scroll = (int)std::lround(rel * (float)limit);
+    if (Screen *s = screen())
+        perform_layout(s->nvg_context());
+}
+
+bool PopupMenu::scroll_event(const Vector2i &p, const Vector2f &rel)
+{
+    if (!contains(p))
+        return false;
+    const int limit = max_scroll();
+    if (limit > 0 && rel.y() != 0.f) {
+        int dy = (int)std::lround(-rel.y() * (float)menu_item_height * 3.f);
+        if (dy == 0)
+            dy = rel.y() < 0.f ? 1 : -1;
+        int next = m_scroll + dy;
+        if (next < 0)
+            next = 0;
+        if (next > limit)
+            next = limit;
+        if (next != m_scroll) {
+            m_scroll = next;
+            if (Screen *s = screen())
+                perform_layout(s->nvg_context());
+        }
+    }
+    /* Window swallows the wheel. A short menu keeps that, so the page
+       underneath does not zoom while the menu is open. */
+    return true;
+}
+
+bool PopupMenu::mouse_drag_event(const Vector2i &p, const Vector2i &rel, int button, int modifiers)
+{
+    if (m_scrollbar_drag) {
+        scroll_from_track(p.y() - m_pos.y());
+        return true;
+    }
+    return Window::mouse_drag_event(p, rel, button, modifiers);
+}
+
+Widget *PopupMenu::find_widget(const Vector2i &p)
+{
+    if (over_scrollbar(p))
+        return this;
+    return Window::find_widget(p);
+}
+
+const Widget *PopupMenu::find_widget(const Vector2i &p) const
+{
+    if (over_scrollbar(p))
+        return this;
+    return Window::find_widget(p);
+}
+
 bool PopupMenu::mouse_button_event(const Vector2i &p, int button, bool down, int modifiers)
 {
+    if (button == GLFW_MOUSE_BUTTON_1 && over_scrollbar(p)) {
+        m_scrollbar_drag = down;
+        if (down)
+            scroll_from_track(p.y() - m_pos.y());
+        return true;
+    }
+    if (!down)
+        m_scrollbar_drag = false;
+
+    /* The star sits on the row but is not the row. A press there must not
+       choose the family or close the menu. */
+    if (button == GLFW_MOUSE_BUTTON_1) {
+        const Vector2i local = p - m_pos;
+        if (!down) {
+            bool armed = false;
+            for (Widget *child : m_children) {
+                auto *item = dynamic_cast<MenuItem *>(child);
+                if (!item || !item->mark_armed())
+                    continue;
+                armed = true;
+                item->release_mark(item->over_mark(local));
+            }
+            if (armed)
+                return true;
+        } else {
+            for (Widget *child : m_children) {
+                auto *item = dynamic_cast<MenuItem *>(child);
+                if (!item || !item->over_mark(local))
+                    continue;
+                for (Widget *other : m_children)
+                    if (auto *sibling = dynamic_cast<MenuItem *>(other))
+                        sibling->disarm_mark();
+                item->arm_mark();
+                return true;
+            }
+        }
+    }
+
     //spdlog::trace("PopupMenu::mouse_button_event({}, {}, {}, {})", p, button, down, modifiers);
     //printf("PopupMenu mouse_button_event\n");
     if (Popup::mouse_button_event(p, button, down, modifiers))
@@ -505,11 +780,27 @@ bool PopupMenu::keyboard_event(int key, int scancode, int action, int modifiers)
 
         if (visible() && (action == GLFW_PRESS || action == GLFW_REPEAT))
         {
+            const bool querying = menu && menu->has_query_callback();
+            if (querying && key == GLFW_KEY_BACKSPACE) {
+                menu->query_event(0);
+                return true;
+            }
+            /* Escape clears a search first. A second Escape closes. */
+            if (querying && key == GLFW_KEY_ESCAPE && menu->query_event(0x1B))
+                return true;
+            /* Space is also a character. Choosing the row here would eat the
+               space that the character event adds to the search. */
+            if (querying && key == GLFW_KEY_SPACE)
+                return true;
             if (key == GLFW_KEY_ESCAPE)
             {
                 set_visible(false);
                 set_highlighted_index(-1);
-                if (m_parent_window && m_parent_window->is_root())
+                if (auto *dd = dynamic_cast<Dropdown *>(m_parent_item))
+                    dd->set_pushed(false);
+                /* A root is not reordered. A modal dialog has to take focus
+                   back; otherwise the next click lands behind it. */
+                if (m_parent_window && (m_parent_window->is_root() || m_parent_window->modal()))
                     m_parent_window->request_focus();
                 else if (parent())
                     parent()->request_focus();
@@ -537,7 +828,7 @@ bool PopupMenu::keyboard_event(int key, int scancode, int action, int modifiers)
                             for (Widget *c : s->children())
                                 if (c == parent_window) { live = true; break; }
                         }
-                        if (live && parent_window->is_root())
+                        if (live && (parent_window->is_root() || parent_window->modal()))
                             parent_window->request_focus();
                         parent_window = nullptr;
                     }
@@ -559,8 +850,12 @@ bool PopupMenu::keyboard_event(int key, int scancode, int action, int modifiers)
             }
             else if (key == GLFW_KEY_UP || key == GLFW_KEY_DOWN)
             {
-                set_highlighted_index(
-                    next_visible_child(this, m_highlighted_idx, key == GLFW_KEY_UP ? Backward : Forward, true));
+                const int next =
+                    next_visible_child(this, m_highlighted_idx, key == GLFW_KEY_UP ? Backward : Forward, true);
+                set_highlighted_index(next);
+                reveal(next);
+                if (Screen *s = screen())
+                    perform_layout(s->nvg_context());
                 return true;
             }
             else if ((key == GLFW_KEY_LEFT || key == GLFW_KEY_RIGHT) && m_parent_item)
@@ -630,6 +925,16 @@ bool PopupMenu::keyboard_event(int key, int scancode, int action, int modifiers)
     return false;
 }
 
+bool PopupMenu::keyboard_character_event(unsigned int codepoint)
+{
+    if (codepoint < 32)
+        return false;
+    if (auto *menu = dynamic_cast<Dropdown *>(m_parent_item))
+        if (menu->has_query_callback())
+            return menu->query_event(codepoint);
+    return false;
+}
+
 void PopupMenu::draw(NVGcontext *ctx)
 {
     // refresh_relative_placement();
@@ -654,7 +959,24 @@ void PopupMenu::draw(NVGcontext *ctx)
 
     nvgRestore(ctx);
 
+    nvgSave(ctx);
+    nvgIntersectScissor(ctx, fx, fy, fw, fh);
     Widget::draw(ctx);
+
+    const int limit = max_scroll();
+    if (limit > 0 && fh > 8.f) {
+        const float track_top = fy + 4.f;
+        const float track_h = fh - 8.f;
+        const float total = (float)(limit + m_size.y());
+        const float thumb_h = std::max(18.f, track_h * ((float)m_size.y() / total));
+        const float travel = std::max(0.f, track_h - thumb_h);
+        const float thumb_y = track_top + travel * ((float)m_scroll / (float)limit);
+        nvgBeginPath(ctx);
+        nvgRoundedRect(ctx, fx + fw - 7.f, thumb_y, 3.f, thumb_h, 1.5f);
+        nvgFillColor(ctx, nvgRGBA(120, 120, 120, 180));
+        nvgFill(ctx);
+    }
+    nvgRestore(ctx);
 }
 
 Dropdown::Dropdown(Widget *parent, Mode mode, const string &caption) : MenuItem(parent, caption), m_mode(mode)
@@ -784,6 +1106,37 @@ void Dropdown::remove_item(int index) {
     item->dec_ref();
 }
 
+void Dropdown::clear_items()
+{
+    if (!m_popup)
+        return;
+    m_popup->set_highlighted_index(-1);
+    while (m_popup->child_count() > 0) {
+        MenuItem *old = m_popup->item(m_popup->child_count() - 1);
+        /* The parent holds one ref. remove_child adds another and drops it
+           at frame cleanup, so a second dec_ref releases the item. */
+        old->inc_ref();
+        m_popup->remove_child(old);
+        old->dec_ref();
+        old->dec_ref();
+    }
+    m_popup->set_selected_index(-1);
+    m_popup->set_scroll(0);
+}
+
+void Dropdown::set_items(const std::vector<std::string> &items)
+{
+    if (!m_popup)
+        return;
+    clear_items();
+    for (const std::string &caption : items)
+        add_item(std::make_pair(caption, std::string()), 0, {}, {{0, 0}}, true);
+    if (!items.empty())
+        set_selected_index(0);
+    else
+        set_caption("");
+}
+
 Vector2i Dropdown::preferred_size(NVGcontext *ctx) const
 {
     int font_size = m_font_size == -1 ? m_theme->m_button_font_size : m_font_size;
@@ -814,17 +1167,40 @@ void Dropdown::update_popup_geometry() const
      * screen's initial layout pass) may never have been sized or laid
      * out, and would render as a zero-size, unclickable frame.  Menus
      * size to their content, so (re)apply the preferred size and lay out
-     * the items every time the popup is opened. */
+     * the items every time the popup is opened. A list taller than the
+     * screen keeps a viewport and scrolls; a menu that fits is unchanged. */
     NVGcontext *nvg = screen()->nvg_context();
     Vector2i   pref = m_popup->preferred_size(nvg);
+    const int edge = 2;
+    const int max_h = std::max(menu_item_height * 2, screen()->height() - 2 * edge);
+    const int max_w = std::max(32, screen()->width() - 2 * edge);
+    int font_size = m_font_size == -1 ? m_theme->m_button_font_size : m_font_size;
+    /* A combo stretched wider than its longest item (the type dialog's font
+       field) still opens a menu that lines up with the field. */
+    if (m_mode == ComboBox) {
+        const int attached = width() + (int)(font_size * icon_scale()) + 4;
+        if (pref.x() < attached)
+            pref.x() = attached;
+    }
+    const bool tall = pref.y() > max_h;
+    const bool wide = pref.x() > max_w;
+    if (tall)
+        pref.y() = max_h;
+    if (wide)
+        pref.x() = max_w;
     if (m_popup->size() != pref)
         m_popup->set_size(pref);
     m_popup->perform_layout(nvg);
 
-    int      font_size = m_font_size == -1 ? m_theme->m_button_font_size : m_font_size;
     Vector2i offset;
-    if (m_mode == ComboBox)
-        offset = Vector2i(-3 - font_size * icon_scale(), -selected_index() * menu_item_height - 4);
+    if (m_mode == ComboBox) {
+        /* A short combo keeps the selected row on the button. A viewport
+           taller than the screen drops open and scrolls that row into view. */
+        if (tall)
+            offset = Vector2i(-3 - (int)(font_size * icon_scale()), height());
+        else
+            offset = Vector2i(-3 - (int)(font_size * icon_scale()), -selected_index() * menu_item_height - 4);
+    }
     else if (m_mode == Menu)
         offset = Vector2i(0, height() + 4);
     else
@@ -865,7 +1241,28 @@ void Dropdown::update_popup_geometry() const
     if (abs_pos.y() <= 1)
         abs_pos.y() = absolute_position().y() + size().y() - 2;
 
+    if (wide) {
+        if (abs_pos.x() < edge)
+            abs_pos.x() = edge;
+        const int overflow = abs_pos.x() + m_popup->size().x() + edge - screen()->width();
+        if (overflow > 0)
+            abs_pos.x() -= overflow;
+    }
+
     m_popup->set_position(abs_pos);
+}
+
+void Dropdown::align_open_scroll()
+{
+    if (m_mode != ComboBox || !m_popup)
+        return;
+    const int idx = selected_index();
+    if (idx >= 0)
+        m_popup->reveal(idx);
+    else
+        m_popup->set_scroll(0);
+    if (Screen *s = screen())
+        m_popup->perform_layout(s->nvg_context());
 }
 
 bool Dropdown::mouse_enter_event(const Vector2i &p, bool enter)
@@ -880,13 +1277,21 @@ bool Dropdown::mouse_button_event(const Vector2i &p, int button, bool down, int 
 {
     //spdlog::trace("Dropdown::mouse_button_event({}, {}, {}, {})", p, button, down, modifiers);
     //printf("Dropdown::mouse_button_event(%d,%d), %d, %d, %d)\n", p[0], p[1], button, down, modifiers);
+    const bool opening = m_popup && !m_popup->visible();
     auto ret = MenuItem::mouse_button_event(p, button, down, modifiers);
     if (m_enabled && m_pushed)
     {
         if (!m_focused)
             request_focus();
 
+        /* Refill before the popup is sized, so a short list is not measured
+           as the previous search. The callback must not call set_pushed. */
+        if (opening && m_open_callback)
+            m_open_callback();
+
         update_popup_geometry();
+        if (opening)
+            align_open_scroll();
 
         // first turn focus off on all menu buttons
         for (auto it : m_popup->children()) it->mouse_enter_event(p - m_pos, false);
@@ -911,6 +1316,7 @@ bool Dropdown::mouse_button_event(const Vector2i &p, int button, bool down, int 
 
 void Dropdown::set_pushed(bool pushed)
 {
+    const bool closing = m_pushed && !pushed;
     m_pushed = pushed;
     // Track the popup panel with the screen (mirrors PopupButton) so
     // clicking outside it — anywhere other than the panel itself or this
@@ -930,6 +1336,10 @@ void Dropdown::set_pushed(bool pushed)
         m_popup->set_visible(false);
         m_popup->set_highlighted_index(-1);
     }
+    /* Clearing a search string is safe here. Rebuilding the popup is not:
+       draw() calls set_pushed(false) whenever the popup is already hidden. */
+    if (closing && m_close_callback)
+        m_close_callback();
 }
 
 bool Dropdown::keyboard_event(int key, int scancode, int action, int modifiers) {
@@ -939,7 +1349,10 @@ bool Dropdown::keyboard_event(int key, int scancode, int action, int modifiers) 
 
     if (!m_popup->visible() && (key == GLFW_KEY_SPACE || key == GLFW_KEY_ENTER || key == GLFW_KEY_KP_ENTER)) {
         // Open the popup menu on Space or Enter (if not already visible)
+        if (m_open_callback)
+            m_open_callback();
         update_popup_geometry();
+        align_open_scroll();
         m_popup->set_visible(true);
         m_popup->request_focus();
         set_pushed(true);
@@ -1067,7 +1480,12 @@ void Dropdown::draw(NVGcontext *ctx)
     nvgFontFace(ctx, "sans");
     nvgTextAlign(ctx, NVG_ALIGN_LEFT | NVG_ALIGN_MIDDLE);
     nvgFillColor(ctx, text_color);
+    nvgSave(ctx);
+    if (m_mode == ComboBox)
+        nvgIntersectScissor(ctx, m_pos.x() + 6.f, m_pos.y(),
+                            std::max(0.f, (float)m_size.x() - 28.f), (float)m_size.y());
     nvgText(ctx, text_pos.x(), text_pos.y(), m_caption.c_str(), nullptr);
+    nvgRestore(ctx);
 
     if (m_mode != Menu)
     {

@@ -997,21 +997,153 @@ bool ComposerView::type_style(TypeStyle &o) const {
     }
     const CharStyle &a = styles.front();
     o.family = a.family;
+    o.face = a.face;
     o.bold = a.bold;
     o.italic = a.italic;
+    o.caps = a.caps;
+    o.underline = a.underline;
+    o.strike = a.strike;
+    o.kerning = a.kerning;
+    o.ligatures = a.ligatures;
     o.size = a.size;
     o.leading = a.leading;
     o.baseline = a.baseline_shift;
+    o.tracking = a.tracking;
+    o.hscale = a.hscale;
     o.mix_family = o.mix_style = o.mix_size = o.mix_leading = o.mix_baseline = false;
+    o.mix_caps = o.mix_deco = o.mix_track = o.mix_hscale = false;
+    o.mix_kerning = o.mix_ligatures = false;
     for (size_t i = 1; i < styles.size(); ++i) {
         const CharStyle &b = styles[i];
         o.mix_family |= b.family != a.family;
-        o.mix_style |= b.bold != a.bold || b.italic != a.italic;
+        o.mix_style |= b.face != a.face || b.bold != a.bold || b.italic != a.italic;
         o.mix_size |= b.size != a.size;
         o.mix_leading |= b.leading != a.leading;
         o.mix_baseline |= b.baseline_shift != a.baseline_shift;
+        o.mix_caps |= b.caps != a.caps;
+        o.mix_deco |= b.underline != a.underline || b.strike != a.strike;
+        o.mix_track |= b.tracking != a.tracking;
+        o.mix_hscale |= b.hscale != a.hscale;
+        o.mix_kerning |= b.kerning != a.kerning;
+        o.mix_ligatures |= b.ligatures != a.ligatures;
     }
     return true;
+}
+
+void ComposerView::collect_align_hits(std::vector<AlignHit> &out) const {
+    out.clear();
+    auto add_line = [&](size_t si, const ComposedLine &l) {
+        out.push_back({si, {l.para, l.byte_start}, {l.para, l.byte_end}});
+    };
+    /* Snap a story range out to the composed lines it touches, so a
+     * selection in the middle of a line still aligns that whole line. */
+    auto add_expanded = [&](size_t si, const Story &story, const Composition &comp,
+                            TextPos a, TextPos b) {
+        if (b < a)
+            std::swap(a, b);
+        if (a == b) {
+            Caret at = caret_at(comp, story, a);
+            if (at.valid() && at.line < comp.lines.size())
+                add_line(si, comp.lines[at.line]);
+            else if (a.para < story.paragraphs.size()) {
+                const uint32_t n = para_length(story.paragraphs[a.para]);
+                out.push_back({si, {a.para, 0}, {a.para, n}});
+            }
+            return;
+        }
+        for (size_t pi = a.para; pi <= b.para && pi < story.paragraphs.size(); ++pi) {
+            const uint32_t len = para_length(story.paragraphs[pi]);
+            uint32_t from = pi == a.para ? a.byte : 0;
+            uint32_t to = pi == b.para ? std::min(b.byte, len) : len;
+            for (const ComposedLine &l : comp.lines) {
+                if (l.para != pi)
+                    continue;
+                const bool inside = l.byte_end > from && l.byte_start < to;
+                const bool empty_inside = l.byte_start == l.byte_end &&
+                                          from <= l.byte_start && l.byte_start <= to;
+                if (!inside && !empty_inside)
+                    continue;
+                from = std::min(from, l.byte_start);
+                to = std::max(to, l.byte_end);
+            }
+            if (len == 0 || from < to)
+                out.push_back({si, {pi, from}, {pi, to}});
+        }
+    };
+
+    if (const Story *s = edit_story()) {
+        const size_t si = m_doc.story_index(m_edit_story);
+        const Composition *c = edit_comp();
+        if (!c || si == SIZE_MAX)
+            return;
+        add_expanded(si, *s, *c, m_anchor, m_caret);
+        return;
+    }
+    for (ItemId id : m_sel) {
+        size_t ti = 0;
+        const StoryEntry *se = m_doc.story_of(id, &ti);
+        const Item *it = m_doc.find_item(id);
+        if (!se || !it || !it->is_text())
+            continue;
+        const size_t si = m_doc.story_index(se->id);
+        if (si >= m_comp.size())
+            continue;
+        for (const ComposedLine &l : m_comp[si].lines)
+            if (l.frame == ti)
+                add_line(si, l);
+    }
+}
+
+bool ComposerView::text_align(Align &align, bool &mixed) const {
+    std::vector<AlignHit> hits;
+    collect_align_hits(hits);
+    mixed = false;
+    bool any = false;
+    for (const AlignHit &h : hits) {
+        if (h.story >= m_doc.stories.size())
+            continue;
+        const Story &s = m_doc.stories[h.story].story;
+        if (h.a.para >= s.paragraphs.size())
+            continue;
+        const Align al = s.paragraphs[h.a.para].style.align;
+        if (!any)
+            align = al;
+        else if (al != align)
+            mixed = true;
+        any = true;
+    }
+    return any;
+}
+
+void ComposerView::apply_align(Align align) {
+    Align current = Align::Left;
+    bool mixed = false;
+    if (!text_align(current, mixed) || (!mixed && current == align))
+        return;
+    std::vector<AlignHit> hits;
+    collect_align_hits(hits);
+    std::vector<std::vector<std::pair<TextPos, TextPos>>> by(m_doc.stories.size());
+    for (const AlignHit &h : hits)
+        if (h.story < by.size())
+            by[h.story].push_back({h.a, h.b});
+    if (editing())
+        will_edit(false);
+    else
+        push_undo();
+    for (size_t i = 0; i < by.size(); ++i) {
+        if (by[i].empty())
+            continue;
+        TextPos *caret = nullptr, *anchor = nullptr;
+        if (editing() && m_doc.stories[i].id == m_edit_story) {
+            caret = &m_caret;
+            anchor = &m_anchor;
+        }
+        set_align_ranges(m_doc.stories[i].story, by[i], align, caret, anchor);
+    }
+    recompose();
+    selection_changed();
+    if (screen())
+        screen()->redraw();
 }
 
 void ComposerView::apply_type(const std::function<void(CharStyle &)> &fn) {
@@ -1397,14 +1529,37 @@ void ComposerView::toggle_style(int key) {
         return;
     will_edit(false);                    // one step per restyle
     /* Like nmail: set when any part of the selection is unset, else clear. */
-    auto get = key == GLFW_KEY_B ? +[](const CharStyle &cs) { return cs.bold; }
-                                 : +[](const CharStyle &cs) { return cs.italic; };
+    auto on = key == GLFW_KEY_B ? +[](const CharStyle &cs) { return cs.bold; }
+                               : +[](const CharStyle &cs) { return cs.italic; };
     bool all = true;
-    restyle(*s, m_anchor, m_caret, [&](CharStyle &cs) { all &= get(cs); });
+    restyle(*s, m_anchor, m_caret, [&](CharStyle &cs) { all &= on(cs); });
+    const bool want = !all;
     restyle(*s, m_anchor, m_caret, [&](CharStyle &cs) {
-        if (key == GLFW_KEY_B) cs.bold = !all; else cs.italic = !all;
+        int weight = cs.bold ? 700 : 400;
+        bool italic = cs.italic;
+        std::string width;
+        if (!cs.face.empty() && m_fonts->describe(cs.family, cs.face, weight, italic))
+            width = FontLibrary::width_of(cs.face);
+        if (key == GLFW_KEY_B)
+            weight = want ? 700 : 400;
+        else
+            italic = want;
+        std::string chosen;
+        if (m_fonts->match(cs.family, weight, italic, width, &chosen)) {
+            cs.face = chosen;
+            int w = 400;
+            bool it = false;
+            if (m_fonts->describe(cs.family, chosen, w, it)) {
+                cs.bold = w >= 600;
+                cs.italic = it;
+            }
+        } else {
+            if (key == GLFW_KEY_B) cs.bold = want; else cs.italic = want;
+            cs.face.clear();
+        }
     });
     recompose();
+    selection_changed();
     if (screen())
         screen()->redraw();
 }

@@ -75,6 +75,19 @@ public:
     /// Set the highlight callback
     void set_highlight_callback(const std::function<void(bool)> &callback) { m_highlight_callback = callback; }
 
+    /* A mark drawn at the right of the row (the font menu's star). Clicking
+     * it runs `callback` and does not choose the row. The callback is
+     * deferred so it can rebuild the menu that owns this item. */
+    void set_mark(bool on, const std::function<void()> &callback);
+    void clear_mark();
+    bool has_mark() const { return m_has_mark; }
+    bool mark_on() const { return m_mark_on; }
+    bool over_mark(const Vector2i &p) const;
+    bool mark_armed() const { return m_mark_armed; }
+    void arm_mark() { m_mark_armed = m_has_mark; }
+    void disarm_mark() { m_mark_armed = false; }
+    void release_mark(bool fire);
+
     virtual void     draw(NVGcontext *ctx) override;
     Vector2i         preferred_text_size(NVGcontext *ctx) const;
     virtual Vector2i preferred_size(NVGcontext *ctx) const override;
@@ -87,6 +100,11 @@ protected:
 
     /// The callback issued for all types of buttons.
     std::function<void(bool)> m_highlight_callback;
+
+    bool m_has_mark = false;
+    bool m_mark_on = false;
+    bool m_mark_armed = false;
+    std::function<void()> m_mark_callback;
 
     /// Memoized preferred_text_size(); Dropdown::preferred_size() calls this
     /// for every item in its popup, so it is the hottest measurement here.
@@ -127,21 +145,41 @@ public:
     /// Sets the callback to execute when an item is selected
     void set_selected_callback(const std::function<void(int)> &callback) { m_selected_callback = callback; }
 
-    /// Invoke the associated layout generator to properly place child widgets, if any
-    virtual void perform_layout(NVGcontext *ctx) override { Widget::perform_layout(ctx); }
+    /// Content size. Window::preferred_size freezes once the popup has a size,
+    /// which would stop a refilled menu from growing and hide the overflow.
+    virtual Vector2i preferred_size(NVGcontext *ctx) const override;
+
+    /// Lay items out at their natural height, then shift them by the scroll offset.
+    virtual void perform_layout(NVGcontext *ctx) override;
 
     virtual bool keyboard_event(int key, int scancode, int action, int modifiers) override;
+    virtual bool keyboard_character_event(unsigned int codepoint) override;
     virtual bool mouse_button_event(const Vector2i &p, int button, bool down, int modifiers) override;
+    virtual bool mouse_drag_event(const Vector2i &p, const Vector2i &rel, int button, int modifiers) override;
+    virtual bool scroll_event(const Vector2i &p, const Vector2f &rel) override;
+    virtual Widget *find_widget(const Vector2i &p) override;
+    virtual const Widget *find_widget(const Vector2i &p) const override;
+
+    /// Scroll so item \p index is inside the popup. Child positions must already be laid out.
+    void reveal(int index);
+    void set_scroll(int y) { m_scroll = y < 0 ? 0 : y; }
+    int scroll() const { return m_scroll; }
 
     /// Draw the popup window
     virtual void draw(NVGcontext *ctx) override;
 
 protected:
+    int max_scroll() const;
+    bool over_scrollbar(const Vector2i &p) const;
+    void scroll_from_track(int local_y);
+
     MenuItem                *m_parent_item = nullptr; ///< Parent MenuItem that this Popup is spawned from.
     bool                     m_exclusive   = false;   ///< Whether the items are mutually exclusive
     std::function<void(int)> m_selected_callback;     ///< The callback to execute when an item is selected.
     int m_selected_idx    = -1; ///< For mutually exclusive popups, the index of the currently selected item.
     int m_highlighted_idx = -1; ///< The index of the currently hovered/highlighted item
+    int m_scroll = 0;           ///< Pixels the items are shifted up when the menu is taller than the screen.
+    bool m_scrollbar_drag = false;
 };
 
 /// A ComboBox or Menubar menu
@@ -175,6 +213,26 @@ public:
 					   				   bool visible = true);
     Dropdown *add_submenu(const std::string &caption, int icon = 0);
 	void remove_item(int index);
+
+    /// Remove every entry. Does not change the caption or run a callback.
+    void clear_items();
+
+    /// Replace every entry. Does not run the selected callback.
+    /// The first item is selected when \p items is not empty.
+    void set_items(const std::vector<std::string> &items);
+
+    /* Fired when a click or key is about to open the popup, before it is
+     * sized. Must not call set_pushed. */
+    void set_open_callback(const std::function<void()> &callback) { m_open_callback = callback; }
+    /* Fired when the popup closes. Must not rebuild the popup: set_pushed
+     * also runs from draw once the popup is no longer visible. */
+    void set_close_callback(const std::function<void()> &callback) { m_close_callback = callback; }
+    /* While the popup is open, typed characters, Backspace (codepoint 0)
+     * and Escape (0x1B) are forwarded here. Return false from Escape when
+     * the menu itself should close. */
+    void set_query_callback(const std::function<bool(unsigned)> &callback) { m_query_callback = callback; }
+    bool has_query_callback() const { return (bool) m_query_callback; }
+    bool query_event(unsigned codepoint) { return m_query_callback && m_query_callback(codepoint); }
 
     /// The current index this Dropdown has selected.
     int selected_index() const { return m_popup->selected_index(); }
@@ -214,10 +272,14 @@ public:
 
 protected:
     void update_popup_geometry() const;
+    /// On open, bring the selected combo row into the viewport.
+    void align_open_scroll();
 
     PopupMenu *m_popup = nullptr;
 
     Mode m_mode = ComboBox;
+    std::function<void()> m_open_callback, m_close_callback;
+    std::function<bool(unsigned)> m_query_callback;
 };
 
 /// A horizontal menu bar containing a row of Dropdown menu items and responsible for handling their hotkeys

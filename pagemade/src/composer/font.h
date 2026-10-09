@@ -67,6 +67,15 @@ public:
     float descender() const  { return m_descender; }   // negative
     float cap_height() const { return m_cap_height; }
     float x_height() const   { return m_x_height; }
+    /* Design units, y up. Underline position is typically negative. */
+    float underline_position() const { return m_ul_pos; }
+    float underline_thickness() const { return m_ul_thick; }
+    float strike_position() const { return m_st_pos; }
+    float strike_thickness() const { return m_st_thick; }
+    /* True when the face has an OpenType small-caps feature. */
+    bool has_small_caps() const;
+    /* Scale for synthesized small caps (x-height over cap height). */
+    float small_cap_scale() const;
 
     hb_font_t *hb() const { return m_font; }
     hb_face_t *hb_face() const { return m_face; }   // for PDF embedding
@@ -93,12 +102,24 @@ private:
     float       m_ascender = 800, m_descender = -200;
     float       m_cap_height = 700, m_x_height = 500;
     uint32_t    m_space_gid = 0;
+    float       m_ul_pos = -100, m_ul_thick = 50;
+    float       m_st_pos = 250, m_st_thick = 50;
+    mutable bool m_smcp_known = false, m_smcp = false;
     mutable std::unordered_map<uint32_t, GlyphOutline> m_outlines;
 };
 
-/* Family + style -> Font. Styles are "Regular", "Bold", "Italic" and
- * "Bold Italic". find() falls back to the family's Regular face, then to
- * the first face registered, so a missing font never stops composition.
+/* One cut of a family, whether or not its file has been loaded yet. */
+struct FaceDesc {
+    std::string style;
+    int  weight = 400;           // 100–900
+    bool italic = false;
+};
+
+/* Family + style -> Font. The built-in families use "Regular", "Bold",
+ * "Italic" and "Bold Italic". Installed faces keep the style name from the
+ * system ("Light", "Condensed Bold") and are loaded the first time they
+ * are shaped. find() falls back within the family, then to the first face
+ * registered, so a missing font never stops composition.
  *
  * Document fonts (embedded in the open publication) come before installed
  * ones, so the publication looks the same on any computer; opening another
@@ -109,6 +130,10 @@ public:
              std::shared_ptr<Font> font);
     bool add_file(const std::string &family, const std::string &style,
                   const std::string &path);
+    /* Remember a face and load it on first use. A family+style already
+     * registered (the built-in Serif/Sans/Display cuts) is left as it is. */
+    void add_catalog(const std::string &family, const std::string &style,
+                     const std::string &path, unsigned index, int weight, bool italic);
     void add_document_font(const std::string &family, const std::string &style,
                            std::shared_ptr<Font> font);
     void clear_document_fonts();
@@ -117,19 +142,47 @@ public:
     bool has_installed_family(const std::string &family) const;
     /* Families in the order they were added. */
     std::vector<std::string> families() const;
+    /* Cuts of one family, lightest first, roman before italic. */
+    std::vector<FaceDesc> faces(const std::string &family) const;
+    /* Weight and italic of a named cut. False when the family has no such style. */
+    bool describe(const std::string &family, const std::string &style,
+                  int &weight, bool &italic) const;
     const Font *find(const std::string &family, bool bold, bool italic) const;
-    /* The requested style of this family, or its Regular face. Null when
-     * the family has neither — never a face from some other family. */
+    /* `style` empty: bold and italic. Otherwise that cut, then bold/italic. */
+    const Font *find(const std::string &family, const std::string &style,
+                     bool bold, bool italic) const;
+    /* The requested style of this family, or the closest weight. Null when
+     * the family has nothing — never a face from some other family. */
     const Font *face_for(const std::string &family, bool bold, bool italic) const;
+    /* Closest cut. `width` is a token such as "Condensed" kept when the
+     * weight changes; empty prefers a face with no width token. `prefer`
+     * ("Italic", "Oblique") breaks ties. Writes the chosen style name. */
+    const Font *match(const std::string &family, int weight, bool italic,
+                      const std::string &width, std::string *style_out = nullptr,
+                      const std::string &prefer = {}) const;
+    /* The style name find() would use, or empty when the family is missing. */
+    std::string resolved_style(const std::string &family, const std::string &face,
+                               bool bold, bool italic) const;
     bool empty() const { return m_faces.empty(); }
     static const char *style_name(bool bold, bool italic);
+    /* "Condensed", "Narrow", "Expanded", … or empty. */
+    static std::string width_of(const std::string &style);
 
 private:
     struct Entry {
-        std::string family, style;
-        std::shared_ptr<Font> font;
+        std::string family, style, path;
+        unsigned index = 0;
+        int  weight = 400;
+        bool italic = false;
         bool document = false;
+        mutable std::shared_ptr<Font> font;
+        mutable bool failed = false;
     };
+    const Font *ensure(const Entry &e) const;
+    const Entry *best(const std::string &family, int weight, bool italic,
+                      const std::string &width, const std::string &prefer) const;
+    Entry loaded_entry(const std::string &family, const std::string &style,
+                       std::shared_ptr<Font> font, bool document) const;
     std::vector<Entry> m_faces;
 };
 

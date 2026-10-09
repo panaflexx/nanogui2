@@ -8,6 +8,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cstdlib>
 
 namespace pagemade {
 
@@ -91,6 +92,19 @@ std::shared_ptr<Font> Font::from_blob(hb_blob_t *blob, unsigned index) {
     else
         f->m_x_height = f->m_ascender * 0.5f;
 
+    f->m_ul_pos = -f->m_upem * 0.1f;
+    f->m_ul_thick = std::max(1.f, f->m_upem * 0.05f);
+    f->m_st_pos = f->m_x_height * 0.5f;
+    f->m_st_thick = f->m_ul_thick;
+    if (hb_ot_metrics_get_position(f->m_font, HB_OT_METRICS_TAG_UNDERLINE_OFFSET, &v))
+        f->m_ul_pos = (float) v;
+    if (hb_ot_metrics_get_position(f->m_font, HB_OT_METRICS_TAG_UNDERLINE_SIZE, &v) && v > 0)
+        f->m_ul_thick = (float) v;
+    if (hb_ot_metrics_get_position(f->m_font, HB_OT_METRICS_TAG_STRIKEOUT_OFFSET, &v))
+        f->m_st_pos = (float) v;
+    if (hb_ot_metrics_get_position(f->m_font, HB_OT_METRICS_TAG_STRIKEOUT_SIZE, &v) && v > 0)
+        f->m_st_thick = (float) v;
+
     hb_codepoint_t gid = 0;
     if (hb_font_get_nominal_glyph(f->m_font, ' ', &gid))
         f->m_space_gid = gid;
@@ -105,6 +119,40 @@ Font::~Font() {
 
 float Font::advance(uint32_t gid) const {
     return (float) hb_font_get_glyph_h_advance(m_font, gid);
+}
+
+float Font::small_cap_scale() const {
+    if (m_cap_height > 1.f && m_x_height > 1.f) {
+        float s = m_x_height / m_cap_height;
+        if (s < 0.6f) s = 0.6f;
+        if (s > 0.85f) s = 0.85f;
+        return s;
+    }
+    return 0.75f;
+}
+
+bool Font::has_small_caps() const {
+    if (m_smcp_known)
+        return m_smcp;
+    m_smcp_known = true;
+    hb_buffer_t *buf = hb_buffer_create();
+    hb_buffer_add_utf8(buf, "a", 1, 0, 1);
+    hb_buffer_guess_segment_properties(buf);
+    hb_shape(m_font, buf, nullptr, 0);
+    unsigned n = 0;
+    hb_glyph_info_t *info = hb_buffer_get_glyph_infos(buf, &n);
+    uint32_t plain = n ? info[0].codepoint : 0;
+    hb_buffer_clear_contents(buf);
+    hb_buffer_set_content_type(buf, HB_BUFFER_CONTENT_TYPE_UNICODE);
+    hb_buffer_add_utf8(buf, "a", 1, 0, 1);
+    hb_buffer_guess_segment_properties(buf);
+    hb_feature_t feat = {HB_TAG('s', 'm', 'c', 'p'), 1, 0, (unsigned) -1};
+    hb_shape(m_font, buf, &feat, 1);
+    info = hb_buffer_get_glyph_infos(buf, &n);
+    uint32_t small = n ? info[0].codepoint : 0;
+    hb_buffer_destroy(buf);
+    m_smcp = small != 0 && small != plain;
+    return m_smcp;
 }
 
 bool Font::is_cff() const {
@@ -236,10 +284,66 @@ const GlyphOutline &Font::outline(uint32_t gid) const {
 
 /* ---- FontLibrary ------------------------------------------------------- */
 
+namespace {
+
+int weight_from_style(const std::string &style) {
+    auto has = [&](const char *s) { return style.find(s) != std::string::npos; };
+    if (has("Thin") || has("Hairline")) return 100;
+    if (has("ExtraLight") || has("Extra Light") || has("UltraLight") || has("Ultra Light"))
+        return 200;
+    if (has("Light")) return 300;
+    if (has("Medium")) return 500;
+    if (has("SemiBold") || has("Semi Bold") || has("DemiBold") || has("Demi Bold") || has("Demi"))
+        return 600;
+    if (has("ExtraBold") || has("Extra Bold") || has("UltraBold") || has("Ultra Bold"))
+        return 800;
+    if (has("Black") || has("Heavy")) return 900;
+    if (has("Bold")) return 700;
+    return 400;
+}
+
+bool italic_from_style(const std::string &style) {
+    return style.find("Italic") != std::string::npos || style.find("Oblique") != std::string::npos;
+}
+
+} // namespace
+
+std::string FontLibrary::width_of(const std::string &style) {
+    static const char *keys[] = {"Condensed", "Narrow", "Compressed", "Expanded", "Extended", "Wide"};
+    for (const char *k : keys)
+        if (style.find(k) != std::string::npos)
+            return k;
+    return {};
+}
+
+FontLibrary::Entry FontLibrary::loaded_entry(const std::string &family, const std::string &style,
+                                             std::shared_ptr<Font> font, bool document) const {
+    Entry e;
+    e.family = family;
+    e.style = style;
+    e.font = std::move(font);
+    e.path = e.font ? e.font->path() : std::string();
+    e.weight = weight_from_style(style);
+    e.italic = italic_from_style(style);
+    e.document = document;
+    return e;
+}
+
+const Font *FontLibrary::ensure(const Entry &e) const {
+    if (e.font)
+        return e.font.get();
+    if (e.failed || e.path.empty())
+        return nullptr;
+    e.font = Font::load_file(e.path, e.index);
+    if (!e.font)
+        e.failed = true;
+    return e.font.get();
+}
+
 void FontLibrary::add(const std::string &family, const std::string &style,
                       std::shared_ptr<Font> font) {
     if (font)
-        m_faces.push_back({family, style, std::move(font)});
+        m_faces.push_back(loaded_entry(family, style, std::move(font), false));
 }
 
 bool FontLibrary::add_file(const std::string &family, const std::string &style,
@@ -251,6 +355,23 @@ bool FontLibrary::add_file(const std::string &family, const std::string &style,
     return true;
 }
 
+void FontLibrary::add_catalog(const std::string &family, const std::string &style,
+                              const std::string &path, unsigned index, int weight, bool italic) {
+    if (family.empty() || path.empty())
+        return;
+    for (const Entry &e : m_faces)
+        if (e.family == family && e.style == style)
+            return;
+    Entry e;
+    e.family = family;
+    e.style = style.empty() ? "Regular" : style;
+    e.path = path;
+    e.index = index;
+    e.weight = weight > 0 ? weight : weight_from_style(e.style);
+    e.italic = italic || italic_from_style(e.style);
+    m_faces.push_back(std::move(e));
+}
+
 void FontLibrary::add_document_font(const std::string &family, const std::string &style,
                                     std::shared_ptr<Font> font) {
     if (!font)
@@ -259,7 +380,7 @@ void FontLibrary::add_document_font(const std::string &family, const std::string
      * find() picks it first. */
     auto first_installed = std::find_if(m_faces.begin(), m_faces.end(),
                                         [](const Entry &e) { return !e.document; });
-    m_faces.insert(first_installed, Entry{family, style, std::move(font), true});
+    m_faces.insert(first_installed, loaded_entry(family, style, std::move(font), true));
 }
 
 void FontLibrary::clear_document_fonts() {
@@ -294,24 +415,136 @@ std::vector<std::string> FontLibrary::families() const {
     return out;
 }
 
+std::vector<FaceDesc> FontLibrary::faces(const std::string &family) const {
+    std::vector<FaceDesc> out;
+    for (const Entry &e : m_faces)
+        if (e.family == family && !e.failed)
+            out.push_back({e.style, e.weight, e.italic});
+    std::stable_sort(out.begin(), out.end(), [](const FaceDesc &a, const FaceDesc &b) {
+        if (a.weight != b.weight) return a.weight < b.weight;
+        if (a.italic != b.italic) return !a.italic && b.italic;
+        return a.style < b.style;
+    });
+    return out;
+}
+
+bool FontLibrary::describe(const std::string &family, const std::string &style,
+                           int &weight, bool &italic) const {
+    for (const Entry &e : m_faces)
+        if (e.family == family && e.style == style) {
+            weight = e.weight;
+            italic = e.italic;
+            return true;
+        }
+    return false;
+}
+
+const FontLibrary::Entry *FontLibrary::best(const std::string &family, int weight, bool italic,
+                                            const std::string &width,
+                                            const std::string &prefer) const {
+    const Entry *chosen = nullptr;
+    int chosen_score = 0;
+    for (const Entry &e : m_faces) {
+        if (e.family != family || e.failed)
+            continue;
+        int score = std::abs(e.weight - weight);
+        if (e.italic != italic)
+            score += 1000;
+        const std::string w = width_of(e.style);
+        if (!width.empty()) {
+            if (w != width)
+                score += 300;
+        } else if (!w.empty()) {
+            score += 40;
+        }
+        if (weight >= 600 && e.weight < 550)
+            score += 120;
+        if (weight <= 450 && e.weight >= 600)
+            score += 120;
+        if (!prefer.empty() && e.italic && e.style.find(prefer) == std::string::npos)
+            score += 15;
+        if (!chosen || score < chosen_score) {
+            chosen = &e;
+            chosen_score = score;
+        }
+    }
+    return chosen;
+}
+
 const Font *FontLibrary::face_for(const std::string &family, bool bold, bool italic) const {
-    const char *style = style_name(bold, italic);
-    const Font *regular = nullptr;
+    const char *want = style_name(bold, italic);
+    const Entry *exact = nullptr;
+    const Entry *regular = nullptr;
     for (const Entry &e : m_faces) {
         if (e.family != family)
             continue;
-        if (e.style == style)
-            return e.font.get();
-        if (e.style == "Regular")
-            regular = e.font.get();
+        if (e.style == want) {
+            exact = &e;
+            break;
+        }
+        if (!regular && (e.style == "Regular" || e.style == "Roman" ||
+                         e.style == "Book" || e.style == "Normal"))
+            regular = &e;
     }
-    return regular;
+    if (exact)
+        if (const Font *f = ensure(*exact))
+            return f;
+    if (const Entry *b = best(family, bold ? 700 : 400, italic, "", ""))
+        if (const Font *f = ensure(*b))
+            return f;
+    if (regular)
+        if (const Font *f = ensure(*regular))
+            return f;
+    for (const Entry &e : m_faces)
+        if (e.family == family)
+            if (const Font *f = ensure(e))
+                return f;
+    return nullptr;
 }
 
 const Font *FontLibrary::find(const std::string &family, bool bold, bool italic) const {
     if (const Font *f = face_for(family, bold, italic))
         return f;
-    return m_faces.empty() ? nullptr : m_faces.front().font.get();
+    for (const Entry &e : m_faces)
+        if (const Font *f = ensure(e))
+            return f;
+    return nullptr;
+}
+
+const Font *FontLibrary::find(const std::string &family, const std::string &style,
+                              bool bold, bool italic) const {
+    if (!style.empty())
+        for (const Entry &e : m_faces)
+            if (e.family == family && e.style == style)
+                if (const Font *f = ensure(e))
+                    return f;
+    return find(family, bold, italic);
+}
+
+const Font *FontLibrary::match(const std::string &family, int weight, bool italic,
+                               const std::string &width, std::string *style_out,
+                               const std::string &prefer) const {
+    const Entry *e = best(family, weight, italic, width, prefer);
+    if (!e)
+        return nullptr;
+    if (style_out)
+        *style_out = e->style;
+    return ensure(*e);
+}
+
+std::string FontLibrary::resolved_style(const std::string &family, const std::string &face,
+                                        bool bold, bool italic) const {
+    if (!face.empty())
+        for (const Entry &e : m_faces)
+            if (e.family == family && e.style == face)
+                return e.style;
+    const char *want = style_name(bold, italic);
+    for (const Entry &e : m_faces)
+        if (e.family == family && e.style == want)
+            return e.style;
+    if (const Entry *e = best(family, bold ? 700 : 400, italic, "", ""))
+        return e->style;
+    return {};
 }
 
 } // namespace pagemade

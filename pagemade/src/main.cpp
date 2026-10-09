@@ -8,10 +8,12 @@
  * to turn to it, drag to rearrange. The toolbar holds the toolbox
  * (pointer, crop, rotate, text, line, rectangle, ellipse, polygon), snap to
  * guides, undo/redo (Ctrl+Z / Ctrl+Shift+Z), a zoom dropdown, and switches
- * for alignment, kerning and ligatures. Below it, the control palette
+ * for alignment of the selected lines, kerning and ligatures. Below it, the control palette
  * switches between the object view (position, size, angle, fill and
  * stroke; with nothing selected, the defaults for new shapes) and the
- * type view (font, size, weight, leading and baseline).
+ * type view (font, size, style, leading and baseline). Type on that palette,
+ * and Element > Type Specs…, open the Type panel: weight, style, caps and
+ * the other character attributes. Apply writes them onto the selection.
  * PageMaker's zoom shortcuts: Ctrl/Cmd + 0 fit, 5 50%, 7 75%, 1 actual
  * size, 2 200%, 4 400%, 8 800%.
  *
@@ -46,6 +48,8 @@
 #include "dialogs.h"
 #include "docfile.h"
 #include "default_fonts.h"
+#include "font_menu_ui.h"
+#include "system_fonts.h"
 #include "page.h"
 #include "pdf.h"
 
@@ -210,6 +214,8 @@ public:
         });
         set_theme_mode(ThemeMode::Light);
         register_default_fonts(m_fonts);
+        register_system_fonts(m_fonts);
+        font_menu_load_or_seed(m_font_menu, font_menu_config_path(), m_fonts.families());
         const std::string hyph = std::string(PAGEMADE_DATA_DIR) + "/hyphenation/hyph-en-us";
         if (!m_hyphenator.load(hyph + ".pat.txt", hyph + ".hyp.txt"))
             std::fprintf(stderr, "pagemade: no hyphenation patterns at %s.pat.txt\n", hyph.c_str());
@@ -276,10 +282,16 @@ public:
             zv[i] > 0 ? zoom_to(zv[i]) : fit_page();
         });
 
-        new Label(toolbar, "  Body:", "sans-bold");
-        m_align = new ComboBox(toolbar, {"Left", "Center", "Right", "Justify", "Force justify"});
+        new Label(toolbar, "  Align:", "sans-bold");
+        m_align = new Dropdown(toolbar, {"Left", "Center", "Right", "Justify", "Force justify"},
+                               {}, Dropdown::ComboBox, "Justify");
         m_align->set_selected_index(3);
-        m_align->set_callback([this](int i) { set_body_align((Align) i); });
+        m_align->set_tooltip("Alignment of the selected text block, or of the selected lines");
+        m_align->set_selected_callback([this](int i) {
+            if (m_syncing_align || i < 0 || i > (int) Align::ForceJustify)
+                return;
+            set_body_align((Align) i);
+        });
 
         m_kern = new CheckBox(toolbar, "Kerning", [this](bool on) {
             for_each_run([on](CharStyle &cs) { cs.kerning = on; });
@@ -557,6 +569,9 @@ public:
                             {{SYSTEM_COMMAND_MOD, GLFW_KEY_B},
                              {SYSTEM_COMMAND_MOD | GLFW_MOD_SHIFT, GLFW_KEY_LEFT_BRACKET}},
                             [this] { m_view->arrange(ComposerView::Stack::Back); });
+        new Separator(element->popup());
+        add_cmd(element, "Type Specs...", {{SYSTEM_COMMAND_MOD, GLFW_KEY_T}},
+                [this] { type_specs(); });
     }
 
     /* ---- Control palette ------------------------------------------- */
@@ -676,13 +691,11 @@ public:
         });
 
         /* Type view. Leading 0 is PageMaker's automatic leading ("Auto").
-         * With no text selected these are the defaults for a new block. */
+         * With no text selected these are the defaults for a new block.
+         * The font menu lists this publication, recent faces and favorites;
+         * typing searches every installed family. Style is the family's
+         * faces (Light, Condensed Bold, …). Type opens the rest. */
         Widget *type = m_type_box;
-        auto type_menu = [&](const std::vector<std::string> &items, int width) {
-            auto *d = new Dropdown(type, items, {}, Dropdown::ComboBox, items.front());
-            d->set_fixed_size(Vector2i(width, 26));
-            return d;
-        };
         auto type_number = [&](const char *label, const char *units, int width) {
             new Label(type, label, "sans-bold");
             auto *box = new FloatBox<float>(type);
@@ -693,17 +706,27 @@ public:
             return box;
         };
 
-        m_families = m_fonts.families();
-        if (m_families.empty())
-            m_families.push_back("Serif");
         new Label(type, "Font", "sans-bold");
-        m_font = type_menu(m_families, 120);
-        m_font->set_tooltip("Font family");
-        m_font->set_selected_callback([this](int i) {
-            if (i < 0 || i >= (int) m_families.size())
-                return;
-            const std::string fam = m_families[(size_t) i];
-            m_view->apply_type([fam](CharStyle &cs) { cs.family = fam; });
+        m_font = new Dropdown(type, Dropdown::ComboBox, "Serif");
+        m_font->set_min_size(Vector2i(150, 30));
+        m_font->set_max_size(Vector2i(300, 40));
+        m_font->set_tooltip("Font family. Type to search all fonts. Click the star to keep a favorite.");
+        m_font_menu.set_listener([this] {
+            async([this] {
+                if (m_font)
+                    refill_palette_font();
+            });
+        });
+        m_font->set_open_callback([this] {
+            m_font_query.clear();
+            refill_palette_font();
+        });
+        m_font->set_close_callback([this] { m_font_query.clear(); });
+        m_font->set_query_callback([this](unsigned codepoint) {
+            if (!font_menu_query_edit(m_font_query, codepoint))
+                return false;
+            refill_palette_font();
+            return true;
         });
 
         m_size = type_number("Size", "pt", 62);
@@ -719,14 +742,20 @@ public:
             return true;
         });
 
-        new Label(type, "Weight", "sans-bold");
-        m_face = type_menu({"Regular", "Bold", "Italic", "Bold Italic"}, 110);
+        new Label(type, "Style", "sans-bold");
+        m_face = new Dropdown(type, {"Regular"}, {}, Dropdown::ComboBox, "Regular");
+        m_face->set_min_size(Vector2i(120, 30));
+        m_face->set_max_size(Vector2i(220, 40));
         m_face->set_tooltip("Type style");
         m_face->set_selected_callback([this](int i) {
-            const bool bold = i & 1, italic = i & 2;
-            m_view->apply_type([bold, italic](CharStyle &cs) {
+            if (m_syncing_type || i < 0 || i >= (int) m_styles.size())
+                return;
+            const FaceDesc f = m_styles[(size_t) i];
+            const bool bold = f.weight >= 600;
+            m_view->apply_type([f, bold](CharStyle &cs) {
+                cs.face = f.style;
                 cs.bold = bold;
-                cs.italic = italic;
+                cs.italic = f.italic;
             });
         });
 
@@ -762,6 +791,161 @@ public:
             m_view->apply_type([shift](CharStyle &cs) { cs.baseline_shift = shift; });
             return true;
         });
+
+        m_specs = new Button(type, "Type");
+        m_specs->set_fixed_size(Vector2i(64, 26));
+        m_specs->set_tooltip("Type specifications");
+        m_specs->set_callback([this] { type_specs(); });
+    }
+
+    void pick_font(const std::string &fam) {
+        if (m_syncing_type || m_applying_font || fam.empty() || !m_view)
+            return;
+        m_applying_font = true;
+        m_font_menu.note_use(fam);
+        ComposerView::TypeStyle t;
+        if (!m_view->type_style(t)) {
+            m_applying_font = false;
+            return;
+        }
+        int weight = t.bold ? 700 : 400;
+        bool italic = t.italic;
+        std::string named = t.face;
+        if (named.empty())
+            named = m_fonts.resolved_style(t.family, "", t.bold, t.italic);
+        int described = weight;
+        bool described_italic = italic;
+        if (!named.empty() && m_fonts.describe(t.family, named, described, described_italic)) {
+            weight = described;
+            italic = described_italic;
+        }
+        const std::string width = FontLibrary::width_of(named);
+        std::string face;
+        if (m_fonts.match(fam, weight, italic, width, &face)) {
+            int w = weight;
+            bool it = italic;
+            if (m_fonts.describe(fam, face, w, it)) {
+                weight = w;
+                italic = it;
+            }
+            const bool bold = weight >= 600;
+            m_view->apply_type([fam, face, bold, italic](CharStyle &cs) {
+                cs.family = fam;
+                cs.face = face;
+                cs.bold = bold;
+                cs.italic = italic;
+            });
+        } else {
+            m_view->apply_type([fam](CharStyle &cs) {
+                cs.family = fam;
+                cs.face.clear();
+            });
+        }
+        m_applying_font = false;
+    }
+
+    void refill_palette_font() {
+        if (!m_font || !m_view)
+            return;
+        ComposerView::TypeStyle t;
+        if (!m_view->type_style(t))
+            return;
+        FontMenuView view;
+        view.model = &m_font_menu;
+        view.installed = m_fonts.families();
+        if (view.installed.empty())
+            view.installed.push_back("Serif");
+        view.document = document_font_families(m_view->document());
+        view.query = m_font_query;
+        view.mixed = t.mix_family;
+        view.current = t.mix_family ? std::string() : t.family;
+        refill_font_menu(m_font, view,
+                         [this](const std::string &fam) { pick_font(fam); },
+                         [this](const std::string &fam) { m_font_menu.toggle_star(fam); });
+    }
+
+    void load_styles(const std::string &family) {
+        m_style_family = family;
+        m_styles = m_fonts.faces(family);
+        std::vector<std::string> names;
+        names.reserve(m_styles.size());
+        for (const FaceDesc &f : m_styles)
+            names.push_back(f.style);
+        if (names.empty()) {
+            names.push_back("Regular");
+            m_styles.push_back(FaceDesc{"Regular", 400, false});
+        }
+        m_face->set_items(names);
+    }
+
+    /* What the palette is showing, as a CharStyle the specs dialog can edit.
+     * Color is left alone: the dialog does not change it. */
+    static CharStyle style_from(const ComposerView::TypeStyle &t) {
+        CharStyle cs;
+        cs.family = t.family;
+        cs.face = t.face;
+        cs.bold = t.bold;
+        cs.italic = t.italic;
+        cs.caps = t.caps;
+        cs.underline = t.underline;
+        cs.strike = t.strike;
+        cs.kerning = t.kerning;
+        cs.ligatures = t.ligatures;
+        cs.size = t.size;
+        cs.leading = t.leading;
+        cs.baseline_shift = t.baseline;
+        cs.tracking = t.tracking;
+        cs.hscale = t.hscale;
+        return cs;
+    }
+
+    static bool type_is_mixed(const ComposerView::TypeStyle &t) {
+        return t.mix_family || t.mix_style || t.mix_size || t.mix_leading ||
+               t.mix_baseline || t.mix_caps || t.mix_deco || t.mix_track ||
+               t.mix_hscale || t.mix_kerning || t.mix_ligatures;
+    }
+
+    void apply_type_specs(const CharStyle &before, const CharStyle &after) {
+        if (!m_view || after == before)
+            return;
+        m_view->apply_type([&](CharStyle &cs) {
+            if (after.family != before.family) cs.family = after.family;
+            if (after.face != before.face) cs.face = after.face;
+            if (after.bold != before.bold) cs.bold = after.bold;
+            if (after.italic != before.italic) cs.italic = after.italic;
+            if (after.caps != before.caps) cs.caps = after.caps;
+            if (after.underline != before.underline) cs.underline = after.underline;
+            if (after.strike != before.strike) cs.strike = after.strike;
+            if (after.size != before.size) cs.size = after.size;
+            if (after.leading != before.leading) cs.leading = after.leading;
+            if (after.tracking != before.tracking) cs.tracking = after.tracking;
+            if (after.hscale != before.hscale) cs.hscale = after.hscale;
+            if (after.baseline_shift != before.baseline_shift)
+                cs.baseline_shift = after.baseline_shift;
+            if (after.kerning != before.kerning) cs.kerning = after.kerning;
+            if (after.ligatures != before.ligatures) cs.ligatures = after.ligatures;
+        });
+    }
+
+    void type_specs() {
+        ComposerView::TypeStyle t;
+        if (!m_view || !m_view->type_style(t))
+            return;
+        if (!m_type_panel) {
+            m_type_panel = new TypeSpecsPanel(this, m_fonts, m_font_menu,
+                                              [this](const CharStyle &before, const CharStyle &after) {
+                apply_type_specs(before, after);
+            });
+            m_type_panel->set_close_callback([this] { m_type_panel = nullptr; });
+        } else {
+            move_window_to_front(m_type_panel);
+        }
+        m_type_panel->load(style_from(t), type_is_mixed(t),
+                           document_font_families(m_view->document()));
+        m_type_panel->set_apply_enabled(true);
+        if (m_type_panel->size() == Vector2i(0, 0))
+            m_type_panel->center();
+        m_type_panel->request_focus();
     }
 
     void apply_geometry(int field, float v) {
@@ -812,6 +996,28 @@ public:
         if (!m_star->focused())
             m_star->set_value((int) sh.star_inset);
         sync_type();
+        sync_align();
+    }
+
+    /* The toolbar alignment menu follows the selected lines. A mixed
+     * selection shows an em dash until the user picks one. */
+    void sync_align() {
+        if (!m_align)
+            return;
+        Align a = Align::Left;
+        bool mixed = false;
+        const bool ok = m_view->text_align(a, mixed);
+        m_align->set_enabled(ok);
+        if (!ok)
+            return;
+        m_syncing_align = true;
+        if (mixed) {
+            m_align->set_selected_index(-1);
+            m_align->set_caption("\u2014");
+        } else if (m_align->selected_index() != (int) a) {
+            m_align->set_selected_index((int) a);
+        }
+        m_syncing_align = false;
     }
 
     void sync_type() {
@@ -824,24 +1030,38 @@ public:
         m_size->set_enabled(ok);
         m_leading->set_enabled(ok);
         m_baseline->set_enabled(ok);
+        if (m_specs)
+            m_specs->set_enabled(ok);
+        if (m_type_panel)
+            m_type_panel->set_apply_enabled(ok);
         if (!ok)
             return;
-        if (t.mix_family)
-            m_font->set_caption("\u2014");
-        else {
-            int idx = -1;
-            for (size_t i = 0; i < m_families.size(); ++i)
-                if (m_families[i] == t.family)
-                    idx = (int) i;
-            if (idx >= 0)
-                m_font->set_selected_index(idx);
-            else
-                m_font->set_caption(t.family);
-        }
-        if (t.mix_style)
+        m_syncing_type = true;
+        /* Choosing a row runs this while that row still exists. Rebuilding
+           the open menu would free it. A search refill is the query callback. */
+        if (!m_applying_font && m_font->popup() && !m_font->popup()->visible())
+            refill_palette_font();
+        if (m_style_family != t.family)
+            load_styles(t.family);
+        if (t.mix_style) {
+            m_face->set_selected_index(-1);
             m_face->set_caption("\u2014");
-        else
-            m_face->set_selected_index((t.bold ? 1 : 0) + (t.italic ? 2 : 0));
+        } else {
+            std::string want = t.face;
+            if (want.empty())
+                want = m_fonts.resolved_style(t.family, "", t.bold, t.italic);
+            int idx = -1;
+            for (int i = 0; i < (int) m_styles.size(); ++i)
+                if (m_styles[(size_t) i].style == want)
+                    idx = i;
+            if (idx >= 0)
+                m_face->set_selected_index(idx);
+            else {
+                m_face->set_selected_index(-1);
+                m_face->set_caption(want.empty() ? std::string("\u2014") : want);
+            }
+        }
+        m_syncing_type = false;
         if (!m_size->focused()) {
             if (t.mix_size)
                 m_size->TextBox::set_value("");
@@ -862,6 +1082,9 @@ public:
             else
                 m_baseline->set_value(t.baseline);
         }
+        if (m_type_panel)
+            m_type_panel->load(style_from(t), type_is_mixed(t),
+                               document_font_families(m_view->document()));
     }
 
     /* The view's tool, mirrored in the toolbar's radio buttons. */
@@ -919,12 +1142,7 @@ public:
     }
 
     void set_body_align(Align a) {
-        m_view->push_undo();
-        for (StoryEntry &se : m_view->document().stories)
-            for (Paragraph &p : se.story.paragraphs)
-                if (p.style.name == "Body text")
-                    p.style.align = a;
-        m_view->recompose();
+        m_view->apply_align(a);
     }
 
     template <typename F> void for_each_run(F fn) {
@@ -1196,7 +1414,7 @@ private:
     ZoomScrollPanel *m_scroll = nullptr;
     ComposerView    *m_view = nullptr;
     PageIconStrip   *m_pages = nullptr;
-    ComboBox        *m_align = nullptr;
+    Dropdown        *m_align = nullptr;
     Dropdown        *m_zoom_menu = nullptr;
     Button          *m_undo_btn = nullptr, *m_redo_btn = nullptr;
     CheckBox        *m_kern = nullptr, *m_baselines = nullptr, *m_loose = nullptr;
@@ -1210,8 +1428,16 @@ private:
     Button          *m_mode_btn = nullptr;
     Widget          *m_object_box = nullptr, *m_type_box = nullptr;
     bool            m_type_mode = false;
-    std::vector<std::string> m_families;
+    FontMenuModel   m_font_menu;
+    std::string     m_font_query;
+    bool            m_applying_font = false;
+    std::vector<FaceDesc> m_styles;
+    std::string     m_style_family;
+    bool            m_syncing_type = false;
+    bool            m_syncing_align = false;
     Dropdown        *m_font = nullptr, *m_face = nullptr;
+    Button          *m_specs = nullptr;
+    TypeSpecsPanel  *m_type_panel = nullptr;
     FloatBox<float> *m_size = nullptr, *m_leading = nullptr, *m_baseline = nullptr;
     MenuItem        *m_remove_page = nullptr, *m_move_earlier = nullptr, *m_move_later = nullptr;
     MenuItem        *m_hide_page = nullptr;

@@ -33,12 +33,15 @@ and its nanovgd renderer. The composer lays out in points and every backend
   page cannot be removed. Layout menu, and PageMaker's page icons along the
   bottom of the window.
 - **Type**: the control palette's type view (the square / A button, or it
-  switches itself when the text tool is chosen). Font, size, weight
-  (Regular / Bold / Italic / Bold Italic), leading (Auto, or a point size)
-  and baseline shift. A text selection is restyled; a caret changes what
-  is typed next; text blocks selected with the pointer restyle the type in
-  those blocks; with nothing selected, the fields are the defaults for a
-  new text block.
+  switches itself when the text tool is chosen). Font (Serif, Sans and
+  Display, then the installed families), size, style (that family's faces),
+  leading (Auto, or a point size) and baseline shift. Element > Type Specs…
+  (Ctrl/Cmd+T), and Specs… on the palette, set weight, roman/italic/oblique,
+  caps, set width, tracking, underline and strikethrough, with a preview of
+  the face. A text selection is restyled; a caret changes what is typed
+  next; text blocks selected with the pointer restyle the type in those
+  blocks; with nothing selected, the fields are the defaults for a new
+  text block. OK in Type Specs changes only the fields that were edited.
 - **Arrange**: Element menu, and the keys. Bring to Front (Ctrl+F), Bring
   Forward (Ctrl+]), Send Backward (Ctrl+[), Send to Back (Ctrl+B). Shift
   with the brackets jumps to the front or the back. A group moves together

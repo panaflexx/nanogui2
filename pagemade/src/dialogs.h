@@ -14,6 +14,7 @@
 #include <nanogui/window.h>
 
 #include <functional>
+#include <memory>
 #include <string>
 #include <vector>
 
@@ -81,3 +82,38 @@ void ask_save_as(nanogui::Screen *screen, const std::string &current_path, bool 
 void ask_replace(nanogui::Screen *screen, const std::string &path, std::function<void(bool)> done);
 
 void show_alert(nanogui::Screen *screen, const std::string &title, const std::string &message);
+
+namespace pagemade {
+class FontLibrary;
+class FontMenuModel;
+struct CharStyle;
+}
+
+/* Floating Type panel: the same character fields as PageMaker's Type
+ * Specifications, with a preview. It is not modal — the page stays live,
+ * and the panel can be dragged by its title bar. Apply writes the edited
+ * fields onto the current selection; closing drops unapplied edits.
+ * `apply` receives the style the panel was loaded from and the edited one. */
+class TypeSpecsPanel : public nanogui::Window {
+public:
+    TypeSpecsPanel(nanogui::Screen *screen, pagemade::FontLibrary &fonts,
+                   pagemade::FontMenuModel &fonts_menu,
+                   std::function<void(const pagemade::CharStyle &before,
+                                      const pagemade::CharStyle &after)> apply);
+    ~TypeSpecsPanel() override;
+
+    /* Show `style`. A mixed selection leaves the font caption blank until
+       the user picks one, and says that Apply changes only edited fields. */
+    void load(const pagemade::CharStyle &style, bool mixed,
+              const std::vector<std::string> &document_fonts);
+    void set_apply_enabled(bool enabled);
+
+    bool mouse_button_event(const nanogui::Vector2i &p, int button, bool down,
+                            int modifiers) override;
+
+private:
+    struct State;
+    std::shared_ptr<State> m_state;
+    std::function<void()> m_refresh;
+    void relayout();
+};

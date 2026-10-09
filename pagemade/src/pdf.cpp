@@ -347,6 +347,31 @@ void emit_glyphs(std::string &s, const GlyphRun &r, int res) {
         s += num(hs) + " 0 0 -1 " + num(g.x) + " " + num(g.y) + " Tm <" + code + "> Tj\n";
     }
     s += "ET\n";
+    if (!r.underline && !r.strike)
+        return;
+    float x0 = 0, x1 = 0, base = 0;
+    bool span = false;
+    for (const PlacedGlyph &g : r.glyphs) {
+        if (g.flags & PlacedGlyph::Invisible)
+            continue;
+        const float right = g.x + std::max(0.f, g.adv);
+        if (!span) { x0 = g.x; x1 = right; base = g.y; span = true; }
+        else { x0 = std::min(x0, g.x); x1 = std::max(x1, right); }
+    }
+    if (!span || !(x1 > x0) || !r.font)
+        return;
+    const float sy = r.size / (float) r.font->units_per_em();
+    auto rule = [&](float design_y, float design_thick) {
+        const float y = base - design_y * sy;
+        const float thick = std::max(0.25f, design_thick * sy);
+        s += emit_color(r.color, true);
+        s += num(thick) + " w\n";
+        s += num(x0) + " " + num(y) + " m " + num(x1) + " " + num(y) + " l S\n";
+    };
+    if (r.underline)
+        rule(r.font->underline_position(), r.font->underline_thickness());
+    if (r.strike)
+        rule(r.font->strike_position(), r.font->strike_thickness());
 }
 
 /* One XObject for the picture's source. JPEG keeps its DCT stream and its

@@ -166,10 +166,16 @@ void BoxLayout::perform_layout(NVGcontext* ctx, Widget* widget) const {
                 pos[axis2] += m_margin;
                 break;
             case Alignment::Middle:
-                pos[axis2] += (available_axis2 - target_axis2) / 2;
+                /* Center in the container. available_axis2 already removed
+                   both margins, so add one back. */
+                pos[axis2] += m_margin + (available_axis2 - target_axis2) / 2;
                 break;
             case Alignment::Maximum:
-                pos[axis2] += available_axis2 - target_axis2 - m_margin * 2;
+                /* Right (or bottom) edge sits on the far margin. available
+                   already excludes both margins; subtracting them again
+                   shoved the row off the near edge and left a gap on the far
+                   one. */
+                pos[axis2] += m_margin + (available_axis2 - target_axis2);
                 break;
             case Alignment::Fill:
                 pos[axis2] += m_margin;

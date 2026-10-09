@@ -144,14 +144,31 @@ public:
      * defaults for a new text block. `mix_*` is set when the range disagrees
      * with itself. False only when selected blocks hold no text. */
     struct TypeStyle {
-        std::string family;
+        std::string family, face;
         bool  bold = false, italic = false;
+        pagemade::Caps caps = pagemade::Caps::Normal;
+        bool  underline = false, strike = false;
+        bool  kerning = true, ligatures = true;
         float size = 12.f, leading = 0.f, baseline = 0.f;
+        float tracking = 0.f, hscale = 100.f;
         bool  mix_family = false, mix_style = false, mix_size = false;
         bool  mix_leading = false, mix_baseline = false;
+        bool  mix_caps = false, mix_deco = false;
+        bool  mix_track = false, mix_hscale = false;
+        bool  mix_kerning = false, mix_ligatures = false;
     };
     bool type_style(TypeStyle &t) const;
     void apply_type(const std::function<void(pagemade::CharStyle &)> &fn);
+
+    /* Paragraph alignment of the selected lines. With the text tool, that
+     * is the caret's line or the lines the selection touches, each whole
+     * line. With text blocks selected, it is the lines in those blocks.
+     * False when there is no such text. `mixed` when the lines disagree. */
+    bool text_align(pagemade::Align &align, bool &mixed) const;
+    /* Apply `align` there. A line that is only part of its paragraph is
+     * split off, so the rest of the paragraph is left as it was. One undo
+     * step. Does nothing when text_align would return false. */
+    void apply_align(pagemade::Align align);
 
     /* Undo/redo: whole-document snapshots (the model is small), one per
      * action. A run of typing or deleting coalesces into a single step;
@@ -274,6 +291,14 @@ private:
     int texture_for(NVGcontext *ctx, const pagemade::DrawImage &im, float px);
 
     /* ---- Text tool ------------------------------------------------- */
+    /* Lines whose alignment the toolbar edits: the caret line, the
+     * selected lines, or the lines inside the selected text blocks. */
+    struct AlignHit {
+        size_t story = 0;             // index into the document's stories
+        pagemade::TextPos a, b;       // half-open range in that story
+    };
+    void collect_align_hits(std::vector<AlignHit> &out) const;
+
     pagemade::Story *edit_story();
     const pagemade::Story *edit_story() const;
     const pagemade::Composition *edit_comp() const;

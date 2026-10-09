@@ -210,8 +210,14 @@ void write_char_style(JsonOut &j, const CharStyle &cs) {
     const CharStyle d;
     j.begin_object();
     if (cs.family != d.family) j.key("family").value(cs.family);
+    if (!cs.face.empty() && cs.face != FontLibrary::style_name(cs.bold, cs.italic))
+        j.key("face").value(cs.face);
     if (cs.bold) j.key("bold").value(true);
     if (cs.italic) j.key("italic").value(true);
+    if (cs.caps == Caps::Small) j.key("caps").value("small");
+    else if (cs.caps == Caps::All) j.key("caps").value("all");
+    if (cs.underline) j.key("underline").value(true);
+    if (cs.strike) j.key("strike").value(true);
     if (cs.size != d.size) j.key("size").value(cs.size);
     if (cs.leading != d.leading) j.key("leading").value(cs.leading);
     if (cs.tracking != d.tracking) j.key("tracking").value(cs.tracking);
@@ -311,13 +317,29 @@ std::vector<FontRef> used_fonts(const PageDoc &doc, const FontLibrary &fonts) {
     for (const StoryEntry &se : doc.stories)
         for (const Paragraph &p : se.story.paragraphs)
             for (const Run &r : p.runs) {
-                const std::string style = FontLibrary::style_name(r.style.bold, r.style.italic);
+                /* A named cut ("Light") is embedded under that name when its
+                 * file loads. Otherwise the classic bold/italic cut of this
+                 * family. Never a face from some other family: a missing
+                 * family stays a name in the story, not a substituted file. */
+                const Font *font = fonts.face_for(r.style.family, r.style.bold, r.style.italic);
+                std::string name = fonts.resolved_style(r.style.family, "", r.style.bold, r.style.italic);
+                if (!r.style.face.empty()) {
+                    const Font *named = fonts.find(r.style.family, r.style.face,
+                                                   r.style.bold, r.style.italic);
+                    if (font && named && named != font) {
+                        font = named;
+                        name = r.style.face;
+                    }
+                }
+                if (name.empty())
+                    name = r.style.face.empty()
+                        ? FontLibrary::style_name(r.style.bold, r.style.italic)
+                        : r.style.face;
                 bool seen = false;
                 for (const FontRef &f : out)
-                    seen |= f.family == r.style.family && f.style == style;
+                    seen |= f.family == r.style.family && f.style == name;
                 if (!seen)
-                    out.push_back({r.style.family, style,
-                                   fonts.face_for(r.style.family, r.style.bold, r.style.italic)});
+                    out.push_back({r.style.family, name, font});
             }
     return out;
 }
@@ -617,8 +639,15 @@ void get(const DictValue *o, const char *k, Color &c) {
 CharStyle read_char_style(const DictValue *o) {
     CharStyle cs;
     get(o, "family", cs.family);
+    get(o, "face", cs.face);
     get(o, "bold", cs.bold);
     get(o, "italic", cs.italic);
+    std::string caps;
+    get(o, "caps", caps);
+    if (caps == "small") cs.caps = Caps::Small;
+    else if (caps == "all") cs.caps = Caps::All;
+    get(o, "underline", cs.underline);
+    get(o, "strike", cs.strike);
     get(o, "size", cs.size);
     get(o, "leading", cs.leading);
     get(o, "tracking", cs.tracking);
@@ -1132,7 +1161,9 @@ OpenResult open_document(const std::string &path, const FontLibrary &installed) 
     for (const StoryEntry &se : d.stories)
         for (const Paragraph &p : se.story.paragraphs)
             for (const Run &run : p.runs) {
-                const std::string style = FontLibrary::style_name(run.style.bold, run.style.italic);
+                const std::string style = run.style.face.empty()
+                    ? FontLibrary::style_name(run.style.bold, run.style.italic)
+                    : run.style.face;
                 if (provided.count(run.style.family + "/" + style) ||
                     installed.has_installed_family(run.style.family))
                     continue;

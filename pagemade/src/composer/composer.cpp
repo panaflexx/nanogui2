@@ -53,6 +53,7 @@ struct PGlyph {
     float    track = 0;          // tracking added after the glyph, points
     float    dx = 0, dy = 0;     // HarfBuzz offsets, points (dy up)
     float    band = 0;           // the run's space width (letter spacing unit)
+    float    scale = 1.f;        // synthetic small caps draw smaller than the run's size
 };
 
 uint32_t decode_utf8(const std::string &s, size_t i) {
@@ -73,6 +74,36 @@ size_t char_before(const std::string &s, size_t end) {
     return i;
 }
 
+/* Byte length of the UTF-8 character at i. */
+size_t utf8_len_at(const std::string &s, size_t i) {
+    if (i >= s.size())
+        return 1;
+    unsigned char c = (unsigned char) s[i];
+    int n = c < 0x80 ? 0 : (c >= 0xF0) ? 3 : (c >= 0xE0) ? 2 : (c >= 0xC0) ? 1 : 0;
+    return (size_t) n + 1;
+}
+
+/* Latin letters we can case without a Unicode library: ASCII, Latin-1,
+ * ß and ÿ. Other scripts are left as typed. */
+bool is_lower_letter(uint32_t cp) {
+    if (cp >= 'a' && cp <= 'z') return true;
+    if (cp == 0xDF || cp == 0xFF) return true;
+    if (cp >= 0xE0 && cp <= 0xF6) return true;
+    if (cp >= 0xF8 && cp <= 0xFE) return true;
+    return false;
+}
+
+void to_upper(uint32_t cp, std::vector<uint32_t> &out) {
+    if (cp >= 'a' && cp <= 'z') { out.push_back(cp - 32); return; }
+    if (cp == 0xDF) { out.push_back('S'); out.push_back('S'); return; }
+    if (cp == 0xFF) { out.push_back(0x178); return; }
+    if ((cp >= 0xE0 && cp <= 0xF6) || (cp >= 0xF8 && cp <= 0xFE)) {
+        out.push_back(cp - 0x20);
+        return;
+    }
+    out.push_back(cp);
+}
+
 bool is_space(uint32_t cp) { return cp == ' ' || cp == 0xA0; }
 bool is_break(uint32_t cp) {
     return cp == '\n' || cp == '\r' || cp == 0x0B || cp == 0x0C || cp == 0x85 ||
@@ -91,7 +122,8 @@ public:
         for (const Run &r : para.runs) {
             m_start.push_back((uint32_t) text.size());
             text += r.text;
-            m_font.push_back(fonts.find(r.style.family, r.style.bold, r.style.italic));
+            m_font.push_back(fonts.find(r.style.family, r.style.face,
+                                         r.style.bold, r.style.italic));
         }
         m_buf = hb_buffer_create();
     }
@@ -129,21 +161,52 @@ public:
         const Font *font = m_font[ri];
         if (!font || s.empty())
             return;
+
+        /* Caps is a style, not a change to the story. Clusters stay the
+         * original byte offsets so carets and copy still see the typed text.
+         * Small caps use the face's smcp feature, or capitals drawn at the
+         * x-height when the face has none. */
+        const bool all_caps = cs.caps == Caps::All;
+        const bool synth = cs.caps == Caps::Small && !font->has_small_caps();
+        const float sm = synth ? font->small_cap_scale() : 1.f;
+        std::vector<float> scale_at(s.size() + 1, 1.f);
         hb_buffer_clear_contents(m_buf);
-        hb_buffer_add_utf8(m_buf, s.data(), (int) s.size(), 0, (int) s.size());
+        /* clear_contents leaves a shaped buffer typed as glyphs. add()
+         * requires Unicode (or an empty invalid buffer). */
+        hb_buffer_set_content_type(m_buf, HB_BUFFER_CONTENT_TYPE_UNICODE);
+        for (size_t i = 0; i < s.size(); ) {
+            const uint32_t cp = decode_utf8(s, i);
+            const size_t n = std::min(utf8_len_at(s, i), s.size() - i);
+            const bool lower = is_lower_letter(cp);
+            std::vector<uint32_t> cps;
+            if ((all_caps || synth) && lower)
+                to_upper(cp, cps);
+            else
+                cps.push_back(cp);
+            float sc = 1.f;
+            if (synth && (lower || cp == '-'))
+                sc = sm;
+            if (i < scale_at.size())
+                scale_at[i] = sc;
+            for (uint32_t o : cps)
+                hb_buffer_add(m_buf, o, (unsigned) i);
+            i += n;
+        }
         hb_buffer_set_direction(m_buf, HB_DIRECTION_LTR);
         hb_buffer_set_language(m_buf, hb_language_from_string("en", -1));
         hb_buffer_guess_segment_properties(m_buf);
         hb_buffer_set_cluster_level(m_buf, HB_BUFFER_CLUSTER_LEVEL_MONOTONE_CHARACTERS);
 
-        hb_feature_t feats[3];
+        hb_feature_t feats[8];
         unsigned nfeat = 0;
-        auto off = [&](const char *tag) {
-            feats[nfeat++] = {hb_tag_from_string(tag, -1), 0,
+        auto feat = [&](const char *tag, uint32_t value) {
+            feats[nfeat++] = {hb_tag_from_string(tag, -1), value,
                               HB_FEATURE_GLOBAL_START, HB_FEATURE_GLOBAL_END};
         };
-        if (!cs.kerning) off("kern");
-        if (!cs.ligatures) { off("liga"); off("clig"); }
+        if (!cs.kerning) feat("kern", 0);
+        if (!cs.ligatures) { feat("liga", 0); feat("clig", 0); }
+        if (cs.caps == Caps::Small && font->has_small_caps())
+            feat("smcp", 1);
         hb_shape(font->hb(), m_buf, feats, nfeat);
 
         unsigned n = 0;
@@ -157,6 +220,8 @@ public:
         for (unsigned i = 0; i < n; ++i) {
             const uint32_t local = info[i].cluster;
             const uint32_t cp = decode_utf8(s, local);
+            const float scale = local < scale_at.size() ? scale_at[local] : 1.f;
+            const float gem = em * scale;
             PGlyph g;
             g.gid = info[i].codepoint;
             g.cluster = base + std::min(local, inserted_from);
@@ -165,11 +230,12 @@ public:
             g.unsafe = hb_glyph_info_get_glyph_flags(&info[i]) & HB_GLYPH_FLAG_UNSAFE_TO_BREAK;
             g.kind = is_break(cp) ? Kind::Break : is_space(cp) ? Kind::Space
                    : cp == '\t' ? Kind::Tab : cp == 0xAD ? Kind::SoftHyphen : Kind::Glyph;
-            g.adv = pos[i].x_advance * em * hs;
+            g.adv = pos[i].x_advance * gem * hs;
             g.track = track;
-            g.dx = pos[i].x_offset * em * hs;
-            g.dy = pos[i].y_offset * em;
+            g.dx = pos[i].x_offset * gem * hs;
+            g.dy = pos[i].y_offset * gem;
             g.band = band;
+            g.scale = scale;
             if (g.kind == Kind::Break || g.kind == Kind::SoftHyphen || g.kind == Kind::Tab) {
                 g.adv = 0;           // tabs are resolved during layout
                 g.track = 0;
@@ -721,13 +787,18 @@ void place_line(Shaper &sh, const Paragraph &para, const LineCandidate &c, float
     for (size_t i = 0; i < g.size(); ++i) {
         const PGlyph &gl = g[i];
         const CharStyle &cs = sh.style(gl.run);
-        if ((int) gl.run != cur || line.runs.empty()) {
+        const float gsize = cs.size * (gl.scale > 0.f ? gl.scale : 1.f);
+        const bool split = line.runs.empty() || (int) gl.run != cur ||
+                           std::fabs(line.runs.back().size - gsize) > 0.01f;
+        if (split) {
             line.runs.emplace_back();
             GlyphRun &r = line.runs.back();
             r.font = sh.font(gl.run);
-            r.size = cs.size;
+            r.size = gsize;
             r.hscale = cs.hscale;
             r.color = cs.color;
+            r.underline = cs.underline;
+            r.strike = cs.strike;
             cur = gl.run;
         }
         run_of[i] = line.runs.size() - 1;

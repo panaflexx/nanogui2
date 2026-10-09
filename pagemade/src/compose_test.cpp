@@ -8,6 +8,8 @@
 #include "composer/hyphenator.h"
 #include "composer/edit.h"
 #include "default_fonts.h"
+#include "font_menu.h"
+#include "system_fonts.h"
 #include "drawlist.h"
 #include "geometry.h"
 #include "image.h"
@@ -29,6 +31,8 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <filesystem>
+#include <fstream>
 #include <memory>
 #include <string>
 #include <vector>
@@ -330,6 +334,160 @@ static void test_edit(const FontLibrary &fonts) {
         /* A point below the text, past the right edge, lands at the end. */
         TextPos past = hit_test(c, s, col, 10000, 30 + 590);
         CHECK(past.byte == text.size(), "click past the text hits the end (%u)", past.byte);
+    }
+}
+
+/* Alignment is a paragraph attribute. A range that is only some of a
+ * paragraph's lines is split off so the rest keeps its alignment, without
+ * the indent and spacing a typed Return would add. */
+static void test_align_ranges(const FontLibrary &fonts) {
+    CharStyle cs; cs.size = 10;
+    ParaStyle ps;
+    ps.align = Align::Justify;
+    ps.name = "Body text";
+    ps.first_indent = 12.f;
+    ps.space_before = 4.f;
+    ps.space_after = 6.f;
+
+    {
+        Story s = one_para("abcdefghijklmnopqrstuvwxyz", cs, ps);
+        TextPos caret{0, 15};
+        set_align_ranges(s, {{{0, 10}, {0, 20}}}, Align::Center, &caret, nullptr);
+        CHECK(s.paragraphs.size() == 3, "middle span splits into three (%zu)", s.paragraphs.size());
+        if (s.paragraphs.size() == 3) {
+            CHECK(paragraph_text(s.paragraphs[0]) == "abcdefghij", "head text");
+            CHECK(paragraph_text(s.paragraphs[1]) == "klmnopqrst", "middle text");
+            CHECK(paragraph_text(s.paragraphs[2]) == "uvwxyz", "tail text");
+            CHECK(s.paragraphs[0].style.align == Align::Justify, "head stays justified");
+            CHECK(s.paragraphs[1].style.align == Align::Center, "middle is centered");
+            CHECK(s.paragraphs[2].style.align == Align::Justify, "tail stays justified");
+            CHECK(s.paragraphs[0].style.first_indent == 12.f, "head keeps the first indent");
+            CHECK(s.paragraphs[0].style.space_before == 4.f, "head keeps space before");
+            CHECK(s.paragraphs[0].style.space_after == 0.f, "the artificial break has no space after");
+            CHECK(s.paragraphs[1].style.first_indent == 0.f, "a continuation is not a first line");
+            CHECK(s.paragraphs[1].style.space_before == 0.f &&
+                  s.paragraphs[1].style.space_after == 0.f, "the middle has no paragraph spacing");
+            CHECK(s.paragraphs[1].style.name == "Body text", "the split keeps the style name");
+            CHECK(s.paragraphs[2].style.first_indent == 0.f &&
+                  s.paragraphs[2].style.space_before == 0.f, "the tail is a continuation");
+            CHECK(s.paragraphs[2].style.space_after == 6.f, "space after stays at the real end");
+            CHECK(caret.para == 1 && caret.byte == 5, "caret follows into the new paragraph (%zu,%u)",
+                  caret.para, caret.byte);
+        }
+    }
+
+    {
+        Story s = one_para("abcdefghijklmnopqrstuvwxyz", cs, ps);
+        set_align_ranges(s, {{{0, 0}, {0, 26}}}, Align::Center);
+        CHECK(s.paragraphs.size() == 1, "a whole paragraph is not split");
+        CHECK(s.paragraphs[0].style.align == Align::Center, "a whole paragraph changes in place");
+        CHECK(s.paragraphs[0].style.first_indent == 12.f &&
+              s.paragraphs[0].style.space_after == 6.f, "a whole paragraph keeps indent and spacing");
+    }
+
+    {
+        Story s = one_para("abcdefghijklmnopqrstuvwxyz", cs, ps);
+        set_align_ranges(s, {{{0, 0}, {0, 10}}, {{0, 10}, {0, 26}}}, Align::Right);
+        CHECK(s.paragraphs.size() == 1, "adjacent spans that cover the paragraph merge");
+        CHECK(s.paragraphs[0].style.align == Align::Right, "the merged span changes alignment");
+    }
+
+    {
+        Story s = one_para("abcdefghijklmnopqrstuvwxyz", cs, ps);
+        set_align_ranges(s, {{{0, 10}, {0, 20}}}, Align::Justify);
+        CHECK(s.paragraphs.size() == 1 && s.paragraphs[0].style.align == Align::Justify,
+              "the alignment it already has does not split it");
+    }
+
+    {
+        Story s = one_para("", cs, ps);
+        set_align_ranges(s, {{{0, 0}, {0, 0}}}, Align::Center);
+        CHECK(s.paragraphs.size() == 1 && s.paragraphs[0].style.align == Align::Center,
+              "an empty paragraph takes the alignment");
+    }
+
+    {
+        Story s = one_para("abcdefghijklmnopqrstuvwxyz", cs, ps);
+        TextPos anchor{0, 3}, caret{0, 17};
+        set_align_ranges(s, {{{0, 0}, {0, 5}}, {{0, 15}, {0, 20}}}, Align::Center,
+                         &caret, &anchor);
+        CHECK(s.paragraphs.size() == 4, "two separate spans split into four (%zu)",
+              s.paragraphs.size());
+        if (s.paragraphs.size() == 4) {
+            CHECK(paragraph_text(s.paragraphs[0]) == "abcde", "first span");
+            CHECK(paragraph_text(s.paragraphs[1]) == "fghijklmno", "gap keeps the old alignment");
+            CHECK(paragraph_text(s.paragraphs[2]) == "pqrst", "second span");
+            CHECK(paragraph_text(s.paragraphs[3]) == "uvwxyz", "tail after both spans");
+            CHECK(s.paragraphs[0].style.align == Align::Center &&
+                  s.paragraphs[2].style.align == Align::Center, "both spans change");
+            CHECK(s.paragraphs[1].style.align == Align::Justify &&
+                  s.paragraphs[3].style.align == Align::Justify, "the gaps stay justified");
+            CHECK(anchor.para == 0 && anchor.byte == 3, "anchor in the first span stays (%zu,%u)",
+                  anchor.para, anchor.byte);
+            CHECK(caret.para == 2 && caret.byte == 2, "caret in the later span follows both splits (%zu,%u)",
+                  caret.para, caret.byte);
+        }
+    }
+
+    /* Lines in one column of a threaded story. The other column, and a
+     * second story, keep the alignment they had. */
+    {
+        ParaStyle head = ps;
+        head.align = Align::Center;
+        head.name = "Headline";
+        head.first_indent = 0;
+        Story headline = one_para("The headline sits in its own box", cs, head);
+        Story body = one_para(kLong, cs, ps);
+        const std::string original = paragraph_text(body.paragraphs[0]);
+        std::vector<Frame> cols = {{0, 0, 160, 48}, {180, 0, 160, 800}};
+        Composition before = compose(body, cols, fonts);
+        CHECK(before.lines.size() > 2 && before.lines.front().frame == 0 &&
+              before.lines.back().frame == 1, "the story threads into the second column");
+        for (size_t i = 1; i < before.lines.size(); ++i)
+            if (before.lines[i].para == before.lines[i - 1].para)
+                CHECK(before.lines[i].byte_start == before.lines[i - 1].byte_end,
+                      "wrapped lines meet (%u then %u)",
+                      before.lines[i - 1].byte_end, before.lines[i].byte_start);
+
+        std::vector<std::pair<TextPos, TextPos>> in_first;
+        for (const ComposedLine &l : before.lines)
+            if (l.frame == 0)
+                in_first.push_back({{l.para, l.byte_start}, {l.para, l.byte_end}});
+        CHECK(!in_first.empty(), "the first column has lines");
+        set_align_ranges(body, in_first, Align::Center);
+
+        std::string all;
+        bool any_center = false, any_justify = false;
+        for (const Paragraph &p : body.paragraphs) {
+            all += paragraph_text(p);
+            any_center = any_center || p.style.align == Align::Center;
+            any_justify = any_justify || p.style.align == Align::Justify;
+        }
+        CHECK(all == original, "the column split keeps the story text");
+        CHECK(any_center && any_justify, "only the selected column's lines change alignment");
+        CHECK(headline.paragraphs.size() == 1 &&
+              headline.paragraphs[0].style.align == Align::Center,
+              "another story is left alone");
+        CHECK(body.paragraphs.back().style.align == Align::Justify &&
+              body.paragraphs.back().style.space_after == 6.f,
+              "the text past the column keeps justification and its space after");
+        CHECK(body.paragraphs.front().style.align == Align::Center &&
+              body.paragraphs.front().style.first_indent == 12.f,
+              "the selected column keeps the paragraph's first indent");
+
+        Composition after = compose(body, cols, fonts);
+        int centered = 0;
+        for (const ComposedLine &l : after.lines) {
+            if (body.paragraphs[l.para].style.align != Align::Center)
+                continue;
+            ++centered;
+            if (l.runs.empty() || l.runs.front().glyphs.empty())
+                continue;
+            float x0 = l.runs.front().glyphs.front().x;
+            float lm = x0 - l.left, rm = l.left + l.width - l.x_end;
+            CHECK(std::fabs(lm - rm) < 1.0f, "a recentered line is centered (%.2f / %.2f)", lm, rm);
+        }
+        CHECK(centered > 0, "the selected lines compose centered");
     }
 }
 
@@ -789,7 +947,9 @@ static void check_color(const Color &a, const Color &b, const char *what) {
 }
 
 static void check_char(const CharStyle &a, const CharStyle &b) {
-    CHECK(a.family == b.family && a.bold == b.bold && a.italic == b.italic, "char style face");
+    CHECK(a.family == b.family && a.face == b.face && a.bold == b.bold && a.italic == b.italic &&
+          a.caps == b.caps && a.underline == b.underline && a.strike == b.strike,
+          "char style face");
     CHECK(near(a.size, b.size) && near(a.leading, b.leading) && near(a.tracking, b.tracking) &&
           near(a.hscale, b.hscale) && near(a.baseline_shift, b.baseline_shift),
           "char style metrics");
@@ -1549,6 +1709,326 @@ static void test_images(const FontLibrary &fonts) {
     std::remove(linked_png.c_str());
 }
 
+static std::vector<const PlacedGlyph *> visible_glyphs(const Composition &c) {
+    std::vector<const PlacedGlyph *> g;
+    for (const ComposedLine &l : c.lines)
+        for (const GlyphRun &r : l.runs)
+            for (const PlacedGlyph &p : r.glyphs)
+                if (!(p.flags & PlacedGlyph::Invisible))
+                    g.push_back(&p);
+    return g;
+}
+
+static void test_caps(const FontLibrary &fonts) {
+    CharStyle cs;
+    cs.size = 36;
+    ParaStyle ps;
+    std::vector<Frame> wide = {{0, 0, 2000, 200}};
+    Composition plain = compose(one_para("Ab", cs, ps), wide, fonts);
+    cs.caps = Caps::All;
+    Composition all = compose(one_para("Ab", cs, ps), wide, fonts);
+    CharStyle up = cs;
+    up.caps = Caps::Normal;
+    Composition upper = compose(one_para("AB", up, ps), wide, fonts);
+    const auto gp = visible_glyphs(plain);
+    const auto ga = visible_glyphs(all);
+    const auto gu = visible_glyphs(upper);
+    CHECK(gp.size() >= 2 && ga.size() >= 2 && gu.size() >= 2,
+          "caps glyphs %zu %zu %zu", gp.size(), ga.size(), gu.size());
+    if (gp.size() >= 2 && ga.size() >= 2 && gu.size() >= 2)
+        CHECK(ga[1]->gid == gu[1]->gid && ga[1]->gid != gp[1]->gid,
+              "all caps shapes the capital (%u vs plain %u vs AB %u)",
+              ga[1]->gid, gp[1]->gid, gu[1]->gid);
+
+    cs.caps = Caps::Small;
+    Composition small = compose(one_para("a", cs, ps), wide, fonts);
+    Composition low = compose(one_para("a", up, ps), wide, fonts);
+    Composition cap = compose(one_para("A", up, ps), wide, fonts);
+    const auto gs = visible_glyphs(small);
+    const auto gl = visible_glyphs(low);
+    const auto gc = visible_glyphs(cap);
+    CHECK(!gs.empty() && !gl.empty() && !gc.empty(), "small caps glyphs");
+    if (!gs.empty() && !gl.empty() && !gc.empty()) {
+        CHECK(gs[0]->gid != gl[0]->gid, "small caps is not the lowercase glyph");
+        CHECK(gs[0]->adv < gc[0]->adv - 0.2f,
+              "small caps is narrower than the capital (%.2f vs %.2f)",
+              gs[0]->adv, gc[0]->adv);
+    }
+
+    cs.caps = Caps::Normal;
+    cs.underline = true;
+    cs.strike = true;
+    Composition ruled = compose(one_para("Hi", cs, ps), wide, fonts);
+    bool flags = false;
+    for (const ComposedLine &l : ruled.lines)
+        for (const GlyphRun &r : l.runs)
+            flags = flags || (r.underline && r.strike && !r.glyphs.empty());
+    CHECK(flags, "underline and strikethrough land on the glyph run");
+}
+
+static void test_type_file(const FontLibrary &fonts) {
+    PageDoc doc = sample_document();
+    CHECK(!doc.stories.empty() && doc.stories[0].story.paragraphs.size() >= 2 &&
+          !doc.stories[0].story.paragraphs[0].runs.empty() &&
+          !doc.stories[0].story.paragraphs[1].runs.empty(),
+          "sample headline has two runs");
+    if (doc.stories.empty() || doc.stories[0].story.paragraphs.size() < 2)
+        return;
+    Run &light = doc.stories[0].story.paragraphs[0].runs[0];
+    light.style.face = "Light";
+    light.style.bold = false;
+    light.style.italic = false;
+    light.style.caps = Caps::Small;
+    light.style.underline = true;
+    light.style.strike = true;
+    Run &classic = doc.stories[0].story.paragraphs[1].runs[0];
+    classic.style.face = FontLibrary::style_name(classic.style.bold, classic.style.italic);
+
+    const std::string json = document_json(doc, fonts, SaveOptions{});
+    CHECK(json.find("\"face\": \"Light\"") != std::string::npos, "face is written");
+    CHECK(json.find("\"caps\": \"small\"") != std::string::npos, "small caps is written");
+    CHECK(json.find("\"underline\": true") != std::string::npos, "underline is written");
+    CHECK(json.find("\"strike\": true") != std::string::npos, "strikethrough is written");
+    size_t faces = 0;
+    for (size_t at = 0; (at = json.find("\"face\"", at)) != std::string::npos; at += 6)
+        ++faces;
+    CHECK(faces == 1, "a face equal to Regular/Bold/Italic is omitted (%zu)", faces);
+
+    const std::string path = "/tmp/pagemade-type-specs.pagemade";
+    std::string error;
+    CHECK(save_document(doc, fonts, path, SaveOptions{}, &error),
+          "save type specs (%s)", error.c_str());
+    OpenResult opened = open_document(path, fonts);
+    CHECK(opened.ok, "open type specs (%s)", opened.error.c_str());
+    bool found = false, classic_clear = false;
+    if (opened.ok && !opened.doc.stories.empty() &&
+        opened.doc.stories[0].story.paragraphs.size() >= 2 &&
+        !opened.doc.stories[0].story.paragraphs[0].runs.empty() &&
+        !opened.doc.stories[0].story.paragraphs[1].runs.empty()) {
+        const CharStyle &a = opened.doc.stories[0].story.paragraphs[0].runs[0].style;
+        found = a.face == "Light" && a.caps == Caps::Small && a.underline && a.strike && !a.bold;
+        const CharStyle &b = opened.doc.stories[0].story.paragraphs[1].runs[0].style;
+        classic_clear = b.face.empty() && b.italic;
+    }
+    CHECK(found, "opened face, caps, underline and strike");
+    CHECK(classic_clear, "opened classic face stays empty");
+    std::remove(path.c_str());
+}
+
+static std::string join_rows(const std::vector<FontMenuRow> &rows) {
+    std::string text;
+    for (const FontMenuRow &row : rows) {
+        if (!text.empty())
+            text += " | ";
+        if (row.heading)
+            text += "[";
+        text += row.text;
+        if (row.starred)
+            text += "*";
+        if (row.heading)
+            text += "]";
+    }
+    return text;
+}
+
+static void test_font_menu() {
+    const std::vector<std::string> installed = {
+        "Serif", "Sans", "Display", "Liberation Sans", "Noto Sans Arabic",
+        "Noto Sans Display", "Noto Sans", "DejaVu Sans"};
+    const FontMenuList defaults = font_menu_defaults(installed);
+    const std::vector<std::string> english = {
+        "Serif", "Sans", "Display", "Liberation Sans", "DejaVu Sans", "Noto Sans"};
+    std::string got_defaults;
+    for (const std::string &name : defaults.favorites) {
+        if (!got_defaults.empty())
+            got_defaults += ", ";
+        got_defaults += name;
+    }
+    CHECK(defaults.favorites == english, "english defaults %s", got_defaults.c_str());
+    CHECK(defaults.recent_limit == 8, "recent limit starts at 8");
+
+    FontMenuModel model;
+    model.set_list(defaults);
+    model.list();
+    FontMenuList listed = defaults;
+    listed.recents = {"DejaVu Sans"};
+    model.set_list(listed);
+    const std::vector<FontMenuRow> short_list =
+        model.rows(installed, {"Noto Sans Arabic"}, "Noto Sans Arabic", "");
+    CHECK(join_rows(short_list) ==
+              "[In this publication] | Noto Sans Arabic | [Recent] | DejaVu Sans* | "
+              "[Favorites] | Serif* | Sans* | Display* | Liberation Sans* | Noto Sans*",
+          "short list %s", join_rows(short_list).c_str());
+
+    const std::vector<FontMenuRow> found = model.rows(installed, {"Noto Sans Arabic"}, "", "noto");
+    CHECK(join_rows(found) ==
+              "[Search: noto] | Noto Sans Arabic | Noto Sans Display | Noto Sans*",
+          "search %s", join_rows(found).c_str());
+    bool section = false;
+    for (const FontMenuRow &row : found)
+        section |= row.text == "Recent" || row.text == "Favorites" || row.text == "In this publication";
+    CHECK(!section, "a search has no section headings");
+
+    const std::vector<FontMenuRow> none = model.rows(installed, {}, "", "zzz");
+    CHECK(none.size() == 2 && none[0].heading && none[0].text == "Search: zzz" &&
+              none[1].heading && none[1].text == "No matching fonts",
+          "no matches %s", join_rows(none).c_str());
+
+    FontMenuModel odd;
+    FontMenuList odd_list;
+    odd_list.favorites = {"Serif"};
+    odd.set_list(odd_list);
+    const std::vector<FontMenuRow> current_only =
+        odd.rows({"Serif", "Weird Face"}, {}, "Weird Face", "");
+    CHECK(join_rows(current_only) == "Weird Face | [Favorites] | Serif*",
+          "current family leads %s", join_rows(current_only).c_str());
+    FontMenuList missing = odd_list;
+    missing.favorites = {"Missing", "Serif"};
+    missing.recents = {"Missing"};
+    odd.set_list(missing);
+    const std::vector<FontMenuRow> dropped = odd.rows({"Serif"}, {}, "", "");
+    CHECK(join_rows(dropped) == "[Favorites] | Serif*",
+          "uninstalled names stay out of the menu %s", join_rows(dropped).c_str());
+
+    FontMenuList capped;
+    capped.recent_limit = 2;
+    model.set_list(capped);
+    model.note_use("A");
+    model.note_use("B");
+    model.note_use("C");
+    CHECK(model.list().recents.size() == 2 && model.list().recents[0] == "C" &&
+              model.list().recents[1] == "B",
+          "recents trim");
+    model.note_use("A");
+    CHECK(model.list().recents.size() == 2 && model.list().recents[0] == "A" &&
+              model.list().recents[1] == "C",
+          "a repeated recent moves to the front");
+    model.toggle_star("Sans");
+    model.toggle_star("Serif");
+    model.toggle_star("Sans");
+    CHECK(model.list().favorites.size() == 1 && model.list().favorites[0] == "Serif",
+          "unstarring removes and starring appends");
+    FontMenuList limited;
+    limited.recent_limit = 0;
+    model.set_list(limited);
+    model.note_use("A");
+    CHECK(model.list().recents.empty(), "a zero recent limit keeps nothing");
+
+    PageDoc doc;
+    StoryEntry first;
+    Paragraph paragraph;
+    Run run;
+    run.style.family = "Noto Sans Arabic";
+    run.text = "a";
+    paragraph.runs.push_back(run);
+    run.style.family = "Serif";
+    paragraph.runs.push_back(run);
+    run.style.family.clear();
+    paragraph.runs.push_back(run);
+    run.style.family = "Noto Sans Arabic";
+    paragraph.runs.push_back(run);
+    first.story.paragraphs.push_back(paragraph);
+    doc.stories.push_back(first);
+    StoryEntry second;
+    Paragraph later;
+    run.style.family = "Display";
+    run.text = "b";
+    later.runs.push_back(run);
+    second.story.paragraphs.push_back(later);
+    doc.stories.push_back(second);
+    const std::vector<std::string> used = document_font_families(doc);
+    CHECK(used.size() == 3 && used[0] == "Noto Sans Arabic" && used[1] == "Serif" &&
+              used[2] == "Display",
+          "document families follow the stories");
+
+    std::string query = "No\xC3\xA9";
+    CHECK(font_menu_query_edit(query, 0) && query == "No", "backspace drops one codepoint");
+    CHECK(font_menu_query_edit(query, ' ') && query == "No ", "a space joins the query");
+    CHECK(font_menu_query_edit(query, 0x1B) && query.empty(), "escape clears the query");
+    CHECK(!font_menu_query_edit(query, 0x1B), "escape on an empty query closes the menu");
+
+    const std::string dir = "/tmp/pagemade-font-menu-test";
+    std::filesystem::remove_all(dir);
+    std::filesystem::create_directories(dir);
+    const std::string path = dir + "/fonts.conf";
+    FontMenuModel fresh;
+    CHECK(!fresh.load(path, installed), "a missing config is not a saved list");
+    CHECK(!std::filesystem::exists(path), "load does not create the file");
+    font_menu_load_or_seed(fresh, path, installed);
+    CHECK(std::filesystem::exists(path), "the first run writes the english list");
+    FontMenuModel seeded;
+    CHECK(seeded.load(path, installed), "the seeded file loads");
+    CHECK(seeded.list().favorites == english, "seeded favorites match the english list");
+
+    {
+        std::ofstream out(path, std::ios::trunc);
+        out << "# comment\n\n";
+        out << "recent_limit 2\n";
+        out << "favorite Serif\n";
+        out << "favorite Serif\n";
+        out << "favorite Noto Sans Arabic\n";
+        out << "recent DejaVu Sans\n";
+        out << "recent Liberation Sans\n";
+        out << "recent DejaVu Sans\n";
+        out << "unknown junk\n";
+        out << "favorite\n";
+        out << "favorite  Liberation Sans\n";
+    }
+    FontMenuModel round;
+    CHECK(round.load(path, {"Serif"}), "a hand-written config loads");
+    CHECK(round.list().recent_limit == 2, "recent limit is stored");
+    CHECK(round.list().favorites.size() == 3 && round.list().favorites[0] == "Serif" &&
+              round.list().favorites[1] == "Noto Sans Arabic" &&
+              round.list().favorites[2] == "Liberation Sans",
+          "favorites keep spaces, the first duplicate, and fonts that are not installed");
+    CHECK(round.list().recents.size() == 2 && round.list().recents[0] == "DejaVu Sans" &&
+              round.list().recents[1] == "Liberation Sans",
+          "recents stay newest-first and drop duplicates");
+    {
+        std::ofstream out(path, std::ios::trunc);
+        out << "# none\n";
+    }
+    FontMenuModel empty;
+    CHECK(empty.load(path, installed) && empty.list().favorites.empty(),
+          "an empty favorites file is a choice, not a missing file");
+    font_menu_load_or_seed(empty, path, installed);
+    CHECK(empty.list().favorites.empty(), "seeding does not refill a file the user emptied");
+    std::filesystem::remove_all(dir);
+
+    const std::string config = font_menu_config_path();
+    CHECK(!config.empty() && (config.find("pagemade/fonts.conf") != std::string::npos ||
+                              config == "pagemade-fonts.conf"),
+          "config path %s", config.c_str());
+}
+
+static void test_system_fonts() {
+    FontLibrary lib;
+    register_default_fonts(lib);
+    register_system_fonts(lib);
+    const std::vector<std::string> fams = lib.families();
+    CHECK(fams.size() >= 3, "at least the three built-in families (%zu)", fams.size());
+    if (fams.size() >= 3)
+        CHECK(fams[0] == "Serif" && fams[1] == "Sans" && fams[2] == "Display",
+              "built-ins stay first (%s, %s, %s)",
+              fams[0].c_str(), fams[1].c_str(), fams[2].c_str());
+    if (fams.size() > 3) {
+        const Font *loaded = nullptr;
+        std::string which;
+        const size_t stop = std::min(fams.size(), (size_t) 11);
+        for (size_t i = 3; i < stop && !loaded; ++i) {
+            if (const Font *f = lib.face_for(fams[i], false, false)) {
+                loaded = f;
+                which = fams[i];
+            }
+        }
+        CHECK(loaded && loaded->units_per_em() > 0, "an installed family loads");
+        if (loaded)
+            std::printf("  system fonts: %zu families, loaded %s\n", fams.size(), which.c_str());
+    } else {
+        std::printf("  system fonts: fc-list added none\n");
+    }
+}
+
 int main(int argc, char **argv) {
     bool verbose = argc > 1 && std::strcmp(argv[1], "-v") == 0;
     FontLibrary fonts;
@@ -1567,6 +2047,7 @@ int main(int argc, char **argv) {
     test_threading(fonts);
     test_breaks(fonts);
     test_edit(fonts);
+    test_align_ranges(fonts);
     test_pdf(fonts);
     test_deterministic(fonts);
     test_model(fonts);
@@ -1577,6 +2058,10 @@ int main(int argc, char **argv) {
     test_drawlist(fonts);
     test_docfile(fonts);
     test_images(fonts);
+    test_caps(fonts);
+    test_type_file(fonts);
+    test_font_menu();
+    test_system_fonts();
     if (verbose)
         dump_sample(fonts);
 

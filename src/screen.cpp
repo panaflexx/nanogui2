@@ -874,6 +874,39 @@ void Screen::set_theme(Theme* theme) {
 }
 
 namespace {
+
+/* The topmost modal window, ignoring popups (a popup is a window parented
+ * to the screen, and it must stay clickable while a dialog is up). */
+Window *front_modal(const std::vector<Widget *> &children) {
+    Window *modal = nullptr;
+    for (Widget *child : children) {
+        auto *win = dynamic_cast<Window *>(child);
+        if (!win || dynamic_cast<Popup *>(child))
+            continue;
+        if (win->modal() && win->visible())
+            modal = win;
+    }
+    return modal;
+}
+
+bool over_open_popup(const std::vector<Widget *> &children, const Vector2i &p) {
+    for (Widget *child : children) {
+        auto *pop = dynamic_cast<Popup *>(child);
+        if (pop && pop->visible() && pop->contains(p))
+            return true;
+    }
+    return false;
+}
+
+bool any_open_popup(const std::vector<Widget *> &children) {
+    for (Widget *child : children) {
+        auto *pop = dynamic_cast<Popup *>(child);
+        if (pop && pop->visible())
+            return true;
+    }
+    return false;
+}
+
 /// Mark retained display lists dirty for a subtree so a palette change paints.
 void dirty_theme_caches(Widget* w) {
     if (!w)
@@ -1426,15 +1459,6 @@ void Screen::mouse_button_callback_event(int button, int action, int modifiers) 
 #endif
 
     try {
-        if (m_focus_path.size() > 1) {
-            const Window* window =
-                dynamic_cast<Window*>(m_focus_path[m_focus_path.size() - 2]);
-            if (window && window->modal()) {
-                if (!window->contains(m_mouse_pos) && !m_drag_active)
-                    return;
-            }
-        }
-
         if (action == GLFW_PRESS)
             m_mouse_state |= 1 << button;
         else
@@ -1503,6 +1527,19 @@ void Screen::mouse_button_callback_event(int button, int action, int modifiers) 
                 m_redraw = true;
         }
 
+        /* A modal dialog owns clicks that miss it. An open menu is a screen
+           child, so it is outside the dialog's rectangle; those clicks still
+           belong to the menu. Anything else is swallowed, after the menu has
+           been closed above, and focus goes back to the dialog. */
+        if (Window *modal = front_modal(m_children)) {
+            if (!m_drag_active && !modal->contains(m_mouse_pos) &&
+                !over_open_popup(m_children, m_mouse_pos)) {
+                modal->request_focus();
+                m_redraw = true;
+                return;
+            }
+        }
+
         if (!m_drag_active && action == GLFW_PRESS && btn12) {
             m_drag_widget = find_widget(m_mouse_pos);
             if (m_drag_widget == this)
@@ -1515,6 +1552,14 @@ void Screen::mouse_button_callback_event(int button, int action, int modifiers) 
             m_drag_widget = nullptr;
         }
         m_redraw |= mouse_button_event(m_mouse_pos, button, action == GLFW_PRESS, m_modifiers);
+        /* Choosing a menu row hides the popup and leaves focus on that row.
+           The row is about to be dropped, which used to clear focus entirely
+           so the next click reached the window behind the dialog. */
+        if (Window *modal = front_modal(m_children)) {
+            if (!any_open_popup(m_children) &&
+                std::find(m_focus_path.begin(), m_focus_path.end(), modal) == m_focus_path.end())
+                modal->request_focus();
+        }
         if ((!m_redraw || m_close_popups) && m_popup_visible.size() != 0) {
             int Size = m_popup_visible.size();
             for (int Cnt = 0; Cnt < Size; Cnt++) {
@@ -1559,13 +1604,9 @@ void Screen::drop_callback_event(int count, const char** filenames) {
 void Screen::scroll_callback_event(double x, double y) {
     m_last_interaction = glfwGetTime();
     try {
-        if (m_focus_path.size() > 1) {
-            const Window* window =
-                dynamic_cast<Window*>(m_focus_path[m_focus_path.size() - 2]);
-            if (window && window->modal()) {
-                if (!window->contains(m_mouse_pos))
-                    return;
-            }
+        if (Window *modal = front_modal(m_children)) {
+            if (!modal->contains(m_mouse_pos) && !over_open_popup(m_children, m_mouse_pos))
+                return;
         }
         m_redraw |= scroll_event(m_mouse_pos, Vector2f(x, y));
     }

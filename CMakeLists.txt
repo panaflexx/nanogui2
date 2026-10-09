@@ -967,6 +967,9 @@ if (NANOGUI_BUILD_EXAMPLES)
         pagemade/src/render_nvg.cpp
         pagemade/src/pdf.cpp
         pagemade/src/default_fonts.cpp
+        pagemade/src/system_fonts.cpp
+        pagemade/src/font_menu.cpp
+        pagemade/src/font_menu_ui.cpp
         pagemade/src/page.cpp
         pagemade/src/geometry.cpp
         pagemade/src/drawlist.cpp
@@ -979,6 +982,8 @@ if (NANOGUI_BUILD_EXAMPLES)
         pagemade/src/compose_test.cpp
         pagemade/src/pdf.cpp
         pagemade/src/default_fonts.cpp
+        pagemade/src/system_fonts.cpp
+        pagemade/src/font_menu.cpp
         pagemade/src/page.cpp
         pagemade/src/geometry.cpp
         pagemade/src/drawlist.cpp

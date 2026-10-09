@@ -5,6 +5,7 @@
 
 #include <nanovg.h>
 
+#include <algorithm>
 #include <cmath>
 
 namespace pagemade {
@@ -61,10 +62,38 @@ void draw_glyph_run(NVGcontext *ctx, const GlyphRun &run) {
         }
         end_contour();
     }
-    if (!any)
+    if (any) {
+        nvgFillColor(ctx, nvgRGBAf(run.color.r, run.color.g, run.color.b, run.color.a));
+        nvgFill(ctx);
+    }
+    if (!run.underline && !run.strike)
         return;
-    nvgFillColor(ctx, nvgRGBAf(run.color.r, run.color.g, run.color.b, run.color.a));
-    nvgFill(ctx);
+
+    float x0 = 0, x1 = 0, base = 0;
+    bool span = false;
+    for (const PlacedGlyph &g : run.glyphs) {
+        if (g.flags & PlacedGlyph::Invisible)
+            continue;
+        const float right = g.x + std::max(0.f, g.adv);
+        if (!span) { x0 = g.x; x1 = right; base = g.y; span = true; }
+        else { x0 = std::min(x0, g.x); x1 = std::max(x1, right); }
+    }
+    if (!span || !(x1 > x0))
+        return;
+    auto rule = [&](float design_y, float design_thick) {
+        const float y = base - design_y * sy;
+        const float thick = std::max(0.25f, design_thick * sy);
+        nvgBeginPath(ctx);
+        nvgMoveTo(ctx, x0, y);
+        nvgLineTo(ctx, x1, y);
+        nvgStrokeColor(ctx, nvgRGBAf(run.color.r, run.color.g, run.color.b, run.color.a));
+        nvgStrokeWidth(ctx, thick);
+        nvgStroke(ctx);
+    };
+    if (run.underline)
+        rule(run.font->underline_position(), run.font->underline_thickness());
+    if (run.strike)
+        rule(run.font->strike_position(), run.font->strike_thickness());
 }
 
 void apply_transform(NVGcontext *ctx, const Transform &t) {

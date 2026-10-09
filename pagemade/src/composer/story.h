@@ -22,10 +22,19 @@ struct Color {
     float r = 0, g = 0, b = 0, a = 1;
 };
 
+/* How letters are cased when shaped. The story text is unchanged. */
+enum class Caps { Normal, Small, All };
+
 struct CharStyle {
     std::string family = "Serif";
+    /* A face of `family` ("Light", "Bold Italic"). Empty means bold and
+     * italic choose Regular / Bold / Italic / Bold Italic. */
+    std::string face;
     bool  bold = false;
     bool  italic = false;
+    Caps  caps = Caps::Normal;
+    bool  underline = false;
+    bool  strike = false;
     float size = 12.f;
     float leading = 0.f;         // 0 = auto (ParaStyle::autoleading percent of size)
     float tracking = 0.f;        // 1/1000 em added after every glyph
@@ -98,10 +107,12 @@ inline bool operator==(const Color &a, const Color &b) {
 }
 
 inline bool operator==(const CharStyle &a, const CharStyle &b) {
-    return a.family == b.family && a.bold == b.bold && a.italic == b.italic &&
-           a.size == b.size && a.leading == b.leading && a.tracking == b.tracking &&
-           a.hscale == b.hscale && a.baseline_shift == b.baseline_shift &&
-           a.kerning == b.kerning && a.ligatures == b.ligatures && a.color == b.color;
+    return a.family == b.family && a.face == b.face && a.bold == b.bold &&
+           a.italic == b.italic && a.caps == b.caps && a.underline == b.underline &&
+           a.strike == b.strike && a.size == b.size && a.leading == b.leading &&
+           a.tracking == b.tracking && a.hscale == b.hscale &&
+           a.baseline_shift == b.baseline_shift && a.kerning == b.kerning &&
+           a.ligatures == b.ligatures && a.color == b.color;
 }
 inline bool operator!=(const CharStyle &a, const CharStyle &b) { return !(a == b); }
 

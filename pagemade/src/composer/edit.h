@@ -51,6 +51,15 @@ TextPos erase(Story &s, TextPos a, TextPos b);
 /* Split the paragraph at p; the new one inherits the paragraph style. */
 TextPos split_paragraph(Story &s, TextPos p);
 void    restyle(Story &s, TextPos a, TextPos b, const std::function<void(CharStyle &)> &fn);
+/* Give each range the paragraph alignment `align`. A range that covers
+ * only part of a paragraph is split off, so the rest keeps its alignment;
+ * a range that covers a whole paragraph changes it in place. That split is
+ * not a typed break: the continuation takes no first-line indent and no
+ * extra space before, and the space after stays at the paragraph's end.
+ * Ranges are half-open and may be in either order. `caret` and `anchor`,
+ * when given, follow the text through those splits. */
+void    set_align_ranges(Story &s, const std::vector<std::pair<TextPos, TextPos>> &ranges,
+                         Align align, TextPos *caret = nullptr, TextPos *anchor = nullptr);
 /* Paragraphs joined with '\n'. */
 std::string copy_text(const Story &s, TextPos a, TextPos b);
 void    normalize(Paragraph &p);

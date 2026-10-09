@@ -9,6 +9,7 @@
 #include <algorithm>
 #include <cmath>
 #include <mutex>
+#include <utility>
 
 namespace pagemade {
 
@@ -246,6 +247,95 @@ TextPos erase(Story &s, TextPos a, TextPos b) {
         first.runs = {Run{style_at(s, a), ""}};
     normalize(first);
     return a;
+}
+
+namespace {
+
+void follow_split(TextPos at, TextPos *p) {
+    if (!p)
+        return;
+    if (p->para > at.para)
+        ++p->para;
+    else if (p->para == at.para && p->byte >= at.byte) {
+        ++p->para;
+        p->byte -= at.byte;
+    }
+}
+
+} // namespace
+
+void set_align_ranges(Story &s, const std::vector<std::pair<TextPos, TextPos>> &ranges,
+                      Align align, TextPos *caret, TextPos *anchor) {
+    struct Span { size_t para; uint32_t begin, end; };
+    std::vector<Span> spans;
+    for (std::pair<TextPos, TextPos> r : ranges) {
+        TextPos a = clamp(s, r.first), b = clamp(s, r.second);
+        if (b < a)
+            std::swap(a, b);
+        if (a.para >= s.paragraphs.size())
+            continue;
+        if (a == b) {
+            if (para_length(s.paragraphs[a.para]) == 0)
+                spans.push_back({a.para, 0, 0});
+            continue;
+        }
+        for (size_t pi = a.para; pi <= b.para && pi < s.paragraphs.size(); ++pi) {
+            const uint32_t len = para_length(s.paragraphs[pi]);
+            const uint32_t from = pi == a.para ? a.byte : 0;
+            const uint32_t to = pi == b.para ? std::min(b.byte, len) : len;
+            if (len == 0 || from < to)
+                spans.push_back({pi, from, to});
+        }
+    }
+    std::sort(spans.begin(), spans.end(), [](const Span &x, const Span &y) {
+        return x.para < y.para || (x.para == y.para && x.begin < y.begin);
+    });
+    std::vector<Span> merged;
+    for (const Span &sp : spans) {
+        if (!merged.empty() && merged.back().para == sp.para && sp.begin <= merged.back().end)
+            merged.back().end = std::max(merged.back().end, sp.end);
+        else
+            merged.push_back(sp);
+    }
+    std::sort(merged.begin(), merged.end(), [](const Span &x, const Span &y) {
+        return x.para > y.para || (x.para == y.para && x.begin > y.begin);
+    });
+    for (const Span &sp : merged) {
+        if (sp.para >= s.paragraphs.size())
+            continue;
+        const uint32_t len = para_length(s.paragraphs[sp.para]);
+        const uint32_t begin = std::min(sp.begin, len);
+        const uint32_t end = std::min(sp.end, len);
+        if (s.paragraphs[sp.para].style.align == align)
+            continue;
+        if (len == 0 || (begin == 0 && end == len)) {
+            s.paragraphs[sp.para].style.align = align;
+            continue;
+        }
+        if (begin >= end)
+            continue;
+        /* Split only so the two sides can align differently. The tail was a
+         * continuation line, so it does not pick up a first-line indent or
+         * space before, and the space after stays with the real end. */
+        auto break_for_align = [&](uint32_t byte) {
+            const TextPos at{sp.para, byte};
+            split_paragraph(s, at);
+            Paragraph &tail = s.paragraphs[at.para + 1];
+            tail.style.first_indent = 0.f;
+            tail.style.space_before = 0.f;
+            s.paragraphs[at.para].style.space_after = 0.f;
+            follow_split(at, caret);
+            follow_split(at, anchor);
+        };
+        size_t target = sp.para;
+        if (end < len)
+            break_for_align(end);
+        if (begin > 0) {
+            break_for_align(begin);
+            target = sp.para + 1;
+        }
+        s.paragraphs[target].style.align = align;
+    }
 }
 
 void restyle(Story &s, TextPos a, TextPos b, const std::function<void(CharStyle &)> &fn) {
