@@ -198,4 +198,58 @@ void PageDoc::send_to_back(ItemId id) {
     }
 }
 
+void PageDoc::restack(const std::vector<ItemId> &ids, int dir) {
+    if (dir == 0)
+        return;
+    auto selected = [&](ItemId id) {
+        return std::find(ids.begin(), ids.end(), id) != ids.end();
+    };
+    for (Page &p : pages) {
+        if (p.items.size() < 2)
+            continue;
+        if (dir > 0) {
+            /* Walk from the front so a selected run swaps once with the
+             * item above it and then stays together. */
+            for (size_t i = p.items.size() - 1; i-- > 0;)
+                if (selected(p.items[i].id) && !selected(p.items[i + 1].id))
+                    std::swap(p.items[i], p.items[i + 1]);
+        } else {
+            for (size_t i = 1; i < p.items.size(); ++i)
+                if (selected(p.items[i].id) && !selected(p.items[i - 1].id))
+                    std::swap(p.items[i], p.items[i - 1]);
+        }
+    }
+}
+
+size_t PageDoc::insert_page(size_t index) {
+    if (index > pages.size())
+        index = pages.size();
+    pages.insert(pages.begin() + (long) index, Page{});
+    return index;
+}
+
+bool PageDoc::remove_page(size_t index) {
+    if (index >= pages.size() || pages.size() <= 1)
+        return false;
+    std::vector<ItemId> ids;
+    for (const Item &it : pages[index].items)
+        ids.push_back(it.id);
+    for (ItemId id : ids)
+        remove_item(id);
+    if (index < pages.size())
+        pages.erase(pages.begin() + (long) index);
+    return true;
+}
+
+void PageDoc::move_page(size_t from, size_t to) {
+    if (from >= pages.size() || to >= pages.size() || from == to)
+        return;
+    if (to > from)
+        std::rotate(pages.begin() + (long) from, pages.begin() + (long) from + 1,
+                    pages.begin() + (long) to + 1);
+    else
+        std::rotate(pages.begin() + (long) to, pages.begin() + (long) from,
+                    pages.begin() + (long) from + 1);
+}
+
 } // namespace pagemade

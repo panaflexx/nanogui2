@@ -6,6 +6,7 @@
 #include <hb.h>
 #include <hb-ot.h>
 
+#include <algorithm>
 #include <cmath>
 
 namespace pagemade {
@@ -228,6 +229,14 @@ bool FontLibrary::has_family(const std::string &family) const {
         if (e.family == family)
             return true;
     return false;
+}
+
+std::vector<std::string> FontLibrary::families() const {
+    std::vector<std::string> out;
+    for (const Entry &e : m_faces)
+        if (std::find(out.begin(), out.end(), e.family) == out.end())
+            out.push_back(e.family);
+    return out;
 }
 
 const Font *FontLibrary::find(const std::string &family, bool bold, bool italic) const {

@@ -27,6 +27,33 @@ constexpr float kSnapPx     = 5.f;      // how near a guide snaps
 constexpr float kPi         = 3.14159265f;
 
 const NVGcolor kPasteboardColor = nvgRGB(214, 214, 214);
+
+/* Styles of the runs that overlap [a, b). An empty paragraph contributes
+ * its one run, which is what the next character typed there will use. */
+void visit_styles(const Story &s, TextPos a, TextPos b,
+                  const std::function<void(const CharStyle &)> &fn) {
+    a = clamp(s, a);
+    b = clamp(s, b);
+    if (b < a)
+        std::swap(a, b);
+    for (size_t pi = a.para; pi <= b.para && pi < s.paragraphs.size(); ++pi) {
+        const Paragraph &p = s.paragraphs[pi];
+        uint32_t from = pi == a.para ? a.byte : 0;
+        uint32_t to = pi == b.para ? b.byte : para_length(p);
+        if (para_length(p) == 0) {
+            if (!p.runs.empty())
+                fn(p.runs.front().style);
+            continue;
+        }
+        uint32_t acc = 0;
+        for (const Run &r : p.runs) {
+            uint32_t next = acc + (uint32_t) r.text.size();
+            if (next > from && acc < to)
+                fn(r.style);
+            acc = next;
+        }
+    }
+}
 const NVGcolor kMarginGuide     = nvgRGB(230, 60, 200);    // magenta
 const NVGcolor kColumnGuide     = nvgRGB(40, 110, 230);    // blue
 const NVGcolor kBlockOutline    = nvgRGBA(0, 0, 0, 40);
@@ -135,18 +162,29 @@ void ComposerView::restore_snapshot() {
     m_marquee = false;
     m_creating = false;
     m_drag = Handle::None;
-    /* Keep the selection and caret where they still exist. */
+    if (m_doc.pages.empty())
+        m_doc.pages.emplace_back();
+    if (m_page >= m_doc.pages.size())
+        m_page = m_doc.pages.size() - 1;
+    /* Keep the selection and caret where they still exist, on this page. */
     m_sel.erase(std::remove_if(m_sel.begin(), m_sel.end(),
-                               [&](ItemId id) { return !m_doc.find_item(id); }),
+                               [&](ItemId id) {
+                                   size_t pg = 0;
+                                   return !m_doc.find_item(id, &pg) || pg != m_page;
+                               }),
                 m_sel.end());
     if (m_edit_story && !m_doc.find_story(m_edit_story))
         m_edit_story = 0;
     if (Story *s = edit_story()) {
         m_caret = clamp(*s, m_caret);
         m_anchor = clamp(*s, m_anchor);
+    } else {
+        m_typing_on = false;
     }
     recompose();
     selection_changed();
+    if (on_page_change)
+        on_page_change();
     if (screen())
         screen()->redraw();
 }
@@ -459,6 +497,7 @@ bool ComposerView::mouse_button_event(const Vector2i &p, int button, bool down, 
         m_down_pt = pt;
         m_goal_x = -1.f;
 
+        m_typing_on = false;
         if (!se) {
             begin_creation(pt);          // drag out a new text block (a click stops editing)
         } else {
@@ -477,12 +516,14 @@ bool ComposerView::mouse_button_event(const Vector2i &p, int button, bool down, 
                 m_caret = {pos.para, para_length(se->story.paragraphs[pos.para])};
             }
         }
+        selection_changed();
         if (screen())
             screen()->redraw();
         return true;
     }
 
     m_edit_story = 0;
+    m_typing_on = false;
     m_drag_start = pt;
     m_gesture_saved = false;             // a new drag, not yet snapshotted
     m_drag = Handle::None;
@@ -680,7 +721,7 @@ void ComposerView::begin_creation(const Point &pt) {
         /* A new story: one empty "Body text" paragraph in the default type. */
         Paragraph para;
         para.style.name = "Body text";
-        para.runs.push_back(Run{CharStyle(), ""});
+        para.runs.push_back(Run{m_default_type, ""});
         Story s;
         s.paragraphs.push_back(para);
         StoryId sid = m_doc.add_story(std::move(s));
@@ -847,6 +888,107 @@ void ComposerView::apply_shape_style(const std::function<void(Shape &)> &fn) {
         screen()->redraw();
 }
 
+bool ComposerView::type_style(TypeStyle &o) const {
+    std::vector<CharStyle> styles;
+    bool saw_frame = false;
+    if (const Story *s = edit_story()) {
+        if (has_selection())
+            visit_styles(*s, m_anchor, m_caret, [&](const CharStyle &cs) { styles.push_back(cs); });
+        else
+            styles.push_back(m_typing_on ? m_typing : style_at(*s, m_caret));
+    } else {
+        for (ItemId id : m_sel) {
+            size_t ti = 0;
+            const StoryEntry *se = m_doc.story_of(id, &ti);
+            const Item *it = m_doc.find_item(id);
+            if (!se || !it || !it->is_text())
+                continue;
+            saw_frame = true;
+            size_t si = m_doc.story_index(se->id);
+            if (si >= m_comp.size())
+                continue;
+            for (const ComposedLine &l : m_comp[si].lines)
+                if (l.frame == ti)
+                    visit_styles(se->story, {l.para, l.byte_start}, {l.para, l.byte_end},
+                                 [&](const CharStyle &cs) { styles.push_back(cs); });
+        }
+    }
+    if (styles.empty()) {
+        if (saw_frame)
+            return false;
+        styles.push_back(m_default_type);
+    }
+    const CharStyle &a = styles.front();
+    o.family = a.family;
+    o.bold = a.bold;
+    o.italic = a.italic;
+    o.size = a.size;
+    o.leading = a.leading;
+    o.baseline = a.baseline_shift;
+    o.mix_family = o.mix_style = o.mix_size = o.mix_leading = o.mix_baseline = false;
+    for (size_t i = 1; i < styles.size(); ++i) {
+        const CharStyle &b = styles[i];
+        o.mix_family |= b.family != a.family;
+        o.mix_style |= b.bold != a.bold || b.italic != a.italic;
+        o.mix_size |= b.size != a.size;
+        o.mix_leading |= b.leading != a.leading;
+        o.mix_baseline |= b.baseline_shift != a.baseline_shift;
+    }
+    return true;
+}
+
+void ComposerView::apply_type(const std::function<void(CharStyle &)> &fn) {
+    if (Story *s = edit_story()) {
+        if (has_selection()) {
+            will_edit(false);
+            restyle(*s, m_anchor, m_caret, fn);
+            recompose();
+            selection_changed();
+            if (screen())
+                screen()->redraw();
+            return;
+        }
+        if (!m_typing_on) {
+            m_typing = style_at(*s, m_caret);
+            m_typing_on = true;
+        }
+        fn(m_typing);
+        selection_changed();
+        return;
+    }
+    struct Range { Story *story; TextPos a, b; };
+    std::vector<Range> ranges;
+    bool saw_frame = false;
+    for (ItemId id : m_sel) {
+        size_t ti = 0;
+        StoryEntry *se = m_doc.story_of(id, &ti);
+        const Item *it = m_doc.find_item(id);
+        if (!se || !it || !it->is_text())
+            continue;
+        saw_frame = true;
+        size_t si = m_doc.story_index(se->id);
+        if (si >= m_comp.size())
+            continue;
+        for (const ComposedLine &l : m_comp[si].lines)
+            if (l.frame == ti)
+                ranges.push_back({&se->story, {l.para, l.byte_start}, {l.para, l.byte_end}});
+    }
+    if (ranges.empty()) {
+        if (saw_frame)
+            return;
+        fn(m_default_type);
+        selection_changed();
+        return;
+    }
+    push_undo();
+    for (Range &r : ranges)
+        restyle(*r.story, r.a, r.b, fn);
+    recompose();
+    selection_changed();
+    if (screen())
+        screen()->redraw();
+}
+
 /* ---- Threading --------------------------------------------------------- */
 
 Frame ComposerView::measure_child_frame(const StoryEntry &s, size_t after, const Point &pt) const {
@@ -923,22 +1065,113 @@ void ComposerView::delete_selection_items() {
         screen()->redraw();
 }
 
-void ComposerView::arrange(bool to_front) {
+void ComposerView::arrange(Stack how) {
     if (m_sel.empty())
         return;
     push_undo();
-    /* Keep the selected items' order among themselves. */
+    /* Stacking order on the page, so a group keeps its own order. */
     std::vector<ItemId> order;
     for (const Item &it : items())
         if (is_selected(it.id))
             order.push_back(it.id);
-    if (to_front) {
+    switch (how) {
+    case Stack::Front:
         for (ItemId id : order)
             m_doc.bring_to_front(id);
-    } else {
+        break;
+    case Stack::Back:
         for (auto id = order.rbegin(); id != order.rend(); ++id)
             m_doc.send_to_back(*id);
+        break;
+    case Stack::Forward:  m_doc.restack(order, +1); break;
+    case Stack::Backward: m_doc.restack(order, -1); break;
     }
+    if (screen())
+        screen()->redraw();
+}
+
+/* ---- Pages --------------------------------------------------------------- */
+
+void ComposerView::page_changed() {
+    m_sel.clear();
+    m_edit_story = 0;
+    m_typing_on = false;
+    m_burst_open = false;
+    m_selecting = false;
+    selection_changed();
+    if (on_page_change)
+        on_page_change();
+    if (screen())
+        screen()->redraw();
+}
+
+void ComposerView::show_page(size_t i) {
+    if (m_doc.pages.empty())
+        return;
+    if (i >= m_doc.pages.size())
+        i = m_doc.pages.size() - 1;
+    if (i == m_page)
+        return;
+    end_placement(false);
+    if (m_creating)
+        finish_creation();
+    m_page = i;
+    page_changed();
+}
+
+void ComposerView::insert_page(bool after) {
+    end_placement(false);
+    if (m_creating)
+        finish_creation();
+    push_undo();
+    size_t at = std::min(m_page + (after ? 1 : 0), m_doc.pages.size());
+    m_page = m_doc.insert_page(at);
+    page_changed();
+}
+
+void ComposerView::remove_page() {
+    if (m_doc.pages.size() <= 1)
+        return;
+    end_placement(false);
+    if (m_creating)
+        finish_creation();
+    push_undo();
+    m_doc.remove_page(m_page);
+    if (m_page >= m_doc.pages.size())
+        m_page = m_doc.pages.size() - 1;
+    recompose();
+    page_changed();
+}
+
+void ComposerView::move_page_by(int delta) {
+    if (delta == 0)
+        return;
+    long to = (long) m_page + delta;
+    if (to < 0 || to >= (long) m_doc.pages.size())
+        return;
+    move_page_to((size_t) to, true);
+}
+
+void ComposerView::move_page_to(size_t index, bool record_undo) {
+    if (index >= m_doc.pages.size() || index == m_page)
+        return;
+    if (record_undo)
+        push_undo();
+    m_doc.move_page(m_page, index);
+    m_page = index;
+    if (on_page_change)
+        on_page_change();
+    if (screen())
+        screen()->redraw();
+}
+
+void ComposerView::set_page_hidden(bool hidden) {
+    if (m_page >= m_doc.pages.size() || m_doc.pages[m_page].hidden == hidden)
+        return;
+    push_undo();
+    m_doc.pages[m_page].hidden = hidden;
+    if (on_page_change)
+        on_page_change();
     if (screen())
         screen()->redraw();
 }
@@ -994,6 +1227,7 @@ void ComposerView::place_caret(TextPos p, bool extend) {
     m_caret = clamp(*s, p);
     if (!extend)
         m_anchor = m_caret;
+    m_typing_on = false;
 }
 
 void ComposerView::after_edit() {
@@ -1023,7 +1257,7 @@ void ComposerView::insert_string(const std::string &utf8, bool burst) {
     if (!s || utf8.empty())
         return;
     will_edit(burst);
-    CharStyle st = style_at(*s, m_caret);
+    CharStyle st = m_typing_on ? m_typing : style_at(*s, m_caret);
     delete_selection();
     m_caret = insert_text(*s, m_caret, utf8, st);
     m_anchor = m_caret;
@@ -1075,7 +1309,9 @@ void ComposerView::move_caret_key(int key, int modifiers) {
     m_caret = p;
     if (!extend)
         m_anchor = p;
+    m_typing_on = false;
     m_burst_open = false;                // a caret move ends the typing run
+    selection_changed();
     if (screen())
         screen()->redraw();
 }
@@ -1120,8 +1356,17 @@ bool ComposerView::keyboard_event(int key, int, int action, int modifiers) {
             delete_selection_items();
             return true;
         }
-        if (cmd && (key == GLFW_KEY_F || key == GLFW_KEY_B)) {
-            arrange(key == GLFW_KEY_F);
+        if (cmd && (key == GLFW_KEY_F || key == GLFW_KEY_B ||
+                    key == GLFW_KEY_LEFT_BRACKET || key == GLFW_KEY_RIGHT_BRACKET)) {
+            const bool shift = (modifiers & GLFW_MOD_SHIFT) != 0;
+            Stack how = Stack::Front;
+            if (key == GLFW_KEY_B || (key == GLFW_KEY_LEFT_BRACKET && shift))
+                how = Stack::Back;
+            else if (key == GLFW_KEY_LEFT_BRACKET)
+                how = Stack::Backward;
+            else if (key == GLFW_KEY_RIGHT_BRACKET && !shift)
+                how = Stack::Forward;
+            arrange(how);
             return true;
         }
         if (!cmd && (key == GLFW_KEY_LEFT || key == GLFW_KEY_RIGHT ||
@@ -1499,6 +1744,13 @@ void ComposerView::draw(NVGcontext *ctx) {
 
     Vector2f o = page_origin();
     nvgTranslate(ctx, o.x(), o.y());
+    if (m_page < m_doc.pages.size() && m_doc.pages[m_page].hidden) {
+        nvgFontFace(ctx, "sans");
+        nvgFontSize(ctx, 11.f * px);
+        nvgTextAlign(ctx, NVG_ALIGN_LEFT | NVG_ALIGN_BOTTOM);
+        nvgFillColor(ctx, nvgRGB(140, 40, 40));
+        nvgText(ctx, 0, -4.f * px, "Hidden \u2014 not printed", nullptr);
+    }
     draw_page(ctx, px);
     draw_list(ctx, build_page(m_doc, m_page, m_comp), px);
     for (const Item &it : items())

@@ -340,6 +340,28 @@ static void test_pdf(const FontLibrary &fonts) {
           bytes.compare(bytes.size() - 6, 6, "%%EOF\n") == 0, "PDF trailer");
     CHECK(bytes.find("/Type0") != std::string::npos, "a composite font is embedded");
     CHECK(bytes.find("Identity-H") != std::string::npos, "identity encoding");
+    CHECK(bytes.find("/Count 1 >>") != std::string::npos, "one page");
+    doc.insert_page(1);
+    doc.pages[1].hidden = true;
+    CHECK(export_pdf(path, doc, comps), "export with a hidden page");
+    f = std::fopen(path.c_str(), "rb");
+    bytes.clear();
+    if (f) {
+        while ((n = std::fread(buf, 1, sizeof buf, f)) > 0)
+            bytes.append(buf, n);
+        std::fclose(f);
+    }
+    CHECK(bytes.find("/Count 1 >>") != std::string::npos, "a hidden page is not printed");
+    doc.pages[1].hidden = false;
+    CHECK(export_pdf(path, doc, comps), "export with two pages");
+    f = std::fopen(path.c_str(), "rb");
+    bytes.clear();
+    if (f) {
+        while ((n = std::fread(buf, 1, sizeof buf, f)) > 0)
+            bytes.append(buf, n);
+        std::fclose(f);
+    }
+    CHECK(bytes.find("/Count 2 >>") != std::string::npos, "a shown page is printed");
     std::printf("  pdf: %zu bytes\n", bytes.size());
 }
 
@@ -401,6 +423,36 @@ static void test_model(const FontLibrary &fonts) {
     CHECK(doc.pages[0].items.back().id == col1, "bring_to_front puts the block on top");
     doc.send_to_back(col1);
     CHECK(doc.pages[0].items.front().id == col1, "send_to_back puts it at the bottom");
+    {
+        PageDoc stack = sample_document();
+        auto &items = stack.pages[0].items;
+        const ItemId a = items[0].id, b = items[1].id, c = items[2].id, d = items[3].id;
+        const std::vector<ItemId> thread = stack.stories[1].thread;
+        stack.restack({b, c}, +1);
+        CHECK(items[0].id == a && items[1].id == d && items[2].id == b && items[3].id == c,
+              "bring forward moves the group up one, together");
+        stack.restack({b, c}, -1);
+        CHECK(items[1].id == b && items[2].id == c && items[3].id == d,
+              "send backward puts the group back");
+        CHECK(stack.stories[1].thread == thread, "restack does not touch reading order");
+    }
+    {
+        PageDoc pages = sample_document();
+        const size_t stories = pages.stories.size();
+        const ItemId kept = pages.pages[0].items.front().id;
+        CHECK(pages.insert_page(1) == 1 && pages.pages.size() == 2 && pages.pages[1].items.empty(),
+              "insert_page adds a blank page");
+        pages.pages[1].hidden = true;
+        pages.move_page(1, 0);
+        CHECK(pages.pages[0].hidden && pages.pages[0].items.empty() &&
+              pages.pages[1].items.front().id == kept, "move_page reorders");
+        CHECK(pages.remove_page(0) && pages.pages.size() == 1 && !pages.pages[0].hidden &&
+              pages.stories.size() == stories, "removing a blank page keeps the stories");
+        CHECK(pages.remove_page(0) == false, "the last page stays");
+        pages.insert_page(1);
+        CHECK(pages.remove_page(0) && pages.pages.size() == 1 && pages.pages[0].items.empty() &&
+              pages.stories.empty(), "removing a page removes its items and their stories");
+    }
     const Composition after = compose(body.story, doc.thread_frames(body), fonts);
     CHECK(after.lines.size() == before.lines.size() && body.thread[0] == col1,
           "rearranging doesn't change the thread or the composition");

@@ -150,6 +150,13 @@ void collect_unicodes(const PageDoc &doc, const std::vector<Composition> &comps,
         for (const ComposedLine &l : comps[si].lines) {
             if (l.para >= story.paragraphs.size())
                 continue;
+            /* Glyphs on a hidden page are not drawn, so they are not embedded. */
+            if (l.frame < doc.stories[si].thread.size()) {
+                size_t pg = 0;
+                if (doc.find_item(doc.stories[si].thread[l.frame], &pg) &&
+                    pg < doc.pages.size() && doc.pages[pg].hidden)
+                    continue;
+            }
             const std::string text = paragraph_text(story.paragraphs[l.para]);
             for (const GlyphRun &r : l.runs) {
                 if (!r.font)
@@ -343,7 +350,10 @@ bool export_pdf(const std::string &path, const PageDoc &doc,
     /* Draw lists for every page, and the fonts they use. */
     std::vector<DrawList> pages;
     for (size_t i = 0; i < doc.pages.size(); ++i)
-        pages.push_back(build_page(doc, i, comps));
+        if (!doc.pages[i].hidden)
+            pages.push_back(build_page(doc, i, comps));
+    if (pages.empty())
+        pages.emplace_back();   // a PDF needs a page; a fully hidden document is blank
 
     std::map<const Font *, PdfFont> fonts;
     collect_unicodes(doc, comps, fonts);

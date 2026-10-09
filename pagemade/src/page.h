@@ -10,8 +10,11 @@
  *
  * Stories live beside the pages, not inside them. A story's thread lists
  * its text frames by id in reading order, so it can run through frames
- * anywhere in the stacking order (and, later, across pages). Every text
- * frame is in exactly one thread.
+ * anywhere in the stacking order and across pages. Every text frame is in
+ * exactly one thread.
+ *
+ * Pages stay in document order. A hidden page is still edited here; print
+ * and PDF export leave it out.
  *
  * The whole model is plain values: copying a PageDoc is a snapshot, which
  * is how undo works.
@@ -125,6 +128,7 @@ struct Item {
 
 struct Page {
     std::vector<Item> items;     // bottom to top
+    bool hidden = false;         // kept, and shown, but not printed
 };
 
 struct StoryEntry {
@@ -174,6 +178,16 @@ struct PageDoc {
     void    remove_item(ItemId id);
     void    bring_to_front(ItemId id);
     void    send_to_back(ItemId id);
+    /* One step up (dir > 0, toward the front) or down. Items in `ids` keep
+     * their order, so a group moves together. */
+    void    restack(const std::vector<ItemId> &ids, int dir);
+
+    /* Insert a blank page at `index` (clamped to the end). */
+    size_t  insert_page(size_t index);
+    /* Remove the page and its items. False when it is the only page. */
+    bool    remove_page(size_t index);
+    /* `to` is the index the page occupies after the move. */
+    void    move_page(size_t from, size_t to);
 };
 
 /* A one-page newsletter: a headline across the top over a rule, a body

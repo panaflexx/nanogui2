@@ -98,6 +98,8 @@ public:
     bool add_file(const std::string &family, const std::string &style,
                   const std::string &path);
     bool has_family(const std::string &family) const;
+    /* Families in the order they were added. */
+    std::vector<std::string> families() const;
     const Font *find(const std::string &family, bool bold, bool italic) const;
     bool empty() const { return m_faces.empty(); }
 

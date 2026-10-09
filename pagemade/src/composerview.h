@@ -14,8 +14,11 @@
  * on empty space for a marquee (selects what it encloses), drag selected
  * items to move them, drag a corner handle to resize (a line's handles are
  * its ends), or drag a text block's bottom windowshade to change its
- * depth. Delete removes the selection; Cmd/Ctrl+F brings it to the front
- * and Cmd/Ctrl+B sends it to the back. With snapping on, moved edges and
+ * depth. Delete removes the selection. Arrange: Cmd/Ctrl+F brings the
+ * selection to the front, Cmd/Ctrl+B sends it to the back, Cmd/Ctrl+]
+ * brings it forward one step and Cmd/Ctrl+[ sends it backward one
+ * (Shift with the brackets jumps to the front or the back). With snapping
+ * on, moved edges and
  * dragged handles snap to the page edges, margins and column guides.
  *
  * Rotate tool: drag to turn the selection about its center; Shift snaps
@@ -81,6 +84,27 @@ public:
     /* Select a story's text block by position: story index, thread index. */
     void select_frame(size_t story, size_t frame);
 
+    /* ---- Pages ------------------------------------------------------ */
+    /* One page is on the pasteboard. Hidden pages can be shown and edited;
+     * printing skips them. */
+    size_t page_index() const { return m_page; }
+    size_t page_count() const { return m_doc.pages.size(); }
+    bool page_hidden(size_t i) const {
+        return i < m_doc.pages.size() && m_doc.pages[i].hidden;
+    }
+    void show_page(size_t i);
+    void insert_page(bool after);          // one undo step
+    void remove_page();                    // keeps the last page
+    void move_page_by(int delta);
+    /* Dragging a page icon: `record_undo` on the first step of the gesture
+     * so the whole drag is one undo step. */
+    void move_page_to(size_t index, bool record_undo);
+    void set_page_hidden(bool hidden);
+
+    /* ---- Arrange ---------------------------------------------------- */
+    enum class Stack { Forward, Backward, Front, Back };
+    void arrange(Stack how);
+
     /* ---- Control palette ------------------------------------------- */
     /* X/Y are the item's origin (its box's top-left corner, turned with
      * it) from the page's top-left, W/H its size, angle in degrees
@@ -97,6 +121,21 @@ public:
     /* Change the selected shapes (one undo step), or the defaults for new
      * shapes when none is selected, as PageMaker does. */
     void apply_shape_style(const std::function<void(pagemade::Shape &)> &fn);
+
+    /* Character attributes for the control palette's type view. With a text
+     * selection, the selection; at a caret, the style about to be typed;
+     * with text blocks selected, the type in those blocks; otherwise the
+     * defaults for a new text block. `mix_*` is set when the range disagrees
+     * with itself. False only when selected blocks hold no text. */
+    struct TypeStyle {
+        std::string family;
+        bool  bold = false, italic = false;
+        float size = 12.f, leading = 0.f, baseline = 0.f;
+        bool  mix_family = false, mix_style = false, mix_size = false;
+        bool  mix_leading = false, mix_baseline = false;
+    };
+    bool type_style(TypeStyle &t) const;
+    void apply_type(const std::function<void(pagemade::CharStyle &)> &fn);
 
     /* Undo/redo: whole-document snapshots (the model is small), one per
      * action. A run of typing or deleting coalesces into a single step;
@@ -118,6 +157,8 @@ public:
     std::function<void(Tool)> on_tool_change;
     /* Called when the selection or a selected item's geometry changes. */
     std::function<void()> on_selection_change;
+    /* Called when the page on screen, or the page list, changes. */
+    std::function<void()> on_page_change;
 
     nanogui::Vector2i preferred_size(NVGcontext *ctx) const override;
     void draw(NVGcontext *ctx) override;
@@ -150,7 +191,13 @@ private:
     /* Does pt (page) touch the item? Unfilled shapes only by their outline. */
     bool hits_item(const pagemade::Item &it, const pagemade::Point &pt) const;
 
-    const std::vector<pagemade::Item> &items() const { return m_doc.pages[m_page].items; }
+    const std::vector<pagemade::Item> &items() const {
+        if (m_page < m_doc.pages.size())
+            return m_doc.pages[m_page].items;
+        static const std::vector<pagemade::Item> none;
+        return none;
+    }
+    void page_changed();               // clear the selection and tell the shell
     bool is_selected(pagemade::ItemId id) const;
     void selection_changed();
     pagemade::Bounds selection_bounds() const;
@@ -187,7 +234,6 @@ private:
 
     /* ---- Pointer and drawing tools ---------------------------------- */
     void delete_selection_items();
-    void arrange(bool to_front);
     /* Start drawing a shape (or a text block) at pt; update_creation()
      * stretches it to the pointer; finish_creation() keeps it or, for a
      * click without a drag, takes it back. */
@@ -237,6 +283,9 @@ private:
     pagemade::ItemId m_created = 0;
     pagemade::PageDoc m_creation_saved;   // pre-drawing state, pushed if something is drawn
     pagemade::Shape m_default_shape;      // fill and stroke for new shapes
+    pagemade::CharStyle m_default_type;   // type for a new text block
+    bool m_typing_on = false;             // caret: the next insert uses m_typing
+    pagemade::CharStyle m_typing;
     bool m_snap = true;
     bool m_placing = false;               // a picked-up story follows the pointer
     pagemade::ItemId m_placement_parent = 0;

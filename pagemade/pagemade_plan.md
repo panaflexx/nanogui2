@@ -27,6 +27,22 @@ and its nanovgd renderer. The composer lays out in points and every backend
   search and copy. Toolbar buttons and `--export-pdf`; printing exports and
   hands the PDF to CUPS `lp`. Colors are device RGB still; CMYK/spot and
   trim/bleed/marks remain open.
+- **Pages**: insert before or after the page on screen, drag the page icons
+  (or Layout > Move Page) to reorder, hide a page so it stays editable but
+  is left out of PDF and print, remove a page and the items on it. The last
+  page cannot be removed. Layout menu, and PageMaker's page icons along the
+  bottom of the window.
+- **Type**: the control palette's type view (the square / A button, or it
+  switches itself when the text tool is chosen). Font, size, weight
+  (Regular / Bold / Italic / Bold Italic), leading (Auto, or a point size)
+  and baseline shift. A text selection is restyled; a caret changes what
+  is typed next; text blocks selected with the pointer restyle the type in
+  those blocks; with nothing selected, the fields are the defaults for a
+  new text block.
+- **Arrange**: Element menu, and the keys. Bring to Front (Ctrl+F), Bring
+  Forward (Ctrl+]), Send Backward (Ctrl+[), Send to Back (Ctrl+B). Shift
+  with the brackets jumps to the front or the back. A group moves together
+  and keeps its order.
 - **Page items foundation**: pages holding items in stacking order; stable ids;
   per-item size and transform; stories with threads of frame ids; minimal shapes;
   rotate tool; Delete; Bring to Front / Send to Back.
@@ -49,7 +65,7 @@ and its nanovgd renderer. The composer lays out in points and every backend
    SVG through nanosvg becomes a group of path items in the shape format.
 3. **Text wrap**: lines ask which horizontal spans are free at their height,
    from the wrap outlines of items in front of the text.
-5. **Printing**: Use the system printing framework (Linux first, Mac, then Windows), 
+5. **Printing**: Use the system printing framework (Linux first, Mac, then Windows),
    to print.
 
 ## Later and known gaps

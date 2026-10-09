@@ -3,7 +3,9 @@
  *
  * export_pdf() writes every page of the document at its trim size in
  * points, with fills, strokes and text drawn by the same positioned glyph
- * runs the screen shows. Text stays real text: each used face is subset
+ * runs the screen shows. Hidden pages are left out (a document whose every
+ * page is hidden still writes one blank page). Text stays real text: each
+ * used face is subset
  * with hb-subset (retaining glyph ids, so character codes are glyph ids
  * under Identity-H) and embedded as CIDFontType0 (CFF) or CIDFontType2
  * (TrueType), with a ToUnicode map for search and copy. Colors are device

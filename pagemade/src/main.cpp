@@ -1,12 +1,17 @@
 /*
  * pagemade — page layout in the spirit of Aldus PageMaker.
  *
- * One page on a pasteboard with text blocks and shapes. The toolbar holds
- * PageMaker's toolbox (pointer, rotate, text, line, rectangle, ellipse,
- * polygon), snap to guides, undo/redo (Ctrl+Z / Ctrl+Shift+Z), a zoom
- * dropdown, and switches for alignment, kerning and ligatures. Below it, a
- * control palette shows the selection's position, size and angle and its
- * fill and stroke (with nothing selected, the defaults for new shapes).
+ * One page on a pasteboard with text blocks and shapes. The menu bar is
+ * PageMaker's (File, Edit, Layout, Element): pages are inserted, removed,
+ * reordered and hidden from Layout, and Arrange lives under Element.
+ * Page icons along the bottom of the window show the document — click one
+ * to turn to it, drag to rearrange. The toolbar holds the toolbox
+ * (pointer, rotate, text, line, rectangle, ellipse, polygon), snap to
+ * guides, undo/redo (Ctrl+Z / Ctrl+Shift+Z), a zoom dropdown, and switches
+ * for alignment, kerning and ligatures. Below it, the control palette
+ * switches between the object view (position, size, angle, fill and
+ * stroke; with nothing selected, the defaults for new shapes) and the
+ * type view (font, size, weight, leading and baseline).
  * PageMaker's zoom shortcuts: Ctrl/Cmd + 0 fit, 5 50%, 7 75%, 1 actual
  * size, 2 200%, 4 400%, 8 800%.
  *
@@ -30,6 +35,7 @@
 #include <nanogui/nanogui.h>
 #include <nanogui/menu.h>
 #include <nanogui/opengl.h>
+#include <nanovg.h>
 #include <nanogui/zoomscrollpanel.h>
 #include <GLFW/glfw3.h>
 
@@ -42,6 +48,7 @@
 #define STB_IMAGE_WRITE_IMPLEMENTATION
 #include "../../ext/glfw/deps/stb_image_write.h"
 
+#include <algorithm>
 #include <array>
 #include <cctype>
 #include <cstdio>
@@ -61,6 +68,127 @@
 using namespace nanogui;
 using namespace pagemade;
 
+/* PageMaker's page icons: a row of little pages at the bottom of the
+ * window. Click turns to that page; drag rearranges them. A hidden page
+ * is gray. */
+class PageIconStrip : public Widget {
+public:
+    PageIconStrip(Widget *parent, ComposerView *view) : Widget(parent), m_view(view) {
+        set_height(32);
+        set_min_height(32);
+        set_height_flex(SizeMode::Fixed);
+        set_tooltip("Pages. Click to turn to a page, drag to rearrange.");
+    }
+
+    void draw(NVGcontext *ctx) override {
+        update_scroll();
+        const int n = (int) m_view->page_count();
+        const int cur = (int) m_view->page_index();
+        nvgFontFace(ctx, "sans");
+        nvgFontSize(ctx, 11);
+        nvgTextAlign(ctx, NVG_ALIGN_CENTER | NVG_ALIGN_MIDDLE);
+        const float y = (float) m_pos.y() + (m_size.y() - kH) * 0.5f;
+        for (int i = 0; i < n; ++i) {
+            const float x = (float) (m_pos.x() + kPad + i * (kW + kGap) - m_scroll);
+            if (x + kW < m_pos.x() || x > m_pos.x() + m_size.x())
+                continue;
+            const bool hidden = m_view->page_hidden((size_t) i);
+            const bool on = i == cur;
+            nvgBeginPath(ctx);
+            nvgRect(ctx, x + 1, y + 1, kW, kH);
+            nvgFillColor(ctx, nvgRGBA(0, 0, 0, 40));
+            nvgFill(ctx);
+            nvgBeginPath(ctx);
+            nvgRect(ctx, x, y, kW, kH);
+            nvgFillColor(ctx, on ? nvgRGB(0, 0, 0) : hidden ? nvgRGB(196, 196, 196) : nvgRGB(255, 255, 255));
+            nvgFill(ctx);
+            nvgStrokeColor(ctx, nvgRGB(0, 0, 0));
+            nvgStrokeWidth(ctx, 1);
+            nvgStroke(ctx);
+            char num[16];
+            std::snprintf(num, sizeof num, "%d", i + 1);
+            nvgFillColor(ctx, on ? nvgRGB(255, 255, 255) : nvgRGB(0, 0, 0));
+            nvgText(ctx, x + kW * 0.5f, y + kH * 0.5f, num, nullptr);
+        }
+    }
+
+    bool mouse_button_event(const Vector2i &p, int button, bool down, int modifiers) override {
+        if (button != GLFW_MOUSE_BUTTON_1)
+            return false;
+        if (!down) {
+            const bool mine = m_press >= 0;
+            m_press = -1;
+            m_moved = false;
+            return mine;
+        }
+        update_scroll();
+        const int i = index_at(p, false);
+        if (i < 0)
+            return false;
+        m_press = i;
+        m_moved = false;
+        m_view->show_page((size_t) i);
+        return true;
+    }
+
+    bool mouse_drag_event(const Vector2i &p, const Vector2i &, int, int) override {
+        if (m_press < 0)
+            return false;
+        update_scroll();
+        const int i = index_at(p, true);
+        if (i < 0 || i == (int) m_view->page_index())
+            return true;
+        m_view->move_page_to((size_t) i, !m_moved);
+        m_moved = true;
+        m_press = i;
+        return true;
+    }
+
+private:
+    static constexpr int kW = 18, kH = 24, kGap = 6, kPad = 8;
+
+    void update_scroll() {
+        const int n = (int) m_view->page_count();
+        const int content = kPad * 2 + n * kW + std::max(0, n - 1) * kGap;
+        const int view = std::max(m_size.x(), 1);
+        if (content <= view) {
+            m_scroll = 0;
+            return;
+        }
+        /* While a page is being dragged, keep the strip still so the icon
+         * under the pointer does not jump as the current page recenters. */
+        if (m_press >= 0) {
+            m_scroll = std::clamp(m_scroll, 0, content - view);
+            return;
+        }
+        const int cur = kPad + (int) m_view->page_index() * (kW + kGap);
+        m_scroll = std::clamp(cur - (view - kW) / 2, 0, content - view);
+    }
+
+    /* `nearest` picks a slot while dragging, including the gaps. */
+    int index_at(const Vector2i &p, bool nearest) const {
+        const int n = (int) m_view->page_count();
+        if (n <= 0)
+            return -1;
+        const int local = p.x() - m_pos.x() + m_scroll - kPad;
+        const int stride = kW + kGap;
+        if (!nearest) {
+            if (local < 0)
+                return -1;
+            const int i = local / stride;
+            if (i >= n || local % stride > kW)
+                return -1;
+            return i;
+        }
+        return std::clamp((local + kGap / 2) / stride, 0, n - 1);
+    }
+
+    ComposerView *m_view;
+    int m_press = -1;
+    int m_scroll = 0;
+    bool m_moved = false;
+};
+
 class PagemadeApp : public Screen {
 public:
     PagemadeApp() : Screen(Vector2i(1280, 940), "pagemade") {
@@ -74,6 +202,7 @@ public:
         auto *root_flex = new FlexLayout(FlexDirection::Column, JustifyContent::FlexStart,
                                          AlignItems::Stretch, 0, 0);
         RootWindow *window = new RootWindow(this, root_flex);
+        build_menus(window);
 
         Widget *toolbar = new Widget(window);
         toolbar->set_min_height(40);
@@ -90,7 +219,7 @@ public:
         };
         tool_btn(Tool::Pointer, FA_MOUSE_POINTER,
                  "Pointer tool (Shift+click adds, drag a marquee; Delete removes; "
-                 "arrows nudge; Ctrl+F/B front/back)");
+                 "arrows nudge; Ctrl+F front, Ctrl+] forward, Ctrl+[ backward, Ctrl+B back)");
         tool_btn(Tool::Rotate, FA_SYNC_ALT, "Rotate tool (Shift snaps to 15\u00B0)");
         tool_btn(Tool::Text, FA_I_CURSOR, "Text tool (drag on empty space for a new block)");
         tool_btn(Tool::Line, FA_SLASH, "Line tool (Shift: 45\u00B0 steps)");
@@ -160,8 +289,14 @@ public:
 
         m_view = new ComposerView(m_scroll, &m_fonts, &m_hyphenator);
         m_view->on_recompose = [this] { update_status(); };
-        m_view->on_tool_change = [this](ComposerView::Tool t) { sync_tool_buttons(t); };
-        m_view->on_selection_change = [this] { sync_palette(); };
+        m_view->on_tool_change = [this](ComposerView::Tool t) {
+            sync_tool_buttons(t);
+            show_type_palette(t == ComposerView::Tool::Text);
+        };
+        m_view->on_selection_change = [this] { sync_palette(); update_status(); };
+        m_view->on_page_change = [this] { update_status(); };
+
+        m_pages = new PageIconStrip(window, m_view);
 
         m_status = new Label(window, "", "sans", 16);
         m_status->set_min_height(24);
@@ -173,17 +308,98 @@ public:
         perform_layout();
     }
 
+    /* ---- Menus (PageMaker: File, Edit, Layout, Element) ------------- */
+
+    MenuItem *add_cmd(Dropdown *menu, const char *caption, const std::vector<Shortcut> &keys,
+                      const std::function<void()> &fn) {
+        MenuItem *item = menu->add_item(caption, 0, keys);
+        item->set_callback(fn);
+        return item;
+    }
+
+    void build_menus(Widget *window) {
+        m_menubar = new MenuBar(window, "");
+        m_menubar->set_height_flex(SizeMode::Fixed);
+
+        Dropdown *file = m_menubar->add_menu("File");
+        add_cmd(file, "Export PDF...", {}, [this] { export_pdf_dialog(); });
+        add_cmd(file, "Print...", {{SYSTEM_COMMAND_MOD, GLFW_KEY_P}}, [this] { print_document(); });
+
+        Dropdown *edit = m_menubar->add_menu("Edit");
+        add_cmd(edit, "Undo", {{SYSTEM_COMMAND_MOD, GLFW_KEY_Z}}, [this] { m_view->undo(); });
+        add_cmd(edit, "Redo", {{SYSTEM_COMMAND_MOD | GLFW_MOD_SHIFT, GLFW_KEY_Z},
+                               {SYSTEM_COMMAND_MOD, GLFW_KEY_Y}},
+                [this] { m_view->redo(); });
+
+        Dropdown *layout = m_menubar->add_menu("Layout");
+        add_cmd(layout, "Insert Page", {}, [this] { m_view->insert_page(true); });
+        add_cmd(layout, "Insert Page Before", {}, [this] { m_view->insert_page(false); });
+        m_remove_page = add_cmd(layout, "Remove Page", {}, [this] { m_view->remove_page(); });
+        new Separator(layout->popup());
+        m_move_earlier = add_cmd(layout, "Move Page Earlier", {}, [this] { m_view->move_page_by(-1); });
+        m_move_later = add_cmd(layout, "Move Page Later", {}, [this] { m_view->move_page_by(1); });
+        new Separator(layout->popup());
+        m_hide_page = add_cmd(layout, "Hide Page", {}, [this] {
+            m_view->set_page_hidden(!m_view->page_hidden(m_view->page_index()));
+        });
+
+        Dropdown *element = m_menubar->add_menu("Element");
+        m_to_front = add_cmd(element, "Bring to Front",
+                             {{SYSTEM_COMMAND_MOD, GLFW_KEY_F},
+                              {SYSTEM_COMMAND_MOD | GLFW_MOD_SHIFT, GLFW_KEY_RIGHT_BRACKET}},
+                             [this] { m_view->arrange(ComposerView::Stack::Front); });
+        m_forward = add_cmd(element, "Bring Forward",
+                            {{SYSTEM_COMMAND_MOD, GLFW_KEY_RIGHT_BRACKET}},
+                            [this] { m_view->arrange(ComposerView::Stack::Forward); });
+        m_backward = add_cmd(element, "Send Backward",
+                             {{SYSTEM_COMMAND_MOD, GLFW_KEY_LEFT_BRACKET}},
+                             [this] { m_view->arrange(ComposerView::Stack::Backward); });
+        m_to_back = add_cmd(element, "Send to Back",
+                            {{SYSTEM_COMMAND_MOD, GLFW_KEY_B},
+                             {SYSTEM_COMMAND_MOD | GLFW_MOD_SHIFT, GLFW_KEY_LEFT_BRACKET}},
+                            [this] { m_view->arrange(ComposerView::Stack::Back); });
+    }
+
     /* ---- Control palette ------------------------------------------- */
 
     static constexpr float kTints[] = {100, 80, 60, 40, 30, 20, 10};
     static constexpr float kWeights[] = {0.25f, 0.5f, 1, 2, 4, 6, 8, 12};
 
+    void show_type_palette(bool type) {
+        m_type_mode = type;
+        if (m_mode_btn) {
+            m_mode_btn->set_icon(type ? FA_FONT : FA_SQUARE);
+            m_mode_btn->set_tooltip(type
+                ? "Type view: font, size, weight, leading, baseline. Click for objects."
+                : "Object view: position, size, fill, stroke. Click for type.");
+        }
+        if (m_object_box)
+            m_object_box->set_visible(!type);
+        if (m_type_box)
+            m_type_box->set_visible(type);
+        perform_layout();
+    }
+
     void build_palette(Widget *window, const PageDoc &doc) {
-        Widget *bar = new Widget(window);
-        bar->set_min_height(34);
-        bar->set_height(34);
-        bar->set_height_flex(SizeMode::Fixed);
-        bar->set_layout(new BoxLayout(Orientation::Horizontal, Alignment::Middle, 8, 5));
+        Widget *outer = new Widget(window);
+        outer->set_min_height(34);
+        outer->set_height(34);
+        outer->set_height_flex(SizeMode::Fixed);
+        outer->set_layout(new BoxLayout(Orientation::Horizontal, Alignment::Middle, 8, 5));
+
+        /* PageMaker's control palette switches view. The icon is the view
+         * showing now. */
+        m_mode_btn = new Button(outer, "", FA_SQUARE);
+        m_mode_btn->set_fixed_size(Vector2i(28, 26));
+        m_mode_btn->set_tooltip("Object view: position, size, fill, stroke. Click for type.");
+        m_mode_btn->set_callback([this] { show_type_palette(!m_type_mode); });
+
+        m_object_box = new Widget(outer);
+        m_object_box->set_layout(new BoxLayout(Orientation::Horizontal, Alignment::Middle, 0, 5));
+        m_type_box = new Widget(outer);
+        m_type_box->set_layout(new BoxLayout(Orientation::Horizontal, Alignment::Middle, 0, 5));
+        m_type_box->set_visible(false);
+        Widget *bar = m_object_box;
 
         auto number = [&](const char *label, const char *units, int field, float width) {
             new Label(bar, label, "sans-bold");
@@ -195,10 +411,10 @@ public:
             box->set_callback([this, field](float v) { apply_geometry(field, v); });
             m_geom[field] = box;
         };
-        number("X", "pt", 0, 70);
-        number("Y", "pt", 1, 70);
-        number("W", "pt", 2, 70);
-        number("H", "pt", 3, 70);
+        number("X", "pt", 0, 64);
+        number("Y", "pt", 1, 64);
+        number("W", "pt", 2, 64);
+        number("H", "pt", 3, 64);
         number("Rot", "\u00B0", 4, 58);
 
         /* The Colors palette's swatches, "None" first, in both paint menus. */
@@ -215,7 +431,7 @@ public:
         };
 
         new Label(bar, " Fill", "sans-bold");
-        m_fill = menu(swatches, 108);
+        m_fill = menu(swatches, 96);
         m_fill->set_selected_callback([this](int i) {
             const SwatchId id = m_swatch_ids[i];
             m_view->apply_shape_style([id](Shape &sh) { sh.fill.swatch = id; });
@@ -227,7 +443,7 @@ public:
         });
 
         new Label(bar, " Stroke", "sans-bold");
-        m_stroke = menu(swatches, 108);
+        m_stroke = menu(swatches, 96);
         m_stroke->set_selected_callback([this](int i) {
             const SwatchId id = m_swatch_ids[i];
             m_view->apply_shape_style([id](Shape &sh) { sh.stroke.paint.swatch = id; });
@@ -258,6 +474,94 @@ public:
         m_star->set_fixed_size(Vector2i(54, 26));
         m_star->set_callback([this](int v) {
             m_view->apply_shape_style([v](Shape &sh) { sh.star_inset = (float) v; });
+        });
+
+        /* Type view. Leading 0 is PageMaker's automatic leading ("Auto").
+         * With no text selected these are the defaults for a new block. */
+        Widget *type = m_type_box;
+        auto type_menu = [&](const std::vector<std::string> &items, int width) {
+            auto *d = new Dropdown(type, items, {}, Dropdown::ComboBox, items.front());
+            d->set_fixed_size(Vector2i(width, 26));
+            return d;
+        };
+        auto type_number = [&](const char *label, const char *units, int width) {
+            new Label(type, label, "sans-bold");
+            auto *box = new FloatBox<float>(type);
+            box->set_editable(true);
+            box->number_format("%.2f");
+            box->set_units(units);
+            box->set_fixed_size(Vector2i(width, 26));
+            return box;
+        };
+
+        m_families = m_fonts.families();
+        if (m_families.empty())
+            m_families.push_back("Serif");
+        new Label(type, "Font", "sans-bold");
+        m_font = type_menu(m_families, 120);
+        m_font->set_tooltip("Font family");
+        m_font->set_selected_callback([this](int i) {
+            if (i < 0 || i >= (int) m_families.size())
+                return;
+            const std::string fam = m_families[(size_t) i];
+            m_view->apply_type([fam](CharStyle &cs) { cs.family = fam; });
+        });
+
+        m_size = type_number("Size", "pt", 62);
+        m_size->set_tooltip("Type size, in points");
+        m_size->TextBox::set_callback([this](const std::string &s) {
+            char *end = nullptr;
+            const float v = std::strtof(s.c_str(), &end);
+            if (end == s.c_str())
+                return false;
+            const float size = std::clamp(v, 1.f, 720.f);
+            m_size->set_value(size);
+            m_view->apply_type([size](CharStyle &cs) { cs.size = size; });
+            return true;
+        });
+
+        new Label(type, "Weight", "sans-bold");
+        m_face = type_menu({"Regular", "Bold", "Italic", "Bold Italic"}, 110);
+        m_face->set_tooltip("Type style");
+        m_face->set_selected_callback([this](int i) {
+            const bool bold = i & 1, italic = i & 2;
+            m_view->apply_type([bold, italic](CharStyle &cs) {
+                cs.bold = bold;
+                cs.italic = italic;
+            });
+        });
+
+        m_leading = type_number("Leading", "pt", 70);
+        m_leading->set_tooltip("Line height. Auto (or 0) is proportional leading.");
+        m_leading->set_format("([Aa]uto)|([-+]?[0-9]*\\.?[0-9]+)");
+        m_leading->TextBox::set_callback([this](const std::string &s) {
+            float lead = 0;
+            if (!s.empty() && s != "Auto" && s != "auto") {
+                char *end = nullptr;
+                lead = std::strtof(s.c_str(), &end);
+                if (end == s.c_str())
+                    return false;
+            }
+            lead = std::max(0.f, lead);
+            if (lead <= 0.f)
+                m_leading->TextBox::set_value("Auto");
+            else
+                m_leading->set_value(lead);
+            m_view->apply_type([lead](CharStyle &cs) { cs.leading = lead; });
+            return true;
+        });
+
+        m_baseline = type_number("Baseline", "pt", 70);
+        m_baseline->set_tooltip("Baseline shift. Positive raises the type.");
+        m_baseline->TextBox::set_callback([this](const std::string &s) {
+            char *end = nullptr;
+            const float v = std::strtof(s.c_str(), &end);
+            if (end == s.c_str())
+                return false;
+            const float shift = std::clamp(v, -500.f, 500.f);
+            m_baseline->set_value(shift);
+            m_view->apply_type([shift](CharStyle &cs) { cs.baseline_shift = shift; });
+            return true;
         });
     }
 
@@ -308,6 +612,57 @@ public:
             m_sides->set_value(sh.sides);
         if (!m_star->focused())
             m_star->set_value((int) sh.star_inset);
+        sync_type();
+    }
+
+    void sync_type() {
+        if (!m_font)
+            return;
+        ComposerView::TypeStyle t;
+        const bool ok = m_view->type_style(t);
+        m_font->set_enabled(ok);
+        m_face->set_enabled(ok);
+        m_size->set_enabled(ok);
+        m_leading->set_enabled(ok);
+        m_baseline->set_enabled(ok);
+        if (!ok)
+            return;
+        if (t.mix_family)
+            m_font->set_caption("\u2014");
+        else {
+            int idx = -1;
+            for (size_t i = 0; i < m_families.size(); ++i)
+                if (m_families[i] == t.family)
+                    idx = (int) i;
+            if (idx >= 0)
+                m_font->set_selected_index(idx);
+            else
+                m_font->set_caption(t.family);
+        }
+        if (t.mix_style)
+            m_face->set_caption("\u2014");
+        else
+            m_face->set_selected_index((t.bold ? 1 : 0) + (t.italic ? 2 : 0));
+        if (!m_size->focused()) {
+            if (t.mix_size)
+                m_size->TextBox::set_value("");
+            else
+                m_size->set_value(t.size);
+        }
+        if (!m_leading->focused()) {
+            if (t.mix_leading)
+                m_leading->TextBox::set_value("");
+            else if (t.leading <= 0.f)
+                m_leading->TextBox::set_value("Auto");
+            else
+                m_leading->set_value(t.leading);
+        }
+        if (!m_baseline->focused()) {
+            if (t.mix_baseline)
+                m_baseline->TextBox::set_value("");
+            else
+                m_baseline->set_value(t.baseline);
+        }
     }
 
     /* The view's tool, mirrored in the toolbar's radio buttons. */
@@ -394,13 +749,30 @@ public:
             ms += c.compose_ms;
             overset |= c.overset;
         }
-        char buf[200];
+        char buf[240];
         const PageDoc &doc = m_view->document();
+        const size_t page = m_view->page_index();
+        const size_t np = doc.pages.size();
+        const size_t nitems = page < np ? doc.pages[page].items.size() : 0;
+        const bool hidden = m_view->page_hidden(page);
         std::snprintf(buf, sizeof buf,
-                      "  %zu items, %zu stories, %zu lines, composed in %.2f ms%s   |   zoom %.0f%%",
-                      doc.pages[0].items.size(), comps.size(), lines, ms,
+                      "  Page %zu of %zu%s   |   %zu items, %zu stories, %zu lines, composed in %.2f ms%s   |   zoom %.0f%%",
+                      page + 1, np, hidden ? " (hidden)" : "", nitems, comps.size(), lines, ms,
                       overset ? "   |   story overset (red arrow)" : "", m_scroll->zoom() * 100.0);
         m_status->set_caption(std::string(buf) + m_note);
+        if (m_remove_page) {
+            m_remove_page->set_enabled(np > 1);
+            m_move_earlier->set_enabled(page > 0);
+            m_move_later->set_enabled(page + 1 < np);
+            m_hide_page->set_caption(hidden ? "Show Page" : "Hide Page");
+        }
+        if (m_to_front) {
+            const bool can = !m_view->selection().empty();
+            m_to_front->set_enabled(can);
+            m_forward->set_enabled(can);
+            m_backward->set_enabled(can);
+            m_to_back->set_enabled(can);
+        }
         sync_zoom_menu();
         m_undo_btn->set_enabled(m_view->can_undo());
         m_redo_btn->set_enabled(m_view->can_redo());
@@ -452,6 +824,8 @@ public:
 
     bool keyboard_event(int key, int scancode, int action, int modifiers) override {
         if (Screen::keyboard_event(key, scancode, action, modifiers))
+            return true;
+        if (action == GLFW_PRESS && m_menubar && m_menubar->process_shortcuts(modifiers, key))
             return true;
         if (action != GLFW_PRESS || !(modifiers & (GLFW_MOD_CONTROL | GLFW_MOD_SUPER)))
             return false;
@@ -598,8 +972,10 @@ public:
 private:
     FontLibrary     m_fonts;
     Hyphenator      m_hyphenator;
+    MenuBar         *m_menubar = nullptr;
     ZoomScrollPanel *m_scroll = nullptr;
     ComposerView    *m_view = nullptr;
+    PageIconStrip   *m_pages = nullptr;
     ComboBox        *m_align = nullptr;
     Dropdown        *m_zoom_menu = nullptr;
     Button          *m_undo_btn = nullptr, *m_redo_btn = nullptr;
@@ -611,6 +987,15 @@ private:
     Dropdown        *m_weight = nullptr, *m_style = nullptr;
     IntBox<int>     *m_sides = nullptr, *m_star = nullptr;
     std::vector<SwatchId> m_swatch_ids;
+    Button          *m_mode_btn = nullptr;
+    Widget          *m_object_box = nullptr, *m_type_box = nullptr;
+    bool            m_type_mode = false;
+    std::vector<std::string> m_families;
+    Dropdown        *m_font = nullptr, *m_face = nullptr;
+    FloatBox<float> *m_size = nullptr, *m_leading = nullptr, *m_baseline = nullptr;
+    MenuItem        *m_remove_page = nullptr, *m_move_earlier = nullptr, *m_move_later = nullptr;
+    MenuItem        *m_hide_page = nullptr;
+    MenuItem        *m_to_front = nullptr, *m_forward = nullptr, *m_backward = nullptr, *m_to_back = nullptr;
     Label           *m_status = nullptr;
     std::string     m_note;
 };
