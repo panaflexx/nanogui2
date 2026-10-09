@@ -38,6 +38,46 @@ float Transform::rotation() const {
     return std::atan2(b, a);
 }
 
+/* ---- Swatches ----------------------------------------------------------- */
+
+std::vector<Swatch> default_swatches() {
+    return {
+        {kPaper,        "[Paper]",        {1, 1, 1, 1}},
+        {kBlack,        "[Black]",        {0, 0, 0, 1}},
+        {kRegistration, "[Registration]", {0, 0, 0, 1}},
+        {4, "Blue",    {0, 0, 1, 1}},
+        {5, "Cyan",    {0, 1, 1, 1}},
+        {6, "Green",   {0, 1, 0, 1}},
+        {7, "Magenta", {1, 0, 1, 1}},
+        {8, "Red",     {1, 0, 0, 1}},
+        {9, "Yellow",  {1, 1, 0, 1}},
+    };
+}
+
+const Swatch *PageDoc::find_swatch(SwatchId id) const {
+    for (const Swatch &s : swatches)
+        if (s.id == id)
+            return &s;
+    return nullptr;
+}
+
+Color PageDoc::resolve(const Paint &p) const {
+    const Swatch *s = p.none() ? nullptr : find_swatch(p.swatch);
+    if (!s)
+        return {0, 0, 0, 0};
+    /* A tint is a screen of the ink over paper white. */
+    const float t = std::clamp(p.tint, 0.f, 100.f) * 0.01f;
+    return {1 - (1 - s->rgb.r) * t, 1 - (1 - s->rgb.g) * t, 1 - (1 - s->rgb.b) * t, s->rgb.a};
+}
+
+SwatchId PageDoc::add_swatch(const std::string &name, Color rgb) {
+    SwatchId id = kRegistration;
+    for (const Swatch &s : swatches)
+        id = std::max(id, s.id);
+    swatches.push_back({id + 1, name, rgb});
+    return id + 1;
+}
+
 /* ---- Lookups ------------------------------------------------------------ */
 
 Item *PageDoc::find_item(ItemId id, size_t *page) {

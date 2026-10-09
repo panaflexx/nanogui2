@@ -1,15 +1,20 @@
 /*
  * pagemade — page layout in the spirit of Aldus PageMaker.
  *
- * First slice: the composer view. One page on a pasteboard with text
- * blocks and shapes, a toolbar with the pointer, rotate and text tools, a
- * zoom dropdown, undo/redo (Ctrl+Z / Ctrl+Shift+Z), a switch for
- * alignment, kerning and ligatures, and PageMaker's zoom shortcuts
- * (Ctrl/Cmd + 0 fit, 5 50%, 7 75%, 1 actual size, 2 200%, 4 400%, 8 800%).
+ * One page on a pasteboard with text blocks and shapes. The toolbar holds
+ * PageMaker's toolbox (pointer, rotate, text, line, rectangle, ellipse,
+ * polygon), snap to guides, undo/redo (Ctrl+Z / Ctrl+Shift+Z), a zoom
+ * dropdown, and switches for alignment, kerning and ligatures. Below it, a
+ * control palette shows the selection's position, size and angle and its
+ * fill and stroke (with nothing selected, the defaults for new shapes).
+ * PageMaker's zoom shortcuts: Ctrl/Cmd + 0 fit, 5 50%, 7 75%, 1 actual
+ * size, 2 200%, 4 400%, 8 800%.
  *
  *   pagemade
  *   pagemade --screenshot out.png [--zoom 4 --at 150,400] [--select 1,1]
- *            [--baselines] [--loose] [--no-kerning] [--tool text|rotate]
+ *            [--baselines] [--loose] [--no-kerning] [--no-snap]
+ *            [--tool pointer|text|rotate|line|rect|ellipse|polygon ...]
+ *            [--fill swatch[,tint] ...] [--stroke swatch,weight[,style] ...]
  *            [--drag x0,y0:x1,y1 ...] [--click x,y ...] [--type txt ...]
  *            [--key [mod+]name ...]
  *
@@ -18,7 +23,9 @@
  * --drag presses at one page point and releases at another, through the
  * real event path, before the screenshot is taken. --click, --type and
  * --key (enter, backspace, left, ..., a-z; mods shift/ctrl/alt) exercise
- * the text tool the same way, in the order given.
+ * the text tool the same way. --tool picks a tool, and --fill / --stroke
+ * set the selection's paint as the control palette would (style: solid,
+ * dashed, dotted, dashdot). All of these run in the order given.
  */
 #include <nanogui/nanogui.h>
 #include <nanogui/menu.h>
@@ -50,7 +57,7 @@ using namespace pagemade;
 
 class PagemadeApp : public Screen {
 public:
-    PagemadeApp() : Screen(Vector2i(1100, 900), "pagemade") {
+    PagemadeApp() : Screen(Vector2i(1280, 940), "pagemade") {
         inc_ref();
         set_theme_mode(ThemeMode::Light);
         register_default_fonts(m_fonts);
@@ -68,16 +75,29 @@ public:
         toolbar->set_height_flex(SizeMode::Fixed);
         toolbar->set_layout(new BoxLayout(Orientation::Horizontal, Alignment::Middle, 8, 6));
 
-        m_pointer_btn = new ToolButton(toolbar, FA_MOUSE_POINTER);
-        m_rotate_btn = new ToolButton(toolbar, FA_SYNC_ALT);
-        m_text_btn = new ToolButton(toolbar, FA_I_CURSOR);
-        m_pointer_btn->set_tooltip("Pointer tool (Delete removes, Ctrl+F/B front/back)");
-        m_rotate_btn->set_tooltip("Rotate tool (Shift snaps to 15\u00B0)");
-        m_text_btn->set_tooltip("Text tool");
-        m_pointer_btn->set_pushed(true);
-        m_pointer_btn->set_callback([this] { apply_tool(ComposerView::Tool::Pointer); });
-        m_rotate_btn->set_callback([this] { apply_tool(ComposerView::Tool::Rotate); });
-        m_text_btn->set_callback([this] { apply_tool(ComposerView::Tool::Text); });
+        using Tool = ComposerView::Tool;
+        auto tool_btn = [&](Tool t, int icon, const char *tip) {
+            ToolButton *b = new ToolButton(toolbar, icon);
+            b->set_tooltip(tip);
+            b->set_callback([this, t] { apply_tool(t); });
+            m_tool_btns.push_back({t, b});
+        };
+        tool_btn(Tool::Pointer, FA_MOUSE_POINTER,
+                 "Pointer tool (Shift+click adds, drag a marquee; Delete removes; "
+                 "arrows nudge; Ctrl+F/B front/back)");
+        tool_btn(Tool::Rotate, FA_SYNC_ALT, "Rotate tool (Shift snaps to 15\u00B0)");
+        tool_btn(Tool::Text, FA_I_CURSOR, "Text tool (drag on empty space for a new block)");
+        tool_btn(Tool::Line, FA_SLASH, "Line tool (Shift: 45\u00B0 steps)");
+        tool_btn(Tool::Rect, FA_SQUARE, "Rectangle tool (Shift: square)");
+        tool_btn(Tool::Ellipse, FA_CIRCLE, "Ellipse tool (Shift: circle)");
+        tool_btn(Tool::Polygon, FA_DRAW_POLYGON, "Polygon tool (Shift: regular)");
+        m_tool_btns.front().second->set_pushed(true);
+
+        m_snap_btn = new Button(toolbar, "", FA_MAGNET);
+        m_snap_btn->set_flags(Button::ToggleButton);
+        m_snap_btn->set_pushed(true);
+        m_snap_btn->set_tooltip("Snap to guides");
+        m_snap_btn->set_change_callback([this](bool on) { m_view->set_snap(on); });
 
         m_undo_btn = new Button(toolbar, "", FA_UNDO);
         m_redo_btn = new Button(toolbar, "", FA_REDO);
@@ -116,6 +136,9 @@ public:
             m_view->set_show_loose_tight(on);
         });
 
+        PageDoc doc = sample_document();
+        build_palette(window, doc);
+
         m_scroll = new ZoomScrollPanel(window, ZoomScrollPanel::ScrollTypes::Both);
         m_scroll->set_zoom_range(0.1, 16.0);
         m_scroll->set_zoom_enabled(true);
@@ -125,14 +148,153 @@ public:
         m_view = new ComposerView(m_scroll, &m_fonts, &m_hyphenator);
         m_view->on_recompose = [this] { update_status(); };
         m_view->on_tool_change = [this](ComposerView::Tool t) { sync_tool_buttons(t); };
+        m_view->on_selection_change = [this] { sync_palette(); };
 
         m_status = new Label(window, "", "sans", 16);
         m_status->set_min_height(24);
         m_status->set_height(24);
         m_status->set_height_flex(SizeMode::Fixed);
 
-        m_view->set_document(sample_document());
+        m_view->set_document(std::move(doc));
+        sync_palette();
         perform_layout();
+    }
+
+    /* ---- Control palette ------------------------------------------- */
+
+    static constexpr float kTints[] = {100, 80, 60, 40, 30, 20, 10};
+    static constexpr float kWeights[] = {0.25f, 0.5f, 1, 2, 4, 6, 8, 12};
+
+    void build_palette(Widget *window, const PageDoc &doc) {
+        Widget *bar = new Widget(window);
+        bar->set_min_height(34);
+        bar->set_height(34);
+        bar->set_height_flex(SizeMode::Fixed);
+        bar->set_layout(new BoxLayout(Orientation::Horizontal, Alignment::Middle, 8, 5));
+
+        auto number = [&](const char *label, const char *units, int field, float width) {
+            new Label(bar, label, "sans-bold");
+            auto *box = new FloatBox<float>(bar);
+            box->set_editable(true);
+            box->number_format("%.2f");
+            box->set_units(units);
+            box->set_fixed_size(Vector2i((int) width, 26));
+            box->set_callback([this, field](float v) { apply_geometry(field, v); });
+            m_geom[field] = box;
+        };
+        number("X", "pt", 0, 70);
+        number("Y", "pt", 1, 70);
+        number("W", "pt", 2, 70);
+        number("H", "pt", 3, 70);
+        number("Rot", "\u00B0", 4, 58);
+
+        /* The Colors palette's swatches, "None" first, in both paint menus. */
+        std::vector<std::string> swatches{"None"};
+        m_swatch_ids = {kNoPaint};
+        for (const Swatch &sw : doc.swatches) {
+            swatches.push_back(sw.name);
+            m_swatch_ids.push_back(sw.id);
+        }
+        auto menu = [&](const std::vector<std::string> &items, int width) {
+            auto *d = new Dropdown(bar, items, {}, Dropdown::ComboBox, items.front());
+            d->set_fixed_size(Vector2i(width, 26));
+            return d;
+        };
+
+        new Label(bar, " Fill", "sans-bold");
+        m_fill = menu(swatches, 108);
+        m_fill->set_selected_callback([this](int i) {
+            const SwatchId id = m_swatch_ids[i];
+            m_view->apply_shape_style([id](Shape &sh) { sh.fill.swatch = id; });
+        });
+        m_fill_tint = menu({"100%", "80%", "60%", "40%", "30%", "20%", "10%"}, 66);
+        m_fill_tint->set_selected_callback([this](int i) {
+            const float t = kTints[i];
+            m_view->apply_shape_style([t](Shape &sh) { sh.fill.tint = t; });
+        });
+
+        new Label(bar, " Stroke", "sans-bold");
+        m_stroke = menu(swatches, 108);
+        m_stroke->set_selected_callback([this](int i) {
+            const SwatchId id = m_swatch_ids[i];
+            m_view->apply_shape_style([id](Shape &sh) { sh.stroke.paint.swatch = id; });
+        });
+        m_weight = menu({"Hairline", "0.5 pt", "1 pt", "2 pt", "4 pt", "6 pt", "8 pt", "12 pt"}, 82);
+        m_weight->set_selected_callback([this](int i) {
+            const float w = kWeights[i];
+            m_view->apply_shape_style([w](Shape &sh) { sh.stroke.weight = w; });
+        });
+        m_style = menu({"Solid", "Dashed", "Dotted", "Dash-dot"}, 88);
+        m_style->set_selected_callback([this](int i) {
+            m_view->apply_shape_style([i](Shape &sh) { sh.stroke.style = (LineStyle) i; });
+        });
+
+        new Label(bar, " Sides", "sans-bold");
+        m_sides = new IntBox<int>(bar, 6);
+        m_sides->set_editable(true);
+        m_sides->set_min_max_values(3, 100);
+        m_sides->set_fixed_size(Vector2i(44, 26));
+        m_sides->set_callback([this](int v) {
+            m_view->apply_shape_style([v](Shape &sh) { sh.sides = std::max(3, v); });
+        });
+        new Label(bar, "Star", "sans-bold");
+        m_star = new IntBox<int>(bar, 0);
+        m_star->set_editable(true);
+        m_star->set_min_max_values(0, 100);
+        m_star->set_units("%");
+        m_star->set_fixed_size(Vector2i(54, 26));
+        m_star->set_callback([this](int v) {
+            m_view->apply_shape_style([v](Shape &sh) { sh.star_inset = (float) v; });
+        });
+    }
+
+    void apply_geometry(int field, float v) {
+        ComposerView::Geometry g;
+        if (!m_view->geometry(g))
+            return;
+        float *f[] = {&g.x, &g.y, &g.w, &g.h, &g.angle};
+        *f[field] = v;
+        m_view->set_geometry(g);
+    }
+
+    void sync_palette() {
+        if (!m_fill)
+            return;
+        ComposerView::Geometry g;
+        const bool one = m_view->geometry(g);
+        const float vals[] = {g.x, g.y, g.w, g.h, g.angle};
+        for (int i = 0; i < 5; ++i) {
+            m_geom[i]->set_enabled(one);
+            if (m_geom[i]->focused())
+                continue;
+            if (one)
+                m_geom[i]->set_value(vals[i]);
+            else
+                m_geom[i]->TextBox::set_value("");
+        }
+        const Shape sh = m_view->shape_style();
+        auto swatch_index = [&](SwatchId id) {
+            for (size_t i = 0; i < m_swatch_ids.size(); ++i)
+                if (m_swatch_ids[i] == id)
+                    return (int) i;
+            return 0;
+        };
+        auto nearest = [](const float *v, int n, float x) {
+            int best = 0;
+            for (int i = 1; i < n; ++i)
+                if (std::fabs(v[i] - x) < std::fabs(v[best] - x))
+                    best = i;
+            return best;
+        };
+        m_fill->set_selected_index(swatch_index(sh.fill.swatch));
+        m_fill_tint->set_selected_index(nearest(kTints, 7, sh.fill.tint));
+        m_stroke->set_selected_index(swatch_index(sh.stroke.paint.swatch));
+        m_weight->set_selected_index(nearest(kWeights, 8, sh.stroke.weight));
+        m_style->set_selected_index((int) sh.stroke.style);
+        if (!m_sides->focused())
+            m_sides->set_value(sh.sides);
+        if (!m_star->focused())
+            m_star->set_value((int) sh.star_inset);
     }
 
     /* The view's tool, mirrored in the toolbar's radio buttons. */
@@ -142,9 +304,8 @@ public:
     }
 
     void sync_tool_buttons(ComposerView::Tool t) {
-        m_pointer_btn->set_pushed(t == ComposerView::Tool::Pointer);
-        m_rotate_btn->set_pushed(t == ComposerView::Tool::Rotate);
-        m_text_btn->set_pushed(t == ComposerView::Tool::Text);
+        for (auto &tb : m_tool_btns)
+            tb.second->set_pushed(tb.first == t);
     }
 
     void zoom_to(double z) {
@@ -330,7 +491,48 @@ public:
         key_callback_event(key, 0, GLFW_RELEASE, mods);
     }
 
+    /* --tool, --fill and --stroke: what the toolbox and palette would do. */
+    void scripted(const std::string &what, const std::string &arg) {
+        std::vector<std::string> f;
+        for (size_t i = 0; i <= arg.size();) {
+            size_t c = arg.find(',', i);
+            f.push_back(arg.substr(i, c == std::string::npos ? std::string::npos : c - i));
+            if (c == std::string::npos) break;
+            i = c + 1;
+        }
+        if (what == "tool") {
+            static const std::pair<const char *, ComposerView::Tool> tools[] = {
+                {"pointer", ComposerView::Tool::Pointer}, {"text", ComposerView::Tool::Text},
+                {"rotate", ComposerView::Tool::Rotate},   {"line", ComposerView::Tool::Line},
+                {"rect", ComposerView::Tool::Rect},       {"ellipse", ComposerView::Tool::Ellipse},
+                {"polygon", ComposerView::Tool::Polygon},
+            };
+            for (const auto &t : tools)
+                if (f[0] == t.first)
+                    apply_tool(t.second);
+            return;
+        }
+        SwatchId id = kNoPaint;
+        for (const Swatch &sw : m_view->document().swatches)
+            if (sw.name == f[0])
+                id = sw.id;
+        if (what == "fill") {
+            const float tint = f.size() > 1 ? (float) std::atof(f[1].c_str()) : 100.f;
+            m_view->apply_shape_style([&](Shape &sh) { sh.fill = {id, tint}; });
+        } else {
+            const float w = f.size() > 1 ? (float) std::atof(f[1].c_str()) : 1.f;
+            const std::string st = f.size() > 2 ? f[2] : "solid";
+            const LineStyle ls = st == "dashed" ? LineStyle::Dashed : st == "dotted" ? LineStyle::Dotted
+                               : st == "dashdot" ? LineStyle::DashDot : LineStyle::Solid;
+            m_view->apply_shape_style([&](Shape &sh) { sh.stroke = {{id, 100.f}, w, ls}; });
+        }
+    }
+
     ComposerView *view() { return m_view; }
+    void set_snap(bool on) {
+        m_view->set_snap(on);
+        m_snap_btn->set_pushed(on);
+    }
     CheckBox *baselines_box() { return m_baselines; }
     CheckBox *loose_box() { return m_loose; }
     CheckBox *kern_box() { return m_kern; }
@@ -344,7 +546,13 @@ private:
     Dropdown        *m_zoom_menu = nullptr;
     Button          *m_undo_btn = nullptr, *m_redo_btn = nullptr;
     CheckBox        *m_kern = nullptr, *m_baselines = nullptr, *m_loose = nullptr;
-    ToolButton      *m_pointer_btn = nullptr, *m_rotate_btn = nullptr, *m_text_btn = nullptr;
+    std::vector<std::pair<ComposerView::Tool, ToolButton *>> m_tool_btns;
+    Button          *m_snap_btn = nullptr;
+    FloatBox<float> *m_geom[5] = {};
+    Dropdown        *m_fill = nullptr, *m_fill_tint = nullptr, *m_stroke = nullptr;
+    Dropdown        *m_weight = nullptr, *m_style = nullptr;
+    IntBox<int>     *m_sides = nullptr, *m_star = nullptr;
+    std::vector<SwatchId> m_swatch_ids;
     Label           *m_status = nullptr;
 };
 
@@ -354,7 +562,7 @@ static bool parse_pair(const char *s, float &a, float &b) {
 
 /* A headless input action, replayed through Screen's GLFW callbacks. */
 struct Action {
-    enum Kind { Drag, Click, Type, Key } kind;
+    enum Kind { Drag, Click, Type, Key, Tool, Fill, Stroke } kind;
     std::array<float, 4> d{};
     std::string text;
     int key = 0, mods = 0;
@@ -401,8 +609,7 @@ int main(int argc, char **argv) {
     std::string shot;
     double zoom = 0;
     float at_x = -1, at_y = -1, sel_a = -1, sel_b = -1;
-    bool baselines = false, loose = false, no_kern = false;
-    std::string tool;
+    bool baselines = false, loose = false, no_kern = false, no_snap = false;
     std::vector<Action> actions;
     for (int i = 1; i < argc; ++i) {
         std::string a = argv[i];
@@ -429,13 +636,18 @@ int main(int argc, char **argv) {
             actions.push_back(act);
             ++i;
         }
-        else if (a == "--tool" && i + 1 < argc) tool = argv[++i];
+        else if ((a == "--tool" || a == "--fill" || a == "--stroke") && i + 1 < argc) {
+            act.kind = a == "--tool" ? Action::Tool : a == "--fill" ? Action::Fill : Action::Stroke;
+            act.text = argv[++i];
+            actions.push_back(act);
+        }
         else if (a == "--zoom" && i + 1 < argc) zoom = std::atof(argv[++i]);
         else if (a == "--at" && i + 1 < argc) parse_pair(argv[++i], at_x, at_y);
         else if (a == "--select" && i + 1 < argc) parse_pair(argv[++i], sel_a, sel_b);
         else if (a == "--baselines") baselines = true;
         else if (a == "--loose") loose = true;
         else if (a == "--no-kerning") no_kern = true;
+        else if (a == "--no-snap") no_snap = true;
     }
 
     nanogui::init();
@@ -456,10 +668,8 @@ int main(int argc, char **argv) {
         } else {
             app->fit_page();
         }
-        if (tool == "text")
-            app->apply_tool(ComposerView::Tool::Text);
-        else if (tool == "rotate")
-            app->apply_tool(ComposerView::Tool::Rotate);
+        if (no_snap)
+            app->set_snap(false);
         for (const Action &act : actions) {
             app->perform_layout();
             app->draw_all();
@@ -475,6 +685,12 @@ int main(int argc, char **argv) {
                 break;
             case Action::Key:
                 app->synthetic_key(act.key, act.mods);
+                break;
+            case Action::Tool:
+            case Action::Fill:
+            case Action::Stroke:
+                app->scripted(act.kind == Action::Tool ? "tool" : act.kind == Action::Fill
+                              ? "fill" : "stroke", act.text);
                 break;
             }
         }

@@ -21,6 +21,7 @@
 #include "composer/composer.h"
 
 #include <cstdint>
+#include <string>
 #include <variant>
 #include <vector>
 
@@ -63,21 +64,52 @@ struct PageSetup {
     float gutter = 18.f;
 };
 
+/* Colors palette entries. Paints refer to swatches by id, so changing a
+ * swatch recolors everything that uses it. Ids 1-3 are PageMaker's built-in
+ * [Paper], [Black] and [Registration]; 0 means no paint ([None]). Swatches
+ * carry an RGB screen color for now; CMYK and spot inks come with PDF. */
+using SwatchId = uint32_t;
+constexpr SwatchId kNoPaint = 0, kPaper = 1, kBlack = 2, kRegistration = 3;
+
+struct Swatch {
+    SwatchId    id = 0;
+    std::string name;
+    Color       rgb;
+};
+
+/* A swatch at a tint: PageMaker's screens, from 100% toward paper white. */
+struct Paint {
+    SwatchId swatch = kNoPaint;
+    float    tint = 100.f;
+    bool none() const { return swatch == kNoPaint; }
+};
+
+enum class LineStyle { Solid, Dashed, Dotted, DashDot };
+
+struct Stroke {
+    Paint     paint{kBlack, 100.f};
+    float     weight = 1.f;          // points; 0 = no stroke
+    LineStyle style = LineStyle::Solid;
+    bool none() const { return weight <= 0.f || paint.none(); }
+};
+
 /* A text block. Its story is the one whose thread lists it. Per-block
  * text options (inset, vertical alignment, columns) will live here. */
 struct TextFrame {};
 
-/* PageMaker's drawn elements. A line runs from (0, 0) to (w, h) in item
- * space, so either may be negative. Fill and stroke become swatches and
- * line styles with the drawing pipeline. */
+/* PageMaker's drawn elements, filling the item's box. A line runs from
+ * (0, 0) to (w, h) in item space, so either may be negative. A polygon is
+ * inscribed in the box; with a star inset, every other vertex is pulled
+ * that percentage of the way toward the center. As in PageMaker, a new
+ * shape has no fill and a 1 pt black stroke. */
 struct Shape {
-    enum class Kind { Rect, Ellipse, Line };
-    Kind  kind = Kind::Rect;
-    float corner_radius = 0.f;
-    bool  filled = false;
-    Color fill{1, 1, 1, 1};
-    float stroke_width = 1.f;    // 0 = no stroke
-    Color stroke;
+    enum class Kind { Rect, Ellipse, Line, Polygon };
+    Kind   kind = Kind::Rect;
+    float  corner_radius = 0.f;      // rectangles
+    int    sides = 6;                // polygons, 3 and up
+    float  star_inset = 0.f;         // polygons, percent
+    Paint  fill;
+    Stroke stroke;
 };
 
 struct Item {
@@ -101,11 +133,21 @@ struct StoryEntry {
     std::vector<ItemId> thread;  // text frames in reading order
 };
 
+/* [Paper], [Black], [Registration] and PageMaker's default colors. */
+std::vector<Swatch> default_swatches();
+
 struct PageDoc {
     PageSetup               setup;
     std::vector<Page>       pages{1};
     std::vector<StoryEntry> stories;
+    std::vector<Swatch>     swatches = default_swatches();
     uint32_t                next_id = 1;   // shared by items and stories
+
+    const Swatch *find_swatch(SwatchId id) const;
+    /* The screen color of a paint; transparent for none. */
+    Color resolve(const Paint &p) const;
+    /* Adds a swatch (ids above the built-ins) and returns its id. */
+    SwatchId add_swatch(const std::string &name, Color rgb);
 
     /* Lookups. `page` (when given) receives the item's page index. */
     Item       *find_item(ItemId id, size_t *page = nullptr);

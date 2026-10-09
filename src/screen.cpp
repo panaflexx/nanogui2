@@ -783,6 +783,20 @@ void Screen::initialize(GLFWwindow* window, bool shutdown_glfw) {
 }
 
 Screen::~Screen() {
+    /* Tear the widget tree down while the Screen is still whole. Widget
+       destructors call back into it (a Dropdown disposes its popup through
+       dispose_window, which reads m_focus_path), but by the time the base
+       Widget destructor would release the children, Screen's own members and
+       the NanoVG context are gone. Popups removed during this pass are queued
+       and released by do_widget_cleanup() below. */
+    std::vector<Widget *> children;
+    children.swap(m_children);
+    for (Widget *child : children) {
+        if (child) {
+            child->set_parent(nullptr);
+            child->dec_ref();
+        }
+    }
     do_widget_cleanup();
     __nanogui_screens.erase(m_glfw_window);
     for (size_t i = 0; i < (size_t)Cursor::CursorCount; ++i) {

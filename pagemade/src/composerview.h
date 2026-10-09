@@ -5,19 +5,25 @@
  * The view's logical units are points. Host it in a ZoomScrollPanel: the
  * panel's scale is the zoom, and the composer never sees it. Text is
  * composed once per change, not per zoom, and drawn as glyph outlines.
- * Every item is drawn, hit-tested and resized in its own space under its
+ * Page content goes through the draw list (drawlist.h), the same one PDF
+ * and SVG output will use; text overlays and handles are drawn on top.
+ * Every item is hit-tested and resized in its own space under its
  * transform, so rotated items behave like upright ones.
  *
- * Pointer tool basics: click an item to select it, drag inside it to move
- * it, drag a corner handle to resize it (a line's handles are its ends),
- * or drag a text block's bottom windowshade handle to change its depth.
- * Delete removes the selection; Cmd/Ctrl+F brings it to the front and
- * Cmd/Ctrl+B sends it to the back (PageMaker's Arrange shortcuts). Every
- * change recomposes. A red arrow in the bottom windowshade means the
- * story is overset.
+ * Pointer tool: click an item to select it (Shift adds or removes), drag
+ * on empty space for a marquee (selects what it encloses), drag selected
+ * items to move them, drag a corner handle to resize (a line's handles are
+ * its ends), or drag a text block's bottom windowshade to change its
+ * depth. Delete removes the selection; Cmd/Ctrl+F brings it to the front
+ * and Cmd/Ctrl+B sends it to the back. With snapping on, moved edges and
+ * dragged handles snap to the page edges, margins and column guides.
  *
- * Rotate tool: drag on an item to turn it about its center; Shift snaps
+ * Rotate tool: drag to turn the selection about its center; Shift snaps
  * the angle to 15 degree steps.
+ *
+ * Line, rectangle, ellipse and polygon tools: drag to draw (Shift draws a
+ * square, circle or 45 degree line). New shapes take the default fill and
+ * stroke, which the control palette sets while nothing is selected.
  *
  * Threading (PageMaker's manual text flow): click the red overset arrow
  * and the story is picked up — a new text block, sized to hold what
@@ -26,20 +32,20 @@
  * block's top windowshade tab (the one with the plus) to merge its text
  * back into the parent block; the block goes away.
  *
- * Text tool basics (composer/edit.h does the model work): click inside a
- * text block to place the caret, drag to select, double-click for a word,
- * triple-click for a paragraph. Typing replaces the selection, Return
- * splits the paragraph (Shift+Return is a line break in the same
- * paragraph), Cmd/Ctrl + A/C/X/V select all/copy/cut/paste, B/I restyle
- * the selection, Alt+arrows move by words. Escape collapses the
- * selection, then returns to the pointer tool.
+ * Text tool (composer/edit.h does the model work): click inside a text
+ * block to place the caret, or drag on empty space to draw a new block.
+ * Drag to select, double-click for a word, triple-click for a paragraph.
+ * Typing replaces the selection, Return splits the paragraph (Shift+Return
+ * is a line break in the same paragraph), Cmd/Ctrl + A/C/X/V select all/
+ * copy/cut/paste, B/I restyle the selection, Alt+arrows move by words.
+ * Escape collapses the selection, then returns to the pointer tool.
  */
 #pragma once
 
 #include <nanogui/widget.h>
 
 #include "composer/edit.h"
-#include "page.h"
+#include "drawlist.h"
 
 #include <deque>
 #include <functional>
@@ -60,19 +66,37 @@ public:
     void set_show_baselines(bool on)   { m_show_baselines = on; }
     void set_show_loose_tight(bool on) { m_show_loose_tight = on; }
     void set_show_guides(bool on)      { m_show_guides = on; }
+    void set_snap(bool on)             { m_snap = on; }
+    bool snap() const                  { return m_snap; }
 
-    /* The toolbox: the pointer tool manipulates items, the rotate tool
-     * turns them, the text tool edits the story inside text blocks. */
-    enum class Tool { Pointer, Rotate, Text };
+    /* The toolbox. */
+    enum class Tool { Pointer, Rotate, Text, Line, Rect, Ellipse, Polygon };
     void set_tool(Tool t);
     Tool tool() const { return m_tool; }
     bool editing() const { return edit_story() != nullptr; }
 
-    /* The selected item (0 = none). */
-    pagemade::ItemId selection() const { return m_sel; }
-    void select(pagemade::ItemId id) { m_sel = id; }
+    /* The selection, in the order items were picked. */
+    const std::vector<pagemade::ItemId> &selection() const { return m_sel; }
+    void select(pagemade::ItemId id);   // 0 clears
     /* Select a story's text block by position: story index, thread index. */
     void select_frame(size_t story, size_t frame);
+
+    /* ---- Control palette ------------------------------------------- */
+    /* X/Y are the item's origin (its box's top-left corner, turned with
+     * it) from the page's top-left, W/H its size, angle in degrees
+     * counterclockwise (PageMaker's convention). One selected item only. */
+    struct Geometry {
+        float x = 0, y = 0, w = 0, h = 0, angle = 0;
+    };
+    bool geometry(Geometry &g) const;
+    void set_geometry(const Geometry &g);       // one undo step
+    /* The fill/stroke the palette shows: the first selected shape, or the
+     * defaults for new shapes when no shape is selected. */
+    pagemade::Shape shape_style() const;
+    bool shapes_selected() const;
+    /* Change the selected shapes (one undo step), or the defaults for new
+     * shapes when none is selected, as PageMaker does. */
+    void apply_shape_style(const std::function<void(pagemade::Shape &)> &fn);
 
     /* Undo/redo: whole-document snapshots (the model is small), one per
      * action. A run of typing or deleting coalesces into a single step;
@@ -92,6 +116,8 @@ public:
     std::function<void()> on_recompose;
     /* Called when the tool changes (Escape back to the pointer tool). */
     std::function<void(Tool)> on_tool_change;
+    /* Called when the selection or a selected item's geometry changes. */
+    std::function<void()> on_selection_change;
 
     nanogui::Vector2i preferred_size(NVGcontext *ctx) const override;
     void draw(NVGcontext *ctx) override;
@@ -117,6 +143,7 @@ private:
      * screen's mouse position, at full precision. */
     pagemade::Point page_point_from_screen(const nanogui::Vector2i &screen_p) const;
     float zoom() const;
+    /* Handles of selected items first, then items top to bottom. */
     Hit hit_test(const pagemade::Point &pt) const;
     /* Topmost text block under pt (0 = none). */
     pagemade::ItemId text_frame_at(const pagemade::Point &pt) const;
@@ -124,14 +151,25 @@ private:
     bool hits_item(const pagemade::Item &it, const pagemade::Point &pt) const;
 
     const std::vector<pagemade::Item> &items() const { return m_doc.pages[m_page].items; }
+    bool is_selected(pagemade::ItemId id) const;
+    void selection_changed();
+    pagemade::Bounds selection_bounds() const;
     /* The composition of the story threading text frame `id`, and the
      * frame's place in the thread. */
     const pagemade::Composition *comp_of_frame(pagemade::ItemId id, size_t *thread_index) const;
 
+    /* ---- Snapping ---------------------------------------------------- */
+    std::vector<float> guides_x() const;
+    std::vector<float> guides_y() const;
+    /* Snap a page point to the guides, axis by axis. */
+    pagemade::Point snap_point(pagemade::Point p) const;
+    /* Adjust a move so one of the box's edges (or its center) lands on a guide. */
+    pagemade::Point snap_move(const pagemade::Bounds &b, pagemade::Point d) const;
+
     void draw_page(NVGcontext *ctx, float px);
-    /* A text block's content in its own space: overlays, selection, glyphs, caret. */
-    void draw_text_frame(NVGcontext *ctx, const pagemade::Item &it, float px);
-    void draw_chrome(NVGcontext *ctx, float px);   // outlines, handles, windowshades
+    /* Loose/tight lines, baselines, the text selection and the caret. */
+    void draw_text_overlays(NVGcontext *ctx, const pagemade::Item &it, float px);
+    void draw_chrome(NVGcontext *ctx, float px);   // outlines, handles, windowshades, marquee
 
     /* ---- Threading ------------------------------------------------- */
     /* The red arrow was clicked: thread a new block after the selected
@@ -147,9 +185,15 @@ private:
     /* ---- Undo -------------------------------------------------------*/
     void restore_snapshot();           // common tail of undo()/redo()
 
-    /* ---- Pointer tool ---------------------------------------------- */
-    void delete_selected_item();
+    /* ---- Pointer and drawing tools ---------------------------------- */
+    void delete_selection_items();
     void arrange(bool to_front);
+    /* Start drawing a shape (or a text block) at pt; update_creation()
+     * stretches it to the pointer; finish_creation() keeps it or, for a
+     * click without a drag, takes it back. */
+    void begin_creation(const pagemade::Point &pt);
+    void update_creation(pagemade::Point pt, bool constrain);
+    void finish_creation();
 
     /* ---- Text tool ------------------------------------------------- */
     pagemade::Story *edit_story();
@@ -182,9 +226,18 @@ private:
     int m_clicks = 0;
     pagemade::Point m_down_pt;            // page point of the last press
 
-    pagemade::ItemId m_sel = 0;
-    Handle m_drag = Handle::None;
+    std::vector<pagemade::ItemId> m_sel;
+    Handle m_drag = Handle::None;         // what the current drag does
+    pagemade::ItemId m_drag_target = 0;   // the item whose handle is dragged
     bool m_rotating = false;              // rotate-tool drag in progress
+    bool m_marquee = false;               // marquee drag in progress
+    bool m_marquee_add = false;           // Shift: add to the selection
+    pagemade::Point m_marquee_end;
+    bool m_creating = false;              // a drawing tool's drag in progress
+    pagemade::ItemId m_created = 0;
+    pagemade::PageDoc m_creation_saved;   // pre-drawing state, pushed if something is drawn
+    pagemade::Shape m_default_shape;      // fill and stroke for new shapes
+    bool m_snap = true;
     bool m_placing = false;               // a picked-up story follows the pointer
     pagemade::ItemId m_placement_parent = 0;
     pagemade::PageDoc m_placement_saved;  // pre-placement state, pushed on commit
@@ -193,7 +246,8 @@ private:
     bool m_burst_open = false;            // typing/deleting run in progress
     bool m_gesture_saved = false;         // drag pushed its snapshot
     pagemade::Point m_drag_start;         // page point at press
-    pagemade::Item m_drag_item;           // the item at press
+    std::vector<pagemade::Item> m_drag_items;   // the selected items at press
+    pagemade::Bounds m_drag_bounds;       // their page bounds at press
 
     bool m_show_baselines = false;
     bool m_show_loose_tight = false;

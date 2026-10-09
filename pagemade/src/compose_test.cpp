@@ -8,6 +8,8 @@
 #include "composer/hyphenator.h"
 #include "composer/edit.h"
 #include "default_fonts.h"
+#include "drawlist.h"
+#include "geometry.h"
 #include "page.h"
 
 #include <algorithm>
@@ -513,6 +515,140 @@ static void test_hyphenation(const FontLibrary &fonts) {
         std::printf("  (skip: no width breaks \"efficient\" at ef-fi)\n");
 }
 
+
+static bool near_color(Color c, float r, float g, float b, float a) {
+    return std::fabs(c.r - r) < 1e-4f && std::fabs(c.g - g) < 1e-4f &&
+           std::fabs(c.b - b) < 1e-4f && std::fabs(c.a - a) < 1e-4f;
+}
+
+static void test_swatches() {
+    PageDoc doc;
+    CHECK(near_color(doc.resolve({kBlack, 100}), 0, 0, 0, 1), "[Black] at 100%%");
+    CHECK(near_color(doc.resolve({kBlack, 40}), 0.6f, 0.6f, 0.6f, 1), "a 40%% tint screens toward paper");
+    CHECK(near_color(doc.resolve({kPaper, 100}), 1, 1, 1, 1), "[Paper] is white");
+    CHECK(doc.resolve({kNoPaint, 100}).a == 0, "no paint is transparent");
+    const SwatchId id = doc.add_swatch("Ochre", {0.8f, 0.6f, 0.2f, 1});
+    CHECK(id > 9 && doc.find_swatch(id) && doc.find_swatch(id)->name == "Ochre",
+          "added swatches get new ids (%u)", id);
+}
+
+static float polyline_length(const Polyline &p) {
+    float len = 0;
+    for (size_t i = 1; i < p.pts.size(); ++i)
+        len += std::hypot(p.pts[i].x - p.pts[i - 1].x, p.pts[i].y - p.pts[i - 1].y);
+    return len;
+}
+
+static void test_geometry() {
+    Bounds b = path_bounds(rect_path(0, 0, 100, 50));
+    CHECK(b.x0 == 0 && b.y0 == 0 && b.x1 == 100 && b.y1 == 50, "rect outline fills its box");
+    Path rr = rect_path(0, 0, 100, 50, 10);
+    b = path_bounds(rr);
+    CHECK(b.x0 == 0 && b.y0 == 0 && b.x1 == 100 && b.y1 == 50, "rounded rect stays in its box");
+    int cubics = 0;
+    for (const PathCmd &c : rr) cubics += c.kind == PathCmd::Cubic;
+    CHECK(cubics == 4, "rounded rect has four corner curves");
+
+    /* Flattened ellipse points sit on the ellipse (the cubic arcs are
+     * within 0.03% of a true quarter ellipse). */
+    float worst = 0;
+    for (const Polyline &pl : flatten(ellipse_path(50, 50, 50, 25), 0.05f))
+        for (const Point &q : pl.pts) {
+            const float nx = (q.x - 50) / 50, ny = (q.y - 50) / 25;
+            worst = std::max(worst, std::fabs(std::sqrt(nx * nx + ny * ny) - 1));
+        }
+    CHECK(worst < 0.003f, "flattened ellipse error %.5f", worst);
+    const size_t coarse = flatten(ellipse_path(0, 0, 100, 100), 1.f)[0].pts.size();
+    const size_t fine = flatten(ellipse_path(0, 0, 100, 100), 0.01f)[0].pts.size();
+    CHECK(fine > coarse * 4, "a tighter tolerance means more segments (%zu vs %zu)", fine, coarse);
+
+    Path hex = polygon_path(100, 100, 6, 0);
+    CHECK(hex.size() == 7 && hex.back().kind == PathCmd::Close, "hexagon: six vertices, closed");
+    CHECK(std::fabs(hex[0].x - 50) < 1e-4f && std::fabs(hex[0].y) < 1e-4f, "first vertex at the top");
+    Path star = polygon_path(100, 100, 5, 50);
+    CHECK(star.size() == 11, "five-point star: ten vertices");
+    const float r1 = std::hypot(star[1].x - 50, star[1].y - 50);
+    CHECK(std::fabs(r1 - 25) < 1e-3f, "50%% inset puts inner vertices at half radius (%.3f)", r1);
+
+    /* Dashing a straight 10-unit line. */
+    std::vector<Polyline> line{{{{0, 0}, {10, 0}}, false}};
+    auto d = dash(line, {2, 1});
+    float on = 0;
+    for (const Polyline &pl : d) on += polyline_length(pl);
+    CHECK(d.size() == 4 && std::fabs(on - 7) < 1e-4f, "2-on 1-off over 10: 4 dashes, 7 on (%zu, %.3f)",
+          d.size(), on);
+    auto dots = dash(line, {0, 2});
+    int singles = 0;
+    for (const Polyline &pl : dots) singles += pl.pts.size() == 1;
+    CHECK(dots.size() == 6 && singles == 6, "dots every 2 over 10: six dots (%zu)", dots.size());
+    auto off = dash(line, {2, 1}, 1);
+    CHECK(!off.empty() && std::fabs(polyline_length(off[0]) - 1) < 1e-4f, "offset 1 shortens the first dash");
+    std::vector<Polyline> square{{{{0, 0}, {10, 0}, {10, 10}, {0, 10}}, true}};
+    auto sd = dash(square, {5, 5});
+    CHECK(sd.size() == 4, "a closed path dashes all the way round (%zu)", sd.size());
+    CHECK(dash_pattern(LineStyle::Solid, 1).empty() && line_style_round_caps(LineStyle::Dotted),
+          "solid has no pattern; dots are round");
+
+    Item it;
+    it.w = 10;
+    it.h = 20;
+    it.xf = Transform::translate(100, 100) * Transform::rotate(3.14159265f / 2);
+    Bounds ib = item_bounds(it);
+    CHECK(std::fabs((ib.x1 - ib.x0) - 20) < 1e-3f && std::fabs((ib.y1 - ib.y0) - 10) < 1e-3f,
+          "a quarter turn swaps the box's extents");
+}
+
+static void test_drawlist(const FontLibrary &fonts) {
+    PageDoc doc = sample_document();
+    std::vector<Composition> comps;
+    for (const StoryEntry &se : doc.stories)
+        comps.push_back(compose(se.story, doc.thread_frames(se), fonts));
+    DrawList list = build_page(doc, 0, comps);
+
+    size_t runs = 0;
+    for (const Composition &c : comps)
+        for (const ComposedLine &l : c.lines)
+            runs += l.runs.size();
+    size_t glyph_ops = 0, fills = 0, strokes = 0;
+    for (const DrawOp &op : list) {
+        glyph_ops += std::holds_alternative<DrawGlyphs>(op);
+        fills += std::holds_alternative<DrawFill>(op);
+        strokes += std::holds_alternative<DrawStroke>(op);
+    }
+    CHECK(glyph_ops == runs, "one glyph op per composed run (%zu of %zu)", glyph_ops, runs);
+    CHECK(fills == 1 && strokes == 2, "rule: stroke; tint box: fill and stroke (%zu, %zu)", fills, strokes);
+    CHECK(std::holds_alternative<DrawGlyphs>(list.front()), "the headline is at the bottom");
+
+    /* The tint box comes before the sidebar text, and after it once it is
+     * brought to the front. */
+    const ItemId tint = doc.pages[0].items[4].id;
+    auto fill_index = [](const DrawList &l) {
+        for (size_t i = 0; i < l.size(); ++i)
+            if (std::holds_alternative<DrawFill>(l[i])) return i;
+        return l.size();
+    };
+    const size_t before = fill_index(list);
+    CHECK(before + 2 < list.size() && std::holds_alternative<DrawGlyphs>(list.back()),
+          "sidebar glyphs draw over the tint");
+    doc.bring_to_front(tint);
+    DrawList front = build_page(doc, 0, comps);
+    CHECK(std::holds_alternative<DrawStroke>(front.back()) &&
+          std::holds_alternative<DrawFill>(front[front.size() - 2]), "brought to front, the box draws last");
+
+    Item dashed;
+    dashed.w = 50;
+    Shape sh;
+    sh.kind = Shape::Kind::Line;
+    sh.stroke.style = LineStyle::Dotted;
+    sh.stroke.weight = 2;
+    dashed.content = sh;
+    doc.add_item(0, dashed);
+    const DrawList with_dots = build_page(doc, 0, comps);
+    const DrawStroke *ds = std::get_if<DrawStroke>(&with_dots.back());
+    CHECK(ds && !ds->dash.empty() && ds->cap == LineCap::Round && ds->width == 2,
+          "a dotted line becomes a round-capped dash pattern");
+}
+
 static void dump_sample(const FontLibrary &fonts) {
     PageDoc doc = sample_document();
     for (size_t si = 0; si < doc.stories.size(); ++si) {
@@ -553,6 +689,9 @@ int main(int argc, char **argv) {
     test_model(fonts);
     test_tabs(fonts);
     test_hyphenation(fonts);
+    test_swatches();
+    test_geometry();
+    test_drawlist(fonts);
     if (verbose)
         dump_sample(fonts);
 

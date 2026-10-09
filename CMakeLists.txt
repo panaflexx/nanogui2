@@ -928,6 +928,65 @@ if (NANOGUI_BUILD_EXAMPLES)
   target_link_libraries(imagestash_test nanogui ${NANOGUI_LIBS})
   target_link_libraries(guieditor nanogui ${NANOGUI_LIBS})
 
+  # pagemade: page layout. The composer is HarfBuzz only (no NanoVG); the
+  # app draws it in a NanoGUI view. Moves to pagemade/CMakeLists.txt later.
+  if (HARFBUZZ_FOUND)
+    # Vendored libunibreak (ext/libunibreak, zlib licence): UAX #14 line
+    # breaking plus grapheme and word boundaries for the editor.
+    file(GLOB UNIBREAK_SOURCES CONFIGURE_DEPENDS ext/libunibreak/src/*.c)
+    # eastasianwidthdata.c is #included by eastasianwidthdef.c; compiling it
+    # standalone yields a duplicate `ub_is_op_east_asian` symbol at link time.
+    list(FILTER UNIBREAK_SOURCES EXCLUDE REGEX "eastasianwidthdata\\.c$")
+    add_library(unibreak STATIC ${UNIBREAK_SOURCES})
+    target_include_directories(unibreak PUBLIC ext/libunibreak/src)
+    set_target_properties(unibreak PROPERTIES POSITION_INDEPENDENT_CODE ON)
+    if (MSVC)
+      target_compile_options(unibreak PRIVATE /W0)
+    endif()
+
+    add_library(pagemade_composer STATIC
+        pagemade/src/composer/font.cpp
+        pagemade/src/composer/composer.cpp
+        pagemade/src/composer/hyphenator.cpp
+        pagemade/src/composer/edit.cpp)
+    target_include_directories(pagemade_composer PUBLIC
+        pagemade/src ${HARFBUZZ_INCLUDE_DIRS})
+    target_link_directories(pagemade_composer PUBLIC ${HARFBUZZ_LIBRARY_DIRS})
+    target_link_libraries(pagemade_composer PUBLIC unibreak ${HARFBUZZ_LIBRARIES})
+
+    add_executable(pagemade_app
+        pagemade/src/main.cpp
+        pagemade/src/composerview.cpp
+        pagemade/src/render_nvg.cpp
+        pagemade/src/default_fonts.cpp
+        pagemade/src/page.cpp
+        pagemade/src/geometry.cpp
+        pagemade/src/drawlist.cpp
+        pagemade/src/sample.cpp)
+    add_executable(pagemade_compose_test
+        pagemade/src/compose_test.cpp
+        pagemade/src/default_fonts.cpp
+        pagemade/src/page.cpp
+        pagemade/src/geometry.cpp
+        pagemade/src/drawlist.cpp
+        pagemade/src/sample.cpp)
+    foreach(_t pagemade_app pagemade_compose_test)
+      target_compile_definitions(${_t} PRIVATE
+          PAGEMADE_RESOURCE_DIR="${CMAKE_CURRENT_SOURCE_DIR}/resources"
+          PAGEMADE_DATA_DIR="${CMAKE_CURRENT_SOURCE_DIR}/pagemade/resources")
+    endforeach()
+    target_link_libraries(pagemade_app pagemade_composer nanogui ${NANOGUI_LIBS})
+    target_link_libraries(pagemade_compose_test pagemade_composer)
+    # Output name "pagemade" would collide with the pagemade/ source directory
+    set_target_properties(pagemade_app PROPERTIES OUTPUT_NAME pagemade)
+    set_target_properties(pagemade_app pagemade_compose_test PROPERTIES
+        RUNTIME_OUTPUT_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}/bin
+        RUNTIME_OUTPUT_DIRECTORY_DEBUG ${CMAKE_CURRENT_BINARY_DIR}/bin
+        RUNTIME_OUTPUT_DIRECTORY_RELEASE ${CMAKE_CURRENT_BINARY_DIR}/bin
+        RUNTIME_OUTPUT_DIRECTORY_RELWITHDEBINFO ${CMAKE_CURRENT_BINARY_DIR}/bin)
+  else()
+    message(STATUS "pagemade: HarfBuzz not found, skipping.")
+  endif()
 
   # Copy icons for example application
   file(COPY resources/icons DESTINATION ${CMAKE_CURRENT_BINARY_DIR})

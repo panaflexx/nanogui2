@@ -137,7 +137,9 @@ PageDoc sample_document() {
     rule.w = body_w;
     rule.h = 0;
     rule.xf = Transform::translate(s.margin_inside, top - 7);
-    rule.content = Shape{Shape::Kind::Line, 0, false, {}, 1.f, {}};
+    Shape rule_shape;
+    rule_shape.kind = Shape::Kind::Line;                 // 1 pt black, the default stroke
+    rule.content = rule_shape;
     doc.add_item(0, rule);
 
     StoryId body_id = doc.add_story(std::move(article));
@@ -154,7 +156,11 @@ PageDoc sample_document() {
     tint.w = box_w;
     tint.h = box_h;
     tint.xf = Transform::rotate_about(Transform::translate(box.x, box.y), center, turn);
-    tint.content = Shape{Shape::Kind::Rect, 4, true, {0.93f, 0.91f, 0.84f, 1}, 0.5f, {}};
+    Shape tint_shape;
+    tint_shape.corner_radius = 4;
+    tint_shape.fill = {doc.add_swatch("Parchment", {0.93f, 0.91f, 0.84f, 1}), 100};
+    tint_shape.stroke.weight = 0.5f;
+    tint.content = tint_shape;
     doc.add_item(0, tint);
 
     StoryId side_id = doc.add_story(std::move(sidebar));

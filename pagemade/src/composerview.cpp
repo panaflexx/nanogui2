@@ -19,9 +19,11 @@ namespace {
 
 constexpr float kPasteboard = 72.f;     // pasteboard margin around the page, points
 constexpr float kMinBlock   = 12.f;     // smallest item, points
+constexpr float kMinDraw    = 2.f;      // a drawing drag shorter than this is a click
 constexpr float kHandlePx   = 7.f;      // handle sizes are in screen pixels
 constexpr float kTabWPx     = 18.f, kTabHPx = 9.f;
 constexpr float kPickPx     = 4.f;      // how near an outline or line counts as on it
+constexpr float kSnapPx     = 5.f;      // how near a guide snaps
 constexpr float kPi         = 3.14159265f;
 
 const NVGcolor kPasteboardColor = nvgRGB(214, 214, 214);
@@ -50,6 +52,17 @@ bool is_line(const Item &it) {
     return sh && sh->kind == Shape::Kind::Line;
 }
 
+/* The handle's position in item space. */
+Point handle_point(const Item &it, int h) {
+    switch (h) {
+    case 2: return {it.w, 0};              // TopRight
+    case 3: return {0, it.h};              // BottomLeft
+    case 4: return {it.w, it.h};           // BottomRight
+    case 5: return {it.w * 0.5f, it.h};    // Windowshade
+    default: return {0, 0};                // TopLeft
+    }
+}
+
 } // namespace
 
 ComposerView::ComposerView(Widget *parent, const FontLibrary *fonts, const Hyphenator *hyphenator)
@@ -60,18 +73,43 @@ ComposerView::ComposerView(Widget *parent, const FontLibrary *fonts, const Hyphe
 void ComposerView::set_document(PageDoc doc) {
     m_doc = std::move(doc);
     m_page = 0;
-    m_sel = 0;
+    m_sel.clear();
     m_edit_story = 0;
     m_selecting = false;
     m_undo.clear();
     m_redo.clear();
     m_burst_open = false;
     recompose();
+    selection_changed();
+}
+
+void ComposerView::select(ItemId id) {
+    m_sel.clear();
+    if (id && m_doc.find_item(id))
+        m_sel.push_back(id);
+    selection_changed();
 }
 
 void ComposerView::select_frame(size_t story, size_t frame) {
     if (story < m_doc.stories.size() && frame < m_doc.stories[story].thread.size())
-        m_sel = m_doc.stories[story].thread[frame];
+        select(m_doc.stories[story].thread[frame]);
+}
+
+bool ComposerView::is_selected(ItemId id) const {
+    return std::find(m_sel.begin(), m_sel.end(), id) != m_sel.end();
+}
+
+void ComposerView::selection_changed() {
+    if (on_selection_change)
+        on_selection_change();
+}
+
+Bounds ComposerView::selection_bounds() const {
+    Bounds b;
+    for (ItemId id : m_sel)
+        if (const Item *it = m_doc.find_item(id))
+            b.add(item_bounds(*it));
+    return b;
 }
 
 /* ---- Undo --------------------------------------------------------------- */
@@ -94,10 +132,13 @@ void ComposerView::restore_snapshot() {
     m_selecting = false;
     m_placing = false;
     m_rotating = false;
+    m_marquee = false;
+    m_creating = false;
     m_drag = Handle::None;
-    /* Keep the selection and caret if they still exist in the restored model. */
-    if (m_sel && !m_doc.find_item(m_sel))
-        m_sel = 0;
+    /* Keep the selection and caret where they still exist. */
+    m_sel.erase(std::remove_if(m_sel.begin(), m_sel.end(),
+                               [&](ItemId id) { return !m_doc.find_item(id); }),
+                m_sel.end());
     if (m_edit_story && !m_doc.find_story(m_edit_story))
         m_edit_story = 0;
     if (Story *s = edit_story()) {
@@ -105,6 +146,7 @@ void ComposerView::restore_snapshot() {
         m_anchor = clamp(*s, m_anchor);
     }
     recompose();
+    selection_changed();
     if (screen())
         screen()->redraw();
 }
@@ -131,17 +173,21 @@ void ComposerView::set_tool(Tool t) {
     if (m_tool == t)
         return;
     end_placement(false);
+    if (m_creating)
+        finish_creation();
     m_tool = t;
     m_burst_open = false;
     m_selecting = false;
     m_rotating = false;
+    m_marquee = false;
     m_drag = Handle::None;
     if (t != Tool::Text)
         m_edit_story = 0;                // put the story down
     else
-        m_sel = 0;                       // no item selection while editing text
+        m_sel.clear();                   // no item selection while editing text
     if (on_tool_change)
         on_tool_change(t);
+    selection_changed();
     if (screen())
         screen()->redraw();
 }
@@ -193,6 +239,60 @@ Point ComposerView::page_point_from_screen(const Vector2i &screen_p) const {
     return {local.x(), local.y()};
 }
 
+/* ---- Snapping ----------------------------------------------------------- */
+
+std::vector<float> ComposerView::guides_x() const {
+    const PageSetup &s = m_doc.setup;
+    const float l = s.margin_inside, r = s.width - s.margin_outside;
+    std::vector<float> g{0, s.width, l, r};
+    if (s.columns > 1) {
+        const float col = (r - l - s.gutter * (s.columns - 1)) / s.columns;
+        for (int c = 1; c < s.columns; ++c) {
+            const float x = l + c * col + (c - 1) * s.gutter;
+            g.push_back(x);
+            g.push_back(x + s.gutter);
+        }
+    }
+    return g;
+}
+
+std::vector<float> ComposerView::guides_y() const {
+    const PageSetup &s = m_doc.setup;
+    return {0, s.height, s.margin_top, s.height - s.margin_bottom};
+}
+
+Point ComposerView::snap_point(Point p) const {
+    if (!m_snap)
+        return p;
+    const float tol = kSnapPx / zoom();
+    auto snap = [&](float v, const std::vector<float> &gs) {
+        float best = v, d = tol;
+        for (float g : gs)
+            if (std::fabs(g - v) <= d) {
+                d = std::fabs(g - v);
+                best = g;
+            }
+        return best;
+    };
+    return {snap(p.x, guides_x()), snap(p.y, guides_y())};
+}
+
+Point ComposerView::snap_move(const Bounds &b, Point d) const {
+    if (!m_snap || b.empty())
+        return d;
+    const float tol = kSnapPx / zoom();
+    auto adjust = [&](std::initializer_list<float> edges, const std::vector<float> &gs, float dv) {
+        float best = tol + 1;
+        for (float e : edges)
+            for (float g : gs)
+                if (std::fabs(g - (e + dv)) < std::fabs(best))
+                    best = g - (e + dv);
+        return std::fabs(best) <= tol ? dv + best : dv;
+    };
+    return {adjust({b.x0, (b.x0 + b.x1) * 0.5f, b.x1}, guides_x(), d.x),
+            adjust({b.y0, (b.y0 + b.y1) * 0.5f, b.y1}, guides_y(), d.y)};
+}
+
 /* ---- Hit testing (each item in its own space) ---------------------------- */
 
 bool ComposerView::hits_item(const Item &it, const Point &pt) const {
@@ -202,15 +302,18 @@ bool ComposerView::hits_item(const Item &it, const Point &pt) const {
     const Shape *sh = it.shape();
     if (!sh)
         return inside;                   // text frames: anywhere in the block
+    const float half = sh->stroke.none() ? 0.f : sh->stroke.weight * 0.5f;
     switch (sh->kind) {
     case Shape::Kind::Line:
-        return dist_to_segment(l, {0, 0}, {it.w, it.h}) <= tol + sh->stroke_width * 0.5f;
-    case Shape::Kind::Rect: {
-        const bool near = l.x >= -tol && l.x <= it.w + tol && l.y >= -tol && l.y <= it.h + tol;
-        if (sh->filled)
+        return dist_to_segment(l, {0, 0}, {it.w, it.h}) <= tol + half;
+    case Shape::Kind::Rect:
+    case Shape::Kind::Polygon: {
+        const float t = tol + half;
+        const bool near = l.x >= -t && l.x <= it.w + t && l.y >= -t && l.y <= it.h + t;
+        if (!sh->fill.none())
             return near;
-        const bool deep = l.x > tol && l.x < it.w - tol && l.y > tol && l.y < it.h - tol;
-        return near && !deep;            // an unfilled box is picked by its outline
+        const bool deep = l.x > t && l.x < it.w - t && l.y > t && l.y < it.h - t;
+        return near && !deep;            // an unfilled shape is picked by its outline
     }
     case Shape::Kind::Ellipse: {
         const float rx = it.w * 0.5f, ry = it.h * 0.5f;
@@ -219,7 +322,8 @@ bool ComposerView::hits_item(const Item &it, const Point &pt) const {
         const float nx = (l.x - rx) / rx, ny = (l.y - ry) / ry;
         const float d = std::sqrt(nx * nx + ny * ny);
         const float r = std::min(rx, ry);
-        return sh->filled ? d <= 1.f + tol / r : std::fabs(d - 1.f) * r <= tol;
+        return !sh->fill.none() ? d <= 1.f + (tol + half) / r
+                                : std::fabs(d - 1.f) * r <= tol + half;
     }
     }
     return false;
@@ -228,14 +332,17 @@ bool ComposerView::hits_item(const Item &it, const Point &pt) const {
 ComposerView::Hit ComposerView::hit_test(const Point &pt) const {
     const float px = 1.f / zoom();
 
-    if (const Item *it = m_doc.find_item(m_sel)) {
+    for (auto id = m_sel.rbegin(); id != m_sel.rend(); ++id) {
+        const Item *it = m_doc.find_item(*id);
+        if (!it)
+            continue;
         const Point l = it->xf.inverse().apply(pt);
         const float s = item_scale(it->xf);
         const float hs = kHandlePx * px / s;
         auto near = [&](float x, float y) {
             return std::fabs(l.x - x) <= hs && std::fabs(l.y - y) <= hs;
         };
-        Hit hit{m_sel, Handle::None};
+        Hit hit{*id, Handle::None};
         if (is_line(*it)) {
             if (near(0, 0))            { hit.handle = Handle::TopLeft;     return hit; }
             if (near(it->w, it->h))    { hit.handle = Handle::BottomRight; return hit; }
@@ -282,49 +389,68 @@ bool ComposerView::mouse_button_event(const Vector2i &p, int button, bool down, 
     }
     if (button != GLFW_MOUSE_BUTTON_1)
         return Widget::mouse_button_event(p, button, down, modifiers);
+    const Point pt = page_point_from_screen(screen()->mouse_pos());
+
     if (!down) {
-        /* A click (no drag) on a windowshade tab is a threading gesture:
-         * the red overset arrow picks the story up, a child's top tab
-         * merges it back into the parent. */
-        if (m_tool == Tool::Pointer && m_sel &&
-            (m_drag == Handle::Windowshade || m_drag == Handle::TopTab)) {
-            Point pt = page_point_from_screen(screen()->mouse_pos());
+        if (m_creating) {
+            finish_creation();
+        } else if (m_marquee) {
+            /* Select what the marquee encloses, as PageMaker does. */
+            Bounds box;
+            box.add(m_drag_start);
+            box.add(m_marquee_end);
+            if (!m_marquee_add)
+                m_sel.clear();
+            for (const Item &it : items())
+                if (box.contains(item_bounds(it)) && !is_selected(it.id))
+                    m_sel.push_back(it.id);
+            m_marquee = false;
+            selection_changed();
+            if (screen())
+                screen()->redraw();
+        } else if (m_tool == Tool::Pointer && m_drag_target &&
+                   (m_drag == Handle::Windowshade || m_drag == Handle::TopTab)) {
+            /* A click (no drag) on a windowshade tab is a threading gesture:
+             * the red overset arrow picks the story up, a child's top tab
+             * merges it back into the parent. */
             float travel = std::fabs(pt.x - m_drag_start.x) + std::fabs(pt.y - m_drag_start.y);
             size_t ti = 0;
-            const StoryEntry *se = m_doc.story_of(m_sel, &ti);
+            const StoryEntry *se = m_doc.story_of(m_drag_target, &ti);
             if (travel <= 2.f && se) {
                 const size_t si = m_doc.story_index(se->id);
                 const bool last = ti + 1 == se->thread.size();
                 if (m_drag == Handle::Windowshade && last && si < m_comp.size() &&
                     m_comp[si].overset) {
+                    m_sel = {m_drag_target};
                     begin_placement(pt);
                 } else if (m_drag == Handle::TopTab && ti > 0) {
                     push_undo();             // merge into the parent block
                     ItemId parent = se->thread[ti - 1];
-                    m_doc.remove_item(m_sel);
-                    m_sel = parent;
+                    m_doc.remove_item(m_drag_target);
+                    m_sel = {parent};
                     recompose();
+                    selection_changed();
                     if (screen())
                         screen()->redraw();
                 }
             }
         }
         m_drag = Handle::None;
+        m_drag_target = 0;
         m_selecting = false;
         m_rotating = false;
         return true;
     }
     request_focus();
-    Point pt = page_point_from_screen(screen()->mouse_pos());
+    m_burst_open = false;                // any click ends a typing or nudging run
+    const bool shift = (modifiers & GLFW_MOD_SHIFT) != 0;
 
     if (m_tool == Tool::Text) {
-        bool shift = (modifiers & GLFW_MOD_SHIFT) != 0;
         double now = glfwGetTime();
         bool near = std::fabs(pt.x - m_down_pt.x) + std::fabs(pt.y - m_down_pt.y) <= 4.f;
         ItemId frame = text_frame_at(pt);
         const StoryEntry *se = frame ? m_doc.story_of(frame) : nullptr;
         const bool same_story = se && se->id == m_edit_story;
-        m_burst_open = false;            // a click ends any typing run
         if (!shift && m_last_click >= 0.0 && now - m_last_click < 0.4 && near && same_story)
             m_clicks = std::min(m_clicks + 1, 3);
         else
@@ -334,7 +460,7 @@ bool ComposerView::mouse_button_event(const Vector2i &p, int button, bool down, 
         m_goal_x = -1.f;
 
         if (!se) {
-            m_edit_story = 0;            // clicked outside any text block: stop editing
+            begin_creation(pt);          // drag out a new text block (a click stops editing)
         } else {
             const bool extend = shift && same_story;
             m_edit_story = se->id;
@@ -357,23 +483,64 @@ bool ComposerView::mouse_button_event(const Vector2i &p, int button, bool down, 
     }
 
     m_edit_story = 0;
-    Hit hit = hit_test(pt);
-    m_sel = hit.item;
-    m_drag = m_tool == Tool::Rotate ? Handle::None : hit.handle;
-    m_rotating = m_tool == Tool::Rotate && hit.item != 0;
     m_drag_start = pt;
     m_gesture_saved = false;             // a new drag, not yet snapshotted
-    if (const Item *it = m_doc.find_item(hit.item))
-        m_drag_item = *it;
+    m_drag = Handle::None;
+    m_drag_target = 0;
+
+    if (m_tool == Tool::Line || m_tool == Tool::Rect || m_tool == Tool::Ellipse ||
+        m_tool == Tool::Polygon) {
+        begin_creation(pt);
+        return true;
+    }
+
+    Hit hit = hit_test(pt);
+    if (m_tool == Tool::Rotate) {
+        if (hit.item && !is_selected(hit.item))
+            m_sel = {hit.item};
+        else if (!hit.item)
+            m_sel.clear();
+        m_rotating = hit.item != 0;
+        m_drag_target = hit.item;
+    } else if (!hit.item) {
+        if (!shift)
+            m_sel.clear();
+        m_marquee = true;
+        m_marquee_add = shift;
+        m_marquee_end = pt;
+    } else if (hit.handle != Handle::Move) {
+        m_drag = hit.handle;             // a handle of a selected item
+        m_drag_target = hit.item;
+    } else if (shift) {
+        if (is_selected(hit.item))
+            m_sel.erase(std::find(m_sel.begin(), m_sel.end(), hit.item));
+        else {
+            m_sel.push_back(hit.item);
+            m_drag = Handle::Move;
+        }
+    } else {
+        if (!is_selected(hit.item))
+            m_sel = {hit.item};
+        m_drag = Handle::Move;
+    }
+
+    m_drag_items.clear();
+    for (ItemId id : m_sel)
+        if (const Item *it = m_doc.find_item(id))
+            m_drag_items.push_back(*it);
+    m_drag_bounds = selection_bounds();
+    selection_changed();
     if (screen())
         screen()->redraw();
     return true;
 }
 
-bool ComposerView::mouse_drag_event(const Vector2i &, const Vector2i &, int, int modifiers) {
-    /* Screen hands drags to us in unzoomed coordinates; ask it where the
-     * mouse really is. */
-    const Point pt = page_point_from_screen(screen()->mouse_pos());
+bool ComposerView::mouse_drag_event(const Vector2i &p, const Vector2i &, int, int modifiers) {
+    /* Screen hands drags to us relative to our parent and without the
+     * panel's zoom. Its mouse_pos() still holds the previous event here, so
+     * rebuild this event's screen point instead. */
+    const Point pt = page_point_from_screen(p + parent()->absolute_position());
+    const bool shift = (modifiers & GLFW_MOD_SHIFT) != 0;
     if (m_selecting && editing()) {
         m_caret = text_pos_at(pt);
         m_goal_x = -1.f;
@@ -381,36 +548,61 @@ bool ComposerView::mouse_drag_event(const Vector2i &, const Vector2i &, int, int
             screen()->redraw();
         return true;
     }
-    Item *it = m_doc.find_item(m_sel);
-    if (!it || (!m_rotating && (m_drag == Handle::None || m_drag == Handle::TopTab)))
+    if (m_creating) {
+        update_creation(pt, shift);
+        return true;
+    }
+    if (m_marquee) {
+        m_marquee_end = pt;
+        return true;
+    }
+    if (!m_rotating && (m_drag == Handle::None || m_drag == Handle::TopTab))
         return true;
     if (!m_gesture_saved) {
         push_undo();                     // one undo step for the whole drag
         m_gesture_saved = true;
     }
-    const Item &o = m_drag_item;
+    const Point d{pt.x - m_drag_start.x, pt.y - m_drag_start.y};
 
     if (m_rotating) {
-        const Point c = o.xf.apply({o.w * 0.5f, o.h * 0.5f});
+        /* Turn the whole selection about the center of its bounds. */
+        const Point c{(m_drag_bounds.x0 + m_drag_bounds.x1) * 0.5f,
+                      (m_drag_bounds.y0 + m_drag_bounds.y1) * 0.5f};
         float delta = std::atan2(pt.y - c.y, pt.x - c.x) -
                       std::atan2(m_drag_start.y - c.y, m_drag_start.x - c.x);
-        if (modifiers & GLFW_MOD_SHIFT) {
-            const float step = kPi / 12.f, r0 = o.xf.rotation();
+        if (shift && !m_drag_items.empty()) {
+            const float step = kPi / 12.f, r0 = m_drag_items.front().xf.rotation();
             delta = std::round((r0 + delta) / step) * step - r0;
         }
-        it->xf = Transform::rotate_about(o.xf, c, delta);
+        for (const Item &o : m_drag_items)
+            if (Item *it = m_doc.find_item(o.id))
+                it->xf = Transform::rotate_about(o.xf, c, delta);
+        selection_changed();
         return true;                     // turning doesn't change the composition
     }
 
-    const Point d{pt.x - m_drag_start.x, pt.y - m_drag_start.y};
     if (m_drag == Handle::Move) {
-        it->xf = Transform::translate(d.x, d.y) * o.xf;
+        const Point sd = snap_move(m_drag_bounds, d);
+        for (const Item &o : m_drag_items)
+            if (Item *it = m_doc.find_item(o.id))
+                it->xf = Transform::translate(sd.x, sd.y) * o.xf;
+        selection_changed();
         return true;                     // nor does moving
     }
 
-    /* Resize in the item's own space: move edges of (0, 0)-(w, h), then
-     * fold the new origin into the transform. */
-    const Point dl = o.xf.inverse().apply_vector(d);
+    /* Resize one item in its own space: snap the dragged handle, move edges
+     * of (0, 0)-(w, h), then fold the new origin into the transform. */
+    auto orig = std::find_if(m_drag_items.begin(), m_drag_items.end(),
+                             [&](const Item &i) { return i.id == m_drag_target; });
+    Item *it = m_doc.find_item(m_drag_target);
+    if (orig == m_drag_items.end() || !it)
+        return true;
+    const Item &o = *orig;
+    const int hidx = m_drag == Handle::TopLeft ? 1 : m_drag == Handle::TopRight ? 2 :
+                     m_drag == Handle::BottomLeft ? 3 : m_drag == Handle::BottomRight ? 4 : 5;
+    const Point h0 = o.xf.apply(handle_point(o, hidx));
+    const Point h1 = snap_point({h0.x + d.x, h0.y + d.y});
+    const Point dl = o.xf.inverse().apply_vector({h1.x - h0.x, h1.y - h0.y});
     float x0 = 0, y0 = 0, x1 = o.w, y1 = o.h;
     if (is_line(o)) {
         if (m_drag == Handle::TopLeft)          { x0 += dl.x; y0 += dl.y; }
@@ -430,6 +622,7 @@ bool ComposerView::mouse_drag_event(const Vector2i &, const Vector2i &, int, int
     it->xf = o.xf * Transform::translate(x0, y0);
     if (it->is_text())
         recompose();
+    selection_changed();
     return true;
 }
 
@@ -440,27 +633,32 @@ bool ComposerView::mouse_motion_event(const Vector2i &p, const Vector2i &rel, in
          * Use the event point (the panel already applied the zoom); the
          * screen's mouse_pos still holds the previous event's point. */
         Vector2f v = Vector2f((float) p.x(), (float) p.y()) - Vector2f(m_pos) - page_origin();
-        if (Item *it = m_doc.find_item(m_sel))
-            it->xf = Transform::translate(v.x() - it->w * 0.5f, v.y() + 8.f);
+        if (!m_sel.empty())
+            if (Item *it = m_doc.find_item(m_sel.front()))
+                it->xf = Transform::translate(v.x() - it->w * 0.5f, v.y() + 8.f);
         set_cursor(Cursor::Crosshair);
         return true;
     }
-    const Point pt = page_point_from_screen(screen()->mouse_pos());
-    if (m_tool == Tool::Text) {
-        set_cursor(text_frame_at(pt) ? Cursor::IBeam : Cursor::Arrow);
-        return Widget::mouse_motion_event(p, rel, button, modifiers);
-    }
-    if (m_tool == Tool::Rotate) {
-        set_cursor(Cursor::Crosshair);
-        return Widget::mouse_motion_event(p, rel, button, modifiers);
-    }
-    switch (hit_test(pt).handle) {
-    case Handle::TopLeft: case Handle::TopRight:
-    case Handle::BottomLeft: case Handle::BottomRight:
-        set_cursor(Cursor::HVResize); break;
-    case Handle::Windowshade: set_cursor(Cursor::VResize); break;
-    case Handle::TopTab: set_cursor(Cursor::Hand); break;
-    default: set_cursor(Cursor::Arrow); break;
+    /* The panel already applied the zoom to the event point. */
+    const Vector2f ev = Vector2f((float) p.x(), (float) p.y()) - Vector2f(m_pos) - page_origin();
+    const Point pt{ev.x(), ev.y()};
+    switch (m_tool) {
+    case Tool::Text:
+        set_cursor(text_frame_at(pt) ? Cursor::IBeam : Cursor::Crosshair);
+        break;
+    case Tool::Pointer:
+        switch (hit_test(pt).handle) {
+        case Handle::TopLeft: case Handle::TopRight:
+        case Handle::BottomLeft: case Handle::BottomRight:
+            set_cursor(Cursor::HVResize); break;
+        case Handle::Windowshade: set_cursor(Cursor::VResize); break;
+        case Handle::TopTab: set_cursor(Cursor::Hand); break;
+        default: set_cursor(Cursor::Arrow); break;
+        }
+        break;
+    default:
+        set_cursor(Cursor::Crosshair);   // rotate and the drawing tools
+        break;
     }
     return Widget::mouse_motion_event(p, rel, button, modifiers);
 }
@@ -470,6 +668,183 @@ bool ComposerView::focus_event(bool focused) {
     if (screen())
         screen()->redraw();              // the caret comes and goes with focus
     return true;
+}
+
+/* ---- Drawing tools ------------------------------------------------------- */
+
+void ComposerView::begin_creation(const Point &pt) {
+    m_creation_saved = m_doc;            // the undo step, once something is drawn
+    const Point p = snap_point(pt);
+    m_drag_start = p;
+    if (m_tool == Tool::Text) {
+        /* A new story: one empty "Body text" paragraph in the default type. */
+        Paragraph para;
+        para.style.name = "Body text";
+        para.runs.push_back(Run{CharStyle(), ""});
+        Story s;
+        s.paragraphs.push_back(para);
+        StoryId sid = m_doc.add_story(std::move(s));
+        m_created = m_doc.add_text_frame(m_page, sid, 0, 0, Transform::translate(p.x, p.y));
+    } else {
+        Item it;
+        it.xf = Transform::translate(p.x, p.y);
+        Shape sh = m_default_shape;
+        sh.kind = m_tool == Tool::Line ? Shape::Kind::Line :
+                  m_tool == Tool::Ellipse ? Shape::Kind::Ellipse :
+                  m_tool == Tool::Polygon ? Shape::Kind::Polygon : Shape::Kind::Rect;
+        it.content = sh;
+        m_created = m_doc.add_item(m_page, it);
+        m_sel = {m_created};
+    }
+    m_creating = true;
+}
+
+void ComposerView::update_creation(Point pt, bool constrain) {
+    Item *it = m_doc.find_item(m_created);
+    if (!it)
+        return;
+    const Point a = m_drag_start;
+    Point b = snap_point(pt);
+    float dx = b.x - a.x, dy = b.y - a.y;
+    if (is_line(*it)) {
+        if (constrain) {                 // 45 degree steps
+            const float ang = std::round(std::atan2(dy, dx) / (kPi / 4)) * (kPi / 4);
+            const float len = std::hypot(dx, dy);
+            dx = len * std::cos(ang);
+            dy = len * std::sin(ang);
+        }
+        it->xf = Transform::translate(a.x, a.y);
+        it->w = dx;
+        it->h = dy;
+    } else {
+        if (constrain) {                 // square, circle, regular polygon
+            const float s = std::max(std::fabs(dx), std::fabs(dy));
+            dx = std::copysign(s, dx);
+            dy = std::copysign(s, dy);
+        }
+        it->xf = Transform::translate(std::min(a.x, a.x + dx), std::min(a.y, a.y + dy));
+        it->w = std::fabs(dx);
+        it->h = std::fabs(dy);
+    }
+    if (it->is_text())
+        recompose();
+    selection_changed();
+}
+
+void ComposerView::finish_creation() {
+    m_creating = false;
+    Item *it = m_doc.find_item(m_created);
+    const float extent = it ? std::hypot(it->w, it->h) : 0.f;
+    if (!it || extent < kMinDraw) {
+        /* A click, not a drag: nothing was drawn, nothing to undo. */
+        m_doc = m_creation_saved;
+        m_created = 0;
+        if (m_tool == Tool::Text)
+            m_edit_story = 0;            // a click outside the text stops editing
+        else
+            m_sel.clear();
+        recompose();
+        selection_changed();
+        if (screen())
+            screen()->redraw();
+        return;
+    }
+    m_undo.push_back(m_creation_saved);
+    if (m_undo.size() > 100)
+        m_undo.pop_front();
+    m_redo.clear();
+    if (it->is_text()) {
+        it->w = std::max(it->w, kMinBlock);
+        it->h = std::max(it->h, kMinBlock);
+        if (const StoryEntry *se = m_doc.story_of(it->id)) {
+            m_edit_story = se->id;       // ready to type into the new block
+            m_caret = m_anchor = {};
+        }
+        m_sel.clear();
+    }
+    m_created = 0;
+    recompose();
+    selection_changed();
+    if (screen())
+        screen()->redraw();
+}
+
+/* ---- Control palette ----------------------------------------------------- */
+
+bool ComposerView::geometry(Geometry &g) const {
+    if (m_sel.size() != 1)
+        return false;
+    const Item *it = m_doc.find_item(m_sel.front());
+    if (!it)
+        return false;
+    const Point o = it->xf.apply({0, 0});
+    g.x = o.x;
+    g.y = o.y;
+    g.w = it->w;
+    g.h = it->h;
+    float a = -it->xf.rotation() * 180.f / kPi;
+    if (std::fabs(a) < 1e-4f)
+        a = 0.f;                         // no "-0"
+    g.angle = a;
+    return true;
+}
+
+void ComposerView::set_geometry(const Geometry &g) {
+    if (m_sel.size() != 1)
+        return;
+    Item *it = m_doc.find_item(m_sel.front());
+    if (!it)
+        return;
+    push_undo();
+    const float target = -g.angle * kPi / 180.f;
+    const float delta = target - it->xf.rotation();
+    if (std::fabs(delta) > 1e-6f)
+        it->xf = Transform::rotate_about(it->xf, it->xf.apply({it->w * 0.5f, it->h * 0.5f}), delta);
+    if (is_line(*it)) {
+        it->w = g.w;
+        it->h = g.h;
+    } else {
+        it->w = std::max(g.w, 1.f);
+        it->h = std::max(g.h, 1.f);
+    }
+    const Point o = it->xf.apply({0, 0});
+    it->xf = Transform::translate(g.x - o.x, g.y - o.y) * it->xf;
+    if (it->is_text())
+        recompose();
+    selection_changed();
+    if (screen())
+        screen()->redraw();
+}
+
+Shape ComposerView::shape_style() const {
+    for (ItemId id : m_sel)
+        if (const Item *it = m_doc.find_item(id))
+            if (const Shape *sh = it->shape())
+                return *sh;
+    return m_default_shape;
+}
+
+bool ComposerView::shapes_selected() const {
+    for (ItemId id : m_sel)
+        if (const Item *it = m_doc.find_item(id))
+            if (it->shape())
+                return true;
+    return false;
+}
+
+void ComposerView::apply_shape_style(const std::function<void(Shape &)> &fn) {
+    if (shapes_selected()) {
+        push_undo();
+        for (ItemId id : m_sel)
+            if (Item *it = m_doc.find_item(id))
+                if (Shape *sh = it->shape())
+                    fn(*sh);
+    } else {
+        fn(m_default_shape);             // nothing selected: set the defaults
+    }
+    selection_changed();
+    if (screen())
+        screen()->redraw();
 }
 
 /* ---- Threading --------------------------------------------------------- */
@@ -492,19 +867,22 @@ Frame ComposerView::measure_child_frame(const StoryEntry &s, size_t after, const
 }
 
 void ComposerView::begin_placement(const Point &pt) {
+    if (m_sel.size() != 1)
+        return;
     size_t ti = 0;
-    const StoryEntry *se = m_doc.story_of(m_sel, &ti);
+    const StoryEntry *se = m_doc.story_of(m_sel.front(), &ti);
     if (!se)
         return;
     m_placement_saved = m_doc;           // becomes the undo step on commit
-    m_placement_parent = m_sel;
+    m_placement_parent = m_sel.front();
     const StoryId story = se->id;
     const Frame f = measure_child_frame(*se, ti, pt);
     size_t page = m_page;
-    m_doc.find_item(m_sel, &page);
-    m_sel = m_doc.add_text_frame(page, story, f.w, f.h, Transform::translate(f.x, f.y), ti + 1);
+    m_doc.find_item(m_placement_parent, &page);
+    m_sel = {m_doc.add_text_frame(page, story, f.w, f.h, Transform::translate(f.x, f.y), ti + 1)};
     m_placing = true;
     recompose();
+    selection_changed();
     if (screen())
         screen()->redraw();
 }
@@ -520,36 +898,47 @@ void ComposerView::end_placement(bool commit) {
         m_redo.clear();
     } else {
         m_doc = m_placement_saved;       // the text goes back where it was
-        m_sel = m_placement_parent;
+        m_sel = {m_placement_parent};
     }
     recompose();
+    selection_changed();
     if (screen())
         screen()->redraw();
 }
 
 /* ---- Pointer tool -------------------------------------------------------- */
 
-void ComposerView::delete_selected_item() {
-    if (!m_doc.find_item(m_sel))
+void ComposerView::delete_selection_items() {
+    if (m_sel.empty())
         return;
     /* A threaded block's text flows on into the rest of its thread; the
      * story goes only with its last block. */
     push_undo();
-    m_doc.remove_item(m_sel);
-    m_sel = 0;
+    for (ItemId id : m_sel)
+        m_doc.remove_item(id);
+    m_sel.clear();
     recompose();
+    selection_changed();
     if (screen())
         screen()->redraw();
 }
 
 void ComposerView::arrange(bool to_front) {
-    if (!m_doc.find_item(m_sel))
+    if (m_sel.empty())
         return;
     push_undo();
-    if (to_front)
-        m_doc.bring_to_front(m_sel);
-    else
-        m_doc.send_to_back(m_sel);
+    /* Keep the selected items' order among themselves. */
+    std::vector<ItemId> order;
+    for (const Item &it : items())
+        if (is_selected(it.id))
+            order.push_back(it.id);
+    if (to_front) {
+        for (ItemId id : order)
+            m_doc.bring_to_front(id);
+    } else {
+        for (auto id = order.rbegin(); id != order.rend(); ++id)
+            m_doc.send_to_back(*id);
+    }
     if (screen())
         screen()->redraw();
 }
@@ -722,15 +1111,32 @@ bool ComposerView::keyboard_event(int key, int, int action, int modifiers) {
     }
     bool cmd = (modifiers & SYSTEM_COMMAND_MOD) != 0;
     if (!editing()) {
-        /* Pointer and rotate tools: Delete, and PageMaker's Arrange keys. */
-        if (m_tool == Tool::Text || !m_sel || action != GLFW_PRESS)
+        /* Item tools: Delete, arrow-key nudges, PageMaker's Arrange keys. */
+        if (m_tool == Tool::Text || m_sel.empty())
+            return false;
+        if (action != GLFW_PRESS && action != GLFW_REPEAT)
             return false;
         if (!cmd && (key == GLFW_KEY_DELETE || key == GLFW_KEY_BACKSPACE)) {
-            delete_selected_item();
+            delete_selection_items();
             return true;
         }
         if (cmd && (key == GLFW_KEY_F || key == GLFW_KEY_B)) {
             arrange(key == GLFW_KEY_F);
+            return true;
+        }
+        if (!cmd && (key == GLFW_KEY_LEFT || key == GLFW_KEY_RIGHT ||
+                     key == GLFW_KEY_UP || key == GLFW_KEY_DOWN)) {
+            /* A run of nudges is one undo step, like a run of typing. */
+            const float step = (modifiers & GLFW_MOD_SHIFT) ? 10.f : 1.f;
+            const float dx = key == GLFW_KEY_LEFT ? -step : key == GLFW_KEY_RIGHT ? step : 0.f;
+            const float dy = key == GLFW_KEY_UP ? -step : key == GLFW_KEY_DOWN ? step : 0.f;
+            will_edit(true);
+            for (ItemId id : m_sel)
+                if (Item *it = m_doc.find_item(id))
+                    it->xf = Transform::translate(dx, dy) * it->xf;
+            selection_changed();
+            if (screen())
+                screen()->redraw();
             return true;
         }
         return false;
@@ -908,11 +1314,14 @@ void ComposerView::draw_page(NVGcontext *ctx, float px) {
     }
 }
 
-void ComposerView::draw_text_frame(NVGcontext *ctx, const Item &it, float px) {
+void ComposerView::draw_text_overlays(NVGcontext *ctx, const Item &it, float px) {
     size_t ti = 0;
     const Composition *c = comp_of_frame(it.id, &ti);
     const StoryEntry *se = m_doc.story_of(it.id);
     if (!c || !se)
+        return;
+    const bool edited = se->id == m_edit_story;
+    if (!m_show_loose_tight && !m_show_baselines && !edited)
         return;
     nvgSave(ctx);
     apply_transform(ctx, it.xf);
@@ -923,7 +1332,7 @@ void ComposerView::draw_text_frame(NVGcontext *ctx, const Item &it, float px) {
             continue;
         nvgBeginPath(ctx);
         nvgRect(ctx, l.left, l.top, l.width, l.leading);
-        nvgFillColor(ctx, l.tight ? nvgRGBA(255, 90, 90, 90) : nvgRGBA(255, 200, 0, 90));
+        nvgFillColor(ctx, l.tight ? nvgRGBA(255, 90, 90, 80) : nvgRGBA(255, 200, 0, 80));
         nvgFill(ctx);
     }
     if (m_show_baselines) {
@@ -938,7 +1347,8 @@ void ComposerView::draw_text_frame(NVGcontext *ctx, const Item &it, float px) {
         nvgStroke(ctx);
     }
 
-    const bool edited = se->id == m_edit_story;
+    /* The text selection is a translucent band over the type, so it shows
+     * through shapes stacked above the block too. */
     if (edited && has_selection()) {
         TextPos lo = m_anchor, hi = m_caret;
         if (hi < lo)
@@ -966,14 +1376,10 @@ void ComposerView::draw_text_frame(NVGcontext *ctx, const Item &it, float px) {
             }
             nvgBeginPath(ctx);
             nvgRect(ctx, x0, l.top, std::max(1.f, x1 - x0), l.leading);
-            nvgFillColor(ctx, nvgRGBA(70, 110, 180, 130));
+            nvgFillColor(ctx, nvgRGBA(60, 120, 255, 90));
             nvgFill(ctx);
         }
-    }
-
-    draw_frame_lines(ctx, *c, ti);
-
-    if (edited && !has_selection() && focused()) {
+    } else if (edited && focused()) {
         Caret at = caret_at(*c, se->story, m_caret);   // invalid in overset text
         if (at.valid() && c->lines[at.line].frame == ti) {
             nvgBeginPath(ctx);
@@ -1014,7 +1420,7 @@ void ComposerView::draw_chrome(NVGcontext *ctx, float px) {
     };
 
     for (const Item &it : items()) {
-        const bool selected = it.id == m_sel;
+        const bool selected = is_selected(it.id);
         nvgSave(ctx);
         apply_transform(ctx, it.xf);
         lpx = px / item_scale(it.xf);
@@ -1061,6 +1467,19 @@ void ComposerView::draw_chrome(NVGcontext *ctx, float px) {
         }
         nvgRestore(ctx);
     }
+
+    if (m_marquee) {
+        Bounds b;
+        b.add(m_drag_start);
+        b.add(m_marquee_end);
+        nvgBeginPath(ctx);
+        nvgRect(ctx, b.x0, b.y0, b.x1 - b.x0, b.y1 - b.y0);
+        nvgFillColor(ctx, nvgRGBA(60, 120, 255, 30));
+        nvgFill(ctx);
+        nvgStrokeWidth(ctx, px);
+        nvgStrokeColor(ctx, nvgRGBA(60, 120, 255, 200));
+        nvgStroke(ctx);
+    }
 }
 
 void ComposerView::draw(NVGcontext *ctx) {
@@ -1081,12 +1500,10 @@ void ComposerView::draw(NVGcontext *ctx) {
     Vector2f o = page_origin();
     nvgTranslate(ctx, o.x(), o.y());
     draw_page(ctx, px);
-    for (const Item &it : items()) {
+    draw_list(ctx, build_page(m_doc, m_page, m_comp), px);
+    for (const Item &it : items())
         if (it.is_text())
-            draw_text_frame(ctx, it, px);
-        else
-            draw_shape(ctx, it);
-    }
+            draw_text_overlays(ctx, it, px);
     draw_chrome(ctx, px);
 
     nvgRestore(ctx);

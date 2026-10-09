@@ -92,7 +92,13 @@ Widget::~Widget() {
            exceptions. */
         return;
     }
-    for (auto child : m_children) {
+    /* Release the children from a private copy. A child's destructor may
+       remove a sibling from this list (a Dropdown disposes its Screen-level
+       popup through Screen::remove_child while the Screen is tearing down),
+       which would invalidate the loop and release later children twice. */
+    std::vector<Widget *> children;
+    children.swap(m_children);
+    for (auto child : children) {
         if (child) {
             child->m_parent = nullptr; // avoid dangling parent in pending cleanup
             child->dec_ref();
