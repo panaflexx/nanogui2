@@ -78,10 +78,14 @@ float   x_at(const ComposedLine &l, const std::string &text, uint32_t byte);
 /* The position on `line` nearest x. Never returns the end of a line that
  * continues on the next one (that position is drawn on the next line). */
 TextPos pos_at_x(const Composition &c, const Story &s, size_t line, float x);
-/* The position nearest a page point, looking in the frame under it (or
- * the nearest frame). */
+/* The position nearest a point, looking in the frame under it (or the
+ * nearest frame). Only for frames that share one coordinate space. */
 TextPos hit_test(const Composition &c, const Story &s, const std::vector<Frame> &frames,
                  float x, float y);
+/* The position nearest (x, y) among the lines of frame `frame`, in that
+ * frame's own coordinates. An empty frame gives the text position where
+ * it would start (the end of the text before it, or the story start). */
+TextPos hit_test_frame(const Composition &c, const Story &s, size_t frame, float x, float y);
 TextPos line_start(const Composition &c, size_t line);
 /* End of the line's visible text: before hanging spaces and a break. */
 TextPos line_end(const Composition &c, const Story &s, size_t line);

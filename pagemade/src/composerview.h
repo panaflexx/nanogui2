@@ -1,15 +1,23 @@
 /*
- * pagemade/composerview.h — ComposerView: one page on a pasteboard, with
- * each text flow composed into its text blocks.
+ * pagemade/composerview.h — ComposerView: one page on a pasteboard, its
+ * items drawn in stacking order, each story composed into its text blocks.
  *
  * The view's logical units are points. Host it in a ZoomScrollPanel: the
  * panel's scale is the zoom, and the composer never sees it. Text is
  * composed once per change, not per zoom, and drawn as glyph outlines.
+ * Every item is drawn, hit-tested and resized in its own space under its
+ * transform, so rotated items behave like upright ones.
  *
- * Pointer tool basics: click a text block to select it, drag inside it to
- * move it, drag a corner handle to resize it, or drag the bottom
- * windowshade handle to change its depth. Every change recomposes.
- * A red arrow in the bottom windowshade means the story is overset.
+ * Pointer tool basics: click an item to select it, drag inside it to move
+ * it, drag a corner handle to resize it (a line's handles are its ends),
+ * or drag a text block's bottom windowshade handle to change its depth.
+ * Delete removes the selection; Cmd/Ctrl+F brings it to the front and
+ * Cmd/Ctrl+B sends it to the back (PageMaker's Arrange shortcuts). Every
+ * change recomposes. A red arrow in the bottom windowshade means the
+ * story is overset.
+ *
+ * Rotate tool: drag on an item to turn it about its center; Shift snaps
+ * the angle to 15 degree steps.
  *
  * Threading (PageMaker's manual text flow): click the red overset arrow
  * and the story is picked up — a new text block, sized to hold what
@@ -39,28 +47,32 @@
 
 class ComposerView : public nanogui::Widget {
 public:
-    ComposerView(nanogui::Widget *parent, const pagemade::FontLibrary *fonts);
+    ComposerView(nanogui::Widget *parent, const pagemade::FontLibrary *fonts,
+                 const pagemade::Hyphenator *hyphenator = nullptr);
 
     void set_document(pagemade::PageDoc doc);
     /* Edit freely, then call recompose(). */
     pagemade::PageDoc &document() { return m_doc; }
     void recompose();
+    /* One per story, in PageDoc::stories order. */
     const std::vector<pagemade::Composition> &compositions() const { return m_comp; }
 
     void set_show_baselines(bool on)   { m_show_baselines = on; }
     void set_show_loose_tight(bool on) { m_show_loose_tight = on; }
     void set_show_guides(bool on)      { m_show_guides = on; }
 
-    /* The toolbox: the pointer tool manipulates text blocks, the text
-     * tool edits the story inside them. */
-    enum class Tool { Pointer, Text };
+    /* The toolbox: the pointer tool manipulates items, the rotate tool
+     * turns them, the text tool edits the story inside text blocks. */
+    enum class Tool { Pointer, Rotate, Text };
     void set_tool(Tool t);
     Tool tool() const { return m_tool; }
-    bool editing() const { return m_edit_flow >= 0; }
-    int edit_flow() const { return m_edit_flow; }
+    bool editing() const { return edit_story() != nullptr; }
 
-    /* Select a text block (flow -1 clears the selection). */
-    void select(int flow, int frame) { m_sel_flow = flow; m_sel_frame = frame; }
+    /* The selected item (0 = none). */
+    pagemade::ItemId selection() const { return m_sel; }
+    void select(pagemade::ItemId id) { m_sel = id; }
+    /* Select a story's text block by position: story index, thread index. */
+    void select_frame(size_t story, size_t frame);
 
     /* Undo/redo: whole-document snapshots (the model is small), one per
      * action. A run of typing or deleting coalesces into a single step;
@@ -96,38 +108,56 @@ public:
 private:
     enum class Handle { None, Move, TopLeft, TopRight, BottomLeft, BottomRight, Windowshade, TopTab };
     struct Hit {
-        int flow = -1, frame = -1;
+        pagemade::ItemId item = 0;
         Handle handle = Handle::None;
     };
 
     /* Event points arrive rounded to whole points and, during drags, without
      * the panel's zoom applied. Both go through this instead, from the
      * screen's mouse position, at full precision. */
-    nanogui::Vector2f page_point_from_screen(const nanogui::Vector2i &screen_p) const;
+    pagemade::Point page_point_from_screen(const nanogui::Vector2i &screen_p) const;
     float zoom() const;
-    Hit hit_test(const nanogui::Vector2f &pt) const;
+    Hit hit_test(const pagemade::Point &pt) const;
+    /* Topmost text block under pt (0 = none). */
+    pagemade::ItemId text_frame_at(const pagemade::Point &pt) const;
+    /* Does pt (page) touch the item? Unfilled shapes only by their outline. */
+    bool hits_item(const pagemade::Item &it, const pagemade::Point &pt) const;
+
+    const std::vector<pagemade::Item> &items() const { return m_doc.pages[m_page].items; }
+    /* The composition of the story threading text frame `id`, and the
+     * frame's place in the thread. */
+    const pagemade::Composition *comp_of_frame(pagemade::ItemId id, size_t *thread_index) const;
 
     void draw_page(NVGcontext *ctx, float px);
-    void draw_overlays(NVGcontext *ctx, float px);
-    void draw_frames(NVGcontext *ctx, float px);
-    void draw_text_overlays(NVGcontext *ctx, float px);   // selection + caret
+    /* A text block's content in its own space: overlays, selection, glyphs, caret. */
+    void draw_text_frame(NVGcontext *ctx, const pagemade::Item &it, float px);
+    void draw_chrome(NVGcontext *ctx, float px);   // outlines, handles, windowshades
 
     /* ---- Threading ------------------------------------------------- */
-    /* The red arrow was clicked: insert a new block after the selected
+    /* The red arrow was clicked: thread a new block after the selected
      * one and let it follow the pointer until end_placement(). */
-    void begin_placement(const nanogui::Vector2f &pt);
+    void begin_placement(const pagemade::Point &pt);
     void end_placement(bool commit);      // false: the text goes back
-    /* A block sized to hold the text that doesn't fit after `after`, its
-     * top centered under pt (height capped at the page's column height). */
-    pagemade::Frame measure_child_frame(int flow, int after,
-                                        const nanogui::Vector2f &pt) const;
+    /* The page rectangle of a block that holds the text which doesn't fit
+     * after thread frame `after`, its top centered under pt (height capped
+     * at the page's column height). */
+    pagemade::Frame measure_child_frame(const pagemade::StoryEntry &s, size_t after,
+                                        const pagemade::Point &pt) const;
 
     /* ---- Undo -------------------------------------------------------*/
     void restore_snapshot();           // common tail of undo()/redo()
 
+    /* ---- Pointer tool ---------------------------------------------- */
+    void delete_selected_item();
+    void arrange(bool to_front);
+
     /* ---- Text tool ------------------------------------------------- */
     pagemade::Story *edit_story();
+    const pagemade::Story *edit_story() const;
     const pagemade::Composition *edit_comp() const;
+    /* The caret position nearest a page point, in the edit story: the
+     * frame under the point, else the story's nearest frame. */
+    pagemade::TextPos text_pos_at(const pagemade::Point &pt) const;
     bool has_selection() const { return editing() && m_caret != m_anchor; }
     /* extend: keep the anchor where it is (grow/shrink the selection). */
     void place_caret(pagemade::TextPos p, bool extend);
@@ -138,28 +168,32 @@ private:
     void toggle_style(int key);           // B -> bold, I -> italic
 
     const pagemade::FontLibrary *m_fonts;
+    const pagemade::Hyphenator *m_hyphenator;
     pagemade::PageDoc m_doc;
+    size_t m_page = 0;                    // the page on screen
     std::vector<pagemade::Composition> m_comp;
 
     Tool m_tool = Tool::Pointer;
-    int m_edit_flow = -1;                 // story with the text caret
+    pagemade::StoryId m_edit_story = 0;   // story with the text caret
     pagemade::TextPos m_caret, m_anchor;  // selection is [anchor, caret)
     float m_goal_x = -1.f;                // remembered x for up/down
     bool m_selecting = false;             // drag-selecting with the text tool
     double m_last_click = -1.0;
     int m_clicks = 0;
-    nanogui::Vector2f m_down_pt;          // page point of the last press
+    pagemade::Point m_down_pt;            // page point of the last press
 
-    int m_sel_flow = -1, m_sel_frame = -1;
+    pagemade::ItemId m_sel = 0;
     Handle m_drag = Handle::None;
-    bool m_placing = false;              // a picked-up story follows the pointer
-    pagemade::PageDoc m_placement_saved; // pre-placement state, pushed on commit
+    bool m_rotating = false;              // rotate-tool drag in progress
+    bool m_placing = false;               // a picked-up story follows the pointer
+    pagemade::ItemId m_placement_parent = 0;
+    pagemade::PageDoc m_placement_saved;  // pre-placement state, pushed on commit
 
     std::deque<pagemade::PageDoc> m_undo, m_redo;
-    bool m_burst_open = false;           // typing/deleting run in progress
-    bool m_gesture_saved = false;        // block drag pushed its snapshot
-    nanogui::Vector2f m_drag_start;    // page point at press
-    pagemade::Frame m_drag_frame;      // block at press
+    bool m_burst_open = false;            // typing/deleting run in progress
+    bool m_gesture_saved = false;         // drag pushed its snapshot
+    pagemade::Point m_drag_start;         // page point at press
+    pagemade::Item m_drag_item;           // the item at press
 
     bool m_show_baselines = false;
     bool m_show_loose_tight = false;

@@ -5,14 +5,20 @@
  *   pagemade_compose_test -v     also dump the sample document's lines
  */
 #include "composer/composer.h"
+#include "composer/hyphenator.h"
 #include "composer/edit.h"
 #include "default_fonts.h"
 #include "page.h"
 
+#include <algorithm>
 #include <cmath>
 #include <cstdio>
 #include <cstring>
 #include <string>
+
+#ifndef PAGEMADE_DATA_DIR
+#define PAGEMADE_DATA_DIR "pagemade/resources"
+#endif
 
 using namespace pagemade;
 
@@ -312,9 +318,9 @@ static void test_edit(const FontLibrary &fonts) {
 
 static void test_deterministic(const FontLibrary &fonts) {
     PageDoc doc = sample_document();
-    for (const TextFlow &f : doc.flows) {
-        Composition a = compose(f.story, f.frames, fonts);
-        Composition b = compose(f.story, f.frames, fonts);
+    for (const StoryEntry &se : doc.stories) {
+        Composition a = compose(se.story, doc.thread_frames(se), fonts);
+        Composition b = compose(se.story, doc.thread_frames(se), fonts);
         bool same = a.lines.size() == b.lines.size();
         for (size_t i = 0; same && i < a.lines.size(); ++i)
             for (size_t r = 0; same && r < a.lines[i].runs.size(); ++r)
@@ -327,19 +333,200 @@ static void test_deterministic(const FontLibrary &fonts) {
     }
 }
 
+static bool near_pt(Point a, Point b) { return std::fabs(a.x - b.x) < 1e-3f && std::fabs(a.y - b.y) < 1e-3f; }
+
+static void test_model(const FontLibrary &fonts) {
+    /* Transforms: B applies first in A * B; inverse and rotate_about. */
+    const float q = 3.14159265f / 2;
+    Transform t = Transform::translate(10, 0) * Transform::rotate(q);
+    CHECK(near_pt(t.apply({1, 0}), {10, 1}), "translate * rotate turns, then moves");
+    CHECK(near_pt(t.inverse().apply(t.apply({3, -7})), {3, -7}), "inverse undoes the transform");
+    Transform r = Transform::rotate_about(Transform::translate(5, 5), {20, 20}, 0.3f);
+    CHECK(near_pt(r.apply(Transform::translate(5, 5).inverse().apply({20, 20})), {20, 20}),
+          "rotate_about keeps the center fixed");
+    CHECK(std::fabs(r.rotation() - 0.3f) < 1e-5f, "rotation() reads the angle back");
+
+    /* The sample: ids, threads, item spaces. */
+    PageDoc doc = sample_document();
+    CHECK(doc.stories.size() == 3 && doc.pages.size() == 1 && doc.pages[0].items.size() == 6,
+          "sample has 3 stories and 6 items (%zu, %zu)", doc.stories.size(),
+          doc.pages[0].items.size());
+    std::vector<uint32_t> ids;
+    for (const Item &it : doc.pages[0].items) ids.push_back(it.id);
+    for (const StoryEntry &se : doc.stories) ids.push_back(se.id);
+    std::sort(ids.begin(), ids.end());
+    CHECK(ids.front() > 0 && std::adjacent_find(ids.begin(), ids.end()) == ids.end() &&
+          ids.back() < doc.next_id, "ids are unique, nonzero and below next_id");
+
+    StoryEntry &body = doc.stories[1];
+    CHECK(body.thread.size() == 2, "body threads two blocks");
+    size_t ti = 99;
+    CHECK(doc.story_of(body.thread[1], &ti) == &body && ti == 1, "story_of finds the thread slot");
+    std::vector<Frame> fr = doc.thread_frames(body);
+    const Item *col2 = doc.find_item(body.thread[1]);
+    CHECK(fr.size() == 2 && fr[1].x == 0 && fr[1].y == 0 && fr[1].w == col2->w && fr[1].h == col2->h,
+          "thread frames are in each block's own space");
+
+    /* Stacking order is independent of reading order. */
+    const Composition before = compose(body.story, doc.thread_frames(body), fonts);
+    const ItemId col1 = body.thread[0];
+    doc.bring_to_front(col1);
+    CHECK(doc.pages[0].items.back().id == col1, "bring_to_front puts the block on top");
+    doc.send_to_back(col1);
+    CHECK(doc.pages[0].items.front().id == col1, "send_to_back puts it at the bottom");
+    const Composition after = compose(body.story, doc.thread_frames(body), fonts);
+    CHECK(after.lines.size() == before.lines.size() && body.thread[0] == col1,
+          "rearranging doesn't change the thread or the composition");
+
+    /* Snapshots are independent copies (undo relies on it). */
+    PageDoc snap = doc;
+    doc.find_item(col1)->xf = Transform::translate(1, 2);
+    CHECK(!(snap.find_item(col1)->xf == doc.find_item(col1)->xf), "a copy is a snapshot");
+
+    /* Threading edits. */
+    ItemId mid = doc.add_text_frame(0, body.id, 100, 50, Transform::translate(0, 0), 1);
+    CHECK(body.thread.size() == 3 && body.thread[1] == mid, "add_text_frame threads at the index");
+    doc.remove_item(mid);
+    CHECK(body.thread.size() == 2 && !doc.find_item(mid), "remove_item unthreads the block");
+    doc.remove_item(body.thread[1]);
+    CHECK(doc.find_story(body.id) && doc.find_story(body.id)->thread.size() == 1,
+          "removing one of two blocks keeps the story");
+    const StoryId head = doc.stories[0].id;
+    doc.remove_item(doc.stories[0].thread[0]);
+    CHECK(!doc.find_story(head), "removing a story's last block removes the story");
+
+    /* Explicit-frame hit testing: frames share no coordinate space. */
+    PageDoc d2 = sample_document();
+    const StoryEntry &b2 = d2.stories[1];
+    Composition c = compose(b2.story, d2.thread_frames(b2), fonts);
+    size_t first_in_1 = SIZE_MAX;
+    for (size_t i = 0; i < c.lines.size(); ++i)
+        if (c.lines[i].frame == 1) { first_in_1 = i; break; }
+    if (first_in_1 != SIZE_MAX) {
+        TextPos p = hit_test_frame(c, b2.story, 1, 0, 1);
+        CHECK(p.para == c.lines[first_in_1].para && p.byte == c.lines[first_in_1].byte_start,
+              "hit_test_frame(1, top-left) is the first position in block 1");
+    }
+}
+
+static void test_tabs(const FontLibrary &fonts) {
+    PageDoc doc = sample_document();
+    const StoryEntry &side = doc.stories[2];     // the sidebar: right tab at 200, dot leader
+    Composition c = compose(side.story, doc.thread_frames(side), fonts);
+    int checked = 0;
+    for (const ComposedLine &l : c.lines) {
+        if (side.story.paragraphs[l.para].style.name != "Contents")
+            continue;
+        int leaders = 0;
+        for (const GlyphRun &r : l.runs)
+            for (const PlacedGlyph &g : r.glyphs)
+                leaders += (g.flags & PlacedGlyph::Inserted) != 0;
+        CHECK(std::fabs(l.x_end - 200.f) < 0.01f, "right tab sets the page number flush at 200 (%.2f)",
+              l.x_end);
+        CHECK(leaders > 5, "dot leader fills the tab (%d dots)", leaders);
+        ++checked;
+    }
+    CHECK(checked == 4, "four contents lines (%d)", checked);
+
+    CharStyle cs; cs.size = 10;
+    ParaStyle ps;
+    ps.tabs = {{100, TabAlign::Left, ""}, {200, TabAlign::Decimal, ""}};
+    Composition t = compose(one_para("a\tb\t12.50", cs, ps), {{0, 0, 300, 100}}, fonts);
+    float bx = -1, dot = -1;
+    for (const GlyphRun &r : t.lines[0].runs)
+        for (const PlacedGlyph &g : r.glyphs) {
+            if (g.cluster == 2) bx = g.x;
+            if (g.cluster == 6) dot = g.x;
+        }
+    CHECK(std::fabs(bx - 100) < 0.01f, "left tab: text starts at the stop (%.2f)", bx);
+    CHECK(std::fabs(dot - 200) < 0.01f, "decimal tab: the point sits on the stop (%.2f)", dot);
+    Composition d = compose(one_para("a\tb", cs, ParaStyle()), {{0, 0, 300, 100}}, fonts);
+    float dflt = -1;
+    for (const GlyphRun &r : d.lines[0].runs)
+        for (const PlacedGlyph &g : r.glyphs)
+            if (g.cluster == 2) dflt = g.x;
+    CHECK(std::fabs(dflt - 36) < 0.01f, "default stops every half inch (%.2f)", dflt);
+}
+
+static void test_hyphenation(const FontLibrary &fonts) {
+    Hyphenator hy;
+    const std::string dir = std::string(PAGEMADE_DATA_DIR) + "/hyphenation/hyph-en-us";
+    CHECK(hy.load(dir + ".pat.txt", dir + ".hyp.txt"), "patterns load from %s", dir.c_str());
+    auto pts = hy.points(utf8_to_u32("hyphenation"));
+    CHECK(pts == std::vector<size_t>({2, 6}), "hy-phen-ation (%zu points)", pts.size());
+    pts = hy.points(utf8_to_u32("table"));
+    CHECK(pts == std::vector<size_t>({2}), "exceptions file: ta-ble (%zu points)", pts.size());
+
+    CharStyle cs; cs.size = 10;
+    ParaStyle ps; ps.align = Align::Justify;
+    Story s = one_para(kLong + " " + kLong, cs, ps);
+    std::vector<Frame> col = {{0, 0, 120, 2000}};
+    Composition with = compose(s, col, fonts, &hy);
+    int hyph = 0;
+    const std::string text = paragraph_text(s.paragraphs[0]);
+    for (size_t i = 0; i < with.lines.size(); ++i) {
+        const ComposedLine &l = with.lines[i];
+        if (!l.hyphenated) continue;
+        ++hyph;
+        const PlacedGlyph &last = l.runs.back().glyphs.back();
+        CHECK((last.flags & PlacedGlyph::Inserted) && last.cluster == l.byte_end,
+              "a hyphenated line ends with an inserted hyphen");
+        CHECK(i + 1 < with.lines.size() && with.lines[i + 1].byte_start == l.byte_end,
+              "the word continues on the next line");
+    }
+    CHECK(hyph > 0, "a narrow justified column hyphenates (%d lines)", hyph);
+    Composition without = compose(s, col, fonts, nullptr);
+    int none = 0;
+    for (const ComposedLine &l : without.lines) none += l.hyphenated;
+    CHECK(none == 0, "no hyphenator, no automatic hyphens");
+
+    ps.hyphen_limit = 1;
+    Composition lim = compose(one_para(kLong + " " + kLong, cs, ps), col, fonts, &hy);
+    bool twice = false;
+    for (size_t i = 1; i < lim.lines.size(); ++i)
+        twice |= lim.lines[i].hyphenated && lim.lines[i - 1].hyphenated;
+    CHECK(!twice, "hyphen_limit 1: never two hyphenated lines in a row");
+
+    /* Fragments are shaped again. "efficient" shapes as e + ffi-ligature +
+     * ...; a break at ef-fi falls inside that ligature, so it only works if
+     * "ef-" and "ficient" are shaped on their own: two glyphs before the
+     * hyphen, and the fi ligature starting the next line. */
+    CharStyle big; big.size = 30;
+    bool found = false;
+    for (float w = 20; w < 120 && !found; w += 1) {
+        Composition e = compose(one_para("efficient", big, ParaStyle()), {{0, 0, w, 500}},
+                                fonts, &hy);
+        if (e.lines.size() < 2 || !e.lines[0].hyphenated || e.lines[0].byte_end != 2)
+            continue;
+        found = true;
+        size_t ink0 = 0;
+        for (const GlyphRun &r : e.lines[0].runs)
+            for (const PlacedGlyph &g : r.glyphs)
+                ink0 += !(g.flags & PlacedGlyph::Inserted);
+        const auto &g1 = e.lines[1].runs.front().glyphs;
+        CHECK(ink0 == 2, "\"ef-\": one glyph per letter (%zu)", ink0);
+        CHECK(g1.size() >= 2 && g1[0].cluster == 2 && g1[1].cluster == 4,
+              "\"ficient\" starts with the fi ligature (clusters %u, %u)",
+              g1.empty() ? 0u : g1[0].cluster, g1.size() < 2 ? 0u : g1[1].cluster);
+    }
+    if (!found)
+        std::printf("  (skip: no width breaks \"efficient\" at ef-fi)\n");
+}
+
 static void dump_sample(const FontLibrary &fonts) {
     PageDoc doc = sample_document();
-    for (size_t fi = 0; fi < doc.flows.size(); ++fi) {
-        const TextFlow &flow = doc.flows[fi];
-        Composition c = compose(flow.story, flow.frames, fonts);
-        std::printf("\nflow %zu: %zu lines, %s, %.3f ms\n", fi, c.lines.size(),
+    for (size_t si = 0; si < doc.stories.size(); ++si) {
+        const StoryEntry &se = doc.stories[si];
+        Composition c = compose(se.story, doc.thread_frames(se), fonts);
+        std::printf("\nstory %zu: %zu lines, %s, %.3f ms\n", si, c.lines.size(),
                     c.overset ? "OVERSET" : "fits", c.compose_ms);
         for (const ComposedLine &l : c.lines) {
-            std::string t = paragraph_text(flow.story.paragraphs[l.para])
+            std::string t = paragraph_text(se.story.paragraphs[l.para])
                                 .substr(l.byte_start, l.byte_end - l.byte_start);
-            std::printf("  b%zu p%-2zu base %6.2f  x %6.2f..%6.2f/%6.2f %s%s| %s\n",
+            std::printf("  b%zu p%-2zu base %6.2f  x %6.2f..%6.2f/%6.2f %s%s%s| %s\n",
                         l.frame, l.para, l.baseline, l.left, l.x_end, l.left + l.width,
-                        l.loose ? "L" : " ", l.tight ? "T" : " ", t.c_str());
+                        l.loose ? "L" : " ", l.tight ? "T" : " ", l.hyphenated ? "-" : " ",
+                        t.c_str());
         }
     }
 }
@@ -363,6 +550,9 @@ int main(int argc, char **argv) {
     test_breaks(fonts);
     test_edit(fonts);
     test_deterministic(fonts);
+    test_model(fonts);
+    test_tabs(fonts);
+    test_hyphenation(fonts);
     if (verbose)
         dump_sample(fonts);
 

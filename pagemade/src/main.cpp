@@ -1,19 +1,20 @@
 /*
  * pagemade — page layout in the spirit of Aldus PageMaker.
  *
- * First slice: the composer view. One page on a pasteboard, a headline
- * and a two-column story, a toolbar with the pointer and text tools, a
+ * First slice: the composer view. One page on a pasteboard with text
+ * blocks and shapes, a toolbar with the pointer, rotate and text tools, a
  * zoom dropdown, undo/redo (Ctrl+Z / Ctrl+Shift+Z), a switch for
  * alignment, kerning and ligatures, and PageMaker's zoom shortcuts
  * (Ctrl/Cmd + 0 fit, 5 50%, 7 75%, 1 actual size, 2 200%, 4 400%, 8 800%).
  *
  *   pagemade
  *   pagemade --screenshot out.png [--zoom 4 --at 150,400] [--select 1,1]
- *            [--baselines] [--loose] [--no-kerning] [--tool text]
+ *            [--baselines] [--loose] [--no-kerning] [--tool text|rotate]
  *            [--drag x0,y0:x1,y1 ...] [--click x,y ...] [--type txt ...]
  *            [--key [mod+]name ...]
  *
  * --at is a page point (points from the page's top-left) to center on.
+ * --select picks a text block by story and thread index ("1,0").
  * --drag presses at one page point and releases at another, through the
  * real event path, before the screenshot is taken. --click, --type and
  * --key (enter, backspace, left, ..., a-z; mods shift/ctrl/alt) exercise
@@ -25,6 +26,7 @@
 #include <nanogui/zoomscrollpanel.h>
 #include <GLFW/glfw3.h>
 
+#include "composer/hyphenator.h"
 #include "composerview.h"
 #include "default_fonts.h"
 #include "page.h"
@@ -39,6 +41,10 @@
 #include <string>
 #include <vector>
 
+#ifndef PAGEMADE_DATA_DIR
+#define PAGEMADE_DATA_DIR "pagemade/resources"
+#endif
+
 using namespace nanogui;
 using namespace pagemade;
 
@@ -48,6 +54,9 @@ public:
         inc_ref();
         set_theme_mode(ThemeMode::Light);
         register_default_fonts(m_fonts);
+        const std::string hyph = std::string(PAGEMADE_DATA_DIR) + "/hyphenation/hyph-en-us";
+        if (!m_hyphenator.load(hyph + ".pat.txt", hyph + ".hyp.txt"))
+            std::fprintf(stderr, "pagemade: no hyphenation patterns at %s.pat.txt\n", hyph.c_str());
 
         auto *root_flex = new FlexLayout(FlexDirection::Column, JustifyContent::FlexStart,
                                          AlignItems::Stretch, 0, 0);
@@ -60,11 +69,14 @@ public:
         toolbar->set_layout(new BoxLayout(Orientation::Horizontal, Alignment::Middle, 8, 6));
 
         m_pointer_btn = new ToolButton(toolbar, FA_MOUSE_POINTER);
+        m_rotate_btn = new ToolButton(toolbar, FA_SYNC_ALT);
         m_text_btn = new ToolButton(toolbar, FA_I_CURSOR);
-        m_pointer_btn->set_tooltip("Pointer tool (text blocks)");
+        m_pointer_btn->set_tooltip("Pointer tool (Delete removes, Ctrl+F/B front/back)");
+        m_rotate_btn->set_tooltip("Rotate tool (Shift snaps to 15\u00B0)");
         m_text_btn->set_tooltip("Text tool");
         m_pointer_btn->set_pushed(true);
         m_pointer_btn->set_callback([this] { apply_tool(ComposerView::Tool::Pointer); });
+        m_rotate_btn->set_callback([this] { apply_tool(ComposerView::Tool::Rotate); });
         m_text_btn->set_callback([this] { apply_tool(ComposerView::Tool::Text); });
 
         m_undo_btn = new Button(toolbar, "", FA_UNDO);
@@ -110,7 +122,7 @@ public:
         m_scroll->set_height_flex(SizeMode::Expanding);
         root_flex->set_flex_item(m_scroll, FlexLayout::FlexItem(1.0f));
 
-        m_view = new ComposerView(m_scroll, &m_fonts);
+        m_view = new ComposerView(m_scroll, &m_fonts, &m_hyphenator);
         m_view->on_recompose = [this] { update_status(); };
         m_view->on_tool_change = [this](ComposerView::Tool t) { sync_tool_buttons(t); };
 
@@ -131,6 +143,7 @@ public:
 
     void sync_tool_buttons(ComposerView::Tool t) {
         m_pointer_btn->set_pushed(t == ComposerView::Tool::Pointer);
+        m_rotate_btn->set_pushed(t == ComposerView::Tool::Rotate);
         m_text_btn->set_pushed(t == ComposerView::Tool::Text);
     }
 
@@ -179,8 +192,8 @@ public:
 
     void set_body_align(Align a) {
         m_view->push_undo();
-        for (TextFlow &f : m_view->document().flows)
-            for (Paragraph &p : f.story.paragraphs)
+        for (StoryEntry &se : m_view->document().stories)
+            for (Paragraph &p : se.story.paragraphs)
                 if (p.style.name == "Body text")
                     p.style.align = a;
         m_view->recompose();
@@ -188,8 +201,8 @@ public:
 
     template <typename F> void for_each_run(F fn) {
         m_view->push_undo();
-        for (TextFlow &f : m_view->document().flows)
-            for (Paragraph &p : f.story.paragraphs)
+        for (StoryEntry &se : m_view->document().stories)
+            for (Paragraph &p : se.story.paragraphs)
                 for (Run &r : p.runs)
                     fn(r.style);
         m_view->recompose();
@@ -208,9 +221,11 @@ public:
             overset |= c.overset;
         }
         char buf[200];
-        std::snprintf(buf, sizeof buf, "  %zu stories, %zu lines, composed in %.2f ms%s   |   zoom %.0f%%",
-                      comps.size(), lines, ms, overset ? "   |   story overset (red arrow)" : "",
-                      m_scroll->zoom() * 100.0);
+        const PageDoc &doc = m_view->document();
+        std::snprintf(buf, sizeof buf,
+                      "  %zu items, %zu stories, %zu lines, composed in %.2f ms%s   |   zoom %.0f%%",
+                      doc.pages[0].items.size(), comps.size(), lines, ms,
+                      overset ? "   |   story overset (red arrow)" : "", m_scroll->zoom() * 100.0);
         m_status->set_caption(buf);
         sync_zoom_menu();
         m_undo_btn->set_enabled(m_view->can_undo());
@@ -322,13 +337,14 @@ public:
 
 private:
     FontLibrary     m_fonts;
+    Hyphenator      m_hyphenator;
     ZoomScrollPanel *m_scroll = nullptr;
     ComposerView    *m_view = nullptr;
     ComboBox        *m_align = nullptr;
     Dropdown        *m_zoom_menu = nullptr;
     Button          *m_undo_btn = nullptr, *m_redo_btn = nullptr;
     CheckBox        *m_kern = nullptr, *m_baselines = nullptr, *m_loose = nullptr;
-    ToolButton      *m_pointer_btn = nullptr, *m_text_btn = nullptr;
+    ToolButton      *m_pointer_btn = nullptr, *m_rotate_btn = nullptr, *m_text_btn = nullptr;
     Label           *m_status = nullptr;
 };
 
@@ -385,7 +401,8 @@ int main(int argc, char **argv) {
     std::string shot;
     double zoom = 0;
     float at_x = -1, at_y = -1, sel_a = -1, sel_b = -1;
-    bool baselines = false, loose = false, no_kern = false, text_tool = false;
+    bool baselines = false, loose = false, no_kern = false;
+    std::string tool;
     std::vector<Action> actions;
     for (int i = 1; i < argc; ++i) {
         std::string a = argv[i];
@@ -412,7 +429,7 @@ int main(int argc, char **argv) {
             actions.push_back(act);
             ++i;
         }
-        else if (a == "--tool" && i + 1 < argc) text_tool = std::string(argv[++i]) == "text";
+        else if (a == "--tool" && i + 1 < argc) tool = argv[++i];
         else if (a == "--zoom" && i + 1 < argc) zoom = std::atof(argv[++i]);
         else if (a == "--at" && i + 1 < argc) parse_pair(argv[++i], at_x, at_y);
         else if (a == "--select" && i + 1 < argc) parse_pair(argv[++i], sel_a, sel_b);
@@ -432,15 +449,17 @@ int main(int argc, char **argv) {
         if (loose)     { app->loose_box()->set_checked(true); app->view()->set_show_loose_tight(true); }
         if (no_kern)   { app->kern_box()->set_checked(false);
                          app->for_each_run([](CharStyle &cs) { cs.kerning = false; }); }
-        if (sel_a >= 0) app->view()->select((int) sel_a, (int) sel_b);
+        if (sel_a >= 0) app->view()->select_frame((size_t) sel_a, (size_t) sel_b);
         if (zoom > 0) {
             app->zoom_to(zoom);
             if (at_x >= 0) app->center_on(Vector2f(at_x, at_y));
         } else {
             app->fit_page();
         }
-        if (text_tool)
+        if (tool == "text")
             app->apply_tool(ComposerView::Tool::Text);
+        else if (tool == "rotate")
+            app->apply_tool(ComposerView::Tool::Rotate);
         for (const Action &act : actions) {
             app->perform_layout();
             app->draw_all();

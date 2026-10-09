@@ -38,15 +38,14 @@ PageDoc sample_document() {
     ParaStyle byline_ps; byline_ps.name = "Byline"; byline_ps.align = Align::Center;
     byline_ps.space_before = 12;
 
-    TextFlow headline;
-    headline.story.paragraphs = {
+    Story headline;
+    headline.paragraphs = {
         para(head_ps,   {{head, "WAVE AFTER WAVE OF TYPE"}}),
         para(deck_ps,   {{deck, "A first look at the pagemade composer: every glyph shaped "
                                 "by HarfBuzz, every line broken in points, and every page "
                                 "drawn the same way at any zoom."}}),
         para(byline_ps, {{byline, "THE PASTEBOARD · VOLUME 1, NUMBER 1 · OCTOBER 2026"}}),
     };
-    headline.frames = {{s.margin_inside, s.margin_top, s.width - s.margin_inside - s.margin_outside, 150}};
 
     /* ---- Body flow ---- */
     CharStyle body;
@@ -61,8 +60,8 @@ PageDoc sample_document() {
     body_ps.first_indent = 12;
     ParaStyle sub_ps;   sub_ps.name = "Subhead 1"; sub_ps.space_before = 9; sub_ps.space_after = 2;
 
-    TextFlow article;
-    article.story.paragraphs = {
+    Story article;
+    article.paragraphs = {
         para(first_ps, {{body_bold, "Desktop publishing began"},
                         {body, " with a simple promise: what you see on the screen is what "
                                "comes out of the printer. Aldus PageMaker kept that promise by "
@@ -98,20 +97,70 @@ PageDoc sample_document() {
                               "gaps open up; turn ligatures off and the fi in “efficient” "
                               "and the fl in “flow” come apart again."}}),
         para(sub_ps, {{sub, "What comes next"}}),
-        para(first_ps, {{body, "Hyphenation, tab stops, a paragraph composer that weighs every "
-                               "break at once, text wrap around graphics, and PDF output with "
-                               "embedded fonts. The composer already hands every backend the "
-                               "same positioned glyphs, so each of those can be checked against "
-                               "the screen point for point."}}),
+        para(first_ps, {{body, "Shapes and pictures on the pasteboard, text wrap around them, "
+                               "a paragraph composer that weighs every break at once, and PDF "
+                               "output with embedded fonts. The composer already hands every "
+                               "backend the same positioned glyphs, so each of those can be "
+                               "checked against the screen point for point."}}),
     };
-    const float top = s.margin_top + 162;
-    const float bottom = s.height - s.margin_bottom;
-    article.frames = {
-        {s.margin_inside, top, col_w, bottom - top},
-        {s.margin_inside + col_w + s.gutter, top, col_w, 120},
+    /* ---- Sidebar: a tinted box and a text block, turned together ---- */
+    CharStyle side_head = sub;
+    CharStyle side = body;
+    side.size = 9.5f; side.leading = 13;
+    CharStyle side_note = side;
+    side_note.italic = true; side_note.size = 9; side_note.leading = 11;
+    ParaStyle side_head_ps; side_head_ps.name = "Sidebar head"; side_head_ps.space_after = 3;
+    ParaStyle contents_ps;  contents_ps.name = "Contents";
+    contents_ps.tabs = {{200, TabAlign::Right, "."}};
+    ParaStyle note_ps;      note_ps.name = "Sidebar note"; note_ps.space_before = 6;
+
+    Story sidebar;
+    sidebar.paragraphs = {
+        para(side_head_ps, {{side_head, "In this issue"}}),
+        para(contents_ps, {{side, "Spacing attributes\t1"}}),
+        para(contents_ps, {{side, "Threaded text blocks\t1"}}),
+        para(contents_ps, {{side, "Rotated blocks\t1"}}),
+        para(contents_ps, {{side, "What comes next\t1"}}),
+        para(note_ps, {{side_note, "This box is turned three degrees. Its text is composed "
+                                   "upright, in the block\u2019s own space, and turned with it."}}),
     };
 
-    doc.flows = {headline, article};
+    /* ---- Page items, bottom to top ---- */
+    const float body_w = s.width - s.margin_inside - s.margin_outside;
+    const float top = s.margin_top + 162;
+    const float bottom = s.height - s.margin_bottom;
+
+    StoryId head_id = doc.add_story(std::move(headline));
+    doc.add_text_frame(0, head_id, body_w, 150, Transform::translate(s.margin_inside, s.margin_top));
+
+    Item rule;
+    rule.w = body_w;
+    rule.h = 0;
+    rule.xf = Transform::translate(s.margin_inside, top - 7);
+    rule.content = Shape{Shape::Kind::Line, 0, false, {}, 1.f, {}};
+    doc.add_item(0, rule);
+
+    StoryId body_id = doc.add_story(std::move(article));
+    doc.add_text_frame(0, body_id, col_w, bottom - top, Transform::translate(s.margin_inside, top));
+    doc.add_text_frame(0, body_id, col_w, 96,
+                       Transform::translate(s.margin_inside + col_w + s.gutter, top));
+
+    const float box_w = 220, box_h = 132, inset = 10;
+    const Point box{s.margin_inside + col_w + s.gutter + (col_w - box_w) * 0.5f,
+                    bottom - box_h - 8};
+    const Point center{box.x + box_w * 0.5f, box.y + box_h * 0.5f};
+    const float turn = -3.f * 3.14159265f / 180.f;
+    Item tint;
+    tint.w = box_w;
+    tint.h = box_h;
+    tint.xf = Transform::rotate_about(Transform::translate(box.x, box.y), center, turn);
+    tint.content = Shape{Shape::Kind::Rect, 4, true, {0.93f, 0.91f, 0.84f, 1}, 0.5f, {}};
+    doc.add_item(0, tint);
+
+    StoryId side_id = doc.add_story(std::move(sidebar));
+    doc.add_text_frame(0, side_id, box_w - 2 * inset, box_h - 2 * inset,
+                       Transform::rotate_about(Transform::translate(box.x + inset, box.y + inset),
+                                               center, turn));
     return doc;
 }
 

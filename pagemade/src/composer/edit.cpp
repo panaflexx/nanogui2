@@ -501,6 +501,12 @@ TextPos hit_test(const Composition &c, const Story &s, const std::vector<Frame> 
         float d = dx * dx + dy * dy;
         if (d < best) { best = d; fi = i; }
     }
+    return hit_test_frame(c, s, fi, x, y);
+}
+
+TextPos hit_test_frame(const Composition &c, const Story &s, size_t fi, float x, float y) {
+    if (c.lines.empty())
+        return {};
     size_t first = SIZE_MAX, last = SIZE_MAX;
     for (size_t i = 0; i < c.lines.size(); ++i)
         if (c.lines[i].frame == fi) {
