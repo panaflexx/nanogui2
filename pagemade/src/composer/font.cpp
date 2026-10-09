@@ -19,8 +19,35 @@ std::shared_ptr<Font> Font::load_file(const std::string &path, unsigned index) {
     if (f) {
         size_t slash = path.find_last_of("/\\");
         f->m_name = slash == std::string::npos ? path : path.substr(slash + 1);
+        f->m_path = path;
     }
     return f;
+}
+
+std::shared_ptr<Font> Font::load_bytes(std::vector<char> bytes, const std::string &name,
+                                       unsigned index) {
+    if (bytes.empty())
+        return nullptr;
+    auto *owned = new std::vector<char>(std::move(bytes));
+    hb_blob_t *blob = hb_blob_create_or_fail(owned->data(), (unsigned) owned->size(),
+                                             HB_MEMORY_MODE_READONLY, owned,
+                                             [](void *p) { delete (std::vector<char> *) p; });
+    if (!blob) {
+        delete owned;
+        return nullptr;
+    }
+    auto f = from_blob(blob, index);
+    if (f)
+        f->m_name = name;
+    return f;
+}
+
+const char *Font::data(size_t *size) const {
+    unsigned n = 0;
+    const char *d = hb_blob_get_data(m_blob, &n);
+    if (size)
+        *size = n;
+    return d;
 }
 
 std::shared_ptr<Font> Font::load_memory(const void *data, size_t size, unsigned index) {
@@ -224,9 +251,37 @@ bool FontLibrary::add_file(const std::string &family, const std::string &style,
     return true;
 }
 
+void FontLibrary::add_document_font(const std::string &family, const std::string &style,
+                                    std::shared_ptr<Font> font) {
+    if (!font)
+        return;
+    /* Ahead of the installed faces (and any earlier document fonts), so
+     * find() picks it first. */
+    auto first_installed = std::find_if(m_faces.begin(), m_faces.end(),
+                                        [](const Entry &e) { return !e.document; });
+    m_faces.insert(first_installed, Entry{family, style, std::move(font), true});
+}
+
+void FontLibrary::clear_document_fonts() {
+    m_faces.erase(std::remove_if(m_faces.begin(), m_faces.end(),
+                                 [](const Entry &e) { return e.document; }),
+                  m_faces.end());
+}
+
+const char *FontLibrary::style_name(bool bold, bool italic) {
+    return bold ? (italic ? "Bold Italic" : "Bold") : (italic ? "Italic" : "Regular");
+}
+
 bool FontLibrary::has_family(const std::string &family) const {
     for (const Entry &e : m_faces)
         if (e.family == family)
+            return true;
+    return false;
+}
+
+bool FontLibrary::has_installed_family(const std::string &family) const {
+    for (const Entry &e : m_faces)
+        if (!e.document && e.family == family)
             return true;
     return false;
 }
@@ -239,9 +294,8 @@ std::vector<std::string> FontLibrary::families() const {
     return out;
 }
 
-const Font *FontLibrary::find(const std::string &family, bool bold, bool italic) const {
-    const char *style = bold ? (italic ? "Bold Italic" : "Bold")
-                             : (italic ? "Italic" : "Regular");
+const Font *FontLibrary::face_for(const std::string &family, bool bold, bool italic) const {
+    const char *style = style_name(bold, italic);
     const Font *regular = nullptr;
     for (const Entry &e : m_faces) {
         if (e.family != family)
@@ -251,8 +305,12 @@ const Font *FontLibrary::find(const std::string &family, bool bold, bool italic)
         if (e.style == "Regular")
             regular = e.font.get();
     }
-    if (regular)
-        return regular;
+    return regular;
+}
+
+const Font *FontLibrary::find(const std::string &family, bool bold, bool italic) const {
+    if (const Font *f = face_for(family, bold, italic))
+        return f;
     return m_faces.empty() ? nullptr : m_faces.front().font.get();
 }
 

@@ -148,6 +148,14 @@ public:
     void undo();
     void redo();
 
+    /* Changed since it was last saved (or loaded)? Every document state has
+     * a version, and undo and redo carry it, so undoing back to the saved
+     * state counts as unmodified again. */
+    bool modified() const { return m_version != m_clean_version; }
+    void mark_clean();                 // the document was just saved
+    /* Called whenever the document changes, is saved or is replaced. */
+    std::function<void()> on_document_change;
+
     /* Top-left of the page in view units; the rest is pasteboard. */
     nanogui::Vector2f page_origin() const;
 
@@ -291,7 +299,16 @@ private:
     pagemade::ItemId m_placement_parent = 0;
     pagemade::PageDoc m_placement_saved;  // pre-placement state, pushed on commit
 
-    std::deque<pagemade::PageDoc> m_undo, m_redo;
+    struct Snapshot {
+        pagemade::PageDoc doc;
+        uint64_t version;
+    };
+    /* Push a state as an undo step; the current state gets a new version. */
+    void push_snapshot(pagemade::PageDoc doc, uint64_t version);
+    void bump_version();
+    std::deque<Snapshot> m_undo, m_redo;
+    uint64_t m_version = 0, m_clean_version = 0, m_next_version = 0;
+    uint64_t m_creation_version = 0, m_placement_version = 0;
     bool m_burst_open = false;            // typing/deleting run in progress
     bool m_gesture_saved = false;         // drag pushed its snapshot
     pagemade::Point m_drag_start;         // page point at press

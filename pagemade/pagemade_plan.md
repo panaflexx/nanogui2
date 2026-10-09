@@ -55,18 +55,29 @@ and its nanovgd renderer. The composer lays out in points and every backend
   nudges, snapping to page edges, margins and columns, new text blocks drawn
   with the text tool, and a control palette (X/Y/W/H, angle, fill, stroke,
   polygon sides and star inset).
+- **Publications**: File > New, Open, Save and Save As. A `.pagemade` file is a
+  zip package (`mimetype`, `document.json`, and `assets/fonts/…` when assets
+  are embedded). Linked fonts are `file:` URIs; an embedded copy keeps its
+  source URI so it can be relinked. Save writes beside the target and renames
+  over it. New, Open and Quit ask before discarding changes. The window title
+  shows a star until the publication is saved again, including after undo.
 
 ## Next, in order
 
-1. **NanoVG rendering fixes**: per-subpath winding and even-odd fill, clipping to
-   a path (cropping, non-rectangular frames). Multi-stop gradients wait for SVG
-   import. (Dashed strokes are done: `render_nvg` cuts dashes on the CPU.)
-2. **Images and SVG**: placing PNG/JPEG makes an image item, cropping is a clip;
-   SVG through nanosvg becomes a group of path items in the shape format.
+1. **Images, with cropping**: placing PNG/JPEG makes an image item, linked or
+   embedded through the file format's asset table. Cropping is a clip, so this
+   step brings clipping to a path to nanovgd (stencil clip; PDF clips natively
+   with `W n`).
+2. **SVG import**: nanosvg makes a group of path items in the shape format. This
+   step brings even-odd fill and per-subpath winding to nanovgd. The fill rule
+   reaches the backend through the `renderFill` hook, which the Metal backend
+   (`ext/nanovg_metal`) implements too, so Mac builds need the matching change.
+   Multi-stop gradients come with it.
 3. **Text wrap**: lines ask which horizontal spans are free at their height,
    from the wrap outlines of items in front of the text.
-5. **Printing**: Use the system printing framework (Linux first, Mac, then Windows),
-   to print.
+4. **Print dialog**: choose the printer, copies and page range. Linux first (the
+   CUPS API with our own dialog, or GTK's), then Mac (NSPrintOperation on the
+   PDF), then Windows. Today printing exports a PDF and hands it to `lp`.
 
 ## Later and known gaps
 
@@ -74,10 +85,13 @@ and its nanovgd renderer. The composer lays out in points and every backend
   glyph id at exact composed positions; cache drawn pages as display lists.
 - Paragraph-at-a-time (Knuth-Plass) composer; right-to-left text.
 - Text colors as swatches (character styles still carry RGB).
-- Groups; multiple pages in the view; master pages and spreads.
-- Native file format (zip of JSON plus assets, via miniz).
+- Groups; master pages; spreads or a continuous page view (the view shows one
+  page at a time).
 - Import: Markdown/HTML (gumbo), RTF, DOCX; old PageMaker files via libpagemaker.
-- Story editor; Styles, Colors and full Control palettes.
+- Story editor; Styles and Colors palettes; the rest of the Control palette
+  (its object and type views are done).
+- Print production: CMYK and spot colors, bleed, crop and registration marks,
+  PDF/X.
 - Fonts on macOS and Windows (only Linux paths, then Roboto from `resources/`).
 - Status bar doesn't refresh after a pinch zoom.
 - Resizing a multiple selection as one group (each item resizes on its own today).

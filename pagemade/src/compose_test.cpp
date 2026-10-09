@@ -12,6 +12,10 @@
 #include "geometry.h"
 #include "page.h"
 #include "pdf.h"
+#include "docfile.h"
+#include "uri.h"
+
+#include <miniz.h>
 
 #include <algorithm>
 #include <cmath>
@@ -744,6 +748,302 @@ static void dump_sample(const FontLibrary &fonts) {
     }
 }
 
+static bool near(float a, float b) { return std::fabs(a - b) < 1e-4f; }
+
+static int count_sub(const std::string &s, const std::string &sub) {
+    int n = 0;
+    for (size_t i = 0; (i = s.find(sub, i)) != std::string::npos; i += sub.size())
+        ++n;
+    return n;
+}
+
+static bool write_zip(const std::string &path, const char *mime, const std::string &json) {
+    mz_zip_archive zip;
+    std::memset(&zip, 0, sizeof zip);
+    if (!mz_zip_writer_init_file(&zip, path.c_str(), 0))
+        return false;
+    bool ok = true;
+    if (mime)
+        ok = mz_zip_writer_add_mem(&zip, "mimetype", mime, std::strlen(mime), MZ_NO_COMPRESSION);
+    if (!json.empty())
+        ok = ok && mz_zip_writer_add_mem(&zip, "document.json", json.data(), json.size(),
+                                         MZ_DEFAULT_COMPRESSION);
+    ok = ok && mz_zip_writer_finalize_archive(&zip);
+    mz_zip_writer_end(&zip);
+    return ok;
+}
+
+static void check_color(const Color &a, const Color &b, const char *what) {
+    CHECK(near(a.r, b.r) && near(a.g, b.g) && near(a.b, b.b) && near(a.a, b.a),
+          "%s color", what);
+}
+
+static void check_char(const CharStyle &a, const CharStyle &b) {
+    CHECK(a.family == b.family && a.bold == b.bold && a.italic == b.italic, "char style face");
+    CHECK(near(a.size, b.size) && near(a.leading, b.leading) && near(a.tracking, b.tracking) &&
+          near(a.hscale, b.hscale) && near(a.baseline_shift, b.baseline_shift),
+          "char style metrics");
+    CHECK(a.kerning == b.kerning && a.ligatures == b.ligatures, "char style switches");
+    check_color(a.color, b.color, "type");
+}
+
+static void check_para(const ParaStyle &a, const ParaStyle &b) {
+    CHECK(a.name == b.name && a.align == b.align, "paragraph name/align");
+    CHECK(near(a.left_indent, b.left_indent) && near(a.right_indent, b.right_indent) &&
+          near(a.first_indent, b.first_indent) && near(a.space_before, b.space_before) &&
+          near(a.space_after, b.space_after) && near(a.autoleading, b.autoleading),
+          "paragraph spacing");
+    CHECK(near(a.word_min, b.word_min) && near(a.word_desired, b.word_desired) &&
+          near(a.word_max, b.word_max) && near(a.letter_min, b.letter_min) &&
+          near(a.letter_desired, b.letter_desired) && near(a.letter_max, b.letter_max),
+          "spacing attributes");
+    CHECK(a.tabs.size() == b.tabs.size(), "tab stops %zu vs %zu", a.tabs.size(), b.tabs.size());
+    for (size_t i = 0; i < std::min(a.tabs.size(), b.tabs.size()); ++i)
+        CHECK(near(a.tabs[i].pos, b.tabs[i].pos) && a.tabs[i].align == b.tabs[i].align &&
+              a.tabs[i].leader == b.tabs[i].leader, "tab %zu", i);
+    CHECK(near(a.default_tab, b.default_tab) && a.hyphenate == b.hyphenate &&
+          a.hyphen_limit == b.hyphen_limit && near(a.hyphen_zone, b.hyphen_zone),
+          "hyphenation");
+}
+
+static void check_doc(const PageDoc &a, const PageDoc &b) {
+    CHECK(near(a.setup.width, b.setup.width) && near(a.setup.height, b.setup.height) &&
+          near(a.setup.margin_top, b.setup.margin_top) &&
+          near(a.setup.margin_bottom, b.setup.margin_bottom) &&
+          near(a.setup.margin_inside, b.setup.margin_inside) &&
+          near(a.setup.margin_outside, b.setup.margin_outside) &&
+          a.setup.columns == b.setup.columns && near(a.setup.gutter, b.setup.gutter),
+          "page setup");
+    CHECK(a.swatches.size() == b.swatches.size(), "swatches %zu vs %zu",
+          a.swatches.size(), b.swatches.size());
+    for (size_t i = 0; i < std::min(a.swatches.size(), b.swatches.size()); ++i) {
+        CHECK(a.swatches[i].id == b.swatches[i].id && a.swatches[i].name == b.swatches[i].name,
+              "swatch %zu", i);
+        check_color(a.swatches[i].rgb, b.swatches[i].rgb, "swatch");
+    }
+    CHECK(a.pages.size() == b.pages.size(), "pages %zu vs %zu", a.pages.size(), b.pages.size());
+    for (size_t p = 0; p < std::min(a.pages.size(), b.pages.size()); ++p) {
+        CHECK(a.pages[p].hidden == b.pages[p].hidden, "page %zu hidden", p);
+        CHECK(a.pages[p].items.size() == b.pages[p].items.size(),
+              "page %zu items %zu vs %zu", p, a.pages[p].items.size(), b.pages[p].items.size());
+        size_t n = std::min(a.pages[p].items.size(), b.pages[p].items.size());
+        for (size_t i = 0; i < n; ++i) {
+            const Item &x = a.pages[p].items[i], &y = b.pages[p].items[i];
+            CHECK(x.id == y.id && x.is_text() == y.is_text() && near(x.w, y.w) && near(x.h, y.h),
+                  "item %zu on page %zu", i, p);
+            CHECK(near(x.xf.a, y.xf.a) && near(x.xf.b, y.xf.b) && near(x.xf.c, y.xf.c) &&
+                  near(x.xf.d, y.xf.d) && near(x.xf.e, y.xf.e) && near(x.xf.f, y.xf.f),
+                  "item %zu transform", i);
+            if (x.shape() && y.shape()) {
+                const Shape &sx = *x.shape(), &sy = *y.shape();
+                CHECK(sx.kind == sy.kind && sx.sides == sy.sides &&
+                      near(sx.corner_radius, sy.corner_radius) && near(sx.star_inset, sy.star_inset),
+                      "shape %zu", i);
+                CHECK(sx.fill.swatch == sy.fill.swatch && near(sx.fill.tint, sy.fill.tint), "fill");
+                CHECK(sx.stroke.paint.swatch == sy.stroke.paint.swatch &&
+                      near(sx.stroke.paint.tint, sy.stroke.paint.tint) &&
+                      near(sx.stroke.weight, sy.stroke.weight) && sx.stroke.style == sy.stroke.style,
+                      "stroke");
+            }
+        }
+    }
+    CHECK(a.stories.size() == b.stories.size(), "stories %zu vs %zu",
+          a.stories.size(), b.stories.size());
+    for (size_t s = 0; s < std::min(a.stories.size(), b.stories.size()); ++s) {
+        CHECK(a.stories[s].id == b.stories[s].id && a.stories[s].thread == b.stories[s].thread,
+              "story %zu thread", s);
+        const Story &x = a.stories[s].story, &y = b.stories[s].story;
+        CHECK(x.paragraphs.size() == y.paragraphs.size(), "story %zu paragraphs", s);
+        for (size_t p = 0; p < std::min(x.paragraphs.size(), y.paragraphs.size()); ++p) {
+            check_para(x.paragraphs[p].style, y.paragraphs[p].style);
+            CHECK(x.paragraphs[p].runs.size() == y.paragraphs[p].runs.size(), "runs");
+            for (size_t r = 0; r < std::min(x.paragraphs[p].runs.size(), y.paragraphs[p].runs.size()); ++r) {
+                CHECK(x.paragraphs[p].runs[r].text == y.paragraphs[p].runs[r].text,
+                      "run text %s", x.paragraphs[p].runs[r].text.c_str());
+                check_char(x.paragraphs[p].runs[r].style, y.paragraphs[p].runs[r].style);
+            }
+        }
+    }
+    CHECK(a.next_id == b.next_id, "next id %u vs %u", a.next_id, b.next_id);
+}
+
+static void test_uri() {
+    std::string path;
+    CHECK(file_uri("/a b/c.otf") == "file:///a%20b/c.otf", "file uri encodes a space");
+    CHECK(file_path_from_uri("file:///a%20b/c.otf", path) && path == "/a b/c.otf",
+          "file uri decodes (%s)", path.c_str());
+    CHECK(file_path_from_uri("file://localhost/tmp/x", path) && path == "/tmp/x",
+          "localhost is this machine");
+    CHECK(file_path_from_uri("FILE:///tmp/x", path) && path == "/tmp/x", "FILE: scheme");
+    CHECK(!file_path_from_uri("file://other/tmp/x", path), "a remote host is not a local path");
+    CHECK(!file_path_from_uri("http://example.com/a", path), "http is not a file");
+    CHECK(is_package_ref("assets/fonts/P052-Roman.otf"), "a package path is a package ref");
+    CHECK(package_ref("assets/fonts", "A B.otf") == "assets/fonts/A%20B.otf", "package ref encodes");
+    CHECK(package_entry("assets/fonts/A%20B.otf") == "assets/fonts/A B.otf", "package entry decodes");
+    CHECK(!is_package_ref("/assets/a.otf") && !is_package_ref("file:///a") &&
+          !is_package_ref("assets/../secret") && !is_package_ref("./assets/a") &&
+          !is_package_ref(""),
+          "absolute, scheme, and parent paths are not package refs");
+}
+
+static void test_docfile(const FontLibrary &fonts) {
+    test_uri();
+
+    PageDoc doc = sample_document();
+    doc.insert_page(1);
+    doc.pages[1].hidden = true;
+    Item star;
+    star.w = 80;
+    star.h = 40;
+    star.xf = Transform::rotate_about(Transform::translate(72, 100), {112, 120}, 0.2f);
+    Shape sh;
+    sh.kind = Shape::Kind::Polygon;
+    sh.sides = 5;
+    sh.star_inset = 35;
+    sh.fill = {kBlack, 40};
+    sh.stroke = {{kBlack, 80}, 2.f, LineStyle::DashDot};
+    star.content = sh;
+    doc.add_item(1, std::move(star));
+
+    CharStyle note;
+    note.family = "Sans";
+    note.size = 14;
+    note.baseline_shift = 2;
+    note.tracking = 15;
+    note.hscale = 0.9f;
+    note.kerning = false;
+    note.color = {0.2f, 0.3f, 0.4f, 1};
+    ParaStyle note_ps;
+    note_ps.name = "Note";
+    note_ps.align = Align::Right;
+    note_ps.hyphenate = false;
+    note_ps.hyphen_limit = 2;
+    note_ps.hyphen_zone = 28;
+    note_ps.default_tab = 48;
+    note_ps.word_min = 80;
+    note_ps.tabs.push_back({120, TabAlign::Decimal, "."});
+    Story extra = one_para("He said \"hello\"\nsecond\tline\\end", note, note_ps);
+    doc.add_text_frame(1, doc.add_story(std::move(extra)), 200, 80, Transform::translate(40, 200));
+
+    const std::string linked = "/tmp/pagemade-doc-linked.pagemade";
+    const std::string embedded = "/tmp/pagemade-doc-embedded.pagemade";
+    std::string error;
+    CHECK(save_document(doc, fonts, linked, SaveOptions{false}, &error),
+          "save linked: %s", error.c_str());
+    OpenResult opened = open_document(linked, fonts);
+    CHECK(opened.ok, "open linked: %s", opened.error.c_str());
+    CHECK(!opened.embed_assets && opened.missing_fonts.empty(), "linked, fonts installed");
+    if (opened.ok)
+        check_doc(doc, opened.doc);
+
+    /* A family the library doesn't have must not be saved as some other face. */
+    PageDoc missing = doc;
+    missing.stories[0].story.paragraphs[0].runs[0].style.family = "Nope";
+    std::string json = document_json(missing, fonts, {});
+    CHECK(count_sub(json, "Nope") == 1, "Nope stays a family name, not an asset (%d)",
+          count_sub(json, "Nope"));
+    CHECK(save_document(missing, fonts, linked, {}, &error), "save with a missing family");
+    OpenResult gone = open_document(linked, fonts);
+    CHECK(gone.ok && gone.missing_fonts.size() == 1 && gone.missing_fonts[0] == "Nope Bold",
+          "missing face is reported");
+
+    CHECK(save_document(doc, fonts, embedded, SaveOptions{true}, &error),
+          "save embedded: %s", error.c_str());
+    FILE *raw = std::fopen(embedded.c_str(), "rb");
+    char head[160] = {};
+    size_t nread = 0;
+    if (raw) {
+        nread = std::fread(head, 1, sizeof head - 1, raw);
+        std::fclose(raw);
+    }
+    CHECK(nread > 0 && std::string(head, nread).find(kPublicationMimeType) != std::string::npos,
+          "mimetype is stored uncompressed at the front");
+    FontLibrary bare;
+    OpenResult emb = open_document(embedded, bare);
+    CHECK(emb.ok && emb.embed_assets, "open embedded: %s", emb.error.c_str());
+    CHECK(emb.fonts.size() >= 3 && emb.missing_fonts.empty(),
+          "embedded faces travel with the file (%zu, missing %zu)",
+          emb.fonts.size(), emb.missing_fonts.size());
+    if (emb.ok)
+        check_doc(doc, emb.doc);
+    FontLibrary carried;
+    for (const DocumentFont &f : emb.fonts)
+        carried.add_document_font(f.family, f.style, f.font);
+    if (!doc.stories.empty() && carried.face_for("Display", true, false)) {
+        const StoryEntry &se = doc.stories[0];
+        Composition here = compose(se.story, doc.thread_frames(se), fonts);
+        Composition there = compose(se.story, doc.thread_frames(se), carried);
+        CHECK(!here.lines.empty() && here.lines.size() == there.lines.size() &&
+              near(here.lines[0].x_end, there.lines[0].x_end),
+              "embedded fonts compose the same line");
+    }
+
+    const std::string keep = "/tmp/pagemade-doc-keep.pagemade";
+    CHECK(save_document(doc, fonts, keep, {}, &error), "save the file we must not clobber");
+    CHECK(!save_document(doc, fonts, "/tmp/no-such-pagemade-dir/out.pagemade", {}, &error),
+          "saving into a missing directory fails");
+    CHECK(std::fopen("/tmp/no-such-pagemade-dir/out.pagemade.saving", "rb") == nullptr,
+          "a failed save leaves no temporary file");
+    OpenResult kept = open_document(keep, fonts);
+    CHECK(kept.ok, "the previous publication is still there: %s", kept.error.c_str());
+
+    const char *repair_json =
+        "{"
+        "\"format\":\"pagemade\",\"version\":2,"
+        "\"pages\":[{\"hidden\":true,\"items\":["
+        "{\"id\":5,\"type\":\"text\",\"w\":100,\"h\":40,\"xf\":[1,0,0,1,10,20]},"
+        "{\"id\":5,\"type\":\"shape\",\"shape\":\"rectangle\",\"w\":10,\"h\":10,\"xf\":[1,0,0,1,0,0]},"
+        "{\"id\":0,\"type\":\"text\",\"w\":1,\"h\":1,\"xf\":[1,0,0,1,0,0]},"
+        "{\"id\":7,\"type\":\"text\",\"w\":30,\"h\":20,\"xf\":[1,0,0,1,4,6]},"
+        "{\"id\":8,\"type\":\"image\",\"w\":1,\"h\":1,\"xf\":[1,0,0,1,0,0]}"
+        "]}],"
+        "\"stories\":["
+        "{\"id\":9,\"thread\":[5,99],\"paragraphs\":[{\"runs\":[{\"text\":\"Kept\"}]}]},"
+        "{\"id\":9,\"thread\":[],\"paragraphs\":[{\"runs\":[{\"text\":\"Gone\"}]}]}"
+        "]}";
+    const std::string repair_path = "/tmp/pagemade-doc-repair.pagemade";
+    CHECK(write_zip(repair_path, kPublicationMimeType, repair_json), "write a damaged package");
+    OpenResult repaired = open_document(repair_path, fonts);
+    CHECK(repaired.ok, "a newer, damaged file still opens: %s", repaired.error.c_str());
+    CHECK(!repaired.warnings.empty(), "damage and a newer version are reported");
+    if (repaired.ok) {
+        CHECK(repaired.doc.pages.size() == 1 && repaired.doc.pages[0].hidden, "the page survived");
+        CHECK(repaired.doc.pages[0].items.size() == 2, "duplicate, zero and unknown items drop");
+        CHECK(repaired.doc.stories.size() == 2, "the empty story drops; the stray frame gets one");
+        bool kept_text = false;
+        for (const StoryEntry &se : repaired.doc.stories)
+            for (const Paragraph &p : se.story.paragraphs)
+                for (const Run &r : p.runs)
+                    kept_text |= r.text == "Kept";
+        CHECK(kept_text, "the threaded story's text is kept");
+    }
+
+    const std::string bad = "/tmp/pagemade-doc-bad.pagemade";
+    CHECK(write_zip(bad, "application/zip", "{\"format\":\"pagemade\",\"version\":1}"),
+          "write a foreign package");
+    OpenResult foreign = open_document(bad, fonts);
+    CHECK(!foreign.ok, "the wrong mimetype is refused");
+    CHECK(write_zip(bad, kPublicationMimeType, "{\"format\":\"other\",\"version\":1}"),
+          "write a package with the wrong document");
+    CHECK(!open_document(bad, fonts).ok, "a non-pagemade document.json is refused");
+    CHECK(write_zip(bad, kPublicationMimeType, ""), "write a package with no document");
+    CHECK(!open_document(bad, fonts).ok, "a package without document.json is refused");
+    FILE *plain = std::fopen(bad.c_str(), "wb");
+    if (plain) {
+        std::fputs("not a zip", plain);
+        std::fclose(plain);
+    }
+    CHECK(!open_document(bad, fonts).ok, "a file that isn't a zip is refused");
+    CHECK(!open_document("/tmp/pagemade-does-not-exist.pagemade", fonts).ok,
+          "a missing file is refused");
+
+    std::remove(linked.c_str());
+    std::remove(embedded.c_str());
+    std::remove(keep.c_str());
+    std::remove(repair_path.c_str());
+    std::remove(bad.c_str());
+}
+
 int main(int argc, char **argv) {
     bool verbose = argc > 1 && std::strcmp(argv[1], "-v") == 0;
     FontLibrary fonts;
@@ -770,6 +1070,7 @@ int main(int argc, char **argv) {
     test_swatches();
     test_geometry();
     test_drawlist(fonts);
+    test_docfile(fonts);
     if (verbose)
         dump_sample(fonts);
 

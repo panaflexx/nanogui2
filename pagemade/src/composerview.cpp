@@ -106,8 +106,11 @@ void ComposerView::set_document(PageDoc doc) {
     m_undo.clear();
     m_redo.clear();
     m_burst_open = false;
+    m_version = m_clean_version = ++m_next_version;   // as loaded: unmodified
     recompose();
     selection_changed();
+    if (on_document_change)
+        on_document_change();
 }
 
 void ComposerView::select(ItemId id) {
@@ -141,17 +144,37 @@ Bounds ComposerView::selection_bounds() const {
 
 /* ---- Undo --------------------------------------------------------------- */
 
-void ComposerView::push_undo() {
-    m_undo.push_back(m_doc);
+void ComposerView::bump_version() {
+    m_version = ++m_next_version;
+    if (on_document_change)
+        on_document_change();
+}
+
+void ComposerView::push_snapshot(PageDoc doc, uint64_t version) {
+    m_undo.push_back({std::move(doc), version});
     if (m_undo.size() > 100)
         m_undo.pop_front();
     m_redo.clear();
+    bump_version();
+}
+
+void ComposerView::push_undo() {
+    push_snapshot(m_doc, m_version);
 }
 
 void ComposerView::will_edit(bool burst) {
     if (!burst || !m_burst_open)
         push_undo();
+    else
+        bump_version();                  // same undo step, but a changed document
     m_burst_open = burst;
+}
+
+void ComposerView::mark_clean() {
+    m_clean_version = m_version;
+    m_burst_open = false;                // the next keystroke starts a new step
+    if (on_document_change)
+        on_document_change();
 }
 
 void ComposerView::restore_snapshot() {
@@ -192,19 +215,25 @@ void ComposerView::restore_snapshot() {
 void ComposerView::undo() {
     if (m_undo.empty())
         return;
-    m_redo.push_back(m_doc);
-    m_doc = m_undo.back();
+    m_redo.push_back({std::move(m_doc), m_version});
+    m_doc = std::move(m_undo.back().doc);
+    m_version = m_undo.back().version;
     m_undo.pop_back();
     restore_snapshot();
+    if (on_document_change)
+        on_document_change();
 }
 
 void ComposerView::redo() {
     if (m_redo.empty())
         return;
-    m_undo.push_back(m_doc);
-    m_doc = m_redo.back();
+    m_undo.push_back({std::move(m_doc), m_version});
+    m_doc = std::move(m_redo.back().doc);
+    m_version = m_redo.back().version;
     m_redo.pop_back();
     restore_snapshot();
+    if (on_document_change)
+        on_document_change();
 }
 
 void ComposerView::set_tool(Tool t) {
@@ -715,6 +744,7 @@ bool ComposerView::focus_event(bool focused) {
 
 void ComposerView::begin_creation(const Point &pt) {
     m_creation_saved = m_doc;            // the undo step, once something is drawn
+    m_creation_version = m_version;
     const Point p = snap_point(pt);
     m_drag_start = p;
     if (m_tool == Tool::Text) {
@@ -790,10 +820,7 @@ void ComposerView::finish_creation() {
             screen()->redraw();
         return;
     }
-    m_undo.push_back(m_creation_saved);
-    if (m_undo.size() > 100)
-        m_undo.pop_front();
-    m_redo.clear();
+    push_snapshot(std::move(m_creation_saved), m_creation_version);
     if (it->is_text()) {
         it->w = std::max(it->w, kMinBlock);
         it->h = std::max(it->h, kMinBlock);
@@ -1016,6 +1043,7 @@ void ComposerView::begin_placement(const Point &pt) {
     if (!se)
         return;
     m_placement_saved = m_doc;           // becomes the undo step on commit
+    m_placement_version = m_version;
     m_placement_parent = m_sel.front();
     const StoryId story = se->id;
     const Frame f = measure_child_frame(*se, ti, pt);
@@ -1034,10 +1062,7 @@ void ComposerView::end_placement(bool commit) {
         return;
     m_placing = false;
     if (commit) {
-        m_undo.push_back(m_placement_saved);
-        if (m_undo.size() > 100)
-            m_undo.pop_front();
-        m_redo.clear();
+        push_snapshot(std::move(m_placement_saved), m_placement_version);
     } else {
         m_doc = m_placement_saved;       // the text goes back where it was
         m_sel = {m_placement_parent};

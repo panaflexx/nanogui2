@@ -49,12 +49,19 @@ public:
     static std::shared_ptr<Font> load_file(const std::string &path, unsigned index = 0);
     /* `data` must outlive the Font (used for fonts compiled into the binary). */
     static std::shared_ptr<Font> load_memory(const void *data, size_t size, unsigned index = 0);
+    /* The Font keeps the bytes (fonts embedded in a publication). */
+    static std::shared_ptr<Font> load_bytes(std::vector<char> bytes, const std::string &name,
+                                            unsigned index = 0);
     ~Font();
 
     Font(const Font &) = delete;
     Font &operator=(const Font &) = delete;
 
     const std::string &name() const { return m_name; }
+    /* The file the font came from; empty when it was loaded from memory. */
+    const std::string &path() const { return m_path; }
+    /* The whole font file, for embedding. */
+    const char *data(size_t *size) const;
     int   units_per_em() const { return m_upem; }
     float ascender() const   { return m_ascender; }
     float descender() const  { return m_descender; }   // negative
@@ -81,6 +88,7 @@ private:
     hb_face_t  *m_face = nullptr;
     hb_font_t  *m_font = nullptr;
     std::string m_name;
+    std::string m_path;
     int         m_upem = 1000;
     float       m_ascender = 800, m_descender = -200;
     float       m_cap_height = 700, m_x_height = 500;
@@ -90,21 +98,38 @@ private:
 
 /* Family + style -> Font. Styles are "Regular", "Bold", "Italic" and
  * "Bold Italic". find() falls back to the family's Regular face, then to
- * the first face registered, so a missing font never stops composition. */
+ * the first face registered, so a missing font never stops composition.
+ *
+ * Document fonts (embedded in the open publication) come before installed
+ * ones, so the publication looks the same on any computer; opening another
+ * publication clears them. */
 class FontLibrary {
 public:
     void add(const std::string &family, const std::string &style,
              std::shared_ptr<Font> font);
     bool add_file(const std::string &family, const std::string &style,
                   const std::string &path);
+    void add_document_font(const std::string &family, const std::string &style,
+                           std::shared_ptr<Font> font);
+    void clear_document_fonts();
     bool has_family(const std::string &family) const;
+    /* Installed faces only, not document fonts. */
+    bool has_installed_family(const std::string &family) const;
     /* Families in the order they were added. */
     std::vector<std::string> families() const;
     const Font *find(const std::string &family, bool bold, bool italic) const;
+    /* The requested style of this family, or its Regular face. Null when
+     * the family has neither — never a face from some other family. */
+    const Font *face_for(const std::string &family, bool bold, bool italic) const;
     bool empty() const { return m_faces.empty(); }
+    static const char *style_name(bool bold, bool italic);
 
 private:
-    struct Entry { std::string family, style; std::shared_ptr<Font> font; };
+    struct Entry {
+        std::string family, style;
+        std::shared_ptr<Font> font;
+        bool document = false;
+    };
     std::vector<Entry> m_faces;
 };
 

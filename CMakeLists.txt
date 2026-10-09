@@ -726,8 +726,10 @@ if (NANOGUI_BUILD_EXAMPLES)
     set(NMAIL_SYS_LIBS pthread)
   endif()
 
-  # Vendored miniz (RFC 1951 DEFLATE for IMAP COMPRESS=DEFLATE, RFC 4978)
-  add_library(miniz STATIC ext/miniz/miniz.c ext/miniz/miniz_tdef.c ext/miniz/miniz_tinfl.c)
+  # Vendored miniz: DEFLATE for nmail's IMAP COMPRESS, and the zip reader
+  # and writer for pagemade publications (miniz_zip.c).
+  add_library(miniz STATIC ext/miniz/miniz.c ext/miniz/miniz_tdef.c
+      ext/miniz/miniz_tinfl.c ext/miniz/miniz_zip.c)
   # Upstream generates miniz_export.h via generate_export_header(); for this
   # static build the empty-decoration equivalent is all miniz.h needs.
   file(WRITE "${CMAKE_CURRENT_BINARY_DIR}/miniz_gen/miniz_export.h"
@@ -968,6 +970,9 @@ if (NANOGUI_BUILD_EXAMPLES)
         pagemade/src/page.cpp
         pagemade/src/geometry.cpp
         pagemade/src/drawlist.cpp
+        pagemade/src/uri.cpp
+        pagemade/src/docfile.cpp
+        pagemade/src/dialogs.cpp
         pagemade/src/sample.cpp)
     add_executable(pagemade_compose_test
         pagemade/src/compose_test.cpp
@@ -976,8 +981,12 @@ if (NANOGUI_BUILD_EXAMPLES)
         pagemade/src/page.cpp
         pagemade/src/geometry.cpp
         pagemade/src/drawlist.cpp
+        pagemade/src/uri.cpp
+        pagemade/src/docfile.cpp
         pagemade/src/sample.cpp)
     foreach(_t pagemade_app pagemade_compose_test)
+      # dict.h (the JSON reader) lives at the repository root.
+      target_include_directories(${_t} PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
       target_compile_definitions(${_t} PRIVATE
           PAGEMADE_RESOURCE_DIR="${CMAKE_CURRENT_SOURCE_DIR}/resources"
           PAGEMADE_DATA_DIR="${CMAKE_CURRENT_SOURCE_DIR}/pagemade/resources")

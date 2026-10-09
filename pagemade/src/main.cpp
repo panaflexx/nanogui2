@@ -21,7 +21,9 @@
  *            [--tool pointer|text|rotate|line|rect|ellipse|polygon ...]
  *            [--fill swatch[,tint] ...] [--stroke swatch,weight[,style] ...]
  *            [--drag x0,y0:x1,y1 ...] [--click x,y ...] [--type txt ...]
- *            [--key [mod+]name ...]
+ *            [--key [mod+]name ...] [--open file.pagemade]
+ *            [--save file.pagemade ...] [--save-embedded file.pagemade ...]
+ *            [--dialog save|changes] [--print-title]
  *
  * --at is a page point (points from the page's top-left) to center on.
  * --select picks a text block by story and thread index ("1,0").
@@ -41,6 +43,8 @@
 
 #include "composer/hyphenator.h"
 #include "composerview.h"
+#include "dialogs.h"
+#include "docfile.h"
 #include "default_fonts.h"
 #include "page.h"
 #include "pdf.h"
@@ -50,6 +54,7 @@
 
 #include <algorithm>
 #include <array>
+#include <filesystem>
 #include <cctype>
 #include <cstdio>
 #include <cstdlib>
@@ -193,6 +198,15 @@ class PagemadeApp : public Screen {
 public:
     PagemadeApp() : Screen(Vector2i(1280, 940), "pagemade") {
         inc_ref();
+        s_instance = this;
+        /* The window's close button asks to save first, like File > Quit. */
+        glfwSetWindowCloseCallback(glfw_window(), [](GLFWwindow *w) {
+            if (!s_instance || s_instance->m_quitting)
+                return;
+            glfwSetWindowShouldClose(w, GLFW_FALSE);
+            if (!ModalDialog::any_open())
+                s_instance->quit();
+        });
         set_theme_mode(ThemeMode::Light);
         register_default_fonts(m_fonts);
         const std::string hyph = std::string(PAGEMADE_DATA_DIR) + "/hyphenation/hyph-en-us";
@@ -295,6 +309,7 @@ public:
         };
         m_view->on_selection_change = [this] { sync_palette(); update_status(); };
         m_view->on_page_change = [this] { update_status(); };
+        m_view->on_document_change = [this] { update_title(); };
 
         m_pages = new PageIconStrip(window, m_view);
 
@@ -305,7 +320,159 @@ public:
 
         m_view->set_document(std::move(doc));
         sync_palette();
+        update_title();
         perform_layout();
+    }
+
+    ~PagemadeApp() override {
+        if (s_instance == this)
+            s_instance = nullptr;
+    }
+
+    /* ---- Publications: New, Open, Save ------------------------------ */
+
+    std::string doc_name() const {
+        return m_doc_path.empty() ? std::string("Untitled")
+                                  : std::filesystem::path(m_doc_path).stem().string();
+    }
+
+    void update_title() {
+        set_caption((m_view->modified() ? "*" : "") + doc_name() + " \u2014 pagemade");
+    }
+
+    /* Run `then` once the open publication may go: it's unchanged, or saved,
+     * or the user chose Don't Save. Cancel runs nothing. */
+    void close_document_then(std::function<void()> then) {
+        if (!m_view->modified()) {
+            then();
+            return;
+        }
+        ask_save_changes(this, doc_name(), [this, then](SaveChoice c) {
+            if (c == SaveChoice::DontSave)
+                then();
+            else if (c == SaveChoice::Save)
+                save([then](bool saved) { if (saved) then(); });
+        });
+    }
+
+    /* Save where it was last saved, or ask where the first time. */
+    void save(std::function<void(bool)> done = {}) {
+        if (m_doc_path.empty()) {
+            save_as(std::move(done));
+            return;
+        }
+        const bool ok = write_to(m_doc_path, m_embed_assets);
+        if (done)
+            done(ok);
+    }
+
+    void save_as(std::function<void(bool)> done = {}) {
+        ask_save_as(this, m_doc_path, m_embed_assets,
+                    [this, done](const std::string &path, bool embed) {
+                        const bool ok = write_to(path, embed);
+                        if (done)
+                            done(ok);
+                    });
+    }
+
+    bool write_to(const std::string &path, bool embed) {
+        std::string error;
+        if (!save_document(m_view->document(), m_fonts, path, SaveOptions{embed}, &error)) {
+            show_alert(this, "The publication couldn't be saved.", error);
+            return false;
+        }
+        m_doc_path = path;
+        m_embed_assets = embed;
+        m_view->mark_clean();
+        set_note("saved " + path + (embed ? " (assets embedded)" : ""));
+        return true;
+    }
+
+    void new_document() {
+        close_document_then([this] {
+            m_fonts.clear_document_fonts();
+            m_view->set_document(PageDoc());
+            m_doc_path.clear();
+            m_embed_assets = false;
+            after_document_switch();
+            set_note("new publication");
+        });
+    }
+
+    void open_document_dialog() {
+        close_document_then([this] {
+            const std::string folder = m_doc_path.empty()
+                ? std::string() : std::filesystem::path(m_doc_path).parent_path().string();
+            auto paths = file_dialog({{kPublicationExtension, "pagemade publication"}}, false,
+                                     false, folder);
+            if (!paths.empty() && !paths[0].empty())
+                open_path(paths[0]);
+        });
+    }
+
+    /* Open without asking about the current publication (callers do that). */
+    bool open_path(const std::string &path) {
+        OpenResult r = open_document(path, m_fonts);
+        if (!r.ok) {
+            show_alert(this, "\u201C" + std::filesystem::path(path).filename().string() +
+                             "\u201D couldn't be opened.", r.error);
+            return false;
+        }
+        /* The old publication's embedded fonts go, this one's arrive; the
+         * view recomposes with them straight away. */
+        m_fonts.clear_document_fonts();
+        for (const DocumentFont &f : r.fonts)
+            m_fonts.add_document_font(f.family, f.style, f.font);
+        m_view->set_document(std::move(r.doc));
+        m_doc_path = path;
+        m_embed_assets = r.embed_assets;
+        after_document_switch();
+        std::string note = "opened " + path;
+        if (!r.missing_fonts.empty()) {
+            note += "   |   missing fonts (substituted):";
+            for (const std::string &f : r.missing_fonts)
+                note += " " + f + ";";
+            note.pop_back();
+        }
+        for (const std::string &w : r.warnings)
+            note += "   |   " + w;
+        set_note(note);
+        return true;
+    }
+
+    void after_document_switch() {
+        rebuild_swatch_menus();
+        sync_palette();
+        update_title();
+        fit_page();
+    }
+
+    void quit() {
+        close_document_then([this] {
+            m_quitting = true;
+            glfwSetWindowShouldClose(glfw_window(), GLFW_TRUE);
+            glfwPostEmptyEvent();
+        });
+    }
+
+    /* The swatch menus follow the open publication's Colors palette. */
+    void rebuild_swatch_menus() {
+        std::vector<std::string> names{"None"};
+        std::vector<SwatchId> ids{kNoPaint};
+        for (const Swatch &sw : m_view->document().swatches) {
+            names.push_back(sw.name);
+            ids.push_back(sw.id);
+        }
+        if (ids == m_swatch_ids || !m_fill)
+            return;
+        m_swatch_ids = ids;
+        for (Dropdown *d : {m_fill, m_stroke}) {
+            while (d->popup()->child_count() > 0)
+                d->remove_item(d->popup()->child_count() - 1);
+            for (const std::string &n : names)
+                d->add_item({n, ""}, 0, {}, {}, true);
+            d->set_selected_index(0);
+        }
     }
 
     /* ---- Menus (PageMaker: File, Edit, Layout, Element) ------------- */
@@ -322,8 +489,17 @@ public:
         m_menubar->set_height_flex(SizeMode::Fixed);
 
         Dropdown *file = m_menubar->add_menu("File");
+        add_cmd(file, "New", {{SYSTEM_COMMAND_MOD, GLFW_KEY_N}}, [this] { new_document(); });
+        add_cmd(file, "Open...", {{SYSTEM_COMMAND_MOD, GLFW_KEY_O}}, [this] { open_document_dialog(); });
+        new Separator(file->popup());
+        add_cmd(file, "Save", {{SYSTEM_COMMAND_MOD, GLFW_KEY_S}}, [this] { save(); });
+        add_cmd(file, "Save As...", {{SYSTEM_COMMAND_MOD | GLFW_MOD_SHIFT, GLFW_KEY_S}},
+                [this] { save_as(); });
+        new Separator(file->popup());
         add_cmd(file, "Export PDF...", {}, [this] { export_pdf_dialog(); });
         add_cmd(file, "Print...", {{SYSTEM_COMMAND_MOD, GLFW_KEY_P}}, [this] { print_document(); });
+        new Separator(file->popup());
+        add_cmd(file, "Quit", {{SYSTEM_COMMAND_MOD, GLFW_KEY_Q}}, [this] { quit(); });
 
         Dropdown *edit = m_menubar->add_menu("Edit");
         add_cmd(edit, "Undo", {{SYSTEM_COMMAND_MOD, GLFW_KEY_Z}}, [this] { m_view->undo(); });
@@ -825,6 +1001,8 @@ public:
     bool keyboard_event(int key, int scancode, int action, int modifiers) override {
         if (Screen::keyboard_event(key, scancode, action, modifiers))
             return true;
+        if (ModalDialog::any_open())
+            return false;                // no menu shortcuts behind a dialog
         if (action == GLFW_PRESS && m_menubar && m_menubar->process_shortcuts(modifiers, key))
             return true;
         if (action != GLFW_PRESS || !(modifiers & (GLFW_MOD_CONTROL | GLFW_MOD_SUPER)))
@@ -837,6 +1015,12 @@ public:
             m_view->redo();
             return true;
         case GLFW_KEY_P: print_document(); return true;
+        case GLFW_KEY_N: new_document(); return true;
+        case GLFW_KEY_O: open_document_dialog(); return true;
+        case GLFW_KEY_S:
+            if (modifiers & GLFW_MOD_SHIFT) save_as(); else save();
+            return true;
+        case GLFW_KEY_Q: quit(); return true;
         case GLFW_KEY_0: fit_page(); return true;
         case GLFW_KEY_5: zoom_to(0.5); return true;
         case GLFW_KEY_7: zoom_to(0.75); return true;
@@ -998,6 +1182,10 @@ private:
     MenuItem        *m_to_front = nullptr, *m_forward = nullptr, *m_backward = nullptr, *m_to_back = nullptr;
     Label           *m_status = nullptr;
     std::string     m_note;
+    std::string     m_doc_path;          // empty: Untitled
+    bool            m_embed_assets = false;
+    bool            m_quitting = false;
+    static inline PagemadeApp *s_instance = nullptr;
 };
 
 static bool parse_pair(const char *s, float &a, float &b) {
@@ -1006,7 +1194,7 @@ static bool parse_pair(const char *s, float &a, float &b) {
 
 /* A headless input action, replayed through Screen's GLFW callbacks. */
 struct Action {
-    enum Kind { Drag, Click, Type, Key, Tool, Fill, Stroke } kind;
+    enum Kind { Drag, Click, Type, Key, Tool, Fill, Stroke, Save, SaveEmbedded } kind;
     std::array<float, 4> d{};
     std::string text;
     int key = 0, mods = 0;
@@ -1050,7 +1238,8 @@ static bool parse_key(const std::string &spec, int &key, int &mods) {
 }
 
 int main(int argc, char **argv) {
-    std::string shot, pdf;
+    std::string shot, pdf, open_path, dialog;
+    bool print_title = false;
     double zoom = 0;
     float at_x = -1, at_y = -1, sel_a = -1, sel_b = -1;
     bool baselines = false, loose = false, no_kern = false, no_snap = false;
@@ -1060,6 +1249,14 @@ int main(int argc, char **argv) {
         Action act;
         if (a == "--screenshot" && i + 1 < argc) shot = argv[++i];
         else if (a == "--export-pdf" && i + 1 < argc) pdf = argv[++i];
+        else if (a == "--open" && i + 1 < argc) open_path = argv[++i];
+        else if (a == "--print-title") print_title = true;
+        else if (a == "--dialog" && i + 1 < argc) dialog = argv[++i];
+        else if ((a == "--save" || a == "--save-embedded") && i + 1 < argc) {
+            act.kind = a == "--save" ? Action::Save : Action::SaveEmbedded;
+            act.text = argv[++i];
+            actions.push_back(act);
+        }
         else if (a == "--drag" && i + 1 < argc &&
                  std::sscanf(argv[i + 1], "%f,%f:%f,%f", &act.d[0], &act.d[1], &act.d[2], &act.d[3]) == 4) {
             act.kind = Action::Drag;
@@ -1101,6 +1298,8 @@ int main(int argc, char **argv) {
         app->dec_ref();
         app->set_visible(true);
         for (int k = 0; k < 3; ++k) { app->perform_layout(); app->draw_all(); }
+        if (!open_path.empty() && !app->open_path(open_path))
+            std::printf("open FAILED %s\n", open_path.c_str());
 
         if (baselines) { app->baselines_box()->set_checked(true); app->view()->set_show_baselines(true); }
         if (loose)     { app->loose_box()->set_checked(true); app->view()->set_show_loose_tight(true); }
@@ -1137,9 +1336,21 @@ int main(int argc, char **argv) {
                 app->scripted(act.kind == Action::Tool ? "tool" : act.kind == Action::Fill
                               ? "fill" : "stroke", act.text);
                 break;
+            case Action::Save:
+            case Action::SaveEmbedded:
+                std::printf("save %s %s\n",
+                            app->write_to(act.text, act.kind == Action::SaveEmbedded) ? "ok" : "FAILED",
+                            act.text.c_str());
+                break;
             }
         }
 
+        if (dialog == "save")
+            app->save_as();
+        else if (dialog == "changes")
+            ask_save_changes(app, app->doc_name(), [](SaveChoice) {});
+        if (print_title)
+            std::printf("title %s\n", app->caption().c_str());
         if (!pdf.empty())
             std::printf("pdf %s %s\n", app->export_pdf_to(pdf) ? "saved" : "FAILED",
                         pdf.c_str());
