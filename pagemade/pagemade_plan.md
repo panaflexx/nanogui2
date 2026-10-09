@@ -19,6 +19,14 @@ and its nanovgd renderer. The composer lays out in points and every backend
   clipboard, bold/italic, grapheme and word movement; threading gestures (pick
   up the overset arrow, merge back).
 - **Undo/redo**: whole-document snapshots, 100 deep, one step per action.
+- **PDF export and printing** (`src/pdf.cpp`): the draw list's second
+  backend. Every page at trim size, paths and strokes (native PDF dashes),
+  text as real text — each used face subset with hb-subset (glyph ids
+  retained, so character codes are glyph ids under Identity-H), embedded as
+  CIDFontType0 (raw CFF program) or CIDFontType2, with a ToUnicode map for
+  search and copy. Toolbar buttons and `--export-pdf`; printing exports and
+  hands the PDF to CUPS `lp`. Colors are device RGB still; CMYK/spot and
+  trim/bleed/marks remain open.
 - **Page items foundation**: pages holding items in stacking order; stable ids;
   per-item size and transform; stories with threads of frame ids; minimal shapes;
   rotate tool; Delete; Bring to Front / Send to Back.
@@ -37,12 +45,12 @@ and its nanovgd renderer. The composer lays out in points and every backend
 1. **NanoVG rendering fixes**: per-subpath winding and even-odd fill, clipping to
    a path (cropping, non-rectangular frames). Multi-stop gradients wait for SVG
    import. (Dashed strokes are done: `render_nvg` cuts dashes on the CPU.)
-2. **PDF export**: the second consumer of the draw list. Fonts subset with
-   hb-subset, text stays real text, CMYK/spot later, trim/bleed and marks.
-3. **Images and SVG**: placing PNG/JPEG makes an image item, cropping is a clip;
+2. **Images and SVG**: placing PNG/JPEG makes an image item, cropping is a clip;
    SVG through nanosvg becomes a group of path items in the shape format.
-4. **Text wrap**: lines ask which horizontal spans are free at their height,
+3. **Text wrap**: lines ask which horizontal spans are free at their height,
    from the wrap outlines of items in front of the text.
+5. **Printing**: Use the system printing framework (Linux first, Mac, then Windows), 
+   to print.
 
 ## Later and known gaps
 

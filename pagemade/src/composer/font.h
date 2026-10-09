@@ -21,6 +21,7 @@
 struct hb_blob_t;
 struct hb_face_t;
 struct hb_font_t;
+struct hb_subset_input_t;
 
 namespace pagemade {
 
@@ -61,10 +62,16 @@ public:
     float x_height() const   { return m_x_height; }
 
     hb_font_t *hb() const { return m_font; }
+    hb_face_t *hb_face() const { return m_face; }   // for PDF embedding
+    bool is_cff() const;                            // CFF outlines vs glyf
+    /* The font's PostScript name (name id 6), or a sanitized fallback. */
+    std::string postscript_name() const;
     uint32_t space_glyph() const { return m_space_gid; }
     float advance(uint32_t gid) const;   // design units
 
     const GlyphOutline &outline(uint32_t gid) const;
+    /* Union of the outlines' bounding boxes, design units (y up). */
+    void glyph_bounds(uint32_t gid, float &x0, float &y0, float &x1, float &y1) const;
 
 private:
     Font() = default;

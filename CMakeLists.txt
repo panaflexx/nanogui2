@@ -954,10 +954,16 @@ if (NANOGUI_BUILD_EXAMPLES)
     target_link_directories(pagemade_composer PUBLIC ${HARFBUZZ_LIBRARY_DIRS})
     target_link_libraries(pagemade_composer PUBLIC unibreak ${HARFBUZZ_LIBRARIES})
 
+    pkg_check_modules(HARFBUZZ_SUBSET harfbuzz-subset)
+    if (NOT HARFBUZZ_SUBSET_FOUND)
+      message(STATUS "pagemade: harfbuzz-subset not found, PDF export needs it.")
+    endif()
+
     add_executable(pagemade_app
         pagemade/src/main.cpp
         pagemade/src/composerview.cpp
         pagemade/src/render_nvg.cpp
+        pagemade/src/pdf.cpp
         pagemade/src/default_fonts.cpp
         pagemade/src/page.cpp
         pagemade/src/geometry.cpp
@@ -965,6 +971,7 @@ if (NANOGUI_BUILD_EXAMPLES)
         pagemade/src/sample.cpp)
     add_executable(pagemade_compose_test
         pagemade/src/compose_test.cpp
+        pagemade/src/pdf.cpp
         pagemade/src/default_fonts.cpp
         pagemade/src/page.cpp
         pagemade/src/geometry.cpp
@@ -975,8 +982,10 @@ if (NANOGUI_BUILD_EXAMPLES)
           PAGEMADE_RESOURCE_DIR="${CMAKE_CURRENT_SOURCE_DIR}/resources"
           PAGEMADE_DATA_DIR="${CMAKE_CURRENT_SOURCE_DIR}/pagemade/resources")
     endforeach()
-    target_link_libraries(pagemade_app pagemade_composer nanogui ${NANOGUI_LIBS})
-    target_link_libraries(pagemade_compose_test pagemade_composer)
+    target_link_libraries(pagemade_app pagemade_composer nanogui miniz
+        ${HARFBUZZ_SUBSET_LIBRARIES} ${NANOGUI_LIBS})
+    target_link_libraries(pagemade_compose_test pagemade_composer miniz
+        ${HARFBUZZ_SUBSET_LIBRARIES})
     # Output name "pagemade" would collide with the pagemade/ source directory
     set_target_properties(pagemade_app PROPERTIES OUTPUT_NAME pagemade)
     set_target_properties(pagemade_app pagemade_compose_test PROPERTIES

@@ -11,6 +11,7 @@
 #include "drawlist.h"
 #include "geometry.h"
 #include "page.h"
+#include "pdf.h"
 
 #include <algorithm>
 #include <cmath>
@@ -316,6 +317,30 @@ static void test_edit(const FontLibrary &fonts) {
         TextPos past = hit_test(c, s, col, 10000, 30 + 590);
         CHECK(past.byte == text.size(), "click past the text hits the end (%u)", past.byte);
     }
+}
+
+static void test_pdf(const FontLibrary &fonts) {
+    PageDoc doc = sample_document();
+    std::vector<Composition> comps;
+    for (const StoryEntry &se : doc.stories)
+        comps.push_back(compose(se.story, doc.thread_frames(se), fonts));
+    const std::string path = "/tmp/pagemade_test.pdf";
+    CHECK(export_pdf(path, doc, comps), "export_pdf writes the sample document");
+    FILE *f = std::fopen(path.c_str(), "rb");
+    if (!f)
+        return;
+    std::string bytes;
+    char buf[4096];
+    size_t n;
+    while ((n = std::fread(buf, 1, sizeof buf, f)) > 0)
+        bytes.append(buf, n);
+    std::fclose(f);
+    CHECK(bytes.rfind("%PDF-1.7", 0) == 0, "PDF header");
+    CHECK(bytes.size() > 1000 &&
+          bytes.compare(bytes.size() - 6, 6, "%%EOF\n") == 0, "PDF trailer");
+    CHECK(bytes.find("/Type0") != std::string::npos, "a composite font is embedded");
+    CHECK(bytes.find("Identity-H") != std::string::npos, "identity encoding");
+    std::printf("  pdf: %zu bytes\n", bytes.size());
 }
 
 static void test_deterministic(const FontLibrary &fonts) {
@@ -685,6 +710,7 @@ int main(int argc, char **argv) {
     test_threading(fonts);
     test_breaks(fonts);
     test_edit(fonts);
+    test_pdf(fonts);
     test_deterministic(fonts);
     test_model(fonts);
     test_tabs(fonts);

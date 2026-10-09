@@ -79,6 +79,45 @@ float Font::advance(uint32_t gid) const {
     return (float) hb_font_get_glyph_h_advance(m_font, gid);
 }
 
+bool Font::is_cff() const {
+    hb_blob_t *t = hb_face_reference_table(m_face, HB_TAG('C', 'F', 'F', ' '));
+    unsigned len = hb_blob_get_length(t);
+    hb_blob_destroy(t);
+    return len > 0;
+}
+
+std::string Font::postscript_name() const {
+    char buf[256];
+    unsigned len = sizeof buf - 1;
+    hb_ot_name_get_utf8(m_face, HB_OT_NAME_ID_POSTSCRIPT_NAME,
+                        HB_LANGUAGE_INVALID, &len, buf);
+    if (len > 0)
+        return std::string(buf, len);
+    /* Fallback: the file name without extension, spaces stripped. */
+    std::string n = m_name;
+    size_t dot = n.find_last_of('.');
+    if (dot != std::string::npos)
+        n.resize(dot);
+    std::string out;
+    for (char c : n)
+        if (c > 32 && c < 127 && c != '(' && c != ')' && c != '<' && c != '>' &&
+            c != '[' && c != ']' && c != '{' && c != '}' && c != '/' && c != '%')
+            out += c;
+    return out.empty() ? "Font" : out;
+}
+
+void Font::glyph_bounds(uint32_t gid, float &x0, float &y0, float &x1, float &y1) const {
+    hb_glyph_extents_t e;
+    if (!hb_font_get_glyph_extents(m_font, gid, &e)) {
+        x0 = y0 = x1 = y1 = 0;
+        return;
+    }
+    x0 = (float) e.x_bearing;
+    y0 = (float) (e.y_bearing + e.height);   // y up: bottom
+    x1 = (float) (e.x_bearing + e.width);
+    y1 = (float) e.y_bearing;                // top
+}
+
 /* ---- Outline extraction -------------------------------------------------- */
 
 namespace {

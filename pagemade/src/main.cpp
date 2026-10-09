@@ -11,7 +11,7 @@
  * size, 2 200%, 4 400%, 8 800%.
  *
  *   pagemade
- *   pagemade --screenshot out.png [--zoom 4 --at 150,400] [--select 1,1]
+ *   pagemade --screenshot out.png [--export-pdf out.pdf] [--zoom 4 --at 150,400] [--select 1,1]
  *            [--baselines] [--loose] [--no-kerning] [--no-snap]
  *            [--tool pointer|text|rotate|line|rect|ellipse|polygon ...]
  *            [--fill swatch[,tint] ...] [--stroke swatch,weight[,style] ...]
@@ -37,6 +37,7 @@
 #include "composerview.h"
 #include "default_fonts.h"
 #include "page.h"
+#include "pdf.h"
 
 #define STB_IMAGE_WRITE_IMPLEMENTATION
 #include "../../ext/glfw/deps/stb_image_write.h"
@@ -47,6 +48,11 @@
 #include <cstdlib>
 #include <string>
 #include <vector>
+
+#if !defined(_WIN32)
+#include <fcntl.h>
+#include <unistd.h>
+#endif
 
 #ifndef PAGEMADE_DATA_DIR
 #define PAGEMADE_DATA_DIR "pagemade/resources"
@@ -105,6 +111,13 @@ public:
         m_redo_btn->set_tooltip("Redo (Ctrl+Shift+Z)");
         m_undo_btn->set_callback([this] { m_view->undo(); });
         m_redo_btn->set_callback([this] { m_view->redo(); });
+
+        auto *pdf_btn = new Button(toolbar, "", FA_FILE_PDF);
+        pdf_btn->set_tooltip("Export as PDF");
+        pdf_btn->set_callback([this] { export_pdf_dialog(); });
+        auto *print_btn = new Button(toolbar, "", FA_PRINT);
+        print_btn->set_tooltip("Print (Ctrl+P, via CUPS lp)");
+        print_btn->set_callback([this] { print_document(); });
 
         /* The zoom levels PageMaker keeps in the View menu, as one dropdown.
          * 0 means Fit in Window. The caption follows the actual zoom. */
@@ -387,10 +400,54 @@ public:
                       "  %zu items, %zu stories, %zu lines, composed in %.2f ms%s   |   zoom %.0f%%",
                       doc.pages[0].items.size(), comps.size(), lines, ms,
                       overset ? "   |   story overset (red arrow)" : "", m_scroll->zoom() * 100.0);
-        m_status->set_caption(buf);
+        m_status->set_caption(std::string(buf) + m_note);
         sync_zoom_menu();
         m_undo_btn->set_enabled(m_view->can_undo());
         m_redo_btn->set_enabled(m_view->can_redo());
+    }
+
+    /* A trailing note in the status bar ("wrote out.pdf"), kept until the
+     * next one. */
+    void set_note(const std::string &note) {
+        m_note = "   |   " + note;
+        update_status();
+    }
+
+    bool export_pdf_to(const std::string &path) {
+        return export_pdf(path, m_view->document(), m_view->compositions());
+    }
+
+    void export_pdf_dialog() {
+        auto paths = file_dialog({{"pdf", "PDF document"}}, true, false, "");
+        if (paths.empty() || paths[0].empty())
+            return;
+        std::string path = paths[0];
+        if (path.size() < 4 || path.compare(path.size() - 4, 4, ".pdf") != 0)
+            path += ".pdf";
+        set_note(export_pdf_to(path) ? "wrote " + path
+                                     : "PDF export FAILED: " + path);
+    }
+
+    /* Print through CUPS: export, then hand the PDF to lp. */
+    void print_document() {
+        const std::string path = "/tmp/pagemade-print.pdf";
+        if (!export_pdf_to(path)) {
+            set_note("print failed: could not write " + path);
+            return;
+        }
+#if defined(_WIN32)
+        set_note("printing is not wired up on Windows yet; use Export PDF");
+#else
+        pid_t pid = fork();
+        if (pid == 0) {
+            setsid();
+            int fd = open("/dev/null", O_RDWR);
+            if (fd >= 0) { dup2(fd, 0); dup2(fd, 1); dup2(fd, 2); if (fd > 2) close(fd); }
+            execlp("lp", "lp", path.c_str(), (char *) nullptr);
+            _exit(127);
+        }
+        set_note(pid > 0 ? "sent to the default printer (lp)" : "print failed (fork)");
+#endif
     }
 
     bool keyboard_event(int key, int scancode, int action, int modifiers) override {
@@ -405,6 +462,7 @@ public:
         case GLFW_KEY_Y:
             m_view->redo();
             return true;
+        case GLFW_KEY_P: print_document(); return true;
         case GLFW_KEY_0: fit_page(); return true;
         case GLFW_KEY_5: zoom_to(0.5); return true;
         case GLFW_KEY_7: zoom_to(0.75); return true;
@@ -554,6 +612,7 @@ private:
     IntBox<int>     *m_sides = nullptr, *m_star = nullptr;
     std::vector<SwatchId> m_swatch_ids;
     Label           *m_status = nullptr;
+    std::string     m_note;
 };
 
 static bool parse_pair(const char *s, float &a, float &b) {
@@ -606,7 +665,7 @@ static bool parse_key(const std::string &spec, int &key, int &mods) {
 }
 
 int main(int argc, char **argv) {
-    std::string shot;
+    std::string shot, pdf;
     double zoom = 0;
     float at_x = -1, at_y = -1, sel_a = -1, sel_b = -1;
     bool baselines = false, loose = false, no_kern = false, no_snap = false;
@@ -615,6 +674,7 @@ int main(int argc, char **argv) {
         std::string a = argv[i];
         Action act;
         if (a == "--screenshot" && i + 1 < argc) shot = argv[++i];
+        else if (a == "--export-pdf" && i + 1 < argc) pdf = argv[++i];
         else if (a == "--drag" && i + 1 < argc &&
                  std::sscanf(argv[i + 1], "%f,%f:%f,%f", &act.d[0], &act.d[1], &act.d[2], &act.d[3]) == 4) {
             act.kind = Action::Drag;
@@ -694,6 +754,10 @@ int main(int argc, char **argv) {
                 break;
             }
         }
+
+        if (!pdf.empty())
+            std::printf("pdf %s %s\n", app->export_pdf_to(pdf) ? "saved" : "FAILED",
+                        pdf.c_str());
 
         if (!shot.empty()) {
             for (int k = 0; k < 2; ++k) { app->perform_layout(); app->draw_all(); }
