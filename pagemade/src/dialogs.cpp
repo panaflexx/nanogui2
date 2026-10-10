@@ -7,6 +7,7 @@
 #include "composer/font.h"
 #include "font_menu_ui.h"
 #include "render_nvg.h"
+#include "spinbox.h"
 
 #include <nanogui/button.h>
 #include <nanogui/checkbox.h>
@@ -629,11 +630,11 @@ TypeSpecsPanel::TypeSpecsPanel(Screen *screen, FontLibrary &fonts, FontMenuModel
     st->caps->set_fixed_size(Vector2i(160, 28));
     st->caps->set_selected_index(st->style.caps == Caps::Small ? 1 : st->style.caps == Caps::All ? 2 : 0);
 
-    auto metric = [&](const char *label, float value, const char *tip,
-                      const std::function<void(float)> &set) {
+    /* The number fields spin (spinbox.h). */
+    auto metric = [&](const char *label, float value, float step, float lo, float hi,
+                      const char *tip, const std::function<void(float)> &set) {
         new Label(grid, label, "sans-bold");
-        auto *box = new FloatBox<float>(grid, value);
-        box->set_editable(true);
+        auto *box = new FloatSpin(grid, value, step, lo, hi);
         box->number_format("%.2f");
         box->set_fixed_size(Vector2i(120, 28));
         box->set_tooltip(tip);
@@ -649,13 +650,19 @@ TypeSpecsPanel::TypeSpecsPanel(Screen *screen, FontLibrary &fonts, FontMenuModel
         return box;
     };
 
-    st->size_box = metric("Size", 12.f, "Type size, in points", [st, refresh_preview](float v) {
+    st->size_box = metric("Size", 12.f, 1.f, 1.f, 720.f, "Type size, in points",
+                          [st, refresh_preview](float v) {
         st->style.size = std::clamp(v, 1.f, 720.f);
         refresh_preview();
     });
     new Label(grid, "Leading", "sans-bold");
-    st->leading = new FloatBox<float>(grid);
-    st->leading->set_editable(true);
+    auto *leading = new FloatSpin(grid, 0.f, 1.f, 0.f, 1300.f);
+    leading->set_blank_value([st] {
+        return st->style.leading > 0.f ? st->style.leading
+                                       : st->style.size * pagemade::ParaStyle().autoleading * 0.01f;
+    });
+    leading->number_format("%.2f");
+    st->leading = leading;
     st->leading->set_format("([Aa]uto)|([-+]?[0-9]*\\.?[0-9]+)");
     st->leading->set_fixed_size(Vector2i(120, 28));
     st->leading->set_tooltip("Line height. Auto (or 0) is proportional leading.");
@@ -684,11 +691,11 @@ TypeSpecsPanel::TypeSpecsPanel(Screen *screen, FontLibrary &fonts, FontMenuModel
     pair_layout->set_col_alignment(
         {Alignment::Maximum, Alignment::Fill, Alignment::Maximum, Alignment::Fill});
     pair->set_layout(pair_layout);
-    auto small_metric = [&](const char *label, float value, const char *tip,
+    auto small_metric = [&](const char *label, float value, float step, float lo, float hi,
+                            const char *tip,
                             const std::function<void(float)> &set) -> FloatBox<float> * {
         new Label(pair, label, "sans-bold");
-        auto *box = new FloatBox<float>(pair, value);
-        box->set_editable(true);
+        auto *box = new FloatSpin(pair, value, step, lo, hi);
         box->number_format("%.2f");
         box->set_fixed_size(Vector2i(90, 28));
         box->set_tooltip(tip);
@@ -703,15 +710,18 @@ TypeSpecsPanel::TypeSpecsPanel(Screen *screen, FontLibrary &fonts, FontMenuModel
         });
         return box;
     };
-    st->hscale = small_metric("Set width", 100.f, "Horizontal scale, percent", [st, refresh_preview](float v) {
+    st->hscale = small_metric("Set width", 100.f, 1.f, 1.f, 1000.f, "Horizontal scale, percent",
+                              [st, refresh_preview](float v) {
         st->style.hscale = std::clamp(v, 1.f, 1000.f);
         refresh_preview();
     });
-    st->tracking = small_metric("Track", 0.f, "Tracking, thousandths of an em", [st, refresh_preview](float v) {
+    st->tracking = small_metric("Track", 0.f, 10.f, -500.f, 1000.f, "Tracking, thousandths of an em",
+                                [st, refresh_preview](float v) {
         st->style.tracking = std::clamp(v, -500.f, 1000.f);
         refresh_preview();
     });
-    st->baseline = small_metric("Baseline", 0.f, "Baseline shift. Positive raises the type.",
+    st->baseline = small_metric("Baseline", 0.f, 0.5f, -500.f, 500.f,
+                                "Baseline shift. Positive raises the type.",
                                 [st, refresh_preview](float v) {
         st->style.baseline_shift = std::clamp(v, -500.f, 500.f);
         refresh_preview();

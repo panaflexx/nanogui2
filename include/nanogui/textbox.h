@@ -16,6 +16,7 @@
 #pragma once
 
 #include <nanogui/widget.h>
+#include <cstdlib>
 #include <cstdio>
 #include <sstream>
 
@@ -311,8 +312,9 @@ public:
 
     void number_format(const std::string &format) { m_number_format = format; }
 
+    /* 0 when the box holds no number (empty, or a word such as "Auto"). */
     Scalar value() const {
-        return (Scalar) std::stod(TextBox::value());
+        return (Scalar) std::strtod(TextBox::value().c_str(), nullptr);
     }
 
     void set_value(Scalar value) {
@@ -324,7 +326,7 @@ public:
 
     void set_callback(const std::function<void(Scalar)> &cb) {
         TextBox::set_callback([cb, this](const std::string &str) {
-            Scalar scalar = (Scalar) std::stod(str);
+            Scalar scalar = (Scalar) std::strtod(str.c_str(), nullptr);
             set_value(scalar);
             cb(scalar);
             return true;

@@ -176,6 +176,10 @@ public:
      * not undoable. */
     void push_undo();                  // snapshot the document as it is now
     void will_edit(bool burst);        // call before mutating the story
+    /* Palette spinners: while the change made with `key` set follows the
+     * last one made with the same key, and nothing else happened between,
+     * it joins that undo step. Set it around one change; nullptr after. */
+    void set_undo_merge(const void *key) { m_merge_key = key; }
     bool can_undo() const { return !m_undo.empty(); }
     bool can_redo() const { return !m_redo.empty(); }
     void undo();
@@ -359,6 +363,9 @@ private:
     uint64_t m_version = 0, m_clean_version = 0, m_next_version = 0;
     uint64_t m_creation_version = 0, m_placement_version = 0;
     bool m_burst_open = false;            // typing/deleting run in progress
+    const void *m_merge_key = nullptr;    // set_undo_merge
+    const void *m_merged_key = nullptr;   // key of the newest undo step
+    uint64_t m_merged_version = 0;        // the version that step left
     bool m_gesture_saved = false;         // drag pushed its snapshot
     pagemade::Point m_drag_start;         // page point at press
     std::vector<pagemade::Item> m_drag_items;   // the selected items at press

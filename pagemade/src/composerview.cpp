@@ -160,7 +160,12 @@ void ComposerView::push_snapshot(PageDoc doc, uint64_t version) {
 }
 
 void ComposerView::push_undo() {
-    push_snapshot(m_doc, m_version);
+    if (m_merge_key && m_merge_key == m_merged_key && m_version == m_merged_version)
+        bump_version();                  // same undo step, but a changed document
+    else
+        push_snapshot(m_doc, m_version);
+    m_merged_key = m_merge_key;
+    m_merged_version = m_version;
 }
 
 void ComposerView::will_edit(bool burst) {
@@ -174,6 +179,7 @@ void ComposerView::will_edit(bool burst) {
 void ComposerView::mark_clean() {
     m_clean_version = m_version;
     m_burst_open = false;                // the next keystroke starts a new step
+    m_merged_key = nullptr;
     if (on_document_change)
         on_document_change();
 }
@@ -511,6 +517,7 @@ bool ComposerView::mouse_button_event(const Vector2i &p, int button, bool down, 
     }
     request_focus();
     m_burst_open = false;                // any click ends a typing or nudging run
+    m_merged_key = nullptr;              // ... or a palette spin
     const bool shift = (modifiers & GLFW_MOD_SHIFT) != 0;
 
     if (m_tool == Tool::Text) {

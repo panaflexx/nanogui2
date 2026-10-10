@@ -26,6 +26,7 @@
  *            [--key [mod+]name ...] [--open file.pagemade] [--place picture.png]
  *            [--save file.pagemade ...] [--save-embedded file.pagemade ...]
  *            [--dialog save|changes] [--print-title]
+ *            [--ui-click x,y ...] [--ui-scroll x,y:dy ...]
  *
  * --at is a page point (points from the page's top-left) to center on.
  * --select picks a text block by story and thread index ("1,0").
@@ -34,7 +35,9 @@
  * --key (enter, backspace, left, ..., a-z; mods shift/ctrl/alt) exercise
  * the text tool the same way. --tool picks a tool, and --fill / --stroke
  * set the selection's paint as the control palette would (style: solid,
- * dashed, dotted, dashdot). All of these run in the order given.
+ * dashed, dotted, dashdot). --ui-click and --ui-scroll act on the window
+ * itself, in window pixels (the palettes, menus, dialogs). All of these run
+ * in the order given.
  */
 #include <nanogui/nanogui.h>
 #include <nanogui/menu.h>
@@ -52,6 +55,7 @@
 #include "system_fonts.h"
 #include "page.h"
 #include "pdf.h"
+#include "spinbox.h"
 
 #define STB_IMAGE_WRITE_IMPLEMENTATION
 #include "../../ext/glfw/deps/stb_image_write.h"
@@ -615,21 +619,25 @@ public:
         m_type_box->set_visible(false);
         Widget *bar = m_object_box;
 
-        auto number = [&](const char *label, const char *units, int field, float width) {
+        /* Number fields spin: the arrows, the scroll wheel or a right-drag
+         * step them (spinbox.h), and a run of steps is one undo step. */
+        auto number = [&](const char *label, const char *units, int field, float width,
+                          float step, float lo, float hi) {
             new Label(bar, label, "sans-bold");
-            auto *box = new FloatBox<float>(bar);
-            box->set_editable(true);
+            auto *box = new FloatSpin(bar, 0.f, step, lo, hi);
             box->number_format("%.2f");
             box->set_units(units);
             box->set_fixed_size(Vector2i((int) width, 26));
-            box->set_callback([this, field](float v) { apply_geometry(field, v); });
+            box->set_callback([this, box, field](float v) {
+                palette_change(box, [&] { apply_geometry(field, v); });
+            });
             m_geom[field] = box;
         };
-        number("X", "pt", 0, 64);
-        number("Y", "pt", 1, 64);
-        number("W", "pt", 2, 64);
-        number("H", "pt", 3, 64);
-        number("Rot", "\u00B0", 4, 58);
+        number("X", "pt", 0, 80, 1.f, -1e5f, 1e5f);
+        number("Y", "pt", 1, 80, 1.f, -1e5f, 1e5f);
+        number("W", "pt", 2, 80, 1.f, 0.f, 1e5f);
+        number("H", "pt", 3, 80, 1.f, 0.f, 1e5f);
+        number("Rot", "\u00B0", 4, 70, 1.f, -360.f, 360.f);
 
         /* The Colors palette's swatches, "None" first, in both paint menus. */
         std::vector<std::string> swatches{"None"};
@@ -641,53 +649,54 @@ public:
         auto menu = [&](const std::vector<std::string> &items, int width) {
             auto *d = new Dropdown(bar, items, {}, Dropdown::ComboBox, items.front());
             d->set_fixed_size(Vector2i(width, 26));
+            d->set_max_size(Vector2i(width, 26));    // the theme's minimum is wider
             return d;
         };
 
         new Label(bar, " Fill", "sans-bold");
-        m_fill = menu(swatches, 96);
+        m_fill = menu(swatches, 90);
         m_fill->set_selected_callback([this](int i) {
             const SwatchId id = m_swatch_ids[i];
             m_view->apply_shape_style([id](Shape &sh) { sh.fill.swatch = id; });
         });
-        m_fill_tint = menu({"100%", "80%", "60%", "40%", "30%", "20%", "10%"}, 66);
+        m_fill_tint = menu({"100%", "80%", "60%", "40%", "30%", "20%", "10%"}, 62);
         m_fill_tint->set_selected_callback([this](int i) {
             const float t = kTints[i];
             m_view->apply_shape_style([t](Shape &sh) { sh.fill.tint = t; });
         });
 
         new Label(bar, " Stroke", "sans-bold");
-        m_stroke = menu(swatches, 96);
+        m_stroke = menu(swatches, 90);
         m_stroke->set_selected_callback([this](int i) {
             const SwatchId id = m_swatch_ids[i];
             m_view->apply_shape_style([id](Shape &sh) { sh.stroke.paint.swatch = id; });
         });
-        m_weight = menu({"Hairline", "0.5 pt", "1 pt", "2 pt", "4 pt", "6 pt", "8 pt", "12 pt"}, 82);
+        m_weight = menu({"Hairline", "0.5 pt", "1 pt", "2 pt", "4 pt", "6 pt", "8 pt", "12 pt"}, 76);
         m_weight->set_selected_callback([this](int i) {
             const float w = kWeights[i];
             m_view->apply_shape_style([w](Shape &sh) { sh.stroke.weight = w; });
         });
-        m_style = menu({"Solid", "Dashed", "Dotted", "Dash-dot"}, 88);
+        m_style = menu({"Solid", "Dashed", "Dotted", "Dash-dot"}, 80);
         m_style->set_selected_callback([this](int i) {
             m_view->apply_shape_style([i](Shape &sh) { sh.stroke.style = (LineStyle) i; });
         });
 
         new Label(bar, " Sides", "sans-bold");
-        m_sides = new IntBox<int>(bar, 6);
-        m_sides->set_editable(true);
-        m_sides->set_min_max_values(3, 100);
-        m_sides->set_fixed_size(Vector2i(44, 26));
+        m_sides = new IntSpin(bar, 6, 1, 3, 100);
+        m_sides->set_fixed_size(Vector2i(52, 26));
         m_sides->set_callback([this](int v) {
-            m_view->apply_shape_style([v](Shape &sh) { sh.sides = std::max(3, v); });
+            palette_change(m_sides, [&] {
+                m_view->apply_shape_style([v](Shape &sh) { sh.sides = std::max(3, v); });
+            });
         });
         new Label(bar, "Star", "sans-bold");
-        m_star = new IntBox<int>(bar, 0);
-        m_star->set_editable(true);
-        m_star->set_min_max_values(0, 100);
+        m_star = new IntSpin(bar, 0, 5, 0, 100);
         m_star->set_units("%");
-        m_star->set_fixed_size(Vector2i(54, 26));
+        m_star->set_fixed_size(Vector2i(62, 26));
         m_star->set_callback([this](int v) {
-            m_view->apply_shape_style([v](Shape &sh) { sh.star_inset = (float) v; });
+            palette_change(m_star, [&] {
+                m_view->apply_shape_style([v](Shape &sh) { sh.star_inset = (float) v; });
+            });
         });
 
         /* Type view. Leading 0 is PageMaker's automatic leading ("Auto").
@@ -696,10 +705,10 @@ public:
          * typing searches every installed family. Style is the family's
          * faces (Light, Condensed Bold, …). Type opens the rest. */
         Widget *type = m_type_box;
-        auto type_number = [&](const char *label, const char *units, int width) {
+        auto type_number = [&](const char *label, const char *units, int width,
+                               float step, float lo, float hi) {
             new Label(type, label, "sans-bold");
-            auto *box = new FloatBox<float>(type);
-            box->set_editable(true);
+            auto *box = new FloatSpin(type, 0.f, step, lo, hi);
             box->number_format("%.2f");
             box->set_units(units);
             box->set_fixed_size(Vector2i(width, 26));
@@ -729,8 +738,16 @@ public:
             return true;
         });
 
-        m_size = type_number("Size", "pt", 62);
+        /* A mixed selection shows blank; spinning starts from the first
+         * character's value. Auto leading spins from the size it gives. */
+        auto type_now = [this] {
+            ComposerView::TypeStyle t;
+            m_view->type_style(t);
+            return t;
+        };
+        m_size = type_number("Size", "pt", 76, 1.f, 1.f, 720.f);
         m_size->set_tooltip("Type size, in points");
+        m_size->set_blank_value([type_now] { return type_now().size; });
         m_size->TextBox::set_callback([this](const std::string &s) {
             char *end = nullptr;
             const float v = std::strtof(s.c_str(), &end);
@@ -738,7 +755,9 @@ public:
                 return false;
             const float size = std::clamp(v, 1.f, 720.f);
             m_size->set_value(size);
-            m_view->apply_type([size](CharStyle &cs) { cs.size = size; });
+            palette_change(m_size, [&] {
+                m_view->apply_type([size](CharStyle &cs) { cs.size = size; });
+            });
             return true;
         });
 
@@ -759,8 +778,12 @@ public:
             });
         });
 
-        m_leading = type_number("Leading", "pt", 70);
+        m_leading = type_number("Leading", "pt", 84, 1.f, 0.f, 1300.f);
         m_leading->set_tooltip("Line height. Auto (or 0) is proportional leading.");
+        m_leading->set_blank_value([type_now] {
+            const ComposerView::TypeStyle t = type_now();
+            return t.leading > 0.f ? t.leading : t.size * ParaStyle().autoleading * 0.01f;
+        });
         m_leading->set_format("([Aa]uto)|([-+]?[0-9]*\\.?[0-9]+)");
         m_leading->TextBox::set_callback([this](const std::string &s) {
             float lead = 0;
@@ -775,12 +798,15 @@ public:
                 m_leading->TextBox::set_value("Auto");
             else
                 m_leading->set_value(lead);
-            m_view->apply_type([lead](CharStyle &cs) { cs.leading = lead; });
+            palette_change(m_leading, [&] {
+                m_view->apply_type([lead](CharStyle &cs) { cs.leading = lead; });
+            });
             return true;
         });
 
-        m_baseline = type_number("Baseline", "pt", 70);
+        m_baseline = type_number("Baseline", "pt", 84, 0.5f, -500.f, 500.f);
         m_baseline->set_tooltip("Baseline shift. Positive raises the type.");
+        m_baseline->set_blank_value([type_now] { return type_now().baseline; });
         m_baseline->TextBox::set_callback([this](const std::string &s) {
             char *end = nullptr;
             const float v = std::strtof(s.c_str(), &end);
@@ -788,7 +814,9 @@ public:
                 return false;
             const float shift = std::clamp(v, -500.f, 500.f);
             m_baseline->set_value(shift);
-            m_view->apply_type([shift](CharStyle &cs) { cs.baseline_shift = shift; });
+            palette_change(m_baseline, [&] {
+                m_view->apply_type([shift](CharStyle &cs) { cs.baseline_shift = shift; });
+            });
             return true;
         });
 
@@ -946,6 +974,14 @@ public:
         if (m_type_panel->size() == Vector2i(0, 0))
             m_type_panel->center();
         m_type_panel->request_focus();
+    }
+
+    /* A change from a palette field. The steps of one spin are one undo
+     * step; a typed value is a step of its own. */
+    template <typename Box> void palette_change(Box *box, const std::function<void()> &change) {
+        m_view->set_undo_merge(box->spinning() ? box : nullptr);
+        change();
+        m_view->set_undo_merge(nullptr);
     }
 
     void apply_geometry(int field, float v) {
@@ -1420,10 +1456,10 @@ private:
     CheckBox        *m_kern = nullptr, *m_baselines = nullptr, *m_loose = nullptr;
     std::vector<std::pair<ComposerView::Tool, ToolButton *>> m_tool_btns;
     Button          *m_snap_btn = nullptr;
-    FloatBox<float> *m_geom[5] = {};
+    FloatSpin       *m_geom[5] = {};
     Dropdown        *m_fill = nullptr, *m_fill_tint = nullptr, *m_stroke = nullptr;
     Dropdown        *m_weight = nullptr, *m_style = nullptr;
-    IntBox<int>     *m_sides = nullptr, *m_star = nullptr;
+    IntSpin         *m_sides = nullptr, *m_star = nullptr;
     std::vector<SwatchId> m_swatch_ids;
     Button          *m_mode_btn = nullptr;
     Widget          *m_object_box = nullptr, *m_type_box = nullptr;
@@ -1438,7 +1474,7 @@ private:
     Dropdown        *m_font = nullptr, *m_face = nullptr;
     Button          *m_specs = nullptr;
     TypeSpecsPanel  *m_type_panel = nullptr;
-    FloatBox<float> *m_size = nullptr, *m_leading = nullptr, *m_baseline = nullptr;
+    FloatSpin       *m_size = nullptr, *m_leading = nullptr, *m_baseline = nullptr;
     MenuItem        *m_remove_page = nullptr, *m_move_earlier = nullptr, *m_move_later = nullptr;
     MenuItem        *m_hide_page = nullptr;
     MenuItem        *m_to_front = nullptr, *m_forward = nullptr, *m_backward = nullptr, *m_to_back = nullptr;
@@ -1456,7 +1492,8 @@ static bool parse_pair(const char *s, float &a, float &b) {
 
 /* A headless input action, replayed through Screen's GLFW callbacks. */
 struct Action {
-    enum Kind { Drag, Click, Type, Key, Tool, Fill, Stroke, Save, SaveEmbedded } kind;
+    enum Kind { Drag, Click, Type, Key, Tool, Fill, Stroke, Save, SaveEmbedded,
+                UiClick, UiScroll } kind;
     std::array<float, 4> d{};
     std::string text;
     int key = 0, mods = 0;
@@ -1531,6 +1568,17 @@ int main(int argc, char **argv) {
             actions.push_back(act);
             ++i;
         }
+        else if (a == "--ui-click" && i + 1 < argc && parse_pair(argv[i + 1], act.d[0], act.d[1])) {
+            act.kind = Action::UiClick;
+            actions.push_back(act);
+            ++i;
+        }
+        else if (a == "--ui-scroll" && i + 1 < argc &&
+                 std::sscanf(argv[i + 1], "%f,%f:%f", &act.d[0], &act.d[1], &act.d[2]) == 3) {
+            act.kind = Action::UiScroll;
+            actions.push_back(act);
+            ++i;
+        }
         else if (a == "--type" && i + 1 < argc) {
             act.kind = Action::Type;
             act.text = argv[++i];
@@ -1593,6 +1641,15 @@ int main(int argc, char **argv) {
                 break;
             case Action::Click:
                 app->synthetic_click(Vector2f(act.d[0], act.d[1]));
+                break;
+            case Action::UiClick:
+                app->cursor_pos_callback_event(act.d[0], act.d[1]);
+                app->mouse_button_callback_event(GLFW_MOUSE_BUTTON_1, GLFW_PRESS, 0);
+                app->mouse_button_callback_event(GLFW_MOUSE_BUTTON_1, GLFW_RELEASE, 0);
+                break;
+            case Action::UiScroll:
+                app->cursor_pos_callback_event(act.d[0], act.d[1]);
+                app->scroll_callback_event(0, act.d[2]);
                 break;
             case Action::Type:
                 app->synthetic_type(act.text);

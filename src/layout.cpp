@@ -105,9 +105,12 @@ void BoxLayout::perform_layout(NVGcontext* ctx, Widget* widget) const {
             Vector2i min_s = w->layout_min_size();
             Vector2i max_s = w->max_size();
 
-            int axis_pref = ps[axis1];
             int axis_min = min_s[axis1];
             int axis_max = max_s[axis1] > 0 ? max_s[axis1] : (container_size[axis1] - 2 * m_margin);
+            // What the child will actually ask for: a max_size caps a wide
+            // preferred size (a combo box's theme minimum, say), and leaving
+            // it uncapped here would shrink every sibling to make room.
+            int axis_pref = std::max(axis_min, std::min(ps[axis1], axis_max));
 
             total_pref += axis_pref;
             total_min += axis_min;
@@ -134,9 +137,9 @@ void BoxLayout::perform_layout(NVGcontext* ctx, Widget* widget) const {
         Vector2i min_s = w->layout_min_size();
         Vector2i max_s = w->max_size();
 
-        int axis_pref = ps[axis1];
         int axis_min = min_s[axis1];
         int axis_max = max_s[axis1] > 0 ? max_s[axis1] : (container_size[axis1] - 2 * m_margin);
+        int axis_pref = std::max(axis_min, std::min(ps[axis1], axis_max));
 
         int target_axis1 = axis_pref;
         if (overflow) {

@@ -179,7 +179,12 @@ void TextBox::draw(NVGcontext* ctx) {
         unit_width += 2;
     } else if (!m_units.empty()) {
         unit_width = nvgTextBounds(ctx, 0, 0, m_units.c_str(), nullptr, nullptr);
-        nvgFillColor(ctx, Color(255, m_enabled ? 64 : 32));
+        /* Muted, from the theme: a fixed translucent white vanished on
+           light themes. */
+        Color units_color = m_theme->m_disabled_text_color;
+        if (!m_enabled)
+            units_color.a() *= 0.5f;
+        nvgFillColor(ctx, units_color);
         nvgTextAlign(ctx, NVG_ALIGN_RIGHT | NVG_ALIGN_MIDDLE);
         nvgText(ctx, m_pos.x() + m_size.x() - x_spacing, draw_pos.y(),
                 m_units.c_str(), nullptr);
