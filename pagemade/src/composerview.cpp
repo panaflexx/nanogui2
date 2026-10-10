@@ -1123,8 +1123,132 @@ bool ComposerView::type_style(TypeStyle &o) const {
         o.mix_hscale |= b.hscale != a.hscale;
         o.mix_kerning |= b.kerning != a.kerning;
         o.mix_ligatures |= b.ligatures != a.ligatures;
+        o.mix_color |= b.swatch != a.swatch || !(b.color == a.color);
+        o.mix_tint |= b.tint != a.tint;
+        o.mix_char_style |= b.char_style != a.char_style;
     }
+    o.swatch = a.swatch;
+    o.tint = a.tint;
+    o.rgb = a.color;
+    o.char_style = a.char_style;
+    o.char_overridden = false;
+    if (!o.mix_char_style && !a.char_style.empty())
+        if (const CharStyleDef *d = m_doc.find_char_style(a.char_style))
+            for (const CharStyle &cs : styles)
+                o.char_overridden |= char_style_overridden(cs, *d);
     return true;
+}
+
+bool ComposerView::selection_char_style(CharStyle &cs, CharStyle &base) const {
+    const Paragraph *para = nullptr;
+    if (const Story *s = edit_story()) {
+        const TextPos a = m_anchor < m_caret ? m_anchor : m_caret;
+        if (a.para >= s->paragraphs.size())
+            return false;
+        para = &s->paragraphs[a.para];
+        if (has_selection()) {
+            /* The first selected character: the run holding byte a. */
+            uint32_t at = 0;
+            cs = para->runs.empty() ? CharStyle() : para->runs.back().style;
+            for (const Run &r : para->runs) {
+                if (a.byte < at + (uint32_t) r.text.size()) {
+                    cs = r.style;
+                    break;
+                }
+                at += (uint32_t) r.text.size();
+            }
+        } else {
+            cs = m_typing_on ? m_typing : style_at(*s, m_caret);
+        }
+    } else {
+        for (ItemId id : m_sel) {
+            size_t ti = 0;
+            const StoryEntry *se = m_doc.story_of(id, &ti);
+            const size_t si = se ? m_doc.story_index(se->id) : SIZE_MAX;
+            if (si >= m_comp.size())
+                continue;
+            for (const ComposedLine &l : m_comp[si].lines)
+                if (l.frame == ti && l.para < se->story.paragraphs.size()) {
+                    para = &se->story.paragraphs[l.para];
+                    cs = style_at(se->story, {l.para, l.byte_start + 1});
+                    break;
+                }
+            if (para)
+                break;
+        }
+        if (!para)
+            return false;
+    }
+    const Run *b = base_run(*para);
+    base = b ? b->style : cs;
+    return true;
+}
+
+void ComposerView::apply_char_style(const std::string &name) {
+    if (name.empty()) {
+        apply_type([](CharStyle &cs) { cs.char_style.clear(); });
+        return;
+    }
+    const CharStyleDef *def = m_doc.find_char_style(name);
+    if (!def)
+        return;
+    const CharStyleDef d = *def;
+    apply_type([d](CharStyle &cs) { pagemade::apply_char_style(cs, d); });
+}
+
+void ComposerView::define_char_style(const std::string &name) {
+    CharStyle cs, base;
+    if (name.empty() || !selection_char_style(cs, base))
+        return;
+    if (editing())
+        will_edit(false);
+    else
+        push_undo();
+    /* From the formatting without the old style's name in the way. */
+    cs.char_style.clear();
+    base.char_style.clear();
+    const CharStyleDef d = char_style_from(name, cs, base);
+    if (CharStyleDef *old = m_doc.find_char_style(name)) {
+        const CharStyleDef before = *old;
+        *old = d;
+        for (StoryEntry &se : m_doc.stories)
+            for (Paragraph &p : se.story.paragraphs)
+                for (Run &r : p.runs)
+                    if (r.style.char_style == name && !char_style_overridden(r.style, before))
+                        pagemade::apply_char_style(r.style, d);
+    } else {
+        m_doc.char_styles.push_back(d);
+    }
+    apply_type([d](CharStyle &c) { pagemade::apply_char_style(c, d); }, false);
+    recompose();
+    selection_changed();
+    if (screen())
+        screen()->redraw();
+}
+
+void ComposerView::delete_char_style(const std::string &name) {
+    auto it = std::find_if(m_doc.char_styles.begin(), m_doc.char_styles.end(),
+                           [&](const CharStyleDef &s) { return s.name == name; });
+    if (it == m_doc.char_styles.end())
+        return;
+    if (editing())
+        will_edit(false);
+    else
+        push_undo();
+    m_doc.char_styles.erase(it);
+    for (StoryEntry &se : m_doc.stories)
+        for (Paragraph &p : se.story.paragraphs) {
+            for (Run &r : p.runs)
+                if (r.style.char_style == name)
+                    r.style.char_style.clear();
+            normalize(p);
+        }
+    if (m_typing.char_style == name)
+        m_typing.char_style.clear();
+    recompose();
+    selection_changed();
+    if (screen())
+        screen()->redraw();
 }
 
 void ComposerView::collect_align_hits(std::vector<AlignHit> &out) const {
@@ -1277,7 +1401,7 @@ void ComposerView::apply_style(const std::string &name) {
     else
         push_undo();
     for (auto [si, pi] : paras)
-        pagemade::apply_style(m_doc.stories[si].story.paragraphs[pi], d);
+        pagemade::apply_style(m_doc.stories[si].story.paragraphs[pi], d, m_doc.char_styles);
     if (editing())
         m_typing_on = false;         // type at the caret follows the new style
     recompose();
@@ -1302,7 +1426,7 @@ void ComposerView::define_style(const std::string &name) {
         for (StoryEntry &se : m_doc.stories)
             for (Paragraph &p : se.story.paragraphs)
                 if (p.style.name == name && !style_overridden(p, before))
-                    pagemade::apply_style(p, d);
+                    pagemade::apply_style(p, d, m_doc.char_styles);
     } else {
         m_doc.styles.push_back(d);
     }
@@ -1351,10 +1475,11 @@ void ComposerView::apply_para(const std::function<void(ParaStyle &)> &fn) {
         screen()->redraw();
 }
 
-void ComposerView::apply_type(const std::function<void(CharStyle &)> &fn) {
+void ComposerView::apply_type(const std::function<void(CharStyle &)> &fn, bool undo) {
     if (Story *s = edit_story()) {
         if (has_selection()) {
-            will_edit(false);
+            if (undo)
+                will_edit(false);
             restyle(*s, m_anchor, m_caret, fn);
             recompose();
             selection_changed();
@@ -1395,7 +1520,8 @@ void ComposerView::apply_type(const std::function<void(CharStyle &)> &fn) {
         selection_changed();
         return;
     }
-    push_undo();
+    if (undo)
+        push_undo();
     for (const TypeRange &r : m_run_type)
         if (r.story < m_doc.stories.size())
             restyle(m_doc.stories[r.story].story, r.a, r.b, fn);
@@ -1833,6 +1959,7 @@ bool ComposerView::keyboard_event(int key, int, int action, int modifiers) {
         switch (key) {
         case GLFW_KEY_A: case GLFW_KEY_C: case GLFW_KEY_X:
         case GLFW_KEY_V: case GLFW_KEY_B: case GLFW_KEY_I:
+        case GLFW_KEY_ENTER: case GLFW_KEY_KP_ENTER:
             if (action != GLFW_PRESS)
                 return true;             // swallow the release
             break;
@@ -1869,6 +1996,13 @@ bool ComposerView::keyboard_event(int key, int, int action, int modifiers) {
             return true;
         case GLFW_KEY_B: case GLFW_KEY_I:
             toggle_style(key);
+            return true;
+        case GLFW_KEY_ENTER: case GLFW_KEY_KP_ENTER:
+            /* Cmd/Ctrl+Return: a frame break, the text goes on in the next
+             * text block. */
+            will_edit(true);
+            delete_selection();
+            insert_string("\x0C", true);
             return true;
         }
         return true;

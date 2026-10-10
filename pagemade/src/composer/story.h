@@ -7,8 +7,9 @@
  * dialogs. All lengths are points.
  *
  * Inside a run, '\n' or U+2028 is a line break that stays in the same
- * paragraph (PageMaker's Shift+Return), '\t' advances to the next tab
- * stop, and U+00AD is a discretionary hyphen.
+ * paragraph (PageMaker's Shift+Return), U+000C (form feed) is a frame
+ * break that carries the text on to the next text block, '\t' advances to
+ * the next tab stop, and U+00AD is a discretionary hyphen.
  */
 #pragma once
 
@@ -42,7 +43,14 @@ struct CharStyle {
     float baseline_shift = 0.f;  // positive = up
     bool  kerning = true;        // pair kerning from GPOS / kern
     bool  ligatures = true;      // fi, fl, ...
-    Color color;
+    /* Text color: a swatch of the publication with a tint, as shapes are
+     * painted. Swatch 0 means the RGB `color` (text from before swatches). */
+    Color    color;
+    uint32_t swatch = 0;
+    float    tint = 100.f;
+    /* The character style this run was set in (named in the publication);
+     * empty for none. */
+    std::string char_style;
 };
 
 /* Justify sets its last line left; JustifyCenter and JustifyRight center it
@@ -86,6 +94,17 @@ struct ParaStyle {
     int   drop_chars = 1;
     float drop_scale = 100.f;    // percent
 
+    /* Keep options (PageMaker's Paragraph Specifications). A rule a
+     * paragraph cannot keep where it starts moves it to the next text
+     * block; one that starts at the top of a block already stays put.
+     * orphans: the fewest of its lines left at the bottom of a block;
+     * widows: the fewest carried to the top of the next (below 2 = off). */
+    bool  keep_together = false;     // all lines in one text block
+    bool  keep_with_next = false;    // last line in the block where the next paragraph starts
+    bool  start_new_frame = false;   // always begin at the top of a text block
+    int   orphans = 0;
+    int   widows = 0;
+
     /* Spacing attributes (PageMaker defaults). Both are percentages of the
      * font's space width. Justified lines move word spaces between min and
      * max first, then letter spacing between its min and max. Ragged lines
@@ -112,6 +131,8 @@ struct ParaStyle {
 constexpr float kMinLineSpacing = 0.1f, kMaxLineSpacing = 3.f;
 constexpr int   kMaxDropLines = 12, kMaxDropChars = 10;
 constexpr float kMinDropScale = 25.f, kMaxDropScale = 400.f;
+constexpr int   kMaxKeepLines = 9;     // widows and orphans
+constexpr uint32_t kFrameBreak = 0x0C; // ends the line and the text block
 
 struct Run {
     CharStyle   style;
@@ -137,7 +158,8 @@ inline bool operator==(const CharStyle &a, const CharStyle &b) {
            a.strike == b.strike && a.size == b.size && a.leading == b.leading &&
            a.tracking == b.tracking && a.hscale == b.hscale &&
            a.baseline_shift == b.baseline_shift && a.kerning == b.kerning &&
-           a.ligatures == b.ligatures && a.color == b.color;
+           a.ligatures == b.ligatures && a.color == b.color && a.swatch == b.swatch &&
+           a.tint == b.tint && a.char_style == b.char_style;
 }
 inline bool operator!=(const CharStyle &a, const CharStyle &b) { return !(a == b); }
 

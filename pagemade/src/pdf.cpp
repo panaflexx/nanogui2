@@ -355,8 +355,9 @@ void emit_cm(std::string &s, const Transform &t) {
 /* A glyph run as real text: one BT/ET, each glyph at its composed position
  * (Tm carries the horizontal scale and the y-flip that keeps glyphs
  * upright under the page's y-down CTM). */
-void emit_glyphs(std::string &s, const GlyphRun &r, int res, std::map<int, float> &alphas) {
-    s += emit_color(r.color, false, alphas);
+void emit_glyphs(std::string &s, const GlyphRun &r, const Color &color, int res,
+                 std::map<int, float> &alphas) {
+    s += emit_color(color, false, alphas);
     s += "BT /F" + std::to_string(res) + " " + num(r.size) + " Tf\n";
     const float hs = r.hscale * 0.01f;
     for (const PlacedGlyph &g : r.glyphs) {
@@ -370,7 +371,7 @@ void emit_glyphs(std::string &s, const GlyphRun &r, int res, std::map<int, float
     std::vector<RuleSpan> rules;
     glyph_run_rules(r, rules);
     for (const RuleSpan &rule : rules) {
-        s += emit_color(r.color, true, alphas);
+        s += emit_color(color, true, alphas);
         s += num(rule.thickness) + " w\n";
         s += num(rule.x0) + " " + num(rule.y) + " m " + num(rule.x1) + " " + num(rule.y) + " l S\n";
     }
@@ -504,7 +505,7 @@ bool export_pdf(const std::string &path, const PageDoc &doc,
                 if (it == font_res.end())
                     continue;
                 emit_cm(content, g->xf);
-                emit_glyphs(content, *g->run, it->second, alphas);
+                emit_glyphs(content, *g->run, g->color, it->second, alphas);
                 content += "Q\n";
             } else if (const auto *f = std::get_if<DrawFill>(&op)) {
                 emit_cm(content, f->xf);

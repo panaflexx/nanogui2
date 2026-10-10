@@ -216,6 +216,48 @@ struct StyleDef {
 /* Normal, then PageMaker's predefined styles and a few more. */
 std::vector<StyleDef> default_styles();
 
+/* The attributes a character style sets; the rest of the text's formatting
+ * shows through (an Emphasis style is only italic). */
+enum CharField : uint32_t {
+    kCharFamily    = 1u << 0,
+    kCharFace      = 1u << 1,    // a named face ("Light")
+    kCharBold      = 1u << 2,
+    kCharItalic    = 1u << 3,
+    kCharSize      = 1u << 4,
+    kCharLeading   = 1u << 5,
+    kCharColor     = 1u << 6,    // swatch, tint (and RGB)
+    kCharUnderline = 1u << 7,
+    kCharStrike    = 1u << 8,
+    kCharCaps      = 1u << 9,
+    kCharTracking  = 1u << 10,
+    kCharHScale    = 1u << 11,
+    kCharBaseline  = 1u << 12,
+    kCharKerning   = 1u << 13,
+    kCharLigatures = 1u << 14,
+    kCharAllFields = (1u << 15) - 1,
+};
+/* The field names in the file, in bit order. */
+const char *char_field_name(int bit);
+
+/* A named character style (the Character panel's menu). */
+struct CharStyleDef {
+    std::string name;
+    CharStyle   type;            // only `fields` of it count
+    uint32_t    fields = 0;
+};
+
+/* Emphasis, Strong, Small caps and Accent (a spot of red). */
+std::vector<CharStyleDef> default_char_styles();
+/* Set the style's fields on `cs` and tag it with the name. Bold or italic
+ * without a named face clears the face, so the family's bold or italic
+ * cut is used. */
+void apply_char_style(CharStyle &cs, const CharStyleDef &def);
+/* `cs` differs from the style in a field the style sets. */
+bool char_style_overridden(const CharStyle &cs, const CharStyleDef &def);
+/* A style named `name` that sets what `cs` changes from `base` (the
+ * paragraph's own type); everything about the type when nothing does. */
+CharStyleDef char_style_from(const std::string &name, const CharStyle &cs, const CharStyle &base);
+
 /* The run that stands for a paragraph's type: the longest. Runs whose bold
  * or italic differ from it are emphasis. */
 const Run *base_run(const Paragraph &p);
@@ -223,7 +265,8 @@ const Run *base_run(const Paragraph &p);
  * family, face, size, leading, tracking, set width and caps on every run.
  * Emphasis keeps its bold or italic; underline, strikethrough, color and
  * baseline shift stay as they were. */
-void apply_style(Paragraph &p, const StyleDef &def);
+void apply_style(Paragraph &p, const StyleDef &def,
+                 const std::vector<CharStyleDef> &char_styles = {});
 /* `p` is formatted differently from `def` (shown as "Name+"). */
 bool style_overridden(const Paragraph &p, const StyleDef &def);
 /* A style named `name` made from `p`'s formatting. */
@@ -235,6 +278,7 @@ struct PageDoc {
     std::vector<StoryEntry> stories;
     std::vector<Swatch>     swatches = default_swatches();
     std::vector<StyleDef>   styles = default_styles();
+    std::vector<CharStyleDef> char_styles = default_char_styles();
     std::vector<ImageAsset> images;        // the publication's pictures
     uint32_t                next_id = 1;   // shared by items and stories
     uint32_t                next_asset = 1;
@@ -242,8 +286,13 @@ struct PageDoc {
     const Swatch *find_swatch(SwatchId id) const;
     const StyleDef *find_style(const std::string &name) const;
     StyleDef       *find_style(const std::string &name);
+    const CharStyleDef *find_char_style(const std::string &name) const;
+    CharStyleDef       *find_char_style(const std::string &name);
     /* The screen color of a paint; transparent for none. */
     Color resolve(const Paint &p) const;
+    /* Text's color: its swatch and tint, or `rgb` without a swatch (or
+     * when the swatch is gone). */
+    Color text_color(uint32_t swatch, float tint, const Color &rgb) const;
     /* Adds a swatch (ids above the built-ins) and returns its id. */
     SwatchId add_swatch(const std::string &name, Color rgb);
 

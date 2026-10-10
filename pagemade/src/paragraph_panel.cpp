@@ -191,6 +191,56 @@ void draw_para_icon(NVGcontext *ctx, ParaIcon icon, float x, float y, float w, f
         nvgLineTo(ctx, ox + 19, oy + 12.5f);
         stroke();
         break;
+    case ParaIcon::Orphans:
+    case ParaIcon::Widows: {
+        /* Two lines against a block's bottom edge (orphans) or top edge
+         * (widows), drawn as a bracket. */
+        const bool bottom = icon == ParaIcon::Orphans;
+        nvgBeginPath(ctx);
+        const float e = bottom ? oy + 15.f : oy + 1.f, in = bottom ? oy + 12.f : oy + 4.f;
+        nvgMoveTo(ctx, ox + 1, in);
+        nvgLineTo(ctx, ox + 1, e);
+        nvgLineTo(ctx, ox + 19, e);
+        nvgLineTo(ctx, ox + 19, in);
+        const float y0 = bottom ? oy + 7.5f : oy + 5.f;
+        bar(ctx, ox + 4, ox + 16, y0);
+        bar(ctx, ox + 4, ox + 12, y0 + 3.5f);
+        nvgLineJoin(ctx, NVG_MITER);
+        stroke();
+        break;
+    }
+    case ParaIcon::KeepTogether:
+        /* Lines held by a bracket. */
+        lines4(7, 19, 2, 4, -1, 0);
+        nvgBeginPath(ctx);
+        nvgMoveTo(ctx, ox + 4.5f, oy + 0.5f);
+        nvgLineTo(ctx, ox + 1.5f, oy + 0.5f);
+        nvgLineTo(ctx, ox + 1.5f, oy + 15.5f);
+        nvgLineTo(ctx, ox + 4.5f, oy + 15.5f);
+        nvgLineJoin(ctx, NVG_MITER);
+        stroke();
+        break;
+    case ParaIcon::KeepWithNext:
+        /* A heading, an arrow, and the text it stays with. */
+        nvgBeginPath(ctx);
+        bar(ctx, ox + 1, ox + 12, oy + 1.5f);
+        nvgMoveTo(ctx, ox + 6, oy + 4);
+        nvgLineTo(ctx, ox + 6, oy + 7);
+        bar(ctx, ox + 1, ox + 19, oy + 11);
+        bar(ctx, ox + 1, ox + 19, oy + 14.5f);
+        stroke();
+        arrow_head(ctx, ox + 6, oy + 9, 0, 1);
+        break;
+    case ParaIcon::StartNewFrame:
+        /* Text starting in the corner of a new block. */
+        nvgBeginPath(ctx);
+        nvgMoveTo(ctx, ox + 1, oy + 15.5f);
+        nvgLineTo(ctx, ox + 1, oy + 0.5f);
+        nvgLineTo(ctx, ox + 19, oy + 0.5f);
+        nvgLineJoin(ctx, NVG_MITER);
+        stroke();
+        lines4(5, 19, 4.5f, 3.5f, -1, 0);
+        break;
     case ParaIcon::SpaceBefore:
     case ParaIcon::SpaceAfter: {
         const bool before = icon == ParaIcon::SpaceBefore;
@@ -280,16 +330,19 @@ private:
 
 } // namespace
 
-/* One of the seven alignment buttons: lit when it is the paragraphs'
- * alignment. */
-class ParagraphPanel::AlignButton : public Button {
+/* An icon button, lit while its setting holds for the paragraphs: one of
+ * the seven alignments, or a keep option (`flag`). */
+class ParagraphPanel::IconButton : public Button {
 public:
-    AlignButton(Widget *parent, ParaIcon icon, Align align, const char *tip)
-        : Button(parent, ""), m_icon(icon), m_align(align) {
+    IconButton(Widget *parent, ParaIcon icon, const char *tip, Align align = Align::Left,
+               bool ParaStyle::*flag = nullptr)
+        : Button(parent, ""), m_icon(icon), m_align(align), m_flag(flag) {
         set_fixed_size(Vector2i(30, 28));
         set_tooltip(tip);
     }
     Align align() const { return m_align; }
+    bool ParaStyle::*flag() const { return m_flag; }
+    bool on() const { return m_on; }
     void set_on(bool on) { m_on = on; }
 
     void draw(NVGcontext *ctx) override {
@@ -315,6 +368,7 @@ public:
 private:
     ParaIcon m_icon;
     Align m_align;
+    bool ParaStyle::*m_flag;
     bool m_on = false;
 };
 
@@ -357,7 +411,7 @@ ParagraphPanel::ParagraphPanel(Widget *parent, Hooks hooks)
             Widget *gap = new Widget(aligns);
             gap->set_fixed_size(Vector2i(10, 1));
         }
-        auto *b = new AlignButton(aligns, all[i].icon, all[i].align, all[i].tip);
+        auto *b = new IconButton(aligns, all[i].icon, all[i].tip, all[i].align);
         b->set_callback([this, b] {
             if (m_hooks.align)
                 m_hooks.align(b->align());
@@ -414,6 +468,36 @@ ParagraphPanel::ParagraphPanel(Widget *parent, Hooks hooks)
               "%");
     add_int_field(drop, ParaIcon::DropChars, "Drop cap: how many characters are enlarged",
                   &P::drop_chars, 1, pagemade::kMaxDropChars, "chars");
+
+    /* Keep options: the fewest lines left at the bottom of a text block
+     * and carried to the top of the next, then the three switches. */
+    new Rule(this);
+    Widget *keep = grid();
+    add_int_field(keep, ParaIcon::Orphans,
+                  "Orphans: the fewest lines left at the bottom of a text block (0 = off)",
+                  &P::orphans, 0, pagemade::kMaxKeepLines, "lines");
+    add_int_field(keep, ParaIcon::Widows,
+                  "Widows: the fewest lines carried to the top of the next block (0 = off)",
+                  &P::widows, 0, pagemade::kMaxKeepLines, "lines");
+    RightRow *switches = new RightRow(this, 2);
+    struct F { ParaIcon icon; bool ParaStyle::*flag; const char *tip; };
+    const F flags[] = {
+        {ParaIcon::KeepTogether, &P::keep_together, "Keep lines together in one text block"},
+        {ParaIcon::KeepWithNext, &P::keep_with_next,
+         "Keep with next: end in the text block where the next paragraph starts"},
+        {ParaIcon::StartNewFrame, &P::start_new_frame,
+         "Start in the next text block (Ctrl+Return inside text breaks there too)"},
+    };
+    for (const F &f : flags) {
+        auto *b = new IconButton(switches, f.icon, f.tip, Align::Left, f.flag);
+        b->set_callback([this, b] {
+            const auto flag = b->flag();
+            const bool value = !b->on();
+            if (m_hooks.apply)
+                m_hooks.apply([flag, value](ParaStyle &ps) { ps.*flag = value; }, nullptr);
+        });
+        m_flags.push_back(b);
+    }
 
     new Rule(this);
     RightRow *bottom = new RightRow(this, 6);
@@ -554,9 +638,17 @@ void ParagraphPanel::load(const std::vector<const Paragraph *> &paras,
     bool same_align = any;
     for (const Paragraph *p : paras)
         same_align &= p->style.align == paras.front()->style.align;
-    for (AlignButton *b : m_align) {
+    for (IconButton *b : m_align) {
         b->set_enabled(any);
         b->set_on(same_align && b->align() == paras.front()->style.align);
+    }
+    /* A keep option is lit when every paragraph has it. */
+    for (IconButton *b : m_flags) {
+        bool all = any;
+        for (const Paragraph *p : paras)
+            all &= p->style.*(b->flag());
+        b->set_enabled(any);
+        b->set_on(all);
     }
 
     for (Field &f : m_fields) {

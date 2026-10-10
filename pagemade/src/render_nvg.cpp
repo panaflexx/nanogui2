@@ -12,6 +12,10 @@
 namespace pagemade {
 
 void draw_glyph_run(NVGcontext *ctx, const GlyphRun &run) {
+    draw_glyph_run(ctx, run, run.color);
+}
+
+void draw_glyph_run(NVGcontext *ctx, const GlyphRun &run, const Color &color) {
     if (!run.font || run.glyphs.empty())
         return;
     const float sy = run.size / (float) run.font->units_per_em();
@@ -64,7 +68,7 @@ void draw_glyph_run(NVGcontext *ctx, const GlyphRun &run) {
         end_contour();
     }
     if (any) {
-        nvgFillColor(ctx, nvgRGBAf(run.color.r, run.color.g, run.color.b, run.color.a));
+        nvgFillColor(ctx, nvgRGBAf(color.r, color.g, color.b, color.a));
         nvgFill(ctx);
     }
     std::vector<RuleSpan> rules;
@@ -73,7 +77,7 @@ void draw_glyph_run(NVGcontext *ctx, const GlyphRun &run) {
         nvgBeginPath(ctx);
         nvgMoveTo(ctx, rule.x0, rule.y);
         nvgLineTo(ctx, rule.x1, rule.y);
-        nvgStrokeColor(ctx, nvgRGBAf(run.color.r, run.color.g, run.color.b, run.color.a));
+        nvgStrokeColor(ctx, nvgRGBAf(color.r, color.g, color.b, color.a));
         nvgStrokeWidth(ctx, rule.thickness);
         nvgStroke(ctx);
     }
@@ -168,7 +172,7 @@ void draw_list(NVGcontext *ctx, const DrawList &list, float px,
         nvgSave(ctx);
         if (const auto *g = std::get_if<DrawGlyphs>(&op)) {
             apply_transform(ctx, g->xf);
-            draw_glyph_run(ctx, *g->run);
+            draw_glyph_run(ctx, *g->run, g->color);
         } else if (const auto *f = std::get_if<DrawFill>(&op)) {
             apply_transform(ctx, f->xf);
             nvgBeginPath(ctx);

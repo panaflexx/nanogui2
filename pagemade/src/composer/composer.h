@@ -59,6 +59,8 @@ struct GlyphRun {
     float size = 12.f;
     float hscale = 100.f;
     Color color;
+    uint32_t swatch = 0;    // the publication resolves a swatch (see CharStyle)
+    float tint = 100.f;
     bool underline = false;
     bool strike = false;
     std::vector<PlacedGlyph> glyphs;

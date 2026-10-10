@@ -1806,6 +1806,7 @@ int main(int argc, char **argv) {
         }
         if (no_snap)
             app->set_snap(false);
+
         for (const Action &act : actions) {
             app->do_widget_cleanup();    // as the main loop does between events
             app->perform_layout();
@@ -1853,6 +1854,7 @@ int main(int argc, char **argv) {
             ask_save_changes(app, app->doc_name(), [](SaveChoice) {});
         else if (dialog == "new")
             app->new_document();
+
         if (print_title)
             std::printf("title %s\n", app->caption().c_str());
         if (!pdf.empty())

@@ -22,6 +22,8 @@ struct NVGcontext;
 
 namespace pagemade {
 
+/* In `color` (the draw list's resolved swatch), or the run's own RGB. */
+void draw_glyph_run(NVGcontext *ctx, const GlyphRun &run, const Color &color);
 void draw_glyph_run(NVGcontext *ctx, const GlyphRun &run);
 /* `texture` returns a NanoVG image for a picture, or 0 to draw a stand-in.
  * The id is the display view, not the source file. */

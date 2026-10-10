@@ -1800,16 +1800,30 @@ void Screen::move_window_to_front(Window* window) {
 }
 
 void Screen::do_widget_cleanup() {
-    std::lock_guard<std::mutex> lock(g_widgets_to_cleanup_mutex);
-    for (Widget* w : g_widgets_to_cleanup) {
-        if (Widget* p = w->parent()) {
-            auto& ch = p->m_children;
-            ch.erase(std::remove(ch.begin(), ch.end(), w), ch.end());
-            w->set_parent(nullptr);
+    /* Destroy outside the lock. A Dropdown's destructor disposes its
+     * screen-level menu, and that remove_child takes this same mutex.
+     * Holding it across dec_ref deadlocks — New Document's OK, and any
+     * window that owns a menu, froze on the next frame. Destructors queue
+     * those menus; drain them on the following pass. */
+    for (;;) {
+        std::vector<Widget*> batch;
+        {
+            std::lock_guard<std::mutex> lock(g_widgets_to_cleanup_mutex);
+            if (g_widgets_to_cleanup.empty())
+                return;
+            batch.swap(g_widgets_to_cleanup);
         }
-        w->dec_ref();
+        for (Widget* w : batch) {
+            if (!w)
+                continue;
+            if (Widget* p = w->parent()) {
+                auto& ch = p->m_children;
+                ch.erase(std::remove(ch.begin(), ch.end(), w), ch.end());
+                w->set_parent(nullptr);
+            }
+            w->dec_ref();
+        }
     }
-    g_widgets_to_cleanup.clear();
 }
 
 void Screen::register_animation(Widget* w) {

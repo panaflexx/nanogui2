@@ -165,9 +165,29 @@ public:
         bool  mix_caps = false, mix_deco = false;
         bool  mix_track = false, mix_hscale = false;
         bool  mix_kerning = false, mix_ligatures = false;
+        /* Color (a swatch and tint; swatch 0 = the RGB) and the character
+         * style; `char_overridden`: the text differs from that style. */
+        uint32_t swatch = 0;
+        float tint = 100.f;
+        pagemade::Color rgb;
+        std::string char_style;
+        bool  mix_color = false, mix_tint = false, mix_char_style = false;
+        bool  char_overridden = false;
     };
     bool type_style(TypeStyle &t) const;
-    void apply_type(const std::function<void(pagemade::CharStyle &)> &fn);
+    /* `undo` false: the caller has already made the undo step. */
+    void apply_type(const std::function<void(pagemade::CharStyle &)> &fn, bool undo = true);
+
+    /* Character styles (PageDoc::char_styles), each one undo step.
+     * apply_char_style sets the text apply_type would change in a style;
+     * an empty name drops the style and keeps the formatting.
+     * define_char_style makes one from the selection: what its first
+     * character changes from its paragraph's own type. Redefining a name
+     * in use updates its runs (those without overrides). delete_char_style
+     * drops a style; its runs keep their formatting. */
+    void apply_char_style(const std::string &name);
+    void define_char_style(const std::string &name);
+    void delete_char_style(const std::string &name);
 
     /* Paragraph alignment of the selected lines. With the text tool, that
      * is the caret's line or the lines the selection touches, each whole
@@ -331,6 +351,8 @@ private:
         pagemade::TextPos a, b;       // half-open range in that story
     };
     void collect_align_hits(std::vector<AlignHit> &out) const;
+    /* The selection's first character and its paragraph's base type. */
+    bool selection_char_style(pagemade::CharStyle &cs, pagemade::CharStyle &base) const;
     /* (story index, paragraph index) for selected_paragraphs. */
     std::vector<std::pair<size_t, size_t>> selected_para_indices() const;
 

@@ -401,9 +401,12 @@ Label *form_label(Widget *parent, const std::string &text, int width) {
 FloatSpin *inch_box(Widget *parent, float inches, float step, float lo, float hi,
                     const std::function<void(float)> &fn) {
     auto *box = new FloatSpin(parent, inches, step, lo, hi);
+    /* The constructor writes the value with FloatBox's default precision.
+     * Set the display format, then write the value again. */
     box->number_format("%.2f");
+    box->set_value(inches);
     box->set_units("in");
-    box->set_fixed_size(Vector2i(96, 28));
+    box->set_fixed_size(Vector2i(108, 28));
     box->set_callback(fn);
     return box;
 }

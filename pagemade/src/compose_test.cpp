@@ -197,6 +197,89 @@ static void test_paragraph_attributes(const FontLibrary &fonts) {
 
 /* Drop caps: placed on the text's cap height and line N's baseline, the
  * lines they reach moved over, sizable, and still editable text. */
+/* Keep options and frame breaks: two text blocks of five 14.4pt lines. */
+static void test_keeps(const FontLibrary &fonts) {
+    CharStyle cs;
+    const std::vector<Frame> two = {{0, 0, 200, 72}, {0, 100, 200, 72}};
+    auto para = [&](const std::string &t, const ParaStyle &ps = ParaStyle()) {
+        Paragraph p;
+        p.style = ps;
+        p.runs.push_back({cs, t});
+        return p;
+    };
+    /* (frame, lines) per paragraph, in order of blocks. */
+    auto layout = [&](const std::vector<Paragraph> &ps) {
+        Story s;
+        s.paragraphs = ps;
+        const Composition c = compose(s, two, fonts);
+        std::vector<std::vector<std::pair<size_t, int>>> out(ps.size());
+        for (const ComposedLine &l : c.lines) {
+            auto &b = out[l.para];
+            if (b.empty() || b.back().first != l.frame)
+                b.push_back({l.frame, 1});
+            else
+                ++b.back().second;
+        }
+        return out;
+    };
+    const Paragraph three = para("a\nb\nc");
+
+    {   /* Without rules: 3 + 2 at the bottom, 1 carried over. */
+        const auto l = layout({three, para("x\ny\nz")});
+        CHECK(l[1].size() == 2 && l[1][0].second == 2 && l[1][1].second == 1,
+              "no rules: two lines, then a widow");
+    }
+    {   ParaStyle ps;
+        ps.widows = 2;
+        const auto l = layout({three, para("x\ny\nz", ps)});
+        CHECK(l[1].size() == 2 && l[1][0] == std::make_pair(size_t(0), 1) &&
+              l[1][1] == std::make_pair(size_t(1), 2), "widows 2: one line carried with it");
+        ps.orphans = 2;
+        const auto m = layout({three, para("x\ny\nz", ps)});
+        CHECK(m[1].size() == 1 && m[1][0].first == 1, "widows and orphans 2: all moves on");
+    }
+    {   ParaStyle ps;
+        ps.orphans = 3;
+        const auto l = layout({three, para(kLong, ps)});
+        CHECK(!l[1].empty() && l[1][0].first == 1, "orphans 3: two lines at the bottom move on");
+        ps.orphans = 2;
+        const auto m = layout({three, para(kLong, ps)});
+        CHECK(!m[1].empty() && m[1][0] == std::make_pair(size_t(0), 2), "orphans 2: two is enough");
+    }
+    {   ParaStyle ps;
+        ps.keep_together = true;
+        const auto l = layout({three, para("x\ny\nz", ps)});
+        CHECK(l[1].size() == 1 && l[1][0] == std::make_pair(size_t(1), 3), "keep together");
+        ps.space_before = 30;
+        const auto m = layout({three, para("x\ny\nz", ps)});
+        CHECK(m[1].size() == 1 && m[1][0].first == 1, "space before is dropped at the top");
+    }
+    {   /* A heading at the bottom of a block goes with the paragraph after it. */
+        ParaStyle head;
+        head.keep_with_next = true;
+        const auto l = layout({para("one"), para("h\ne\na\nd", head), para("body")});
+        CHECK(l[1].size() == 1 && l[1][0].first == 1 && l[2][0].first == 1,
+              "keep with next moves the heading");
+        const auto m = layout({para("one"), para("h", head), para("s\nu\nb", head),
+                               para("body")});
+        CHECK(m[1][0].first == 1 && m[2][0].first == 1 && m[3][0].first == 1,
+              "a chain of headings moves together");
+        const auto k = layout({para("h\ne\na\nd\ns", head), para("body")});
+        CHECK(k[0][0].first == 0, "a heading already at the top stays");
+    }
+    {   ParaStyle ps;
+        ps.start_new_frame = true;
+        const auto l = layout({para("one"), para("two", ps)});
+        CHECK(l[1][0].first == 1, "start in the next text block");
+        const auto m = layout({para("two", ps)});
+        CHECK(m[0][0].first == 0, "...unless it already starts at the top of one");
+    }
+    {   const auto l = layout({para("one\x0Ctwo"), para("after")});
+        CHECK(l[0].size() == 2 && l[0][0].first == 0 && l[0][1].first == 1 &&
+              l[1][0].first == 1, "a frame break carries the text to the next block");
+    }
+}
+
 static bool near_f(float a, float b) { return std::fabs(a - b) < 1e-3f; }
 
 static void test_drop_caps(const FontLibrary &fonts) {
@@ -515,9 +598,12 @@ static void test_breaks(const FontLibrary &fonts) {
 
     /* End stops before every break the composer hangs, including VT, FF and NEL. */
     {
+        /* Two blocks: a form feed also carries the text to the next one. */
+        std::vector<Frame> blocks = wide;
+        blocks.push_back({wide[0].x, wide[0].y + wide[0].h + 10, wide[0].w, wide[0].h});
         auto end_before = [&](const char *text, const char *label) {
             Story s = one_para(text, cs, ps);
-            Composition t = compose(s, wide, fonts);
+            Composition t = compose(s, blocks, fonts);
             CHECK(t.lines.size() == 2, "%s breaks the line (%zu)", label, t.lines.size());
             if (t.lines.size() < 1)
                 return;
@@ -1280,6 +1366,9 @@ static void check_para(const ParaStyle &a, const ParaStyle &b) {
           "paragraph spacing");
     CHECK(a.drop_lines == b.drop_lines && a.drop_chars == b.drop_chars &&
           near(a.drop_scale, b.drop_scale), "drop cap");
+    CHECK(a.keep_together == b.keep_together && a.keep_with_next == b.keep_with_next &&
+          a.start_new_frame == b.start_new_frame && a.orphans == b.orphans &&
+          a.widows == b.widows, "keep options");
     CHECK(near(a.word_min, b.word_min) && near(a.word_desired, b.word_desired) &&
           near(a.word_max, b.word_max) && near(a.letter_min, b.letter_min) &&
           near(a.letter_desired, b.letter_desired) && near(a.letter_max, b.letter_max),
@@ -1494,6 +1583,11 @@ static void test_docfile(const FontLibrary &fonts) {
     note_ps.drop_lines = 2;
     note_ps.drop_chars = 2;
     note_ps.drop_scale = 120;
+    note_ps.keep_with_next = true;
+    note_ps.keep_together = true;
+    note_ps.start_new_frame = true;
+    note_ps.orphans = 2;
+    note_ps.widows = 3;
     note_ps.tabs.push_back({120, TabAlign::Decimal, "."});
     Story extra = one_para("He said \"hello\"\nsecond\tline\\end", note, note_ps);
     doc.add_text_frame(1, doc.add_story(std::move(extra)), 200, 80, Transform::translate(40, 200));
@@ -2527,6 +2621,7 @@ int main(int argc, char **argv) {
     test_line_spacing(fonts);
     test_paragraph_attributes(fonts);
     test_drop_caps(fonts);
+    test_keeps(fonts);
     test_styles();
     test_edit(fonts);
     test_align_ranges(fonts);

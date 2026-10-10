@@ -230,6 +230,9 @@ void write_char_style(JsonOut &j, const CharStyle &cs) {
     if (!cs.kerning) j.key("kerning").value(false);
     if (!cs.ligatures) j.key("ligatures").value(false);
     if (!(cs.color == d.color)) write_color(j, "color", cs.color);
+    if (cs.swatch != d.swatch) j.key("swatch").value(cs.swatch);
+    if (cs.tint != d.tint) j.key("tint").value(cs.tint);
+    if (!cs.char_style.empty()) j.key("char_style").value(cs.char_style);
     j.end_object();
 }
 
@@ -250,6 +253,11 @@ void write_para_style(JsonOut &j, const ParaStyle &ps) {
     if (ps.drop_lines != d.drop_lines) j.key("drop_lines").value(ps.drop_lines);
     if (ps.drop_chars != d.drop_chars) j.key("drop_chars").value(ps.drop_chars);
     if (ps.drop_scale != d.drop_scale) j.key("drop_scale").value(ps.drop_scale);
+    if (ps.keep_together) j.key("keep_together").value(true);
+    if (ps.keep_with_next) j.key("keep_with_next").value(true);
+    if (ps.start_new_frame) j.key("start_new_frame").value(true);
+    if (ps.orphans != d.orphans) j.key("orphans").value(ps.orphans);
+    if (ps.widows != d.widows) j.key("widows").value(ps.widows);
     if (ps.word_min != d.word_min || ps.word_desired != d.word_desired || ps.word_max != d.word_max)
         j.key("word_spacing").numbers({ps.word_min, ps.word_desired, ps.word_max});
     if (ps.letter_min != d.letter_min || ps.letter_desired != d.letter_desired ||
@@ -533,6 +541,23 @@ std::string make_json(const PageDoc &doc, const SaveOptions &opts, const std::ve
     }
     j.end_array();
 
+    /* Character styles list the fields they set by name. */
+    j.key("char_styles").begin_array();
+    for (const CharStyleDef &st : doc.char_styles) {
+        j.begin_object();
+        j.key("name").value(st.name);
+        j.key("fields").begin_array();
+        for (int b = 0; b < 32; ++b)
+            if ((st.fields >> b) & 1u)
+                if (*char_field_name(b))
+                    j.value(char_field_name(b));
+        j.end_array();
+        j.key("type");
+        write_char_style(j, st.type);
+        j.end_object();
+    }
+    j.end_array();
+
     j.key("assets").begin_array();
     for (const FontRef &r : refs) {
         if (!r.font)
@@ -679,6 +704,10 @@ CharStyle read_char_style(const DictValue *o) {
     get(o, "kerning", cs.kerning);
     get(o, "ligatures", cs.ligatures);
     get(o, "color", cs.color);
+    get(o, "swatch", cs.swatch);
+    get(o, "tint", cs.tint);
+    cs.tint = std::clamp(cs.tint, 0.f, 100.f);
+    get(o, "char_style", cs.char_style);
     if (!(cs.size > 0)) cs.size = CharStyle().size;
     return cs;
 }
@@ -705,6 +734,13 @@ ParaStyle read_para_style(const DictValue *o) {
     ps.drop_lines = std::clamp(ps.drop_lines, 0, kMaxDropLines);
     ps.drop_chars = std::clamp(ps.drop_chars, 1, kMaxDropChars);
     ps.drop_scale = std::clamp(ps.drop_scale, kMinDropScale, kMaxDropScale);
+    get(o, "keep_together", ps.keep_together);
+    get(o, "keep_with_next", ps.keep_with_next);
+    get(o, "start_new_frame", ps.start_new_frame);
+    get(o, "orphans", ps.orphans);
+    get(o, "widows", ps.widows);
+    ps.orphans = std::clamp(ps.orphans, 0, kMaxKeepLines);
+    ps.widows = std::clamp(ps.widows, 0, kMaxKeepLines);
     float w[3] = {ps.word_min, ps.word_desired, ps.word_max};
     if (floats(o, "word_spacing", w, 3) == 3) {
         ps.word_min = w[0]; ps.word_desired = w[1]; ps.word_max = w[2];
@@ -1030,6 +1066,30 @@ OpenResult open_document(const std::string &path, const FontLibrary &installed) 
             get(at(sw, i), "rgb", s.rgb);
             if (s.id != kNoPaint && !d.find_swatch(s.id))
                 d.swatches.push_back(s);
+        }
+    }
+
+    /* A file from before character styles keeps the default set. */
+    if (const DictValue *cstyles = field(root, "char_styles")) {
+        d.char_styles.clear();
+        for (size_t i = 0; i < count(cstyles); ++i) {
+            const DictValue *o = at(cstyles, i);
+            CharStyleDef st;
+            get(o, "name", st.name);
+            if (st.name.empty() || d.find_char_style(st.name))
+                continue;
+            const DictValue *fields = field(o, "fields");
+            for (size_t k = 0; k < count(fields); ++k) {
+                std::string f;
+                if (const DictValue *v = at(fields, k); v && v->type == DICT_STRING && v->string_value)
+                    f = v->string_value;
+                for (int b = 0; b < 32; ++b)
+                    if (*char_field_name(b) && f == char_field_name(b))
+                        st.fields |= 1u << b;
+            }
+            st.type = read_char_style(field(o, "type"));
+            st.type.char_style = st.name;
+            d.char_styles.push_back(std::move(st));
         }
     }
 

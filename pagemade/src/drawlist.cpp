@@ -48,7 +48,7 @@ DrawList build_page(const PageDoc &doc, size_t page, const std::vector<Compositi
         for (const ComposedLine &l : comps[si].lines)
             if (l.frame == ti)
                 for (const GlyphRun &r : l.runs)
-                    out.push_back(DrawGlyphs{&r, it.xf});
+                    out.push_back(DrawGlyphs{&r, it.xf, doc.text_color(r.swatch, r.tint, r.color)});
     }
     return out;
 }

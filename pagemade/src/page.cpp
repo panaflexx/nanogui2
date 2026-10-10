@@ -72,29 +72,39 @@ std::vector<StyleDef> default_styles() {
     };
     return {
         def("Normal", "Serif", 12, 0, [](ParaStyle &) {}),
+        /* Body text keeps two lines together at a block break; headings
+         * stay with what follows them. */
         def("Body text", "Serif", 10.5f, 13, [](ParaStyle &p) {
             p.align = Align::Justify;
             p.first_indent = 12;
+            p.orphans = p.widows = 2;
         }),
-        def("Body first", "Serif", 10.5f, 13, [](ParaStyle &p) { p.align = Align::Justify; }),
+        def("Body first", "Serif", 10.5f, 13, [](ParaStyle &p) {
+            p.align = Align::Justify;
+            p.orphans = p.widows = 2;
+        }),
         def("Drop cap", "Serif", 10.5f, 13, [](ParaStyle &p) {
             p.align = Align::Justify;
             p.drop_lines = 3;
+            p.orphans = p.widows = 2;
         }),
         def("Headline", "Display", 34, 36, [](ParaStyle &p) {
             p.align = Align::Center;
             p.space_after = 6;
             p.hyphenate = false;
+            p.keep_with_next = p.keep_together = true;
         }, true),
         def("Subhead 1", "Sans", 14, 17, [](ParaStyle &p) {
             p.space_before = 12;
             p.space_after = 3;
             p.hyphenate = false;
+            p.keep_with_next = p.keep_together = true;
         }, true),
         def("Subhead 2", "Sans", 11, 13, [](ParaStyle &p) {
             p.space_before = 9;
             p.space_after = 2;
             p.hyphenate = false;
+            p.keep_with_next = p.keep_together = true;
         }, true),
         def("Caption", "Sans", 8.5f, 10.5f, [](ParaStyle &p) { p.space_before = 4; }, false, true),
         def("Hanging indent", "Serif", 10.5f, 13, [](ParaStyle &p) {
@@ -113,6 +123,112 @@ std::vector<StyleDef> default_styles() {
             p.space_before = 12;
         }, true),
     };
+}
+
+/* ---- Character styles ------------------------------------------------------ */
+
+const char *char_field_name(int bit) {
+    static const char *names[] = {"family", "face", "bold", "italic", "size", "leading",
+                                  "color", "underline", "strike", "caps", "tracking",
+                                  "hscale", "baseline", "kerning", "ligatures"};
+    return bit >= 0 && bit < (int) (sizeof names / sizeof names[0]) ? names[bit] : "";
+}
+
+std::vector<CharStyleDef> default_char_styles() {
+    CharStyleDef em{"Emphasis", {}, kCharItalic};
+    em.type.italic = true;
+    CharStyleDef strong{"Strong", {}, kCharBold};
+    strong.type.bold = true;
+    CharStyleDef sc{"Small caps", {}, kCharCaps | kCharTracking};
+    sc.type.caps = Caps::Small;
+    sc.type.tracking = 20;
+    CharStyleDef accent{"Accent", {}, kCharColor | kCharBold};
+    accent.type.swatch = 8;                // Red
+    accent.type.bold = true;
+    for (CharStyleDef *d : {&em, &strong, &sc, &accent})
+        d->type.char_style = d->name;
+    return {em, strong, sc, accent};
+}
+
+void apply_char_style(CharStyle &cs, const CharStyleDef &def) {
+    const CharStyle &t = def.type;
+    const uint32_t f = def.fields;
+    if (f & kCharFamily) cs.family = t.family;
+    if (f & kCharFace) cs.face = t.face;
+    else if (f & (kCharBold | kCharItalic)) cs.face.clear();
+    if (f & kCharBold) cs.bold = t.bold;
+    if (f & kCharItalic) cs.italic = t.italic;
+    if (f & kCharSize) cs.size = t.size;
+    if (f & kCharLeading) cs.leading = t.leading;
+    if (f & kCharColor) {
+        cs.color = t.color;
+        cs.swatch = t.swatch;
+        cs.tint = t.tint;
+    }
+    if (f & kCharUnderline) cs.underline = t.underline;
+    if (f & kCharStrike) cs.strike = t.strike;
+    if (f & kCharCaps) cs.caps = t.caps;
+    if (f & kCharTracking) cs.tracking = t.tracking;
+    if (f & kCharHScale) cs.hscale = t.hscale;
+    if (f & kCharBaseline) cs.baseline_shift = t.baseline_shift;
+    if (f & kCharKerning) cs.kerning = t.kerning;
+    if (f & kCharLigatures) cs.ligatures = t.ligatures;
+    cs.char_style = def.name;
+}
+
+namespace {
+
+/* The fields in which two styles differ. */
+uint32_t char_differences(const CharStyle &a, const CharStyle &b) {
+    uint32_t d = 0;
+    if (a.family != b.family) d |= kCharFamily;
+    if (a.face != b.face) d |= kCharFace;
+    if (a.bold != b.bold) d |= kCharBold;
+    if (a.italic != b.italic) d |= kCharItalic;
+    if (a.size != b.size) d |= kCharSize;
+    if (a.leading != b.leading) d |= kCharLeading;
+    if (!(a.color == b.color) || a.swatch != b.swatch || a.tint != b.tint) d |= kCharColor;
+    if (a.underline != b.underline) d |= kCharUnderline;
+    if (a.strike != b.strike) d |= kCharStrike;
+    if (a.caps != b.caps) d |= kCharCaps;
+    if (a.tracking != b.tracking) d |= kCharTracking;
+    if (a.hscale != b.hscale) d |= kCharHScale;
+    if (a.baseline_shift != b.baseline_shift) d |= kCharBaseline;
+    if (a.kerning != b.kerning) d |= kCharKerning;
+    if (a.ligatures != b.ligatures) d |= kCharLigatures;
+    return d;
+}
+
+} // namespace
+
+bool char_style_overridden(const CharStyle &cs, const CharStyleDef &def) {
+    /* A face cleared for bold or italic is the style's doing, not an override. */
+    uint32_t d = char_differences(cs, def.type) & def.fields;
+    if (!(def.fields & kCharFace))
+        d &= ~kCharFace;
+    return d != 0;
+}
+
+CharStyleDef char_style_from(const std::string &name, const CharStyle &cs, const CharStyle &base) {
+    CharStyleDef d;
+    d.name = name;
+    d.type = cs;
+    d.type.char_style = name;
+    d.fields = char_differences(cs, base);
+    if (d.fields == 0)
+        d.fields = kCharFamily | kCharFace | kCharBold | kCharItalic | kCharSize | kCharColor;
+    return d;
+}
+
+const CharStyleDef *PageDoc::find_char_style(const std::string &name) const {
+    for (const CharStyleDef &s : char_styles)
+        if (s.name == name)
+            return &s;
+    return nullptr;
+}
+
+CharStyleDef *PageDoc::find_char_style(const std::string &name) {
+    return const_cast<CharStyleDef *>(static_cast<const PageDoc *>(this)->find_char_style(name));
 }
 
 const StyleDef *PageDoc::find_style(const std::string &name) const {
@@ -153,7 +269,9 @@ bool same_format(const ParaStyle &a, const ParaStyle &b) {
            a.space_after == b.space_after && a.autoleading == b.autoleading &&
            a.line_spacing == b.line_spacing && a.extra_spacing == b.extra_spacing &&
            a.drop_lines == b.drop_lines && a.drop_chars == b.drop_chars &&
-           a.drop_scale == b.drop_scale &&
+           a.drop_scale == b.drop_scale && a.keep_together == b.keep_together &&
+           a.keep_with_next == b.keep_with_next && a.start_new_frame == b.start_new_frame &&
+           a.orphans == b.orphans && a.widows == b.widows &&
            a.word_min == b.word_min && a.word_desired == b.word_desired &&
            a.word_max == b.word_max && a.letter_min == b.letter_min &&
            a.letter_desired == b.letter_desired && a.letter_max == b.letter_max &&
@@ -171,7 +289,7 @@ bool same_type(const CharStyle &a, const CharStyle &b) {
 
 } // namespace
 
-void apply_style(Paragraph &p, const StyleDef &def) {
+void apply_style(Paragraph &p, const StyleDef &def, const std::vector<CharStyleDef> &char_styles) {
     p.style = def.para;
     p.style.name = def.name;
     const Run *base = base_run(p);
@@ -190,6 +308,11 @@ void apply_style(Paragraph &p, const StyleDef &def) {
         cs.leading = def.type.leading;
         cs.tracking = def.type.tracking;
         cs.hscale = def.type.hscale;
+        /* A run in a character style keeps what that style sets. */
+        if (!cs.char_style.empty())
+            for (const CharStyleDef &c : char_styles)
+                if (c.name == cs.char_style)
+                    apply_char_style(cs, c);
     }
 }
 
@@ -211,6 +334,9 @@ StyleDef style_from(const std::string &name, const Paragraph &p) {
     d.type.underline = d.type.strike = false;
     d.type.baseline_shift = 0;
     d.type.color = Color();
+    d.type.swatch = 0;
+    d.type.tint = 100.f;
+    d.type.char_style.clear();
     return d;
 }
 
@@ -228,6 +354,12 @@ Color PageDoc::resolve(const Paint &p) const {
     /* A tint is a screen of the ink over paper white. */
     const float t = std::clamp(p.tint, 0.f, 100.f) * 0.01f;
     return {1 - (1 - s->rgb.r) * t, 1 - (1 - s->rgb.g) * t, 1 - (1 - s->rgb.b) * t, s->rgb.a};
+}
+
+Color PageDoc::text_color(uint32_t swatch, float tint, const Color &rgb) const {
+    if (swatch == kNoPaint || !find_swatch(swatch))
+        return rgb;
+    return resolve(Paint{swatch, tint});
 }
 
 SwatchId PageDoc::add_swatch(const std::string &name, Color rgb) {

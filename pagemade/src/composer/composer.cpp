@@ -869,6 +869,8 @@ void place_line(Shaper &sh, const Paragraph &para, const LineCandidate &c, float
             r.size = gsize;
             r.hscale = cs.hscale;
             r.color = cs.color;
+            r.swatch = cs.swatch;
+            r.tint = cs.tint;
             r.underline = cs.underline;
             r.strike = cs.strike;
             cur = gl.run;
@@ -950,13 +952,31 @@ Composition compose(const Story &story, const std::vector<Frame> &frames,
             std::chrono::steady_clock::now() - t0).count();
         return out;
     };
+    auto next_frame = [&] {
+        ++fi;
+        if (fi < frames.size())
+            y = frames[fi].y;
+        at_frame_top = true;
+    };
 
-    for (size_t pi = 0; pi < story.paragraphs.size(); ++pi) {
+    /* What the keep rules decided for a paragraph: begin in the next text
+     * block, or end a block after so many of its lines (to give a widow
+     * company). Each is set at most once, so composing again settles. */
+    struct Plan {
+        bool next_frame = false;
+        int  break_after = -1;
+    };
+
+    /* Compose one paragraph from the current position. False when the text
+     * runs out of frames (the story is overset from here). */
+    auto compose_para = [&](size_t pi, const Plan &plan) -> bool {
         const Paragraph &para = story.paragraphs[pi];
         const ParaStyle &st = para.style;
         Shaper sh(para, fonts);
         Breaker br(sh, para, hyphenator);
 
+        if ((plan.next_frame || st.start_new_frame) && !at_frame_top)
+            next_frame();
         if (!at_frame_top)
             y += st.space_before;
 
@@ -1011,6 +1031,8 @@ Composition compose(const Story &story, const std::vector<Frame> &frames,
                         r.size = gsize;
                         r.hscale = cs.hscale;
                         r.color = cs.color;
+                        r.swatch = cs.swatch;
+                        r.tint = cs.tint;
                         cap.runs.push_back(r);
                     }
                     PlacedGlyph pg;
@@ -1058,6 +1080,7 @@ Composition compose(const Story &story, const std::vector<Frame> &frames,
         };
 
         bool first_line = true;
+        int placed = 0;                  // lines of this paragraph so far
         do {
             for (;;) {
                 if (fi >= frames.size()) {
@@ -1065,7 +1088,7 @@ Composition compose(const Story &story, const std::vector<Frame> &frames,
                     out.overset = true;
                     out.overset_para = pi;
                     out.overset_byte = br.position();
-                    return finish();
+                    return false;
                 }
                 const Frame &f = frames[fi];
                 ComposedLine line;
@@ -1105,10 +1128,7 @@ Composition compose(const Story &story, const std::vector<Frame> &frames,
                 leading = slug(leading);
 
                 if (y + leading > f.y + f.h + kEps) {
-                    ++fi;
-                    if (fi < frames.size())
-                        y = frames[fi].y;
-                    at_frame_top = true;
+                    next_frame();
                     continue;
                 }
 
@@ -1137,12 +1157,19 @@ Composition compose(const Story &story, const std::vector<Frame> &frames,
                     cap.baseline = line.baseline - cap.rise + cap.height;
                     cap.bottom = cap.baseline + cap.descent;
                 }
+                /* A frame break ends the text block here. */
+                const bool frame_break = !c.pieces.empty() && c.pieces.back().forced &&
+                    c.pieces.back().stop > 0 &&
+                    (uint8_t) sh.text[c.pieces.back().stop - 1] == kFrameBreak;
                 br.commit(std::move(c));
                 out.lines.push_back(std::move(line));
+                ++placed;
 
                 y += leading;
                 at_frame_top = false;
                 first_line = false;
+                if (frame_break || placed == plan.break_after)
+                    next_frame();
                 break;
             }
         } while (!br.done());
@@ -1155,6 +1182,114 @@ Composition compose(const Story &story, const std::vector<Frame> &frames,
         place_cap();
 
         y += st.space_after;
+        return true;
+    };
+
+    /* Each paragraph starts from a checkpoint. When one breaks a keep rule,
+     * the plan for it changes and composition goes back to its checkpoint.
+     * A rule only moves a paragraph that does not already start at the top
+     * of a text block, and plans only ever gain decisions (those after the
+     * paragraph composed again are dropped), so this ends; the cap on
+     * retries is a backstop. */
+    struct Checkpoint {
+        size_t fi, lines;
+        float  y;
+        bool   at_top;
+    };
+    const size_t n = story.paragraphs.size();
+    std::vector<Plan> plans(n);
+    std::vector<Checkpoint> starts(n);
+    int retries = 8 + 4 * (int) n;
+
+    /* Lines of paragraph p per text block, in order. */
+    auto blocks_of = [&](size_t p, size_t end) {
+        std::vector<std::pair<size_t, int>> b;
+        for (size_t i = starts[p].lines; i < end; ++i)
+            if (b.empty() || b.back().first != out.lines[i].frame)
+                b.push_back({out.lines[i].frame, 1});
+            else
+                ++b.back().second;
+        return b;
+    };
+    /* Rules for paragraph p, composed as far as it goes (`overset`: it ran
+     * out of text blocks, which counts as one more block). The paragraph
+     * to compose again from, or SIZE_MAX when they all hold. */
+    auto check = [&](size_t p, bool overset) -> size_t {
+        const ParaStyle &st = story.paragraphs[p].style;
+        auto b = blocks_of(p, out.lines.size());
+        const bool movable = !starts[p].at_top && !plans[p].next_frame;
+        if (overset && !b.empty()) {
+            const int orphans = std::min(st.orphans, kMaxKeepLines);
+            if (movable && (st.keep_together || (orphans > 1 && b.front().second < orphans))) {
+                plans[p].next_frame = true;
+                return p;
+            }
+            b.clear();                   // where its last lines would go is unknown
+        }
+        if (b.size() > 1) {
+            const int orphans = std::min(st.orphans, kMaxKeepLines);
+            const int widows = std::min(st.widows, kMaxKeepLines);
+            if (movable && (st.keep_together || (orphans > 1 && b.front().second < orphans))) {
+                plans[p].next_frame = true;
+                return p;
+            }
+            if (widows > 1 && b.back().second < widows && plans[p].break_after < 0) {
+                /* Carry lines from the block before so the last one has
+                 * `widows`; if that leaves too few behind, move it all. */
+                const int need = widows - b.back().second;
+                const int before = b[b.size() - 2].second;
+                int lines_before_last = 0;
+                for (size_t i = 0; i + 1 < b.size(); ++i)
+                    lines_before_last += b[i].second;
+                const int left = before - need;
+                /* Orphans only count in the paragraph's first block. */
+                const int keep = b.size() == 2 ? std::max(1, orphans) : 1;
+                if (left >= keep) {
+                    plans[p].break_after = lines_before_last - need;
+                    return p;
+                }
+                if (movable) {
+                    plans[p].next_frame = true;
+                    return p;
+                }
+            }
+        }
+        /* Keep with next: the paragraph before ends in another block than
+         * this one starts in. */
+        if (p > 0 && starts[p].lines > 0) {
+            const size_t q = p - 1;
+            const ParaStyle &prev = story.paragraphs[q].style;
+            const bool apart = starts[p].lines < out.lines.size()
+                ? out.lines[starts[p].lines - 1].frame != out.lines[starts[p].lines].frame
+                : overset;               // none of this paragraph fits
+            if (prev.keep_with_next && !starts[q].at_top && !plans[q].next_frame && apart) {
+                plans[q].next_frame = true;
+                return q;
+            }
+        }
+        return SIZE_MAX;
+    };
+
+    for (size_t pi = 0; pi < n; ) {
+        starts[pi] = {fi, out.lines.size(), y, at_frame_top};
+        const bool fits = compose_para(pi, plans[pi]);
+        const size_t again = retries > 0 ? check(pi, !fits) : SIZE_MAX;
+        if (again == SIZE_MAX) {
+            if (!fits)
+                return finish();
+            ++pi;
+            continue;
+        }
+        out.overset = false;
+        --retries;
+        const Checkpoint &c = starts[again];
+        fi = c.fi;
+        y = c.y;
+        at_frame_top = c.at_top;
+        out.lines.resize(c.lines);
+        for (size_t k = again + 1; k < n; ++k)
+            plans[k] = Plan();
+        pi = again;
     }
     return finish();
 }

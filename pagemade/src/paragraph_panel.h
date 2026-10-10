@@ -2,7 +2,8 @@
  * pagemade/paragraph_panel.h — the Paragraph panel the ¶ button pops open,
  * laid out after VectorStyler's: the style menu, seven alignments, line
  * spacing and extra spacing, the four indents, space before and after, and
- * the drop cap (lines, size, characters),
+ * the drop cap (lines, size, characters), keep options (orphans, widows,
+ * keep together, keep with next, start in the next text block),
  * with Remove (delete the style) and Add (new style from the selection)
  * below.
  *
@@ -34,6 +35,7 @@ enum class ParaIcon {
     LeftIndent, RightIndent, FirstIndent, LastIndent,
     SpaceBefore, SpaceAfter,
     DropCap, DropSize, DropChars,
+    Orphans, Widows, KeepTogether, KeepWithNext, StartNewFrame,
 };
 void draw_para_icon(NVGcontext *ctx, ParaIcon icon, float x, float y, float w, float h,
                     const nanogui::Color &color);
@@ -74,7 +76,7 @@ private:
         int pagemade::ParaStyle::*member = nullptr;
         int lo = 0, hi = 0;
     };
-    class AlignButton;
+    class IconButton;
 
     void add_field(nanogui::Widget *grid, ParaIcon icon, const char *tip,
                    float pagemade::ParaStyle::*member, float scale, float lo, float hi,
@@ -86,7 +88,8 @@ private:
     nanogui::Dropdown *m_style = nullptr;
     std::vector<std::string> m_style_names;
     std::string m_current_style;         // the selection's style, when it has one
-    std::vector<AlignButton *> m_align;
+    std::vector<IconButton *> m_align;
+    std::vector<IconButton *> m_flags;   // keep together, keep with next, new frame
     std::vector<Field> m_fields;
     std::vector<IntField> m_int_fields;
     pagemade::ParaStyle m_first;         // the first selected paragraph's

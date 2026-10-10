@@ -40,6 +40,7 @@ struct DrawStroke {
 struct DrawGlyphs {
     const GlyphRun *run = nullptr;
     Transform       xf;
+    Color           color;           // the run's swatch and tint, resolved
 };
 
 /* A placed picture. The frame (0, 0)–(clip_w, clip_h) in item space clips
