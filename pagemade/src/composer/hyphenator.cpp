@@ -2,6 +2,7 @@
  * pagemade/composer/hyphenator.cpp — see hyphenator.h.
  */
 #include "composer/hyphenator.h"
+#include "composer/utf8.h"
 
 #include <algorithm>
 #include <fstream>
@@ -11,13 +12,8 @@ namespace pagemade {
 std::u32string utf8_to_u32(const std::string &s) {
     std::u32string out;
     for (size_t i = 0; i < s.size();) {
-        unsigned char c = (unsigned char) s[i];
-        int n = (c >= 0xF0) ? 3 : (c >= 0xE0) ? 2 : (c >= 0xC0) ? 1 : 0;
-        char32_t cp = c & (0x7F >> (n ? n + 1 : 0));
-        for (int k = 1; k <= n && i + k < s.size(); ++k)
-            cp = (cp << 6) | ((unsigned char) s[i + k] & 0x3F);
-        out.push_back(cp);
-        i += n + 1;
+        out.push_back(utf8_decode(s, i));
+        i += utf8_len(s, i);
     }
     return out;
 }
@@ -81,6 +77,8 @@ bool Hyphenator::load(const std::string &patterns_path, const std::string &excep
     }
     if (!exceptions_path.empty()) {
         std::ifstream ex(exceptions_path);
+        if (!ex)
+            return false;
         while (std::getline(ex, line)) {
             while (!line.empty() && (line.back() == '\r' || line.back() == ' '))
                 line.pop_back();
@@ -112,7 +110,7 @@ std::vector<size_t> Hyphenator::points(const std::u32string &word) const {
     std::vector<uint8_t> vals(w.size() + 1, 0);
     for (size_t i = 0; i < w.size(); ++i) {
         for (size_t len = 1; len <= m_max_len && i + len <= w.size(); ++len) {
-            auto it = m_patterns.find(w.substr(i, len));
+            auto it = m_patterns.find(std::u32string_view(w.data() + i, len));
             if (it == m_patterns.end())
                 continue;
             for (size_t k = 0; k < it->second.size(); ++k)

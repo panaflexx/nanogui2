@@ -26,6 +26,7 @@
 #include "composer/font.h"
 #include "composer/story.h"
 
+#include <algorithm>
 #include <cstddef>
 #include <cstdint>
 #include <vector>
@@ -62,6 +63,41 @@ struct GlyphRun {
     bool strike = false;
     std::vector<PlacedGlyph> glyphs;
 };
+
+/* Underline and strike for one run, in that order. y is the rule's center. */
+struct RuleSpan {
+    float x0 = 0, y = 0, x1 = 0, thickness = 0;
+};
+
+inline void glyph_run_rules(const GlyphRun &run, std::vector<RuleSpan> &out) {
+    out.clear();
+    if (!run.font || (!run.underline && !run.strike))
+        return;
+    float x0 = 0, x1 = 0, base = 0;
+    bool span = false;
+    for (const PlacedGlyph &g : run.glyphs) {
+        if (g.flags & PlacedGlyph::Invisible)
+            continue;
+        const float right = g.x + std::max(0.f, g.adv);
+        if (!span) { x0 = g.x; x1 = right; base = g.y; span = true; }
+        else { x0 = std::min(x0, g.x); x1 = std::max(x1, right); }
+    }
+    if (!span || !(x1 > x0))
+        return;
+    const float sy = run.size / (float) run.font->units_per_em();
+    auto add = [&](float design_y, float design_thick) {
+        RuleSpan r;
+        r.x0 = x0;
+        r.x1 = x1;
+        r.y = base - design_y * sy;
+        r.thickness = std::max(0.25f, design_thick * sy);
+        out.push_back(r);
+    };
+    if (run.underline)
+        add(run.font->underline_position(), run.font->underline_thickness());
+    if (run.strike)
+        add(run.font->strike_position(), run.font->strike_thickness());
+}
 
 struct ComposedLine {
     size_t   frame = 0;

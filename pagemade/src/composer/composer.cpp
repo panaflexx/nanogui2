@@ -24,6 +24,7 @@
  */
 #include "composer/composer.h"
 #include "composer/hyphenator.h"
+#include "composer/utf8.h"
 
 #include <hb.h>
 #include <linebreak.h>
@@ -45,7 +46,7 @@ enum class Kind : uint8_t { Glyph, Space, Tab, Break, SoftHyphen };
 struct PGlyph {
     uint32_t gid = 0;
     uint32_t cluster = 0;
-    uint16_t run = 0;
+    uint32_t run = 0;
     Kind     kind = Kind::Glyph;
     bool     unsafe = false;     // breaking before this glyph would change shaping
     bool     inserted = false;   // a hyphen added at a break
@@ -55,33 +56,6 @@ struct PGlyph {
     float    band = 0;           // the run's space width (letter spacing unit)
     float    scale = 1.f;        // synthetic small caps draw smaller than the run's size
 };
-
-uint32_t decode_utf8(const std::string &s, size_t i) {
-    unsigned char c = (unsigned char) s[i];
-    if (c < 0x80) return c;
-    int n = (c >= 0xF0) ? 3 : (c >= 0xE0) ? 2 : (c >= 0xC0) ? 1 : 0;
-    uint32_t cp = c & (0x3F >> n);
-    for (int k = 1; k <= n && i + k < s.size(); ++k)
-        cp = (cp << 6) | ((unsigned char) s[i + k] & 0x3F);
-    return cp;
-}
-
-/* Start byte of the character that ends just before `end`. */
-size_t char_before(const std::string &s, size_t end) {
-    size_t i = end - 1;
-    while (i > 0 && ((unsigned char) s[i] & 0xC0) == 0x80)
-        --i;
-    return i;
-}
-
-/* Byte length of the UTF-8 character at i. */
-size_t utf8_len_at(const std::string &s, size_t i) {
-    if (i >= s.size())
-        return 1;
-    unsigned char c = (unsigned char) s[i];
-    int n = c < 0x80 ? 0 : (c >= 0xF0) ? 3 : (c >= 0xE0) ? 2 : (c >= 0xC0) ? 1 : 0;
-    return (size_t) n + 1;
-}
 
 /* Latin letters we can case without a Unicode library: ASCII, Latin-1,
  * ß and ÿ. Other scripts are left as typed. */
@@ -105,10 +79,6 @@ void to_upper(uint32_t cp, std::vector<uint32_t> &out) {
 }
 
 bool is_space(uint32_t cp) { return cp == ' ' || cp == 0xA0; }
-bool is_break(uint32_t cp) {
-    return cp == '\n' || cp == '\r' || cp == 0x0B || cp == 0x0C || cp == 0x85 ||
-           cp == 0x2028 || cp == 0x2029;
-}
 
 float leading_of(const CharStyle &cs, const ParaStyle &ps) {
     return cs.leading > 0 ? cs.leading : cs.size * ps.autoleading * 0.01f;
@@ -175,8 +145,8 @@ public:
          * requires Unicode (or an empty invalid buffer). */
         hb_buffer_set_content_type(m_buf, HB_BUFFER_CONTENT_TYPE_UNICODE);
         for (size_t i = 0; i < s.size(); ) {
-            const uint32_t cp = decode_utf8(s, i);
-            const size_t n = std::min(utf8_len_at(s, i), s.size() - i);
+            const uint32_t cp = utf8_decode(s, i);
+            const size_t n = std::min(utf8_len(s, i), s.size() - i);
             const bool lower = is_lower_letter(cp);
             std::vector<uint32_t> cps;
             if ((all_caps || synth) && lower)
@@ -219,13 +189,13 @@ public:
 
         for (unsigned i = 0; i < n; ++i) {
             const uint32_t local = info[i].cluster;
-            const uint32_t cp = decode_utf8(s, local);
+            const uint32_t cp = utf8_decode(s, local);
             const float scale = local < scale_at.size() ? scale_at[local] : 1.f;
             const float gem = em * scale;
             PGlyph g;
             g.gid = info[i].codepoint;
             g.cluster = base + std::min(local, inserted_from);
-            g.run = (uint16_t) ri;
+            g.run = (uint32_t) ri;
             g.inserted = local >= inserted_from;
             g.unsafe = hb_glyph_info_get_glyph_flags(&info[i]) & HB_GLYPH_FLAG_UNSAFE_TO_BREAK;
             g.kind = is_break(cp) ? Kind::Break : is_space(cp) ? Kind::Space
@@ -412,12 +382,16 @@ struct Piece {
     size_t   seg = 0;
 };
 
+/* Hang index of the first `n` glyphs: trailing spaces and breaks are excluded. */
+size_t prefix_hang(const std::vector<PGlyph> &g, size_t n) {
+    while (n > 0 && (g[n - 1].kind == Kind::Space || g[n - 1].kind == Kind::Break))
+        --n;
+    return n;
+}
+
 /* Index of the first trailing glyph that hangs (spaces, a break). */
 size_t hang_start(const std::vector<PGlyph> &g) {
-    size_t h = g.size();
-    while (h > 0 && (g[h - 1].kind == Kind::Space || g[h - 1].kind == Kind::Break))
-        --h;
-    return h;
+    return prefix_hang(g, g.size());
 }
 
 void flatten(const std::vector<const Piece *> &pieces, std::vector<PGlyph> &g, size_t &hang) {
@@ -460,15 +434,31 @@ public:
         const bool justify = is_justified(ps.align);
         const LineCtx lc{&ps, &m_sh.text, frame_x};
 
+        /* Accepted pieces stay flattened. A try appends, measures, then drops
+         * the extra. The cached measure is the hyphen zone of the line so far. */
+        std::vector<PGlyph> flat;
+        size_t acc_hang = 0;
+        Measure acc;
+        bool have_acc = false;
+
         auto fits = [&](const Piece *extra) {
-            std::vector<const Piece *> ptrs;
-            for (const Piece &p : c.pieces) ptrs.push_back(&p);
-            if (extra) ptrs.push_back(extra);
-            size_t hang;
-            flatten(ptrs, m_tmp, hang);
-            Measure m = measure(m_tmp, hang, x0, lc, m_xs);
-            float shrink = (justify && !m.has_tab) ? m.word_shrink + m.letter_shrink : 0.f;
+            const size_t base = flat.size();
+            size_t hang = acc_hang;
+            if (extra) {
+                flat.insert(flat.end(), extra->glyphs.begin(), extra->glyphs.end());
+                hang = flat.size() - (extra->glyphs.size() - hang_start(extra->glyphs));
+            }
+            const Measure m = measure(flat, hang, x0, lc, m_xs);
+            flat.resize(base);
+            const float shrink = (justify && !m.has_tab) ? m.word_shrink + m.letter_shrink : 0.f;
             return m.natural - shrink <= avail + kEps;
+        };
+        auto accept = [&](Piece p) {
+            flat.insert(flat.end(), p.glyphs.begin(), p.glyphs.end());
+            acc_hang = flat.size() - (p.glyphs.size() - hang_start(p.glyphs));
+            acc = measure(flat, acc_hang, x0, lc, m_xs);
+            have_acc = true;
+            c.pieces.push_back(std::move(p));
         };
         auto consume = [&] {
             if (c.carry) c.carry.reset();
@@ -479,7 +469,7 @@ public:
             Piece p = c.carry ? *c.carry : from_seg(c.next_seg);
             if (fits(&p)) {
                 consume();
-                c.pieces.push_back(std::move(p));
+                accept(std::move(p));
                 if (c.pieces.back().forced)
                     break;
                 continue;
@@ -487,13 +477,8 @@ public:
 
             /* Hyphenate the piece that overflows, at the last point that fits. */
             bool zone_ok = true;
-            if (!justify && !c.pieces.empty()) {
-                std::vector<const Piece *> ptrs;
-                for (const Piece &q : c.pieces) ptrs.push_back(&q);
-                size_t hang;
-                flatten(ptrs, m_tmp, hang);
-                zone_ok = avail - measure(m_tmp, hang, x0, lc, m_xs).natural > ps.hyphen_zone;
-            }
+            if (!justify && have_acc)
+                zone_ok = avail - acc.natural > ps.hyphen_zone;
             const bool limit_ok = ps.hyphen_limit <= 0 || m_hyphen_run < ps.hyphen_limit;
             if (zone_ok && limit_ok) {
                 const std::vector<uint32_t> &pts = points(p.seg);
@@ -513,19 +498,58 @@ public:
             }
 
             if (c.pieces.empty()) {
-                /* Nothing fits: split the piece at the last cluster boundary
-                 * that fits, keeping at least one cluster on the line. */
+                /* Nothing fits: split at the last cluster boundary that fits,
+                 * keeping at least one cluster. Tabs are measured in place;
+                 * a tab-free piece is one forward pass at desired spacing. */
                 consume();
                 const size_t box = hang_start(p.glyphs);
                 size_t cut = 0, smallest = 0;
-                for (size_t i = box; i > 0; --i) {
-                    if (i < p.glyphs.size() && p.glyphs[i].cluster == p.glyphs[i - 1].cluster)
-                        continue;
-                    smallest = i;
-                    Piece head = slice(p, 0, i);
-                    if (fits(&head)) {
-                        cut = i;
-                        break;
+                bool any_tab = false;
+                for (size_t i = 0; i < box; ++i)
+                    any_tab |= p.glyphs[i].kind == Kind::Tab;
+                if (any_tab) {
+                    for (size_t i = box; i > 0; --i) {
+                        if (i < p.glyphs.size() && p.glyphs[i].cluster == p.glyphs[i - 1].cluster)
+                            continue;
+                        smallest = i;
+                        const Measure m = measure(p.glyphs, prefix_hang(p.glyphs, i), x0, lc, m_xs);
+                        const float shrink =
+                            (justify && !m.has_tab) ? m.word_shrink + m.letter_shrink : 0.f;
+                        if (m.natural - shrink <= avail + kEps) {
+                            cut = i;
+                            break;
+                        }
+                    }
+                } else {
+                    float natural = 0, word_shrink = 0, letter_shrink = 0;
+                    size_t measured = 0;
+                    bool saw = false;
+                    for (size_t i = 1; i <= box; ++i) {
+                        if (i < p.glyphs.size() && p.glyphs[i].cluster == p.glyphs[i - 1].cluster)
+                            continue;
+                        if (!saw) { smallest = i; saw = true; }
+                        const size_t hang = prefix_hang(p.glyphs, i);
+                        while (measured < hang) {
+                            const PGlyph &gl = p.glyphs[measured];
+                            if (measured > 0 && p.glyphs[measured - 1].kind == Kind::Glyph) {
+                                natural += p.glyphs[measured - 1].track;
+                                if (gl.kind == Kind::Glyph) {
+                                    natural += gl.band * ps.letter_desired * 0.01f;
+                                    letter_shrink += gl.band *
+                                        (ps.letter_desired - ps.letter_min) * 0.01f;
+                                }
+                            }
+                            if (gl.kind == Kind::Space) {
+                                natural += gl.adv * ps.word_desired * 0.01f + gl.track;
+                                word_shrink += gl.adv * (ps.word_desired - ps.word_min) * 0.01f;
+                            } else if (gl.kind == Kind::Glyph) {
+                                natural += gl.adv;
+                            }
+                            ++measured;
+                        }
+                        const float shrink = justify ? word_shrink + letter_shrink : 0.f;
+                        if (natural - shrink <= avail + kEps)
+                            cut = i;
                     }
                 }
                 if (cut == 0)
@@ -579,7 +603,7 @@ private:
             char b = brks[end - 1];
             if (b != LINEBREAK_MUSTBREAK && b != LINEBREAK_ALLOWBREAK)
                 continue;
-            if (decode_utf8(t, char_before(t, end)) == 0xAD)
+            if (utf8_decode(t, utf8_prev(t, end)) == 0xAD)
                 continue;                      // discretionary hyphen: a hyphenation point
             m_segs.push_back({g0, i + 1, m_glyphs[g0].cluster, end, b == LINEBREAK_MUSTBREAK});
             g0 = i + 1;
@@ -663,10 +687,9 @@ private:
         struct Cp { char32_t c; uint32_t byte; };
         std::vector<Cp> cps;
         for (uint32_t i = s.start; i < s.stop;) {
-            uint32_t cp = decode_utf8(t, i);
+            uint32_t cp = utf8_decode(t, i);
             cps.push_back({cp, i});
-            unsigned char lead = (unsigned char) t[i];
-            i += lead < 0x80 ? 1 : lead >= 0xF0 ? 4 : lead >= 0xE0 ? 3 : 2;
+            i += (uint32_t) utf8_len(t, i);
         }
         for (size_t k = 0; k + 1 < cps.size(); ++k)
             if (cps[k].c == 0xAD)
@@ -703,7 +726,6 @@ private:
     std::optional<Piece> m_carry;
     int  m_hyphen_run = 0;
     bool m_need_empty = false;
-    std::vector<PGlyph> m_tmp;
     std::vector<float> m_xs;
 };
 

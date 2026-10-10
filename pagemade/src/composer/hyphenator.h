@@ -10,7 +10,9 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <map>
 #include <string>
+#include <string_view>
 #include <unordered_map>
 #include <vector>
 
@@ -30,7 +32,12 @@ public:
     int right_min = 3;
 
 private:
-    std::unordered_map<std::u32string, std::vector<uint8_t>> m_patterns;
+    /* Transparent so a pattern probe can look up a view into ".word." */
+    struct PatternLess {
+        using is_transparent = void;
+        bool operator()(std::u32string_view a, std::u32string_view b) const { return a < b; }
+    };
+    std::map<std::u32string, std::vector<uint8_t>, PatternLess> m_patterns;
     std::unordered_map<std::u32string, std::vector<size_t>> m_exceptions;
     size_t m_max_len = 0;
 };

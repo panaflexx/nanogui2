@@ -49,8 +49,6 @@ class Font {
 public:
     /* nullptr if the file can't be read or isn't a font. */
     static std::shared_ptr<Font> load_file(const std::string &path, unsigned index = 0);
-    /* `data` must outlive the Font (used for fonts compiled into the binary). */
-    static std::shared_ptr<Font> load_memory(const void *data, size_t size, unsigned index = 0);
     /* The Font keeps the bytes (fonts embedded in a publication). */
     static std::shared_ptr<Font> load_bytes(std::vector<char> bytes, const std::string &name,
                                             unsigned index = 0);

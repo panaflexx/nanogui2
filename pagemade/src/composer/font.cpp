@@ -51,17 +51,6 @@ const char *Font::data(size_t *size) const {
     return d;
 }
 
-std::shared_ptr<Font> Font::load_memory(const void *data, size_t size, unsigned index) {
-    hb_blob_t *blob = hb_blob_create_or_fail((const char *) data, (unsigned) size,
-                                             HB_MEMORY_MODE_READONLY, nullptr, nullptr);
-    if (!blob)
-        return nullptr;
-    auto f = from_blob(blob, index);
-    if (f)
-        f->m_name = "(embedded)";
-    return f;
-}
-
 std::shared_ptr<Font> Font::from_blob(hb_blob_t *blob, unsigned index) {
     hb_face_t *face = hb_face_create(blob, index);
     if (!face || hb_face_get_glyph_count(face) == 0) {
@@ -77,6 +66,8 @@ std::shared_ptr<Font> Font::from_blob(hb_blob_t *blob, unsigned index) {
      * all come back unhinted, in design units. */
     f->m_font = hb_font_create(face);
     f->m_upem = (int) hb_face_get_upem(face);
+    if (f->m_upem < 1)
+        f->m_upem = 1;
 
     hb_position_t v;
     if (hb_ot_metrics_get_position(f->m_font, HB_OT_METRICS_TAG_HORIZONTAL_ASCENDER, &v))

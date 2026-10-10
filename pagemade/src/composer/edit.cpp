@@ -2,6 +2,7 @@
  * pagemade/composer/edit.cpp — see edit.h.
  */
 #include "composer/edit.h"
+#include "composer/utf8.h"
 
 #include <graphemebreak.h>
 #include <wordbreak.h>
@@ -14,21 +15,6 @@
 namespace pagemade {
 
 namespace {
-
-uint32_t decode(const std::string &s, size_t i) {
-    unsigned char c = (unsigned char) s[i];
-    if (c < 0x80) return c;
-    int n = (c >= 0xF0) ? 3 : (c >= 0xE0) ? 2 : (c >= 0xC0) ? 1 : 0;
-    uint32_t cp = c & (0x3F >> n);
-    for (int k = 1; k <= n && i + k < s.size(); ++k)
-        cp = (cp << 6) | ((unsigned char) s[i + k] & 0x3F);
-    return cp;
-}
-
-size_t char_len(const std::string &s, size_t i) {
-    unsigned char c = (unsigned char) s[i];
-    return c < 0x80 ? 1 : c >= 0xF0 ? 4 : c >= 0xE0 ? 3 : 2;
-}
 
 void init_breaks() {
     static std::once_flag once;
@@ -62,8 +48,8 @@ bool is_word_char(uint32_t cp) {
 }
 
 bool has_word_char(const std::string &t, uint32_t a, uint32_t b) {
-    for (uint32_t i = a; i < b; i += (uint32_t) char_len(t, i))
-        if (is_word_char(decode(t, i)))
+    for (uint32_t i = a; i < b; i += (uint32_t) utf8_len(t, i))
+        if (is_word_char(utf8_decode(t, i)))
             return true;
     return false;
 }
@@ -496,7 +482,7 @@ float x_at(const ComposedLine &l, const std::string &text, uint32_t byte) {
         if (byte > b.c0 && byte < b.c1) {
             /* Inside a ligature: share its advance between its characters. */
             int n = 0, k = 0;
-            for (uint32_t i = b.c0; i < b.c1 && i < text.size(); i += (uint32_t) char_len(text, i)) {
+            for (uint32_t i = b.c0; i < b.c1 && i < text.size(); i += (uint32_t) utf8_len(text, i)) {
                 if (i < byte) ++k;
                 ++n;
             }
@@ -538,11 +524,11 @@ TextPos line_end(const Composition &c, const Story &s, size_t line) {
     const std::string t = paragraph_text(s.paragraphs[l.para]);
     uint32_t e = l.byte_end;
     while (e > l.byte_start) {
-        size_t i = e - 1;
-        while (i > l.byte_start && ((unsigned char) t[i] & 0xC0) == 0x80)
-            --i;
-        uint32_t cp = decode(t, i);
-        if (cp != ' ' && cp != 0xA0 && cp != '\n' && cp != '\r' && cp != 0x2028 && cp != 0x2029)
+        size_t i = utf8_prev(t, e);
+        if (i < l.byte_start)
+            break;
+        uint32_t cp = utf8_decode(t, i);
+        if (cp != ' ' && cp != 0xA0 && !is_break(cp))
             break;
         e = (uint32_t) i;
     }
@@ -555,7 +541,7 @@ TextPos pos_at_x(const Composition &c, const Story &s, size_t line, float x) {
     TextPos out{l.para, l.byte_end};
     for (const ClusterBox &b : clusters_of(l)) {
         std::vector<uint32_t> starts;
-        for (uint32_t i = b.c0; i < b.c1 && i < t.size(); i += (uint32_t) char_len(t, i))
+        for (uint32_t i = b.c0; i < b.c1 && i < t.size(); i += (uint32_t) utf8_len(t, i))
             starts.push_back(i);
         if (starts.empty())
             starts.push_back(b.c0);
