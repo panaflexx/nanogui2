@@ -48,8 +48,12 @@ and its nanovgd renderer. The composer lays out in points and every backend
   Ctrl/Cmd+M) pops open a panel laid out after VectorStyler's. It holds the
   style menu, seven alignments (justified with the last line left, centered
   or right, and force justify), leading as a percent, extra spacing, left,
-  right, first-line and last-line indents, and space before and after. It
-  works on whole paragraphs. A last line too long for its indent breaks
+  right, first-line and last-line indents, space before and after, and drop
+  caps. It works on whole paragraphs. A drop cap enlarges the first
+  characters so their cap height runs from the first line's cap height to
+  line N's baseline, sized from there by a percent; the lines it reaches
+  move over by its width, and a short paragraph pushes the next one below
+  it. The cap stays text: the caret, selection and PDF treat it as such. A last line too long for its indent breaks
   again. Named styles live in the publication (Normal, PageMaker's
   predefined set, Pull quote, Byline, plus the sample's own). Applying one
   keeps italic or bold emphasis, underline and color; the menu shows "Name+"
@@ -141,7 +145,9 @@ and its nanovgd renderer. The composer lays out in points and every backend
   - Superscript/subscript (PageMaker's Position: size and offset percents)
     and real small caps or old-style figures from OpenType features (smcp,
     onum, lnum, tnum) when the face has them.
-  - Paragraph rules (lines above/below) and drop caps.
+  - Paragraph rules (lines above/below). Drop cap options: a raised cap
+    (baseline on line 1), a font or color of its own, and text that follows
+    the cap's outline instead of its box.
   - Align to grid: snap baselines to a leading grid across columns.
   - Whether a block selected with the pointer should restyle its whole story
     (PageMaker does) rather than only the text in that block (pagemade does).

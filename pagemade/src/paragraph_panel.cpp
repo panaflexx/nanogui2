@@ -45,6 +45,16 @@ void arrow_head(NVGcontext *ctx, float x, float y, float dx, float dy) {
     nvgFill(ctx);
 }
 
+/* A capital A in strokes, its apex at the top of (x0, y0)-(x1, y1). */
+void letter_a(NVGcontext *ctx, float x0, float y0, float x1, float y1) {
+    const float xm = (x0 + x1) * 0.5f, yb = y0 + (y1 - y0) * 0.62f;
+    const float t = (yb - y0) / (y1 - y0);
+    nvgMoveTo(ctx, x0, y1);
+    nvgLineTo(ctx, xm, y0);
+    nvgLineTo(ctx, x1, y1);
+    bar(ctx, xm + (x0 - xm) * t, xm + (x1 - xm) * t, yb);
+}
+
 } // namespace
 
 void draw_para_icon(NVGcontext *ctx, ParaIcon icon, float x, float y, float w, float h,
@@ -149,6 +159,38 @@ void draw_para_icon(NVGcontext *ctx, ParaIcon icon, float x, float y, float w, f
         stroke();
         break;
     }
+    case ParaIcon::DropCap: {
+        /* A large A beside three short lines, a full line below. */
+        nvgLineJoin(ctx, NVG_MITER);
+        nvgBeginPath(ctx);
+        letter_a(ctx, ox + 1, oy + 1, ox + 10, oy + 11);
+        bar(ctx, ox + 13, ox + 19, oy + 2);
+        bar(ctx, ox + 13, ox + 19, oy + 6);
+        bar(ctx, ox + 13, ox + 19, oy + 10.5f);
+        bar(ctx, ox + 1, ox + 19, oy + 14.5f);
+        stroke();
+        break;
+    }
+    case ParaIcon::DropSize:
+        /* A large A and a small one. */
+        nvgLineJoin(ctx, NVG_MITER);
+        nvgBeginPath(ctx);
+        letter_a(ctx, ox + 1, oy + 1, ox + 12, oy + 15);
+        letter_a(ctx, ox + 13.5f, oy + 8, ox + 19, oy + 15);
+        stroke();
+        break;
+    case ParaIcon::DropChars:
+        /* Two capitals over a bracket: how many characters drop. */
+        nvgLineJoin(ctx, NVG_MITER);
+        nvgBeginPath(ctx);
+        letter_a(ctx, ox + 1, oy + 1, ox + 9, oy + 11);
+        letter_a(ctx, ox + 11, oy + 1, ox + 19, oy + 11);
+        nvgMoveTo(ctx, ox + 1, oy + 12.5f);
+        nvgLineTo(ctx, ox + 1, oy + 15);
+        nvgLineTo(ctx, ox + 19, oy + 15);
+        nvgLineTo(ctx, ox + 19, oy + 12.5f);
+        stroke();
+        break;
     case ParaIcon::SpaceBefore:
     case ParaIcon::SpaceAfter: {
         const bool before = icon == ParaIcon::SpaceBefore;
@@ -362,6 +404,18 @@ ParagraphPanel::ParagraphPanel(Widget *parent, Hooks hooks)
               0.f, 1000.f, 1.f, "%.1f", "pt");
 
     new Rule(this);
+    Widget *drop = grid();
+    add_int_field(drop, ParaIcon::DropCap,
+                  "Drop cap: how many lines it drops (0 = none)", &P::drop_lines, 0,
+                  pagemade::kMaxDropLines, "lines");
+    add_field(drop, ParaIcon::DropSize,
+              "Drop cap size: 100% spans its lines exactly; larger moves more lines over",
+              &P::drop_scale, 1.f, pagemade::kMinDropScale, pagemade::kMaxDropScale, 5.f, "%.0f",
+              "%");
+    add_int_field(drop, ParaIcon::DropChars, "Drop cap: how many characters are enlarged",
+                  &P::drop_chars, 1, pagemade::kMaxDropChars, "chars");
+
+    new Rule(this);
     RightRow *bottom = new RightRow(this, 6);
     m_delete = new Button(bottom, "Remove");
     m_delete->set_fixed_size(Vector2i(84, 28));
@@ -418,6 +472,35 @@ void ParagraphPanel::add_field(Widget *grid, ParaIcon icon, const char *tip,
         const float shown = std::clamp(v, f.lo, f.hi);
         f.box->set_value(shown);
         const float value = shown / f.scale;
+        const auto member = f.member;
+        if (m_hooks.apply)
+            m_hooks.apply([member, value](ParaStyle &ps) { ps.*member = value; },
+                          f.box->spinning() ? f.box : nullptr);
+        return true;
+    });
+}
+
+void ParagraphPanel::add_int_field(Widget *grid, ParaIcon icon, const char *tip,
+                                   int ParaStyle::*member, int lo, int hi, const char *units) {
+    auto *label = new IconLabel(grid, icon);
+    label->set_tooltip(tip);
+    auto *box = new IntSpin(grid, lo, 1, lo, hi);
+    box->set_units(units);
+    box->set_default_value("");          // left blank (mixed): no change
+    box->set_alignment(TextBox::Alignment::Left);
+    box->set_fixed_size(Vector2i(104, 28));
+    box->set_tooltip(tip);
+    const size_t index = m_int_fields.size();
+    m_int_fields.push_back({box, member, lo, hi});
+    box->set_blank_value([this, index] { return m_first.*(m_int_fields[index].member); });
+    box->TextBox::set_callback([this, index](const std::string &s) {
+        const IntField &f = m_int_fields[index];
+        char *end = nullptr;
+        const long v = std::strtol(s.c_str(), &end, 10);
+        if (end == s.c_str())
+            return false;
+        const int value = (int) std::clamp<long>(v, f.lo, f.hi);
+        f.box->set_value(value);
         const auto member = f.member;
         if (m_hooks.apply)
             m_hooks.apply([member, value](ParaStyle &ps) { ps.*member = value; },
@@ -485,6 +568,19 @@ void ParagraphPanel::load(const std::vector<const Paragraph *> &paras,
             same &= p->style.*(f.member) == paras.front()->style.*(f.member);
         if (same)
             f.box->set_value(paras.front()->style.*(f.member) * f.scale);
+        else
+            f.box->TextBox::set_value("");
+    }
+
+    for (IntField &f : m_int_fields) {
+        f.box->set_enabled(any);
+        if (f.box->focused() || f.box->spinning())
+            continue;
+        bool same = any;
+        for (const Paragraph *p : paras)
+            same &= p->style.*(f.member) == paras.front()->style.*(f.member);
+        if (same)
+            f.box->set_value(paras.front()->style.*(f.member));
         else
             f.box->TextBox::set_value("");
     }

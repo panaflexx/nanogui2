@@ -1,6 +1,8 @@
 /*
- * pagemade/composerview.h — ComposerView: one page on a pasteboard, its
- * items drawn in stacking order, each story composed into its text blocks.
+ * pagemade/composerview.h — ComposerView: pages on a pasteboard, items
+ * drawn in stacking order, each story composed into its text blocks.
+ * The pasteboard shows one page, a side-by-side spread, or every page
+ * stacked. A click on a visible page turns to it.
  *
  * The view's logical units are points. Host it in a ZoomScrollPanel: the
  * panel's scale is the zoom, and the composer never sees it. Text is
@@ -101,13 +103,20 @@ public:
     void select_frame(size_t story, size_t frame);
 
     /* ---- Pages ------------------------------------------------------ */
-    /* One page is on the pasteboard. Hidden pages can be shown and edited;
-     * printing skips them. */
+    /* Hidden pages can be shown and edited; printing skips them.
+     * PageView chooses one page, the spread that holds the current page,
+     * or a stack of every page. */
     size_t page_index() const { return m_page; }
     size_t page_count() const { return m_doc.pages.size(); }
     bool page_hidden(size_t i) const {
         return i < m_doc.pages.size() && m_doc.pages[i].hidden;
     }
+    void set_page_view(pagemade::PageView view);
+    pagemade::PageView page_view() const { return m_page_view; }
+    /* Top-left of page `index` in the arrangement (0, 0 when it is off screen). */
+    nanogui::Vector2f page_slot_offset(size_t index) const;
+    /* The rectangle Fit Page should frame: one page, or the whole spread. */
+    void fit_extent(float &width, float &height) const;
     void show_page(size_t i);
     void insert_page(bool after);          // one undo step
     void remove_page();                    // keeps the last page
@@ -209,7 +218,7 @@ public:
     /* Called whenever the document changes, is saved or is replaced. */
     std::function<void()> on_document_change;
 
-    /* Top-left of the page in view units; the rest is pasteboard. */
+    /* Top-left of the arrangement in view units; the rest is pasteboard. */
     nanogui::Vector2f page_origin() const;
 
     /* Called after every recompose (status bars). */
@@ -244,11 +253,15 @@ private:
      * the panel's zoom applied. Both go through this instead, from the
      * screen's mouse position, at full precision. */
     pagemade::Point page_point_from_screen(const nanogui::Vector2i &screen_p) const;
+    /* `local` is view space, origin at the widget's top-left. The point
+     * comes back in the page under the cursor, or the page the gesture
+     * started on while the button is down. */
+    pagemade::Point page_point_from_local(const nanogui::Vector2f &local) const;
     float zoom() const;
     /* Handles of selected items first, then items top to bottom. */
-    Hit hit_test(const pagemade::Point &pt) const;
+    Hit hit_test(const pagemade::Point &pt, size_t page) const;
     /* Topmost text block under pt (0 = none). */
-    pagemade::ItemId text_frame_at(const pagemade::Point &pt) const;
+    pagemade::ItemId text_frame_at(const pagemade::Point &pt, size_t page) const;
     /* Does pt (page) touch the item? Unfilled shapes only by their outline. */
     bool hits_item(const pagemade::Item &it, const pagemade::Point &pt) const;
 
@@ -274,10 +287,10 @@ private:
     /* Adjust a move so one of the box's edges (or its center) lands on a guide. */
     pagemade::Point snap_move(const pagemade::Bounds &b, pagemade::Point d) const;
 
-    void draw_page(NVGcontext *ctx, float px);
+    void draw_page(NVGcontext *ctx, float px, size_t page);
     /* Loose/tight lines, baselines, the text selection and the caret. */
     void draw_text_overlays(NVGcontext *ctx, const pagemade::Item &it, float px);
-    void draw_chrome(NVGcontext *ctx, float px);   // outlines, handles, windowshades, marquee
+    void draw_chrome(NVGcontext *ctx, float px, size_t page);   // outlines, handles, windowshades, marquee
 
     /* ---- Threading ------------------------------------------------- */
     /* The red arrow was clicked: thread a new block after the selected
@@ -339,7 +352,11 @@ private:
     const pagemade::FontLibrary *m_fonts;
     const pagemade::Hyphenator *m_hyphenator;
     pagemade::PageDoc m_doc;
-    size_t m_page = 0;                    // the page on screen
+    size_t m_page = 0;                    // the page being edited
+    pagemade::PageView m_page_view = pagemade::PageView::One;
+    bool m_pointer_down = false;          // a drag stays on the page it started
+    size_t m_gesture_page = 0;
+    mutable size_t m_point_page = 0;      // page page_point_from_local resolved
     std::vector<pagemade::Composition> m_comp;
 
     Tool m_tool = Tool::Pointer;

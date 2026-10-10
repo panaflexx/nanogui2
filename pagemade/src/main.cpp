@@ -5,11 +5,14 @@
  * PageMaker's (File, Edit, Layout, Element): pages are inserted, removed,
  * reordered and hidden from Layout, and Arrange lives under Element.
  * Page icons along the bottom of the window show the document — click one
- * to turn to it, drag to rearrange. The toolbar holds the toolbox
+ * to turn to it, drag to rearrange. Beside them, three buttons show one
+ * page, a side-by-side spread, or every page in a stack. File > New Document
+ * asks for the page size, facing pages, margins and columns. The toolbar holds the toolbox
  * (pointer, crop, rotate, text, line, rectangle, ellipse, polygon), snap to
  * guides, undo/redo (Ctrl+Z / Ctrl+Shift+Z), a zoom dropdown, the ¶ button
- * for the Paragraph panel (style, alignment, spacing, indents), and switches
- * for kerning and ligatures. Below it, the control palette
+ * for the Paragraph panel (style, alignment, spacing, indents), and K/L/B/V
+ * toggles for kerning, ligatures, baselines and loose/tight lines. Below it,
+ * the control palette
  * switches between the object view (position, size, angle, fill and
  * stroke; with nothing selected, the defaults for new shapes) and the
  * type view (font, size, style, leading and baseline). Type on that palette,
@@ -26,7 +29,8 @@
  *            [--drag x0,y0:x1,y1 ...] [--click x,y ...] [--type txt ...]
  *            [--key [mod+]name ...] [--open file.pagemade] [--place picture.png]
  *            [--save file.pagemade ...] [--save-embedded file.pagemade ...]
- *            [--dialog save|changes] [--print-title]
+ *            [--dialog save|changes|new] [--blank-pages n] [--page-view one|spread|stack]
+ *            [--print-title]
  *            [--ui-click x,y ...] [--ui-scroll x,y:dy ...]
  *
  * --at is a page point (points from the page's top-left) to center on.
@@ -86,27 +90,49 @@ using namespace pagemade;
 
 /* PageMaker's page icons: a row of little pages at the bottom of the
  * window. Click turns to that page; drag rearranges them. A hidden page
- * is gray. */
+ * is gray. Three buttons on the right choose one page, a side-by-side
+ * spread, or every page in a stack. */
 class PageIconStrip : public Widget {
 public:
+    std::function<void()> on_turned;   // a click turned to a page
+    std::function<void()> on_view;     // a view button changed the pasteboard
+
     PageIconStrip(Widget *parent, ComposerView *view) : Widget(parent), m_view(view) {
         set_height(32);
         set_min_height(32);
         set_height_flex(SizeMode::Fixed);
         set_tooltip("Pages. Click to turn to a page, drag to rearrange.");
+        auto add = [&](PageView mode, int icon, const char *tip) {
+            ToolButton *b = new ToolButton(this, icon);
+            b->set_fixed_size(Vector2i(kBtn, kBtn));
+            b->set_tooltip(tip);
+            b->set_callback([this, mode] {
+                m_view->set_page_view(mode);
+                if (on_view)
+                    on_view();
+            });
+            m_modes.push_back({mode, b});
+        };
+        add(PageView::One, FA_FILE, "One page");
+        add(PageView::Spread, FA_COLUMNS, "Side by side");
+        add(PageView::Stack, FA_GRIP_LINES, "One-page style");
+        m_modes.front().second->set_pushed(true);
     }
 
     void draw(NVGcontext *ctx) override {
         update_scroll();
+        sync_buttons();
+        place_buttons();
         const int n = (int) m_view->page_count();
         const int cur = (int) m_view->page_index();
+        const int right = m_pos.x() + m_size.x() - chrome();
         nvgFontFace(ctx, "sans");
         nvgFontSize(ctx, 11);
         nvgTextAlign(ctx, NVG_ALIGN_CENTER | NVG_ALIGN_MIDDLE);
         const float y = (float) m_pos.y() + (m_size.y() - kH) * 0.5f;
         for (int i = 0; i < n; ++i) {
             const float x = (float) (m_pos.x() + kPad + i * (kW + kGap) - m_scroll);
-            if (x + kW < m_pos.x() || x > m_pos.x() + m_size.x())
+            if (x + kW < m_pos.x() || x > right)
                 continue;
             const bool hidden = m_view->page_hidden((size_t) i);
             const bool on = i == cur;
@@ -126,6 +152,17 @@ public:
             nvgFillColor(ctx, on ? nvgRGB(255, 255, 255) : nvgRGB(0, 0, 0));
             nvgText(ctx, x + kW * 0.5f, y + kH * 0.5f, num, nullptr);
         }
+        nvgSave(ctx);
+        nvgTranslate(ctx, (float) m_pos.x(), (float) m_pos.y());
+        for (Widget *c : children())
+            if (c->visible())
+                c->draw(ctx);
+        nvgRestore(ctx);
+    }
+
+    void perform_layout(NVGcontext *ctx) override {
+        Widget::perform_layout(ctx);
+        place_buttons();
     }
 
     bool mouse_button_event(const Vector2i &p, int button, bool down, int modifiers) override {
@@ -133,8 +170,11 @@ public:
             return false;
         if (!down) {
             const bool mine = m_press >= 0;
+            const bool turn = mine && !m_moved;
             m_press = -1;
             m_moved = false;
+            if (turn && on_turned)
+                on_turned();
             return mine;
         }
         update_scroll();
@@ -162,11 +202,37 @@ public:
 
 private:
     static constexpr int kW = 18, kH = 24, kGap = 6, kPad = 8;
+    static constexpr int kBtn = 26, kBtnGap = 2;
+
+    int chrome() const {
+        const int n = (int) m_modes.size();
+        if (n <= 0)
+            return 0;
+        return kPad + n * kBtn + (n - 1) * kBtnGap + kPad;
+    }
+
+    void place_buttons() {
+        const int n = (int) m_modes.size();
+        int x = m_size.x() - kPad - n * kBtn - std::max(0, n - 1) * kBtnGap;
+        const int y = std::max(0, (m_size.y() - kBtn) / 2);
+        for (auto &mb : m_modes) {
+            mb.second->set_position(Vector2i(x, y));
+            mb.second->set_size(Vector2i(kBtn, kBtn));
+            x += kBtn + kBtnGap;
+        }
+    }
+
+    void sync_buttons() {
+        const PageView v = m_view->page_view();
+        for (auto &mb : m_modes)
+            if (mb.second->pushed() != (mb.first == v))
+                mb.second->set_pushed(mb.first == v);
+    }
 
     void update_scroll() {
         const int n = (int) m_view->page_count();
         const int content = kPad * 2 + n * kW + std::max(0, n - 1) * kGap;
-        const int view = std::max(m_size.x(), 1);
+        const int view = std::max(m_size.x() - chrome(), 1);
         if (content <= view) {
             m_scroll = 0;
             return;
@@ -186,6 +252,8 @@ private:
         const int n = (int) m_view->page_count();
         if (n <= 0)
             return -1;
+        if (p.x() >= m_pos.x() + m_size.x() - chrome())
+            return -1;
         const int local = p.x() - m_pos.x() + m_scroll - kPad;
         const int stride = kW + kGap;
         if (!nearest) {
@@ -203,6 +271,7 @@ private:
     int m_press = -1;
     int m_scroll = 0;
     bool m_moved = false;
+    std::vector<std::pair<PageView, ToolButton *>> m_modes;
 };
 
 class PagemadeApp : public Screen {
@@ -323,18 +392,29 @@ public:
          * until they clip. Fixed, it fits the panel. */
         para_popup->set_resizable(false);
 
-        m_kern = new CheckBox(toolbar, "Kerning", [this](bool on) {
+        /* Kerning, ligatures, baselines, loose/tight: one toggle each. */
+        Widget *flags = new Widget(toolbar);
+        flags->set_layout(new BoxLayout(Orientation::Horizontal, Alignment::Middle, 0, 2));
+        auto toggle = [&](const char *letter, const char *tip, bool on,
+                          std::function<void(bool)> fn) {
+            Button *b = new Button(flags, letter);
+            b->set_flags(Button::ToggleButton);
+            b->set_pushed(on);
+            b->set_fixed_size(Vector2i(28, 28));
+            b->set_tooltip(tip);
+            b->set_change_callback(std::move(fn));
+            return b;
+        };
+        m_kern = toggle("K", "Kerning", true, [this](bool on) {
             for_each_run([on](CharStyle &cs) { cs.kerning = on; });
         });
-        m_kern->set_checked(true);
-        auto *liga = new CheckBox(toolbar, "Ligatures", [this](bool on) {
+        toggle("L", "Ligatures", true, [this](bool on) {
             for_each_run([on](CharStyle &cs) { cs.ligatures = on; });
         });
-        liga->set_checked(true);
-        m_baselines = new CheckBox(toolbar, "Baselines", [this](bool on) {
+        m_baselines = toggle("B", "Baselines", false, [this](bool on) {
             m_view->set_show_baselines(on);
         });
-        m_loose = new CheckBox(toolbar, "Loose/tight lines", [this](bool on) {
+        m_loose = toggle("V", "Loose/tight lines", false, [this](bool on) {
             m_view->set_show_loose_tight(on);
         });
 
@@ -359,6 +439,11 @@ public:
         m_view->on_document_change = [this] { update_title(); };
 
         m_pages = new PageIconStrip(window, m_view);
+        m_pages->on_view = [this] { fit_page(); };
+        m_pages->on_turned = [this] {
+            if (m_view->page_view() != PageView::One)
+                frame_view();
+        };
 
         m_status = new Label(window, "", "sans", 16);
         m_status->set_min_height(24);
@@ -438,13 +523,15 @@ public:
 
     void new_document() {
         close_document_then([this] {
-            m_fonts.clear_document_fonts();
-            m_images.clear();
-            m_view->set_document(PageDoc());
-            m_doc_path.clear();
-            m_embed_assets = false;
-            after_document_switch();
-            set_note("new publication");
+            ask_new_document(this, [this](const NewDocument &spec) {
+                m_fonts.clear_document_fonts();
+                m_images.clear();
+                m_view->set_document(new_publication(spec.setup, spec.pages));
+                m_doc_path.clear();
+                m_embed_assets = false;
+                after_document_switch();
+                set_note("new publication");
+            });
         });
     }
 
@@ -553,7 +640,7 @@ public:
         m_menubar->set_height_flex(SizeMode::Fixed);
 
         Dropdown *file = m_menubar->add_menu("File");
-        add_cmd(file, "New", {{SYSTEM_COMMAND_MOD, GLFW_KEY_N}}, [this] { new_document(); });
+        add_cmd(file, "New Document", {{SYSTEM_COMMAND_MOD, GLFW_KEY_N}}, [this] { new_document(); });
         add_cmd(file, "Open...", {{SYSTEM_COMMAND_MOD, GLFW_KEY_O}}, [this] { open_document_dialog(); });
         add_cmd(file, "Place...", {{SYSTEM_COMMAND_MOD, GLFW_KEY_D}}, [this] { place_dialog(); });
         new Separator(file->popup());
@@ -1215,20 +1302,41 @@ public:
     }
 
     void fit_page() {
-        const PageSetup &s = m_view->document().setup;
+        float w, h;
+        m_view->fit_extent(w, h);
         Vector2i panel = m_scroll->size();
-        double z = std::min((panel.x() - 24) / (s.width + 24.0),
-                            (panel.y() - 24) / (s.height + 24.0));
+        double z = std::min((panel.x() - 24) / (w + 24.0),
+                            (panel.y() - 24) / (h + 24.0));
+        if (!(z > 0.02))
+            z = 1;
         m_scroll->set_zoom(z);
-        center_on(Vector2f(s.width * 0.5f, s.height * 0.5f));
+        frame_view();
         update_status();
     }
 
-    /* Put a page point at the middle of the panel. */
+    /* Center the spread, or the current page when the pages are stacked. */
+    void frame_view() {
+        perform_layout();
+        double z = m_scroll->zoom();
+        Vector2f v;
+        if (m_view->page_view() == PageView::Stack) {
+            const PageSetup &s = m_view->document().setup;
+            v = m_view->page_origin() + m_view->page_slot_offset(m_view->page_index()) +
+                Vector2f(s.width * 0.5f, s.height * 0.5f);
+        } else {
+            float w, h;
+            m_view->fit_extent(w, h);
+            v = m_view->page_origin() + Vector2f(w * 0.5f, h * 0.5f);
+        }
+        m_scroll->set_pan_offset(ZoomScrollPanel::Vector2d(m_scroll->size().x() * 0.5 - v.x() * z,
+                                                           m_scroll->size().y() * 0.5 - v.y() * z));
+    }
+
+    /* Put a page point of the current page at the middle of the panel. */
     void center_on(const Vector2f &page_pt) {
         perform_layout();
         double z = m_scroll->zoom();
-        Vector2f v = m_view->page_origin() + page_pt;
+        Vector2f v = m_view->page_origin() + m_view->page_slot_offset(m_view->page_index()) + page_pt;
         m_scroll->set_pan_offset(ZoomScrollPanel::Vector2d(m_scroll->size().x() * 0.5 - v.x() * z,
                                                            m_scroll->size().y() * 0.5 - v.y() * z));
     }
@@ -1490,9 +1598,9 @@ public:
         m_view->set_snap(on);
         m_snap_btn->set_pushed(on);
     }
-    CheckBox *baselines_box() { return m_baselines; }
-    CheckBox *loose_box() { return m_loose; }
-    CheckBox *kern_box() { return m_kern; }
+    Button *baselines_box() { return m_baselines; }
+    Button *loose_box() { return m_loose; }
+    Button *kern_box() { return m_kern; }
 
 private:
     FontLibrary     m_fonts;
@@ -1504,7 +1612,7 @@ private:
     PageIconStrip   *m_pages = nullptr;
     Dropdown        *m_zoom_menu = nullptr;
     Button          *m_undo_btn = nullptr, *m_redo_btn = nullptr;
-    CheckBox        *m_kern = nullptr, *m_baselines = nullptr, *m_loose = nullptr;
+    Button          *m_kern = nullptr, *m_baselines = nullptr, *m_loose = nullptr;
     std::vector<std::pair<ComposerView::Tool, ToolButton *>> m_tool_btns;
     Button          *m_snap_btn = nullptr;
     FloatSpin       *m_geom[5] = {};
@@ -1595,6 +1703,8 @@ int main(int argc, char **argv) {
     double zoom = 0;
     float at_x = -1, at_y = -1, sel_a = -1, sel_b = -1;
     bool baselines = false, loose = false, no_kern = false, no_snap = false;
+    int blank_pages = 0;
+    std::string page_view;
     std::vector<Action> actions;
     for (int i = 1; i < argc; ++i) {
         std::string a = argv[i];
@@ -1605,6 +1715,8 @@ int main(int argc, char **argv) {
         else if (a == "--place" && i + 1 < argc) place_path = argv[++i];
         else if (a == "--print-title") print_title = true;
         else if (a == "--dialog" && i + 1 < argc) dialog = argv[++i];
+        else if (a == "--blank-pages" && i + 1 < argc) blank_pages = std::atoi(argv[++i]);
+        else if (a == "--page-view" && i + 1 < argc) page_view = argv[++i];
         else if ((a == "--save" || a == "--save-embedded") && i + 1 < argc) {
             act.kind = a == "--save" ? Action::Save : Action::SaveEmbedded;
             act.text = argv[++i];
@@ -1672,9 +1784,18 @@ int main(int argc, char **argv) {
                 std::printf("place FAILED %s\n", error.c_str());
         }
 
-        if (baselines) { app->baselines_box()->set_checked(true); app->view()->set_show_baselines(true); }
-        if (loose)     { app->loose_box()->set_checked(true); app->view()->set_show_loose_tight(true); }
-        if (no_kern)   { app->kern_box()->set_checked(false);
+        if (blank_pages > 1) {
+            while ((int) app->view()->page_count() < blank_pages)
+                app->view()->insert_page(true);
+            app->view()->show_page(0);
+        }
+        if (page_view == "spread")
+            app->view()->set_page_view(PageView::Spread);
+        else if (page_view == "stack" || page_view == "continuous")
+            app->view()->set_page_view(PageView::Stack);
+        if (baselines) { app->baselines_box()->set_pushed(true); app->view()->set_show_baselines(true); }
+        if (loose)     { app->loose_box()->set_pushed(true); app->view()->set_show_loose_tight(true); }
+        if (no_kern)   { app->kern_box()->set_pushed(false);
                          app->for_each_run([](CharStyle &cs) { cs.kerning = false; }); }
         if (sel_a >= 0) app->view()->select_frame((size_t) sel_a, (size_t) sel_b);
         if (zoom > 0) {
@@ -1730,6 +1851,8 @@ int main(int argc, char **argv) {
             app->save_as();
         else if (dialog == "changes")
             ask_save_changes(app, app->doc_name(), [](SaveChoice) {});
+        else if (dialog == "new")
+            app->new_document();
         if (print_title)
             std::printf("title %s\n", app->caption().c_str());
         if (!pdf.empty())

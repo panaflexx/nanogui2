@@ -1,7 +1,8 @@
 /*
  * pagemade/paragraph_panel.h — the Paragraph panel the ¶ button pops open,
  * laid out after VectorStyler's: the style menu, seven alignments, line
- * spacing and extra spacing, the four indents, and space before and after,
+ * spacing and extra spacing, the four indents, space before and after, and
+ * the drop cap (lines, size, characters),
  * with Remove (delete the style) and Add (new style from the selection)
  * below.
  *
@@ -32,6 +33,7 @@ enum class ParaIcon {
     LineSpacing, ExtraSpacing,
     LeftIndent, RightIndent, FirstIndent, LastIndent,
     SpaceBefore, SpaceAfter,
+    DropCap, DropSize, DropChars,
 };
 void draw_para_icon(NVGcontext *ctx, ParaIcon icon, float x, float y, float w, float h,
                     const nanogui::Color &color);
@@ -67,11 +69,18 @@ private:
         float scale = 1;                 // shown = member * scale
         float lo = 0, hi = 0;
     };
+    struct IntField {
+        IntSpin *box = nullptr;
+        int pagemade::ParaStyle::*member = nullptr;
+        int lo = 0, hi = 0;
+    };
     class AlignButton;
 
     void add_field(nanogui::Widget *grid, ParaIcon icon, const char *tip,
                    float pagemade::ParaStyle::*member, float scale, float lo, float hi,
                    float step, const char *format, const char *units);
+    void add_int_field(nanogui::Widget *grid, ParaIcon icon, const char *tip,
+                       int pagemade::ParaStyle::*member, int lo, int hi, const char *units);
 
     Hooks m_hooks;
     nanogui::Dropdown *m_style = nullptr;
@@ -79,6 +88,7 @@ private:
     std::string m_current_style;         // the selection's style, when it has one
     std::vector<AlignButton *> m_align;
     std::vector<Field> m_fields;
+    std::vector<IntField> m_int_fields;
     pagemade::ParaStyle m_first;         // the first selected paragraph's
     nanogui::Button *m_delete = nullptr, *m_new = nullptr;
     bool m_loading = false;

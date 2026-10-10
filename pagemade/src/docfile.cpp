@@ -247,6 +247,9 @@ void write_para_style(JsonOut &j, const ParaStyle &ps) {
     if (ps.autoleading != d.autoleading) j.key("autoleading").value(ps.autoleading);
     if (ps.line_spacing != d.line_spacing) j.key("line_spacing").value(ps.line_spacing);
     if (ps.extra_spacing != d.extra_spacing) j.key("extra_spacing").value(ps.extra_spacing);
+    if (ps.drop_lines != d.drop_lines) j.key("drop_lines").value(ps.drop_lines);
+    if (ps.drop_chars != d.drop_chars) j.key("drop_chars").value(ps.drop_chars);
+    if (ps.drop_scale != d.drop_scale) j.key("drop_scale").value(ps.drop_scale);
     if (ps.word_min != d.word_min || ps.word_desired != d.word_desired || ps.word_max != d.word_max)
         j.key("word_spacing").numbers({ps.word_min, ps.word_desired, ps.word_max});
     if (ps.letter_min != d.letter_min || ps.letter_desired != d.letter_desired ||
@@ -505,6 +508,7 @@ std::string make_json(const PageDoc &doc, const SaveOptions &opts, const std::ve
     j.key("margins").numbers({s.margin_top, s.margin_bottom, s.margin_inside, s.margin_outside});
     j.key("columns").value(s.columns);
     j.key("gutter").value(s.gutter);
+    j.key("facing").value(s.facing);
     j.end_object();
 
     j.key("swatches").begin_array();
@@ -695,6 +699,12 @@ ParaStyle read_para_style(const DictValue *o) {
     get(o, "line_spacing", ps.line_spacing);
     ps.line_spacing = std::clamp(ps.line_spacing, kMinLineSpacing, kMaxLineSpacing);
     get(o, "extra_spacing", ps.extra_spacing);
+    get(o, "drop_lines", ps.drop_lines);
+    get(o, "drop_chars", ps.drop_chars);
+    get(o, "drop_scale", ps.drop_scale);
+    ps.drop_lines = std::clamp(ps.drop_lines, 0, kMaxDropLines);
+    ps.drop_chars = std::clamp(ps.drop_chars, 1, kMaxDropChars);
+    ps.drop_scale = std::clamp(ps.drop_scale, kMinDropScale, kMaxDropScale);
     float w[3] = {ps.word_min, ps.word_desired, ps.word_max};
     if (floats(o, "word_spacing", w, 3) == 3) {
         ps.word_min = w[0]; ps.word_desired = w[1]; ps.word_max = w[2];
@@ -1009,6 +1019,7 @@ OpenResult open_document(const std::string &path, const FontLibrary &installed) 
     get(setup, "columns", d.setup.columns);
     d.setup.columns = std::max(1, d.setup.columns);
     get(setup, "gutter", d.setup.gutter);
+    get(setup, "facing", d.setup.facing);
 
     if (const DictValue *sw = field(root, "swatches")) {
         d.swatches.clear();

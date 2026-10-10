@@ -8,10 +8,15 @@
  * Escape cancels; the save prompt also takes Cmd/Ctrl+D for Don't Save, as
  * on the Mac. Answers come back through callbacks that run after the dialog
  * has closed, so a callback may open the next dialog.
+ *
+ * New Document is the page setup for File > New Document: size, orientation,
+ * facing pages, page count, margins and columns.
  */
 #pragma once
 
 #include <nanogui/window.h>
+
+#include "page.h"
 
 #include <functional>
 #include <memory>
@@ -88,6 +93,14 @@ void show_alert(nanogui::Screen *screen, const std::string &title, const std::st
 void ask_text(nanogui::Screen *screen, const std::string &title, const std::string &label,
               const std::string &initial, const std::string &hint,
               std::function<void(const std::string &)> done);
+
+/* File > New Document. `done` runs after OK, with the page setup and how
+ * many blank pages to create. Cancel runs nothing. */
+struct NewDocument {
+    pagemade::PageSetup setup;
+    int pages = 1;
+};
+void ask_new_document(nanogui::Screen *screen, std::function<void(const NewDocument &)> done);
 
 namespace pagemade {
 class FontLibrary;

@@ -23,6 +23,7 @@
 #include <algorithm>
 #include <cctype>
 #include <cmath>
+#include <cstdio>
 #include <cstdlib>
 #include <filesystem>
 #include <memory>
@@ -345,6 +346,229 @@ void open_save_as(Screen *screen, const std::string &current_path, const std::st
 }
 
 } // namespace
+
+namespace {
+
+constexpr float kPt = 72.f;
+
+struct Paper { const char *name; float w, h; };   // points, portrait (w <= h)
+
+float mm_pt(float mm) { return mm / 25.4f * kPt; }
+
+const Paper kPapers[] = {
+    {"Letter",      8.5f * kPt,  11.f * kPt},
+    {"Legal",       8.5f * kPt,  14.f * kPt},
+    {"Tabloid",     11.f * kPt,  17.f * kPt},
+    {"Statement",   5.5f * kPt,  8.5f * kPt},
+    {"Executive",   7.25f * kPt, 10.5f * kPt},
+    {"A3",          mm_pt(297),  mm_pt(420)},
+    {"A4",          mm_pt(210),  mm_pt(297)},
+    {"A5",          mm_pt(148),  mm_pt(210)},
+    {"A6",          mm_pt(105),  mm_pt(148)},
+    {"4 \u00D7 6",  4.f * kPt,   6.f * kPt},
+    {"5 \u00D7 7",  5.f * kPt,   7.f * kPt},
+    {"8 \u00D7 10", 8.f * kPt,   10.f * kPt},
+    {"6 \u00D7 6",  6.f * kPt,   6.f * kPt},
+    {"8 \u00D7 8",  8.f * kPt,   8.f * kPt},
+    {"10 \u00D7 10", 10.f * kPt, 10.f * kPt},
+    {"12 \u00D7 12", 12.f * kPt, 12.f * kPt},
+};
+constexpr int kPaperCount = (int) (sizeof kPapers / sizeof kPapers[0]);
+
+bool near_pt(float a, float b) { return std::fabs(a - b) < 0.75f; }
+
+int match_paper(float w, float h) {
+    for (int i = 0; i < kPaperCount; ++i) {
+        const float pw = kPapers[i].w, ph = kPapers[i].h;
+        if ((near_pt(w, pw) && near_pt(h, ph)) || (near_pt(w, ph) && near_pt(h, pw)))
+            return i;
+    }
+    return kPaperCount;
+}
+
+Widget *form_row(Widget *parent) {
+    Widget *r = new Widget(parent);
+    r->set_layout(new BoxLayout(Orientation::Horizontal, Alignment::Middle, 0, 8));
+    return r;
+}
+
+Label *form_label(Widget *parent, const std::string &text, int width) {
+    Label *l = new Label(parent, text, "sans-bold");
+    l->set_fixed_size(Vector2i(width, 0));
+    return l;
+}
+
+FloatSpin *inch_box(Widget *parent, float inches, float step, float lo, float hi,
+                    const std::function<void(float)> &fn) {
+    auto *box = new FloatSpin(parent, inches, step, lo, hi);
+    box->number_format("%.2f");
+    box->set_units("in");
+    box->set_fixed_size(Vector2i(96, 28));
+    box->set_callback(fn);
+    return box;
+}
+
+struct DocForm {
+    float width = 8.5f * kPt, height = 11.f * kPt;
+    bool landscape = false;
+    bool facing = false;
+    int pages = 1;
+    float top = 0.5f * kPt, bottom = 0.5f * kPt;
+    float inside = 0.5f * kPt, outside = 0.5f * kPt;
+    int columns = 1;
+    float gutter = 12.f;          // 0.167 in
+    bool syncing = false;
+    Dropdown *sizes = nullptr;
+    FloatSpin *width_box = nullptr, *height_box = nullptr;
+    Button *portrait_btn = nullptr, *landscape_btn = nullptr;
+    Label *inside_label = nullptr, *outside_label = nullptr;
+};
+
+void refresh_size(const std::shared_ptr<DocForm> &st) {
+    st->syncing = true;
+    if (st->width_box)
+        st->width_box->set_value(st->width / kPt);
+    if (st->height_box)
+        st->height_box->set_value(st->height / kPt);
+    if (st->portrait_btn) {
+        st->portrait_btn->set_pushed(!st->landscape);
+        st->landscape_btn->set_pushed(st->landscape);
+    }
+    if (st->sizes) {
+        const int i = match_paper(st->width, st->height);
+        if (st->sizes->selected_index() != i)
+            st->sizes->set_selected_index(i);
+    }
+    st->syncing = false;
+}
+
+void use_paper(const std::shared_ptr<DocForm> &st, int index) {
+    if (index < 0 || index >= kPaperCount)
+        return;
+    float w = kPapers[index].w, h = kPapers[index].h;
+    if (st->landscape && h > w)
+        std::swap(w, h);
+    st->width = w;
+    st->height = h;
+    refresh_size(st);
+}
+
+} // namespace
+
+void ask_new_document(Screen *screen, std::function<void(const NewDocument &)> done) {
+    auto st = std::make_shared<DocForm>();
+
+    auto *d = new ModalDialog(screen, "New Document");
+    Widget *form = d->body();
+    form->set_fixed_size(Vector2i(520, 0));
+
+    Widget *size_row = form_row(form);
+    form_label(size_row, "Size", 88);
+    std::vector<std::string> names;
+    for (const Paper &p : kPapers)
+        names.emplace_back(p.name);
+    names.emplace_back("Custom");
+    st->sizes = new Dropdown(size_row, names, {}, Dropdown::ComboBox, names.front());
+    st->sizes->set_fixed_size(Vector2i(280, 28));
+    st->sizes->set_selected_callback([st](int index) {
+        if (!st->syncing)
+            use_paper(st, index);
+    });
+
+    Widget *wh = form_row(form);
+    form_label(wh, "Width", 88);
+    st->width_box = inch_box(wh, st->width / kPt, 0.125f, 1.f, 48.f, [st](float inches) {
+        if (st->syncing)
+            return;
+        st->width = std::max(kPt, inches * kPt);
+        st->landscape = st->width > st->height + 0.5f;
+        refresh_size(st);
+    });
+    form_label(wh, "Height", 64);
+    st->height_box = inch_box(wh, st->height / kPt, 0.125f, 1.f, 48.f, [st](float inches) {
+        if (st->syncing)
+            return;
+        st->height = std::max(kPt, inches * kPt);
+        st->landscape = st->width > st->height + 0.5f;
+        refresh_size(st);
+    });
+
+    Widget *orient = form_row(form);
+    form_label(orient, "Orientation", 88);
+    st->portrait_btn = new Button(orient, "Portrait");
+    st->landscape_btn = new Button(orient, "Landscape");
+    for (Button *b : {st->portrait_btn, st->landscape_btn}) {
+        b->set_flags(Button::RadioButton | Button::ToggleButton);
+        b->set_fixed_size(Vector2i(104, 28));
+    }
+    st->portrait_btn->set_pushed(true);
+    st->portrait_btn->set_callback([st] {
+        st->landscape = false;
+        if (st->width > st->height)
+            std::swap(st->width, st->height);
+        refresh_size(st);
+    });
+    st->landscape_btn->set_callback([st] {
+        st->landscape = true;
+        if (st->height > st->width)
+            std::swap(st->width, st->height);
+        refresh_size(st);
+    });
+
+    Widget *face_row = form_row(form);
+    form_label(face_row, "", 88);
+    CheckBox *facing = new CheckBox(face_row, "Facing Pages");
+    form_label(face_row, "Page Count", 92);
+    IntSpin *pages = new IntSpin(face_row, 1, 1, 1, 999);
+    pages->set_fixed_size(Vector2i(72, 28));
+    pages->set_callback([st](int n) { st->pages = std::max(1, n); });
+
+    Label *margins = new Label(form, "Margin Guides", "sans-bold", 16);
+    margins->set_fixed_size(Vector2i(200, 0));
+    Widget *tb = form_row(form);
+    form_label(tb, "Top", 88);
+    inch_box(tb, 0.5f, 0.05f, 0.f, 20.f, [st](float v) { st->top = std::max(0.f, v * kPt); });
+    form_label(tb, "Bottom", 64);
+    inch_box(tb, 0.5f, 0.05f, 0.f, 20.f, [st](float v) { st->bottom = std::max(0.f, v * kPt); });
+    Widget *lr = form_row(form);
+    st->inside_label = form_label(lr, "Left", 88);
+    inch_box(lr, 0.5f, 0.05f, 0.f, 20.f, [st](float v) { st->inside = std::max(0.f, v * kPt); });
+    st->outside_label = form_label(lr, "Right", 64);
+    inch_box(lr, 0.5f, 0.05f, 0.f, 20.f, [st](float v) { st->outside = std::max(0.f, v * kPt); });
+    facing->set_callback([st](bool on) {
+        st->facing = on;
+        st->inside_label->set_caption(on ? "Inside" : "Left");
+        st->outside_label->set_caption(on ? "Outside" : "Right");
+    });
+
+    Label *columns = new Label(form, "Column Guides", "sans-bold", 16);
+    columns->set_fixed_size(Vector2i(200, 0));
+    Widget *col = form_row(form);
+    form_label(col, "Columns", 88);
+    IntSpin *cols = new IntSpin(col, 1, 1, 1, 24);
+    cols->set_fixed_size(Vector2i(72, 28));
+    cols->set_callback([st](int n) { st->columns = std::max(1, n); });
+    form_label(col, "Gutter", 64);
+    inch_box(col, 12.f / kPt, 0.01f, 0.f, 5.f, [st](float v) { st->gutter = std::max(0.f, v * kPt); });
+
+    d->add_button("Cancel", {}, ModalDialog::Role::Cancel);
+    d->add_button("OK", [st, done] {
+        NewDocument spec;
+        spec.setup.width = std::max(kPt, st->width);
+        spec.setup.height = std::max(kPt, st->height);
+        spec.setup.margin_top = std::max(0.f, st->top);
+        spec.setup.margin_bottom = std::max(0.f, st->bottom);
+        spec.setup.margin_inside = std::max(0.f, st->inside);
+        spec.setup.margin_outside = std::max(0.f, st->outside);
+        spec.setup.columns = std::max(1, st->columns);
+        spec.setup.gutter = std::max(0.f, st->gutter);
+        spec.setup.facing = st->facing;
+        spec.pages = std::max(1, st->pages);
+        if (done)
+            done(spec);
+    }, ModalDialog::Role::Default);
+    d->open();
+}
 
 namespace {
 

@@ -77,6 +77,10 @@ std::vector<StyleDef> default_styles() {
             p.first_indent = 12;
         }),
         def("Body first", "Serif", 10.5f, 13, [](ParaStyle &p) { p.align = Align::Justify; }),
+        def("Drop cap", "Serif", 10.5f, 13, [](ParaStyle &p) {
+            p.align = Align::Justify;
+            p.drop_lines = 3;
+        }),
         def("Headline", "Display", 34, 36, [](ParaStyle &p) {
             p.align = Align::Center;
             p.space_after = 6;
@@ -148,6 +152,8 @@ bool same_format(const ParaStyle &a, const ParaStyle &b) {
            a.last_indent == b.last_indent && a.space_before == b.space_before &&
            a.space_after == b.space_after && a.autoleading == b.autoleading &&
            a.line_spacing == b.line_spacing && a.extra_spacing == b.extra_spacing &&
+           a.drop_lines == b.drop_lines && a.drop_chars == b.drop_chars &&
+           a.drop_scale == b.drop_scale &&
            a.word_min == b.word_min && a.word_desired == b.word_desired &&
            a.word_max == b.word_max && a.letter_min == b.letter_min &&
            a.letter_desired == b.letter_desired && a.letter_max == b.letter_max &&
@@ -461,6 +467,70 @@ void PageDoc::move_page(size_t from, size_t to) {
     else
         std::rotate(pages.begin() + (long) to, pages.begin() + (long) from,
                     pages.begin() + (long) from + 1);
+}
+
+PageDoc new_publication(PageSetup setup, int page_count) {
+    PageDoc doc;
+    doc.setup = setup;
+    if (page_count < 1)
+        page_count = 1;
+    if (page_count > 999)
+        page_count = 999;
+    for (int i = 1; i < page_count; ++i)
+        doc.insert_page(doc.pages.size());
+    return doc;
+}
+
+void arrange_pages(const PageSetup &setup, size_t page_count, size_t current,
+                   PageView view, std::vector<PageSlot> &slots,
+                   float &width, float &height) {
+    slots.clear();
+    const float pw = setup.width > 1.f ? setup.width : 1.f;
+    const float ph = setup.height > 1.f ? setup.height : 1.f;
+    const float gap = kPageGap;
+    if (page_count == 0) {
+        width = pw;
+        height = ph;
+        return;
+    }
+    if (current >= page_count)
+        current = page_count - 1;
+
+    if (view == PageView::One) {
+        slots.push_back({current, 0.f, 0.f});
+        width = pw;
+        height = ph;
+        return;
+    }
+    if (view == PageView::Stack) {
+        for (size_t i = 0; i < page_count; ++i)
+            slots.push_back({i, 0.f, i * (ph + gap)});
+        width = pw;
+        height = page_count * ph + (page_count - 1) * gap;
+        return;
+    }
+
+    size_t first = 0, n = 1;
+    if (!setup.facing) {
+        first = current - (current % 2);
+        n = std::min<size_t>(2, page_count - first);
+    } else if (current == 0) {
+        first = 0;
+        n = 1;
+    } else {
+        first = 1 + ((current - 1) / 2) * 2;
+        n = std::min<size_t>(2, page_count - first);
+    }
+    const bool pair = page_count > 1;
+    width = pair ? pw * 2.f + gap : pw;
+    height = ph;
+    if (n == 2) {
+        slots.push_back({first, 0.f, 0.f});
+        slots.push_back({first + 1, pw + gap, 0.f});
+    } else if (setup.facing && first == 0)
+        slots.push_back({first, pair ? pw + gap : 0.f, 0.f});
+    else
+        slots.push_back({first, 0.f, 0.f});
 }
 
 } // namespace pagemade

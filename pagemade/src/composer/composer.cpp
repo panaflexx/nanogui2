@@ -420,6 +420,47 @@ public:
 
     bool done() const { return !m_carry && m_next >= m_segs.size() && !m_need_empty; }
 
+    /* Set the first `n` characters (clusters) apart, for a drop cap: lines
+     * start after them. A space, tab or break ends the cap early. Returns
+     * where the rest of the text begins (0: nothing set apart). */
+    uint32_t set_apart(int n) {
+        uint32_t end = (uint32_t) m_sh.text.size();
+        int count = 0;
+        bool have = false;
+        uint32_t cur = 0;
+        for (const PGlyph &g : m_glyphs) {
+            if (have && g.cluster == cur)
+                continue;                // more glyphs of the same character
+            if (count == n || g.kind != Kind::Glyph) {
+                end = g.cluster;
+                break;
+            }
+            have = true;
+            cur = g.cluster;
+            ++count;
+        }
+        if (count == 0 || end == 0)
+            return 0;
+        for (size_t i = 0; i < m_segs.size(); ++i) {
+            const Seg &s = m_segs[i];
+            if (end >= s.stop) {
+                m_next = i + 1;
+                continue;
+            }
+            /* The rest of the word goes on, as after a hyphenated break,
+             * unless only spaces are left of it. */
+            bool spaces = true;
+            for (uint32_t b = std::max(end, s.start); b < s.stop; ++b)
+                spaces &= m_sh.text[b] == ' ';
+            if (end > s.start && !spaces)
+                m_carry = make_piece(end, s.stop, false, s.forced, i);
+            if (end > s.start)
+                m_next = i + 1;
+            break;
+        }
+        return end;
+    }
+
     uint32_t position() const {
         if (m_carry) return m_carry->start;
         if (m_next < m_segs.size()) return m_segs[m_next].start;
@@ -920,10 +961,107 @@ Composition compose(const Story &story, const std::vector<Frame> &frames,
             y += st.space_before;
 
         const CharStyle empty_style = para.runs.empty() ? CharStyle() : para.runs.front().style;
+        /* A line's slug from its leading: line spacing, then extra spacing. */
+        auto slug = [&](float lead) {
+            return std::max(0.f, lead * std::clamp(st.line_spacing, kMinLineSpacing,
+                                                   kMaxLineSpacing) + st.extra_spacing);
+        };
+
+        /* Drop cap. Its top is the first line's cap height; at 100 percent
+         * its own cap height reaches line drop_lines' baseline. Lines move
+         * over while they start above the bottom of its ink. */
+        struct {
+            bool on = false;
+            std::vector<GlyphRun> runs;  // x from the pen origin; y holds dy (up)
+            float ink_left = 0, indent = 0;
+            float rise = 0;              // the text's cap height: first baseline to cap top
+            float height = 0;            // the cap's cap height
+            float descent = 0;           // its ink below its baseline
+            float pitch = 0;             // one line of the text
+            size_t line = SIZE_MAX;      // the paragraph's first line, once placed
+            size_t frame = 0;
+            float baseline = 0, bottom = 0;
+        } cap;
+        if (st.drop_lines > 0 && !para.runs.empty()) {
+            const uint32_t end = br.set_apart(std::clamp(st.drop_chars, 1, kMaxDropChars));
+            std::vector<PGlyph> g;
+            if (end > 0)
+                sh.shape(0, end, false, g);
+            if (!g.empty()) {
+                const CharStyle &cs0 = sh.style(g.front().run);
+                const Font *f0 = sh.font(g.front().run);
+                const float ch = f0->cap_height() / (float) f0->units_per_em();
+                const int lines = std::clamp(st.drop_lines, 1, kMaxDropLines);
+                cap.pitch = slug(leading_of(cs0, st));
+                cap.rise = ch * cs0.size;
+                const float fit = ((float) (lines - 1) * cap.pitch + cap.rise) / ch;
+                const float size = fit * std::clamp(st.drop_scale, kMinDropScale,
+                                                    kMaxDropScale) * 0.01f;
+                const float k = size / cs0.size;
+                cap.height = ch * size;
+                float pen = 0, ink0 = INFINITY, ink1 = -INFINITY, low = 0;
+                for (const PGlyph &q : g) {
+                    const CharStyle &cs = sh.style(q.run);
+                    const Font *font = sh.font(q.run);
+                    const float gsize = cs.size * k * (q.scale > 0.f ? q.scale : 1.f);
+                    if (cap.runs.empty() || cap.runs.back().font != font ||
+                        std::fabs(cap.runs.back().size - gsize) > 0.01f) {
+                        GlyphRun r;
+                        r.font = font;
+                        r.size = gsize;
+                        r.hscale = cs.hscale;
+                        r.color = cs.color;
+                        cap.runs.push_back(r);
+                    }
+                    PlacedGlyph pg;
+                    pg.gid = q.gid;
+                    pg.cluster = q.cluster;
+                    pg.x = pen + q.dx * k;
+                    pg.y = q.dy * k;
+                    pg.adv = q.adv * k;
+                    float x0, y0, x1, y1;
+                    font->glyph_bounds(q.gid, x0, y0, x1, y1);
+                    const float em = gsize / (float) font->units_per_em();
+                    const float emx = em * cs.hscale * 0.01f;
+                    if (x1 > x0) {
+                        ink0 = std::min(ink0, pg.x + x0 * emx);
+                        ink1 = std::max(ink1, pg.x + x1 * emx);
+                        low = std::min(low, pg.y + y0 * em);
+                    }
+                    cap.runs.back().glyphs.push_back(pg);
+                    pen += pg.adv;
+                }
+                if (ink1 < ink0) {
+                    ink0 = 0;
+                    ink1 = pen;
+                }
+                cap.ink_left = ink0;
+                cap.indent = ink1 - ink0 + 0.25f * cs0.size;   // a quarter-em gap
+                cap.descent = -low;
+                cap.on = true;
+            }
+        }
+        /* Set the cap beside the paragraph's first line, its ink on the
+         * left indent, once the lines it reaches are known. */
+        auto place_cap = [&] {
+            if (!cap.on || cap.line == SIZE_MAX)
+                return;
+            const float x = frames[cap.frame].x + st.left_indent - cap.ink_left;
+            for (GlyphRun &r : cap.runs)
+                for (PlacedGlyph &pg : r.glyphs) {
+                    pg.x += x;
+                    pg.y = cap.baseline - pg.y;
+                }
+            ComposedLine &l0 = out.lines[cap.line];
+            l0.runs.insert(l0.runs.begin(), cap.runs.begin(), cap.runs.end());
+            cap.on = false;
+        };
+
         bool first_line = true;
         do {
             for (;;) {
                 if (fi >= frames.size()) {
+                    place_cap();
                     out.overset = true;
                     out.overset_para = pi;
                     out.overset_byte = br.position();
@@ -933,9 +1071,12 @@ Composition compose(const Story &story, const std::vector<Frame> &frames,
                 ComposedLine line;
                 line.frame = fi;
                 line.para = pi;
-                line.left = f.x + st.left_indent + (first_line ? st.first_indent : 0.f);
-                line.width = f.w - st.left_indent - st.right_indent -
-                             (first_line ? st.first_indent : 0.f);
+                const bool beside = cap.on && (cap.line == SIZE_MAX ||
+                                               (fi == cap.frame && y < cap.bottom - kEps));
+                const float lead_in = beside     ? cap.indent
+                                    : first_line ? st.first_indent : 0.f;
+                line.left = f.x + st.left_indent + lead_in;
+                line.width = f.w - st.left_indent - st.right_indent - lead_in;
 
                 LineCandidate c = br.next_line(line.left, line.width, f.x);
 
@@ -961,9 +1102,7 @@ Composition compose(const Story &story, const std::vector<Frame> &frames,
                         leading = std::max(leading, leading_of(sh.style(g.run), st));
                 if (leading == 0)
                     leading = leading_of(empty_style, st);
-                leading = std::max(0.f, leading * std::clamp(st.line_spacing, kMinLineSpacing,
-                                                             kMaxLineSpacing) +
-                                            st.extra_spacing);
+                leading = slug(leading);
 
                 if (y + leading > f.y + f.h + kEps) {
                     ++fi;
@@ -990,6 +1129,14 @@ Composition compose(const Story &story, const std::vector<Frame> &frames,
                 } else {
                     place_line(sh, para, c, f.x, last_line, line);
                 }
+                if (cap.on && cap.line == SIZE_MAX) {
+                    /* The first line: the cap's characters belong to it. */
+                    line.byte_start = 0;
+                    cap.line = out.lines.size();
+                    cap.frame = fi;
+                    cap.baseline = line.baseline - cap.rise + cap.height;
+                    cap.bottom = cap.baseline + cap.descent;
+                }
                 br.commit(std::move(c));
                 out.lines.push_back(std::move(line));
 
@@ -999,6 +1146,13 @@ Composition compose(const Story &story, const std::vector<Frame> &frames,
                 break;
             }
         } while (!br.done());
+
+        /* A paragraph shorter than its cap: the next one starts below it,
+         * on the line grid. */
+        if (cap.on && cap.line != SIZE_MAX && fi == cap.frame && y < cap.bottom &&
+            cap.pitch > 0.f)
+            y += std::ceil((cap.bottom - y) / cap.pitch - kEps) * cap.pitch;
+        place_cap();
 
         y += st.space_after;
     }

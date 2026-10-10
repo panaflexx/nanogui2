@@ -77,6 +77,15 @@ struct ParaStyle {
     float line_spacing = 1.f;
     float extra_spacing = 0.f;   // points added to every line, after line_spacing
 
+    /* Drop cap: the first drop_chars characters set large beside the
+     * opening lines. At drop_scale 100 the cap's height runs from the first
+     * line's cap height down to line drop_lines' baseline; another scale
+     * makes it larger or smaller from the same top. The lines it reaches
+     * move over by its width. drop_lines 0 = no drop cap. */
+    int   drop_lines = 0;
+    int   drop_chars = 1;
+    float drop_scale = 100.f;    // percent
+
     /* Spacing attributes (PageMaker defaults). Both are percentages of the
      * font's space width. Justified lines move word spaces between min and
      * max first, then letter spacing between its min and max. Ragged lines
@@ -101,6 +110,8 @@ struct ParaStyle {
 };
 
 constexpr float kMinLineSpacing = 0.1f, kMaxLineSpacing = 3.f;
+constexpr int   kMaxDropLines = 12, kMaxDropChars = 10;
+constexpr float kMinDropScale = 25.f, kMaxDropScale = 400.f;
 
 struct Run {
     CharStyle   style;

@@ -64,14 +64,41 @@ struct Transform {
     }
 };
 
-/* Document Setup: page size, margins and column guides, in points. */
+/* Document Setup: page size, margins and column guides, in points.
+ * With facing pages, the inside margin is toward the spine: on the left
+ * of a right-hand page and on the right of a left-hand page. */
 struct PageSetup {
     float width = 612.f, height = 792.f;    // US Letter
     float margin_top = 54.f, margin_bottom = 54.f;
     float margin_inside = 54.f, margin_outside = 54.f;
     int   columns = 2;
     float gutter = 18.f;
+    bool  facing = false;
 };
+
+/* How the pasteboard shows pages. A screen setting, kept out of the file. */
+enum class PageView { One, Spread, Stack };
+
+constexpr float kPageGap = 24.f;   // space between pages on the pasteboard
+
+struct PageSlot {
+    size_t index = 0;
+    float x = 0, y = 0;            // top-left of that page, points, y down
+};
+
+/* Pages on screen for `current`, and the size of that arrangement.
+ * A facing spread puts page 1 alone on the right, then pairs 2–3, 4–5, …
+ * With facing pages off, pages pair as 1–2, 3–4, … */
+void arrange_pages(const PageSetup &setup, size_t page_count, size_t current,
+                   PageView view, std::vector<PageSlot> &slots,
+                   float &width, float &height);
+
+/* Left and right margins of page `index` (0-based). */
+inline void page_side_margins(const PageSetup &s, size_t index, float &left, float &right) {
+    const bool verso = s.facing && (index % 2 == 1);
+    left = verso ? s.margin_outside : s.margin_inside;
+    right = verso ? s.margin_inside : s.margin_outside;
+}
 
 /* Colors palette entries. Paints refer to swatches by id, so changing a
  * swatch recolors everything that uses it. Ids 1-3 are PageMaker's built-in
@@ -264,6 +291,9 @@ struct PageDoc {
     /* `to` is the index the page occupies after the move. */
     void    move_page(size_t from, size_t to);
 };
+
+/* A blank publication: `page_count` empty pages (at least one) at `setup`. */
+PageDoc new_publication(PageSetup setup, int page_count);
 
 /* A one-page newsletter: a headline across the top over a rule, a body
  * story threaded through two columns (the second short enough that the

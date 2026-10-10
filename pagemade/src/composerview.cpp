@@ -29,6 +29,30 @@ constexpr float kPi         = 3.14159265f;
 
 const NVGcolor kPasteboardColor = nvgRGB(214, 214, 214);
 
+size_t page_under(const std::vector<PageSlot> &slots, float x, float y,
+                  float pw, float ph, size_t fallback) {
+    for (const PageSlot &sl : slots)
+        if (x >= sl.x && y >= sl.y && x <= sl.x + pw && y <= sl.y + ph)
+            return sl.index;
+    size_t best = fallback;
+    float best_d = 1e30f;
+    for (const PageSlot &sl : slots) {
+        const float dx = x - (sl.x + pw * 0.5f);
+        const float dy = y - (sl.y + ph * 0.5f);
+        const float d = dx * dx + dy * dy;
+        if (d < best_d) {
+            best_d = d;
+            best = sl.index;
+        }
+    }
+    return best;
+}
+
+void arrangement(const PageDoc &doc, size_t current, PageView view,
+                 std::vector<PageSlot> &slots, float &w, float &h) {
+    arrange_pages(doc.setup, doc.pages.size(), current, view, slots, w, h);
+}
+
 /* Styles of the runs that overlap [a, b). An empty paragraph contributes
  * its one run, which is what the next character typed there will use. */
 void visit_styles(const Story &s, TextPos a, TextPos b,
@@ -284,13 +308,46 @@ const Composition *ComposerView::comp_of_frame(ItemId id, size_t *thread_index) 
 
 Vector2f ComposerView::page_origin() const {
     /* ZoomScrollPanel centers our preferred size when it's smaller than the
-     * viewport, so the page sits a fixed pasteboard margin in. */
+     * viewport, so the pages sit a fixed pasteboard margin in. */
     return Vector2f(kPasteboard, kPasteboard);
 }
 
 Vector2i ComposerView::preferred_size(NVGcontext *) const {
-    return Vector2i((int) std::ceil(m_doc.setup.width + 2 * kPasteboard),
-                    (int) std::ceil(m_doc.setup.height + 2 * kPasteboard));
+    std::vector<PageSlot> slots;
+    float w, h;
+    arrangement(m_doc, m_page, m_page_view, slots, w, h);
+    return Vector2i((int) std::ceil(w + 2 * kPasteboard),
+                    (int) std::ceil(h + 2 * kPasteboard));
+}
+
+void ComposerView::set_page_view(PageView view) {
+    if (m_page_view == view)
+        return;
+    m_page_view = view;
+    if (screen()) {
+        screen()->perform_layout();
+        screen()->redraw();
+    }
+}
+
+Vector2f ComposerView::page_slot_offset(size_t index) const {
+    std::vector<PageSlot> slots;
+    float w, h;
+    arrangement(m_doc, m_page, m_page_view, slots, w, h);
+    for (const PageSlot &sl : slots)
+        if (sl.index == index)
+            return {sl.x, sl.y};
+    return {0.f, 0.f};
+}
+
+void ComposerView::fit_extent(float &width, float &height) const {
+    if (m_page_view == PageView::Stack) {
+        width = m_doc.setup.width > 1.f ? m_doc.setup.width : 1.f;
+        height = m_doc.setup.height > 1.f ? m_doc.setup.height : 1.f;
+        return;
+    }
+    std::vector<PageSlot> slots;
+    arrangement(m_doc, m_page, m_page_view, slots, width, height);
 }
 
 float ComposerView::zoom() const {
@@ -309,15 +366,39 @@ Point ComposerView::page_point_from_screen(const Vector2i &screen_p) const {
     } else {
         local = Vector2f(screen_p - absolute_position());
     }
-    local -= page_origin();
-    return {local.x(), local.y()};
+    return page_point_from_local(local);
+}
+
+Point ComposerView::page_point_from_local(const Vector2f &local_in) const {
+    Vector2f local = local_in - page_origin();
+    std::vector<PageSlot> slots;
+    float aw, ah;
+    arrangement(m_doc, m_page, m_page_view, slots, aw, ah);
+    size_t page = m_page;
+    if (m_pointer_down)
+        page = m_gesture_page;
+    else if (!m_placing)
+        page = page_under(slots, local.x(), local.y(), m_doc.setup.width, m_doc.setup.height, m_page);
+    if (!m_doc.pages.empty() && page >= m_doc.pages.size())
+        page = m_doc.pages.size() - 1;
+    m_point_page = page;
+    float sx = 0.f, sy = 0.f;
+    for (const PageSlot &sl : slots)
+        if (sl.index == page) {
+            sx = sl.x;
+            sy = sl.y;
+            break;
+        }
+    return {local.x() - sx, local.y() - sy};
 }
 
 /* ---- Snapping ----------------------------------------------------------- */
 
 std::vector<float> ComposerView::guides_x() const {
     const PageSetup &s = m_doc.setup;
-    const float l = s.margin_inside, r = s.width - s.margin_outside;
+    float left = 0.f, right = 0.f;
+    page_side_margins(s, m_page, left, right);
+    const float l = left, r = s.width - right;
     std::vector<float> g{0, s.width, l, r};
     if (s.columns > 1) {
         const float col = (r - l - s.gutter * (s.columns - 1)) / s.columns;
@@ -403,7 +484,7 @@ bool ComposerView::hits_item(const Item &it, const Point &pt) const {
     return false;
 }
 
-ComposerView::Hit ComposerView::hit_test(const Point &pt) const {
+ComposerView::Hit ComposerView::hit_test(const Point &pt, size_t page) const {
     const float px = 1.f / zoom();
 
     for (auto id = m_sel.rbegin(); id != m_sel.rend(); ++id) {
@@ -438,15 +519,19 @@ ComposerView::Hit ComposerView::hit_test(const Point &pt) const {
             }
         }
     }
-    const auto &its = items();
+    static const std::vector<Item> none;
+    const std::vector<Item> &its =
+        page < m_doc.pages.size() ? static_cast<const std::vector<Item> &>(m_doc.pages[page].items) : none;
     for (auto it = its.rbegin(); it != its.rend(); ++it)
         if (hits_item(*it, pt))
             return {it->id, Handle::Move};
     return {};
 }
 
-ItemId ComposerView::text_frame_at(const Point &pt) const {
-    const auto &its = items();
+ItemId ComposerView::text_frame_at(const Point &pt, size_t page) const {
+    static const std::vector<Item> none;
+    const std::vector<Item> &its =
+        page < m_doc.pages.size() ? static_cast<const std::vector<Item> &>(m_doc.pages[page].items) : none;
     for (auto it = its.rbegin(); it != its.rend(); ++it)
         if (it->is_text() && hits_item(*it, pt))
             return it->id;
@@ -466,6 +551,7 @@ bool ComposerView::mouse_button_event(const Vector2i &p, int button, bool down, 
     const Point pt = page_point_from_screen(screen()->mouse_pos());
 
     if (!down) {
+        m_pointer_down = false;
         if (m_creating) {
             finish_creation();
         } else if (m_marquee) {
@@ -516,6 +602,10 @@ bool ComposerView::mouse_button_event(const Vector2i &p, int button, bool down, 
         return true;
     }
     request_focus();
+    m_gesture_page = m_point_page;
+    m_pointer_down = true;
+    if (m_gesture_page != m_page)
+        show_page(m_gesture_page);
     m_burst_open = false;                // any click ends a typing or nudging run
     m_merged_key = nullptr;              // ... or a palette spin
     const bool shift = (modifiers & GLFW_MOD_SHIFT) != 0;
@@ -523,7 +613,7 @@ bool ComposerView::mouse_button_event(const Vector2i &p, int button, bool down, 
     if (m_tool == Tool::Text) {
         double now = glfwGetTime();
         bool near = std::fabs(pt.x - m_down_pt.x) + std::fabs(pt.y - m_down_pt.y) <= 4.f;
-        ItemId frame = text_frame_at(pt);
+        ItemId frame = text_frame_at(pt, m_page);
         const StoryEntry *se = frame ? m_doc.story_of(frame) : nullptr;
         const bool same_story = se && se->id == m_edit_story;
         if (!shift && m_last_click >= 0.0 && now - m_last_click < 0.4 && near && same_story)
@@ -572,7 +662,7 @@ bool ComposerView::mouse_button_event(const Vector2i &p, int button, bool down, 
         return true;
     }
 
-    Hit hit = hit_test(pt);
+    Hit hit = hit_test(pt, m_page);
     if (m_tool == Tool::Rotate) {
         if (hit.item && !is_selected(hit.item))
             m_sel = {hit.item};
@@ -741,22 +831,22 @@ bool ComposerView::mouse_motion_event(const Vector2i &p, const Vector2i &rel, in
         /* The picked-up story follows the pointer, text flowed in live.
          * Use the event point (the panel already applied the zoom); the
          * screen's mouse_pos still holds the previous event's point. */
-        Vector2f v = Vector2f((float) p.x(), (float) p.y()) - Vector2f(m_pos) - page_origin();
+        const Point at = page_point_from_local(Vector2f((float) p.x(), (float) p.y()) - Vector2f(m_pos));
         if (!m_sel.empty())
             if (Item *it = m_doc.find_item(m_sel.front()))
-                it->xf = Transform::translate(v.x() - it->w * 0.5f, v.y() + 8.f);
+                it->xf = Transform::translate(at.x - it->w * 0.5f, at.y + 8.f);
         set_cursor(Cursor::Crosshair);
         return true;
     }
     /* The panel already applied the zoom to the event point. */
-    const Vector2f ev = Vector2f((float) p.x(), (float) p.y()) - Vector2f(m_pos) - page_origin();
-    const Point pt{ev.x(), ev.y()};
+    const Point pt = page_point_from_local(Vector2f((float) p.x(), (float) p.y()) - Vector2f(m_pos));
+    const size_t page = m_point_page;
     switch (m_tool) {
     case Tool::Text:
-        set_cursor(text_frame_at(pt) ? Cursor::IBeam : Cursor::Crosshair);
+        set_cursor(text_frame_at(pt, page) ? Cursor::IBeam : Cursor::Crosshair);
         break;
     case Tool::Pointer:
-        switch (hit_test(pt).handle) {
+        switch (hit_test(pt, page).handle) {
         case Handle::TopLeft: case Handle::TopRight:
         case Handle::BottomLeft: case Handle::BottomRight:
             set_cursor(Cursor::HVResize); break;
@@ -766,7 +856,7 @@ bool ComposerView::mouse_motion_event(const Vector2i &p, const Vector2i &rel, in
         }
         break;
     case Tool::Crop: {
-        Hit hit = hit_test(pt);
+        Hit hit = hit_test(pt, page);
         switch (hit.handle) {
         case Handle::TopLeft: case Handle::TopRight:
         case Handle::BottomLeft: case Handle::BottomRight:
@@ -1451,6 +1541,8 @@ void ComposerView::insert_page(bool after) {
     size_t at = std::min(m_page + (after ? 1 : 0), m_doc.pages.size());
     m_page = m_doc.insert_page(at);
     page_changed();
+    if (m_page_view == PageView::Stack && screen())
+        screen()->perform_layout();
 }
 
 void ComposerView::remove_page() {
@@ -1465,6 +1557,8 @@ void ComposerView::remove_page() {
         m_page = m_doc.pages.size() - 1;
     recompose();
     page_changed();
+    if (m_page_view == PageView::Stack && screen())
+        screen()->perform_layout();
 }
 
 void ComposerView::move_page_by(int delta) {
@@ -1528,13 +1622,15 @@ TextPos ComposerView::text_pos_at(const Point &pt) const {
     float best_d = INFINITY;
     Point best_l;
     for (size_t i = 0; i < se->thread.size(); ++i) {
-        const Item *it = m_doc.find_item(se->thread[i]);
+        size_t ipage = 0;
+        const Item *it = m_doc.find_item(se->thread[i], &ipage);
         if (!it)
             continue;
         const Point l = it->xf.inverse().apply(pt);
         const float dx = std::max({-l.x, 0.f, l.x - it->w});
         const float dy = std::max({-l.y, 0.f, l.y - it->h});
-        const float d = dx * dx + dy * dy;
+        /* A point is in one page's space. Frames on that page win. */
+        const float d = dx * dx + dy * dy + (ipage == m_point_page ? 0.f : 1.0e6f);
         if (d < best_d) {
             best_d = d;
             best = i;
@@ -1867,7 +1963,7 @@ bool ComposerView::keyboard_character_event(unsigned int codepoint) {
 
 /* ---- Drawing ----------------------------------------------------------- */
 
-void ComposerView::draw_page(NVGcontext *ctx, float px) {
+void ComposerView::draw_page(NVGcontext *ctx, float px, size_t page) {
     const PageSetup &s = m_doc.setup;
 
     /* Classic PageMaker drop shadow: a solid offset slab. */
@@ -1886,8 +1982,10 @@ void ComposerView::draw_page(NVGcontext *ctx, float px) {
 
     if (!m_show_guides)
         return;
-    const float l = s.margin_inside, t = s.margin_top;
-    const float r = s.width - s.margin_outside, b = s.height - s.margin_bottom;
+    float left = 0.f, right = 0.f;
+    page_side_margins(s, page, left, right);
+    const float l = left, t = s.margin_top;
+    const float r = s.width - right, b = s.height - s.margin_bottom;
     nvgBeginPath(ctx);
     nvgRect(ctx, l, t, r - l, b - t);
     nvgStrokeColor(ctx, kMarginGuide);
@@ -1983,7 +2081,7 @@ void ComposerView::draw_text_overlays(NVGcontext *ctx, const Item &it, float px)
     nvgRestore(ctx);
 }
 
-void ComposerView::draw_chrome(NVGcontext *ctx, float px) {
+void ComposerView::draw_chrome(NVGcontext *ctx, float px, size_t page) {
     enum Tab { Empty, Plus, Overset };
     float lpx = px;
     auto tab = [&](float cx, float cy, Tab kind) {
@@ -2011,7 +2109,10 @@ void ComposerView::draw_chrome(NVGcontext *ctx, float px) {
         }
     };
 
-    for (const Item &it : items()) {
+    static const std::vector<Item> none;
+    const std::vector<Item> &page_items =
+        page < m_doc.pages.size() ? static_cast<const std::vector<Item> &>(m_doc.pages[page].items) : none;
+    for (const Item &it : page_items) {
         const bool selected = is_selected(it.id);
         nvgSave(ctx);
         apply_transform(ctx, it.xf);
@@ -2060,7 +2161,7 @@ void ComposerView::draw_chrome(NVGcontext *ctx, float px) {
         nvgRestore(ctx);
     }
 
-    if (m_marquee) {
+    if (m_marquee && page == m_page) {
         Bounds b;
         b.add(m_drag_start);
         b.add(m_marquee_end);
@@ -2085,7 +2186,9 @@ void ComposerView::place_frame(uint32_t asset, const ImageMetadata &meta) {
     float ph = image_print_points(meta.height_px, meta.ppi_y);
     if (!(pw > 0.f)) pw = 36.f;
     if (!(ph > 0.f)) ph = 36.f;
-    const float live_w = std::max(36.f, s.width - s.margin_inside - s.margin_outside);
+    float left = 0.f, right = 0.f;
+    page_side_margins(s, m_page, left, right);
+    const float live_w = std::max(36.f, s.width - left - right);
     const float live_h = std::max(36.f, s.height - s.margin_top - s.margin_bottom);
     if (pw > live_w || ph > live_h) {
         const float scale = std::min(live_w / pw, live_h / ph);
@@ -2095,7 +2198,7 @@ void ComposerView::place_frame(uint32_t asset, const ImageMetadata &meta) {
     Item it;
     it.w = pw;
     it.h = ph;
-    it.xf = Transform::translate(s.margin_inside, s.margin_top);
+    it.xf = Transform::translate(left, s.margin_top);
     PlacedImage im;
     im.asset = asset;
     im.x = 0;
@@ -2208,23 +2311,31 @@ void ComposerView::draw(NVGcontext *ctx) {
     nvgFillColor(ctx, kPasteboardColor);
     nvgFill(ctx);
 
-    Vector2f o = page_origin();
-    nvgTranslate(ctx, o.x(), o.y());
-    if (m_page < m_doc.pages.size() && m_doc.pages[m_page].hidden) {
-        nvgFontFace(ctx, "sans");
-        nvgFontSize(ctx, 11.f * px);
-        nvgTextAlign(ctx, NVG_ALIGN_LEFT | NVG_ALIGN_BOTTOM);
-        nvgFillColor(ctx, nvgRGB(140, 40, 40));
-        nvgText(ctx, 0, -4.f * px, "Hidden \u2014 not printed", nullptr);
-    }
-    draw_page(ctx, px);
+    std::vector<PageSlot> slots;
+    float aw, ah;
+    arrangement(m_doc, m_page, m_page_view, slots, aw, ah);
+    const Vector2f o = page_origin();
     sync_textures(ctx);
-    draw_list(ctx, build_page(m_doc, m_page, m_comp), px,
-              [&](const DrawImage &im) { return texture_for(ctx, im, px); });
-    for (const Item &it : items())
-        if (it.is_text())
-            draw_text_overlays(ctx, it, px);
-    draw_chrome(ctx, px);
+    for (const PageSlot &sl : slots) {
+        nvgSave(ctx);
+        nvgTranslate(ctx, o.x() + sl.x, o.y() + sl.y);
+        if (sl.index < m_doc.pages.size() && m_doc.pages[sl.index].hidden) {
+            nvgFontFace(ctx, "sans");
+            nvgFontSize(ctx, 11.f * px);
+            nvgTextAlign(ctx, NVG_ALIGN_LEFT | NVG_ALIGN_BOTTOM);
+            nvgFillColor(ctx, nvgRGB(140, 40, 40));
+            nvgText(ctx, 0, -4.f * px, "Hidden \u2014 not printed", nullptr);
+        }
+        draw_page(ctx, px, sl.index);
+        draw_list(ctx, build_page(m_doc, sl.index, m_comp), px,
+                  [&](const DrawImage &im) { return texture_for(ctx, im, px); });
+        if (sl.index < m_doc.pages.size())
+            for (const Item &it : m_doc.pages[sl.index].items)
+                if (it.is_text())
+                    draw_text_overlays(ctx, it, px);
+        draw_chrome(ctx, px, sl.index);
+        nvgRestore(ctx);
+    }
 
     nvgRestore(ctx);
 }

@@ -195,6 +195,104 @@ static void test_paragraph_attributes(const FontLibrary &fonts) {
     CHECK(pitch(1, -100) == 0.f, "spacing never goes below zero (%g)", pitch(1, -100));
 }
 
+/* Drop caps: placed on the text's cap height and line N's baseline, the
+ * lines they reach moved over, sizable, and still editable text. */
+static bool near_f(float a, float b) { return std::fabs(a - b) < 1e-3f; }
+
+static void test_drop_caps(const FontLibrary &fonts) {
+    CharStyle cs;
+    const std::vector<Frame> wide = {{0, 0, 200, 1000}};
+    const std::string text = "Hello there. " + kLong;
+    auto make = [&](int lines, float scale = 100, int chars = 1,
+                    const std::string &t = std::string()) {
+        ParaStyle ps;
+        ps.drop_lines = lines;
+        ps.drop_scale = scale;
+        ps.drop_chars = chars;
+        return compose(one_para(t.empty() ? text : t, cs, ps), wide, fonts);
+    };
+    auto beside = [](const Composition &c) {
+        size_t n = 0;
+        while (n < c.lines.size() && c.lines[n].left > 0.5f)
+            ++n;
+        return n;
+    };
+
+    const Composition c = make(3);
+    CHECK(c.lines.size() > 4, "a long paragraph (%zu lines)", c.lines.size());
+    if (c.lines.size() < 4 || c.lines[0].runs.empty())
+        return;
+    const GlyphRun &cap = c.lines[0].runs.front();
+    CHECK(cap.glyphs.size() == 1 && cap.glyphs[0].cluster == 0 && cap.size > cs.size * 2.5f,
+          "the first run is the enlarged cap (%zu glyphs, %.1fpt)", cap.glyphs.size(), cap.size);
+    CHECK(c.lines[0].byte_start == 0, "the first line holds the cap's characters");
+    CHECK(beside(c) == 3, "three lines move over (%zu)", beside(c));
+    CHECK(near_f(c.lines[0].left, c.lines[2].left) && c.lines[3].left < 0.01f,
+          "the same indent, then the full measure");
+    const PlacedGlyph &h = cap.glyphs[0];
+    CHECK(std::fabs(h.y - c.lines[2].baseline) < 0.01f, "the cap sits on line 3's baseline");
+    {
+        const Font *f = cap.font;
+        float x0, y0, x1, y1;
+        f->glyph_bounds(h.gid, x0, y0, x1, y1);
+        const float em = cap.size / (float) f->units_per_em();
+        const float text_cap = f->cap_height() / (float) f->units_per_em() * cs.size;
+        CHECK(std::fabs((h.y - y1 * em) - (c.lines[0].baseline - text_cap)) < 0.2f,
+              "its top is the first line's cap height (%g vs %g)", h.y - y1 * em,
+              c.lines[0].baseline - text_cap);
+        CHECK(std::fabs(h.x + x0 * em) < 0.01f, "its ink starts on the left edge (%g)",
+              h.x + x0 * em);
+        CHECK(c.lines[0].left > h.x + x1 * em, "the text clears its ink");
+    }
+    /* The rest of the first word follows the cap on the first line. */
+    CHECK(c.lines[0].runs.size() > 1 && c.lines[0].runs[1].glyphs.front().cluster == 1,
+          "the word goes on after the cap");
+
+    CHECK(beside(make(3, 160)) > 3, "a larger cap moves more lines over (%zu)",
+          beside(make(3, 160)));
+    CHECK(beside(make(3, 50)) < 3, "a smaller cap fewer (%zu)", beside(make(3, 50)));
+    CHECK(beside(make(0)) == 0, "drop_lines 0: no drop cap");
+    const Composition two = make(2);
+    CHECK(beside(two) == 2 && two.lines[0].runs.front().size < cap.size,
+          "a two-line cap is smaller");
+
+    /* Several characters; a space ends the cap, and the word after it
+     * starts the first line. */
+    const Composition three = make(3, 100, 5, "The quick brown fox " + kLong);
+    if (!three.lines.empty() && three.lines[0].runs.size() > 1) {
+        CHECK(three.lines[0].runs.front().glyphs.size() == 3, "\"The\" is the cap (%zu)",
+              three.lines[0].runs.front().glyphs.size());
+        CHECK(three.lines[0].runs[1].glyphs.front().cluster == 4,
+              "the first line starts at \"quick\"");
+    }
+
+    /* A paragraph shorter than its cap pushes the next one below it. */
+    {
+        ParaStyle ps;
+        ps.drop_lines = 3;
+        Story s = one_para("Hi", cs, ps);
+        s.paragraphs.push_back(one_para("Next", cs, ParaStyle()).paragraphs[0]);
+        const Composition sc = compose(s, wide, fonts);
+        CHECK(sc.lines.size() == 2, "two lines (%zu)", sc.lines.size());
+        if (sc.lines.size() == 2) {
+            const PlacedGlyph &g = sc.lines[0].runs.front().glyphs[0];
+            CHECK(sc.lines[1].top >= g.y - 0.01f && sc.lines[1].left < 0.01f,
+                  "the next paragraph starts below the cap, at the margin");
+        }
+    }
+
+    /* The cap is text: the caret before it is at its left. */
+    {
+        Story s = one_para(text, cs, [] { ParaStyle p; p.drop_lines = 3; return p; }());
+        const Composition sc = compose(s, wide, fonts);
+        const Caret k = caret_at(sc, s, {0, 0});
+        CHECK(k.valid() && k.line == 0 && std::fabs(k.x - sc.lines[0].runs[0].glyphs[0].x) < 0.01f,
+              "a caret at the start sits before the cap");
+        const Caret k1 = caret_at(sc, s, {0, 1});
+        CHECK(k1.valid() && k1.x > sc.lines[0].left - 0.5f, "after the cap, at the text");
+    }
+}
+
 /* Named paragraph styles. */
 static void test_styles() {
     const std::vector<StyleDef> defs = default_styles();
@@ -207,6 +305,7 @@ static void test_styles() {
                              "Caption", "Hanging indent", "Pull quote"})
         CHECK(std::find(names.begin(), names.end(), want) != names.end(), "default style %s", want);
     CHECK(names.front() == "Normal", "Normal comes first");
+    CHECK(std::find(names.begin(), names.end(), "Drop cap") != names.end(), "a Drop cap style");
 
     PageDoc doc;
     const StyleDef *body = doc.find_style("Body text");
@@ -1179,6 +1278,8 @@ static void check_para(const ParaStyle &a, const ParaStyle &b) {
           near(a.line_spacing, b.line_spacing) && near(a.extra_spacing, b.extra_spacing) &&
           near(a.last_indent, b.last_indent),
           "paragraph spacing");
+    CHECK(a.drop_lines == b.drop_lines && a.drop_chars == b.drop_chars &&
+          near(a.drop_scale, b.drop_scale), "drop cap");
     CHECK(near(a.word_min, b.word_min) && near(a.word_desired, b.word_desired) &&
           near(a.word_max, b.word_max) && near(a.letter_min, b.letter_min) &&
           near(a.letter_desired, b.letter_desired) && near(a.letter_max, b.letter_max),
@@ -1198,7 +1299,8 @@ static void check_doc(const PageDoc &a, const PageDoc &b) {
           near(a.setup.margin_bottom, b.setup.margin_bottom) &&
           near(a.setup.margin_inside, b.setup.margin_inside) &&
           near(a.setup.margin_outside, b.setup.margin_outside) &&
-          a.setup.columns == b.setup.columns && near(a.setup.gutter, b.setup.gutter),
+          a.setup.columns == b.setup.columns && near(a.setup.gutter, b.setup.gutter) &&
+          a.setup.facing == b.setup.facing,
           "page setup");
     CHECK(a.swatches.size() == b.swatches.size(), "swatches %zu vs %zu",
           a.swatches.size(), b.swatches.size());
@@ -1302,10 +1404,59 @@ static void test_uri() {
           "absolute, scheme, and parent paths are not package refs");
 }
 
+static void test_arrange() {
+    PageSetup s;
+    s.width = 100;
+    s.height = 200;
+    std::vector<PageSlot> slots;
+    float w = 0, h = 0;
+    arrange_pages(s, 3, 0, PageView::One, slots, w, h);
+    CHECK(slots.size() == 1 && slots[0].index == 0 && w == 100 && h == 200, "one page");
+    arrange_pages(s, 3, 1, PageView::Spread, slots, w, h);
+    CHECK(slots.size() == 2 && slots[0].index == 0 && slots[1].index == 1 &&
+          slots[1].x == 124 && w == 224 && h == 200, "non-facing pair");
+    arrange_pages(s, 3, 2, PageView::Spread, slots, w, h);
+    CHECK(slots.size() == 1 && slots[0].index == 2 && slots[0].x == 0 && w == 224,
+          "last page of an odd count sits on the left");
+    arrange_pages(s, 1, 0, PageView::Spread, slots, w, h);
+    CHECK(slots.size() == 1 && slots[0].x == 0 && w == 100, "a single page has no empty half");
+    s.facing = true;
+    arrange_pages(s, 5, 0, PageView::Spread, slots, w, h);
+    CHECK(slots.size() == 1 && slots[0].index == 0 && slots[0].x == 124,
+          "facing page 1 sits on the right");
+    arrange_pages(s, 5, 1, PageView::Spread, slots, w, h);
+    CHECK(slots.size() == 2 && slots[0].index == 1 && slots[1].index == 2, "facing pages 2–3");
+    arrange_pages(s, 5, 2, PageView::Spread, slots, w, h);
+    CHECK(slots.size() == 2 && slots[0].index == 1 && slots[1].index == 2,
+          "page 3 shares the 2–3 spread");
+    arrange_pages(s, 4, 3, PageView::Spread, slots, w, h);
+    CHECK(slots.size() == 1 && slots[0].index == 3 && slots[0].x == 0,
+          "a trailing left-hand page sits on the left");
+    arrange_pages(s, 3, 0, PageView::Stack, slots, w, h);
+    CHECK(slots.size() == 3 && slots[2].y == 2 * (200 + kPageGap) && w == 100 &&
+          h == 3 * 200 + 2 * kPageGap, "stack");
+    float left = 0, right = 0;
+    s.facing = false;
+    s.margin_inside = 10;
+    s.margin_outside = 30;
+    page_side_margins(s, 1, left, right);
+    CHECK(left == 10 && right == 30, "inside stays on the left");
+    s.facing = true;
+    page_side_margins(s, 0, left, right);
+    CHECK(left == 10 && right == 30, "a right-hand page keeps inside on the left");
+    page_side_margins(s, 1, left, right);
+    CHECK(left == 30 && right == 10, "a left-hand page puts inside on the right");
+    PageDoc doc = new_publication(s, 3);
+    CHECK(doc.pages.size() == 3 && doc.setup.facing && doc.pages[0].items.empty() &&
+          doc.pages[2].items.empty(), "blank publication");
+    CHECK(new_publication(s, 0).pages.size() == 1, "a publication keeps one page");
+}
+
 static void test_docfile(const FontLibrary &fonts) {
     test_uri();
 
     PageDoc doc = sample_document();
+    doc.setup.facing = true;
     doc.insert_page(1);
     doc.pages[1].hidden = true;
     Item star;
@@ -1340,6 +1491,9 @@ static void test_docfile(const FontLibrary &fonts) {
     note_ps.extra_spacing = -1.5f;
     note_ps.last_indent = 24;
     note_ps.align = Align::JustifyRight;
+    note_ps.drop_lines = 2;
+    note_ps.drop_chars = 2;
+    note_ps.drop_scale = 120;
     note_ps.tabs.push_back({120, TabAlign::Decimal, "."});
     Story extra = one_para("He said \"hello\"\nsecond\tline\\end", note, note_ps);
     doc.add_text_frame(1, doc.add_story(std::move(extra)), 200, 80, Transform::translate(40, 200));
@@ -2372,6 +2526,7 @@ int main(int argc, char **argv) {
     test_outline_cache(fonts);
     test_line_spacing(fonts);
     test_paragraph_attributes(fonts);
+    test_drop_caps(fonts);
     test_styles();
     test_edit(fonts);
     test_align_ranges(fonts);
@@ -2384,6 +2539,7 @@ int main(int argc, char **argv) {
     test_hyphenation(fonts);
     test_swatches();
     test_geometry();
+    test_arrange();
     test_drawlist(fonts);
     test_docfile(fonts);
     test_images(fonts);
