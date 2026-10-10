@@ -4,6 +4,7 @@
 #include "pdf.h"
 
 #include "composer/font.h"
+#include "composer/utf8.h"
 #include "drawlist.h"
 #include "image.h"
 #include "page.h"
@@ -17,6 +18,7 @@
 #include <cstdint>
 #include <cstdio>
 #include <map>
+#include <optional>
 #include <set>
 
 namespace pagemade {
@@ -45,34 +47,29 @@ std::string hex16(uint32_t cp) {
     return buf;
 }
 
-/* UTF-8 -> big-endian UTF-16 hex for ToUnicode (BMP only here; anything
- * astral would need a surrogate pair). */
+/* UTF-8 -> big-endian UTF-16 hex for ToUnicode. Astral scalars are surrogate pairs. */
 std::string utf16_hex(const std::string &utf8) {
     std::string out;
     for (size_t i = 0; i < utf8.size();) {
-        unsigned char c = (unsigned char) utf8[i];
-        int n = c < 0x80 ? 0 : c >= 0xF0 ? 3 : c >= 0xE0 ? 2 : 1;
-        uint32_t cp = c & (0x7F >> n);
-        for (int k = 1; k <= n && i + k < utf8.size(); ++k)
-            cp = (cp << 6) | ((unsigned char) utf8[i + k] & 0x3F);
-        if (cp > 0xFFFF) {   // surrogate pair
+        uint32_t cp = utf8_decode(utf8, i);
+        if (cp > 0xFFFF) {
             cp -= 0x10000;
             out += hex16(0xD800 + (cp >> 10)) + hex16(0xDC00 + (cp & 0x3FF));
         } else {
             out += hex16(cp);
         }
-        i += (size_t) n + 1;
+        i += utf8_len(utf8, i);
     }
     return out;
 }
 
-std::string flate(const std::string &in) {
+std::optional<std::string> flate(const std::string &in) {
     mz_ulong bound = mz_compressBound((mz_ulong) in.size());
     std::string out(bound, '\0');
     mz_ulong have = bound;
     if (mz_compress2((unsigned char *) out.data(), &have,
                      (const unsigned char *) in.data(), (mz_ulong) in.size(), 6) != MZ_OK)
-        return {};
+        return std::nullopt;
     out.resize(have);
     return out;
 }
@@ -84,16 +81,21 @@ std::string flate(const std::string &in) {
  */
 struct Writer {
     std::vector<std::string> objects;
+    bool ok = true;
 
     int add(std::string body) {
         objects.push_back(std::move(body));
         return (int) objects.size();
     }
-    /* A stream object, Flate-compressed. */
+    /* A stream object, Flate-compressed. A failed compress marks the file unusable. */
     int add_stream(const std::string &dict, const std::string &data) {
-        std::string z = flate(data);
-        return add("<< " + dict + " /Length " + std::to_string(z.size()) +
-                   " /Filter /FlateDecode >>\nstream\n" + z + "\nendstream");
+        auto z = flate(data);
+        if (!z) {
+            ok = false;
+            z = std::string();
+        }
+        return add("<< " + dict + " /Length " + std::to_string(z->size()) +
+                   " /Filter /FlateDecode >>\nstream\n" + *z + "\nendstream");
     }
     /* A stream already encoded (a JPEG's own bytes). `dict` includes /Filter. */
     int add_raw_stream(const std::string &dict, const std::string &data) {
@@ -102,6 +104,8 @@ struct Writer {
     }
 
     bool write(const std::string &path, int root) {
+        if (!ok)
+            return false;
         std::string out = "%PDF-1.7\n%\xE2\xE3\xCF\xD3\n";
         std::vector<size_t> offs(objects.size());
         for (size_t i = 0; i < objects.size(); ++i) {
@@ -201,7 +205,7 @@ void collect_unicodes(const PageDoc &doc, const std::vector<Composition> &comps,
 }
 
 /* Subset and embed one face; returns false when hb-subset fails. */
-bool embed_font(Writer &w, PdfFont &pf, int &out_res) {
+bool embed_font(Writer &w, PdfFont &pf, int &out_res, int &tag_seq) {
     const Font *font = pf.font;
     const int upem = font->units_per_em();
     auto em = [&](float v) { return std::lround(v * 1000.0f / upem); };
@@ -229,7 +233,6 @@ bool embed_font(Writer &w, PdfFont &pf, int &out_res) {
     hb_blob_destroy(blob);
     hb_face_destroy(sub);
 
-    static int tag_seq = 0;
     char tag[8];
     std::snprintf(tag, sizeof tag, "PGM%c%c%c+", 'A' + (tag_seq / 26 / 26) % 26,
                   'A' + (tag_seq / 26) % 26, 'A' + tag_seq % 26);
@@ -330,8 +333,18 @@ void emit_path(std::string &s, const Path &p) {
     }
 }
 
-std::string emit_color(const Color &c, bool stroke) {
-    return num(c.r) + " " + num(c.g) + " " + num(c.b) + (stroke ? " RG\n" : " rg\n");
+/* Device RGB, plus an ExtGState when the color is translucent. `alphas`
+ * records thousandths of alpha; the objects are created once content is known. */
+std::string emit_color(const Color &c, bool stroke, std::map<int, float> &alphas) {
+    std::string s = num(c.r) + " " + num(c.g) + " " + num(c.b) + (stroke ? " RG\n" : " rg\n");
+    if (c.a < 0.9995f) {
+        int key = (int) std::lround((double) c.a * 1000.0);
+        if (key < 0) key = 0;
+        if (key > 1000) key = 1000;
+        alphas[key] = key / 1000.f;
+        s += "/A" + std::to_string(key) + " gs\n";
+    }
+    return s;
 }
 
 void emit_cm(std::string &s, const Transform &t) {
@@ -342,8 +355,8 @@ void emit_cm(std::string &s, const Transform &t) {
 /* A glyph run as real text: one BT/ET, each glyph at its composed position
  * (Tm carries the horizontal scale and the y-flip that keeps glyphs
  * upright under the page's y-down CTM). */
-void emit_glyphs(std::string &s, const GlyphRun &r, int res) {
-    s += emit_color(r.color, false);
+void emit_glyphs(std::string &s, const GlyphRun &r, int res, std::map<int, float> &alphas) {
+    s += emit_color(r.color, false, alphas);
     s += "BT /F" + std::to_string(res) + " " + num(r.size) + " Tf\n";
     const float hs = r.hscale * 0.01f;
     for (const PlacedGlyph &g : r.glyphs) {
@@ -354,31 +367,13 @@ void emit_glyphs(std::string &s, const GlyphRun &r, int res) {
         s += num(hs) + " 0 0 -1 " + num(g.x) + " " + num(g.y) + " Tm <" + code + "> Tj\n";
     }
     s += "ET\n";
-    if (!r.underline && !r.strike)
-        return;
-    float x0 = 0, x1 = 0, base = 0;
-    bool span = false;
-    for (const PlacedGlyph &g : r.glyphs) {
-        if (g.flags & PlacedGlyph::Invisible)
-            continue;
-        const float right = g.x + std::max(0.f, g.adv);
-        if (!span) { x0 = g.x; x1 = right; base = g.y; span = true; }
-        else { x0 = std::min(x0, g.x); x1 = std::max(x1, right); }
+    std::vector<RuleSpan> rules;
+    glyph_run_rules(r, rules);
+    for (const RuleSpan &rule : rules) {
+        s += emit_color(r.color, true, alphas);
+        s += num(rule.thickness) + " w\n";
+        s += num(rule.x0) + " " + num(rule.y) + " m " + num(rule.x1) + " " + num(rule.y) + " l S\n";
     }
-    if (!span || !(x1 > x0) || !r.font)
-        return;
-    const float sy = r.size / (float) r.font->units_per_em();
-    auto rule = [&](float design_y, float design_thick) {
-        const float y = base - design_y * sy;
-        const float thick = std::max(0.25f, design_thick * sy);
-        s += emit_color(r.color, true);
-        s += num(thick) + " w\n";
-        s += num(x0) + " " + num(y) + " m " + num(x1) + " " + num(y) + " l S\n";
-    };
-    if (r.underline)
-        rule(r.font->underline_position(), r.font->underline_thickness());
-    if (r.strike)
-        rule(r.font->strike_position(), r.font->strike_thickness());
 }
 
 /* One XObject for the picture's source. JPEG keeps its DCT stream and its
@@ -476,9 +471,10 @@ bool export_pdf(const std::string &path, const PageDoc &doc,
 
     Writer w;
     std::map<const Font *, int> font_res;
+    int tag_seq = 0;
     for (auto &kv : fonts) {
         int res = 0;
-        if (!embed_font(w, kv.second, res))
+        if (!embed_font(w, kv.second, res, tag_seq))
             return false;
         font_res[kv.first] = res;
     }
@@ -495,26 +491,11 @@ bool export_pdf(const std::string &path, const PageDoc &doc,
                             image_res[im->asset] = embed_picture(w, *e);
     }
 
-    std::string res_dict = "<< /Font <<";
-    for (const auto &kv : font_res)
-        res_dict += " /F" + std::to_string(kv.second) + " " + std::to_string(kv.second) +
-                    " 0 R";
-    res_dict += " >>";
-    bool any_image = false;
-    for (const auto &kv : image_res)
-        any_image |= kv.second.obj != 0;
-    if (any_image) {
-        res_dict += " /XObject <<";
-        for (const auto &kv : image_res)
-            if (kv.second.obj)
-                res_dict += " /Im" + std::to_string(kv.first) + " " +
-                            std::to_string(kv.second.obj) + " 0 R";
-        res_dict += " >>";
-    }
-    res_dict += " >>";
-
-    int pages_kids_placeholder = 0;   // filled once the page objects exist
-    std::vector<int> page_objs;
+    /* Page streams first, so translucent colors can name ExtGState objects
+     * before the resource dict is written into each page. */
+    std::map<int, float> alphas;
+    std::vector<std::string> contents_src;
+    contents_src.reserve(pages.size());
     for (size_t i = 0; i < pages.size(); ++i) {
         std::string content = "1 0 0 -1 0 " + num(doc.setup.height) + " cm\n";
         for (const DrawOp &op : pages[i]) {
@@ -523,16 +504,16 @@ bool export_pdf(const std::string &path, const PageDoc &doc,
                 if (it == font_res.end())
                     continue;
                 emit_cm(content, g->xf);
-                emit_glyphs(content, *g->run, it->second);
+                emit_glyphs(content, *g->run, it->second, alphas);
                 content += "Q\n";
             } else if (const auto *f = std::get_if<DrawFill>(&op)) {
                 emit_cm(content, f->xf);
-                content += emit_color(f->color, false);
+                content += emit_color(f->color, false, alphas);
                 emit_path(content, f->path);
                 content += "f\nQ\n";
             } else if (const auto *s = std::get_if<DrawStroke>(&op)) {
                 emit_cm(content, s->xf);
-                content += emit_color(s->color, true);
+                content += emit_color(s->color, true, alphas);
                 content += num(s->width) + " w\n";
                 if (!s->dash.empty()) {
                     content += "[";
@@ -572,12 +553,46 @@ bool export_pdf(const std::string &path, const PageDoc &doc,
                 content += "Q\n";
             }
         }
+        contents_src.push_back(std::move(content));
+    }
+
+    std::map<int, int> alpha_objs;
+    for (const auto &kv : alphas)
+        alpha_objs[kv.first] = w.add("<< /Type /ExtGState /ca " + num(kv.second) +
+                                     " /CA " + num(kv.second) + " >>");
+
+    std::string res_dict = "<< /Font <<";
+    for (const auto &kv : font_res)
+        res_dict += " /F" + std::to_string(kv.second) + " " + std::to_string(kv.second) +
+                    " 0 R";
+    res_dict += " >>";
+    bool any_image = false;
+    for (const auto &kv : image_res)
+        any_image |= kv.second.obj != 0;
+    if (any_image) {
+        res_dict += " /XObject <<";
+        for (const auto &kv : image_res)
+            if (kv.second.obj)
+                res_dict += " /Im" + std::to_string(kv.first) + " " +
+                            std::to_string(kv.second.obj) + " 0 R";
+        res_dict += " >>";
+    }
+    if (!alpha_objs.empty()) {
+        res_dict += " /ExtGState <<";
+        for (const auto &kv : alpha_objs)
+            res_dict += " /A" + std::to_string(kv.first) + " " + std::to_string(kv.second) +
+                        " 0 R";
+        res_dict += " >>";
+    }
+    res_dict += " >>";
+
+    std::vector<int> page_objs;
+    for (const std::string &content : contents_src) {
         int contents = w.add_stream("", content);
         page_objs.push_back(w.add("<< /Type /Page /Parent 0 0 R /MediaBox [0 0 " +
                                   num(doc.setup.width) + " " + num(doc.setup.height) +
                                   "] /Resources " + res_dict + " /Contents " +
                                   std::to_string(contents) + " 0 R >>"));
-        (void) pages_kids_placeholder;
     }
 
     std::string kids;

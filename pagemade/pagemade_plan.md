@@ -149,7 +149,7 @@ and its nanovgd renderer. The composer lays out in points and every backend
 
 # Code review: pagemade text engine (composer / edit / font / hyphenator / pdf)
 
-P1 items 1–3 are fixed and covered by `pagemade_compose_test`. Items 4–16 are still open.
+Items 1–16 are fixed. `pagemade_compose_test` covers the behavior changes: trailing breaks, ToUnicode, the outline cache, End on VT/FF/NEL, a missing exceptions file, and ExtGState alpha.
 
 ## P1 — Correctness bugs
 
@@ -167,55 +167,50 @@ Outlines live in a `std::deque`; the map stores pointers. A returned outline sta
 
 ## P2 — Robustness / spec issues
 
-**4. `pdf.cpp:69-78, 98-101` — Flate failure silently yields a corrupt PDF.**
-If `mz_compress2` fails, `flate()` returns `""` and `add_stream` writes a 0-length `/FlateDecode` stream with no error; `export_pdf` still returns true.
-*Fix:* have `flate`/`add_stream` propagate failure (e.g. `std::optional` or a `Writer::ok` flag checked in `export_pdf`).
+**4. Fixed. A failed Flate compression wrote a 0-length stream and still returned true.**
+`flate` returns `std::optional`. `Writer::ok` is cleared when `mz_compress2` fails, and `write` returns false without creating the file. An empty input still compresses to a zlib header, so that is not treated as failure.
 
-**5. `composer.cpp:228` — Run index truncated to 16 bits.**
-`g.run = (uint16_t) ri`; a paragraph with >65535 runs (possible via many alternating-style edits — `normalize` only merges same-style neighbors) wraps and assigns glyphs the wrong style/font. `PGlyph` has padding, so widening is free.
-*Fix:* make `PGlyph::run` `uint32_t`.
+**5. Fixed. The run index was truncated to 16 bits.**
+`PGlyph::run` is `uint32_t`. A paragraph with many alternating-style runs no longer wraps the index and picks up the wrong face.
 
-**6. `pdf.cpp:326-328, 339` — Alpha is silently dropped.**
-`emit_color` writes only `rg/RG`; semi-transparent text/fills that the screen renders translucent come out fully opaque in PDF, with no note in the header comment ("Colors are device RGB for now" doesn't mention alpha).
-*Fix:* emit a `/ca` ExtGState for `a < 1`, or document the limitation explicitly.
+**6. Fixed. PDF export dropped alpha.**
+A color with alpha below 1 still writes device RGB, then selects an ExtGState named `/A` plus the alpha in thousandths, with both `/ca` and `/CA`. Opaque colors emit the same operators as before, and the sample document's PDF stays the same size. `pdf.h` describes the ExtGState. (`test_pdf_alpha`)
 
-**7. `pdf.cpp:225-229` — `static int tag_seq` is shared mutable state.**
-The subset-tag counter persists across exports and is a data race if export ever runs off the UI thread; two documents exported in one process also share the sequence (harmless but needless).
-*Fix:* make the counter a local in `export_pdf` threaded into `embed_font`.
+**7. Fixed. The subset-tag counter was a function-local static.**
+`tag_seq` is a local in `export_pdf` and is passed into `embed_font`, so exports do not share a counter.
 
-**8. `edit.cpp:544-545` vs `composer.cpp:108-111` — `line_end` doesn't recognize all break chars the composer does.**
-`line_end` trims ` `, 0xA0, `\n`, `\r`, 0x2028, 0x2029 but not 0x0B, 0x0C, 0x85, which `is_break()` treats as breaks; a line ending in VT/FF/NEL leaves the End-key caret *after* the invisible break char.
-*Fix:* share one `is_break` helper between the two files.
+**8. Fixed. End did not treat VT, form feed, or NEL as hanging breaks.**
+`is_break` lives in `composer/utf8.h`. `line_end` uses it, so the caret stops before U+000B, U+000C, and U+0085 the same way it stops before a newline. (`test_breaks`)
 
 ## P3 — Duplicated logic
 
-**9. UTF-8 decoding is implemented five times with subtly different invalid-input behavior.**
-`composer.cpp` (`decode_utf8`, `utf8_len_at`, `char_before`, and the lead-byte walker in hyphenation points), `edit.cpp` (`decode`, `char_len`, and the continuation walk in `line_end`), `hyphenator.cpp` (`utf8_to_u32`), and `pdf.cpp` (`utf16_hex`). They diverge on malformed input (e.g. a continuation byte as a lead: `edit.cpp` treats it as a 2-byte lead, `hyphenator.cpp` maps it to `c & 0x7F`, `composer.cpp` to `c & 0x3F`), so caret math and shaping can disagree on corrupt text. `pdf.cpp`'s separate `char_len` was removed with item 2.
-*Fix:* one shared `utf8.h` with `decode`/`length`/`prev` used everywhere.
+**9. Fixed. UTF-8 decoding was copied in the composer, the editor, the hyphenator, and the PDF writer.**
+`composer/utf8.h` provides `utf8_decode`, `utf8_len`, and `utf8_prev`. Shaping, caret math, hyphenation points, `utf8_to_u32`, and the ToUnicode encoder all call them. A continuation byte is one byte. Valid text, including ToUnicode for "fi", is unchanged.
 
-**10. Underline/strike span computation is duplicated almost verbatim.**
-`pdf.cpp:352-374` (`emit_glyphs`) and `render_nvg.cpp:72-96` (`draw_glyph_run`) both compute the visible-glyph x-span and emit the two rules from `underline_position/thickness` and `strike_position/thickness`.
-*Fix:* extract a helper that returns the rule rects `(x0, x1, y, thickness)` for a run, used by both backends.
+**10. Fixed. Underline and strike geometry was duplicated in the PDF and NanoVG backends.**
+`glyph_run_rules` in `composer.h` returns the spans `(x0, y, x1, thickness)`, underline then strike. Both backends stroke those spans.
 
 ## P4 — Performance (compose runs per keystroke)
 
-**11. `composer.cpp:463-471, 519-530` — `fits()` re-flattens and re-measures the whole accumulated line for every piece tried.**
-Each `fits` call copies all accepted glyphs (`flatten`) and re-runs `measure`→`layout` (including tab resolution), making line-building O(L²) in glyphs per line; the overflow fallback then multiplies this by the box length, doing a full `slice` copy + `fits` per cluster boundary — O(box²) copies for a long unbreakable segment (a 5 000-char URL pasted into a narrow frame = ~25 M glyph copies on one keystroke).
-*Fix:* keep a running `Measure` for the accepted pieces (incremental per piece, reset only when a piece is hyphenated/reshaped), and scan cluster boundaries with a running width instead of re-slicing and re-measuring each candidate.
+**11. Fixed. `fits` copied and remeasured the whole line for every piece, and the emergency split copied a prefix per cluster.**
+Accepted pieces stay in one buffer. A try appends, measures, and drops the extra; the hyphen zone uses that cached measure. A tab-free overflow is one forward pass at desired spacing. A tabbed prefix is measured in place, with no slice copy per cluster. Line breaks, justification, tabs, and hyphenation are unchanged.
 
-**12. `hyphenator.cpp:113-120` — One heap allocation per pattern probe, per word, per compose.**
-`m_patterns.find(w.substr(i, len))` allocates a fresh `std::u32string` for every (position, length) pair — O(n·max_len) allocations per word — and `Breaker::m_points` is rebuilt from scratch on every keystroke because `Breaker` is reconstructed in `compose()`.
-*Fix:* key the map so lookup needs no allocation (e.g. a trie over `char32_t`, or `std::map<std::u32string,…,std::less<>>` with `u32string_view` transparent lookup).
+**12. Fixed. Each pattern probe allocated a `u32string`.**
+Patterns are a `std::map` with a transparent comparator. `points` looks up a `u32string_view` into `.word.`. Hyphenation points for "hyphenation" and the "ta-ble" exception are unchanged. (`test_hyphenation`)
 
 ## P5 — Dead code / error-handling gaps
 
-**13. `font.cpp:54-63` (`Font::load_memory`) is unused** — no callers anywhere in the tree (only the declaration at `font.h:51`). *Fix:* remove it or use it for the built-in fonts.
+**13. Fixed. `Font::load_memory` had no callers.**
+The declaration and the definition are gone. Built-in faces still load from files.
 
-**14. `pdf.cpp:509, 573` — `pages_kids_placeholder` is dead**: declared, `(void)`-cast, never used. *Fix:* delete it.
+**14. Fixed. `pages_kids_placeholder` was unused.**
+The variable and its `(void)` cast are gone. `/Parent` is still patched after the Pages object exists.
 
-**15. `hyphenator.cpp:82-90` — An explicitly passed exceptions file that fails to open is silently ignored** (`std::ifstream ex` failure is unchecked), so a misspelled path degrades hyphenation with no signal. *Fix:* check `ex.is_open()` and report/return false.
+**15. Fixed. A missing exceptions file was ignored.**
+`Hyphenator::load` returns false when a non-empty exceptions path does not open. An empty path is still optional. (`test_hyphenation`)
 
-**16. `font.cpp:79` — No guard against `upem == 0`.** A malformed font with glyph count > 0 but upem 0 flows into `cs.size / units_per_em()` (`composer.cpp:215`), `em()` (`pdf.cpp:200`), and `render_nvg.cpp:16`, producing infinities. *Fix:* clamp `m_upem` to ≥ 1 in `from_blob`.
+**16. Fixed. A font with units-per-em of 0 could divide by zero.**
+`from_blob` clamps `m_upem` to at least 1 before advances, PDF widths, or screen drawing divide by it.
 
 ---
 

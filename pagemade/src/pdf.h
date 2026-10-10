@@ -9,7 +9,8 @@
  * with hb-subset (retaining glyph ids, so character codes are glyph ids
  * under Identity-H) and embedded as CIDFontType0 (CFF) or CIDFontType2
  * (TrueType), with a ToUnicode map for search and copy. Colors are device
- * RGB for now; CMYK/spot and trim/bleed/marks come later.
+ * RGB. An alpha below 1 selects an ExtGState (/ca and /CA). CMYK, spot
+ * colors, and trim/bleed/marks come later.
  * Pictures are embedded from the source file in `images` (a JPEG's own
  * DCT stream, anything else the full-resolution pixels), clipped to the
  * frame. The screen's display view is not what gets written.

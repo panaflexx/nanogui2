@@ -413,6 +413,22 @@ static void test_breaks(const FontLibrary &fonts) {
         CHECK(compose(twice, wide, fonts).lines.size() == 3,
               "two trailing breaks open two lines");
     }
+
+    /* End stops before every break the composer hangs, including VT, FF and NEL. */
+    {
+        auto end_before = [&](const char *text, const char *label) {
+            Story s = one_para(text, cs, ps);
+            Composition t = compose(s, wide, fonts);
+            CHECK(t.lines.size() == 2, "%s breaks the line (%zu)", label, t.lines.size());
+            if (t.lines.size() < 1)
+                return;
+            TextPos e = line_end(t, s, 0);
+            CHECK(e.byte == 5, "End stops before a trailing %s (%u)", label, e.byte);
+        };
+        end_before("hello\vworld", "VT");
+        end_before("hello\fworld", "FF");
+        end_before("hello\xC2\x85world", "NEL");
+    }
 }
 
 static void test_edit(const FontLibrary &fonts) {
@@ -900,6 +916,11 @@ static void test_hyphenation(const FontLibrary &fonts) {
     CHECK(pts == std::vector<size_t>({2, 6}), "hy-phen-ation (%zu points)", pts.size());
     pts = hy.points(utf8_to_u32("table"));
     CHECK(pts == std::vector<size_t>({2}), "exceptions file: ta-ble (%zu points)", pts.size());
+    Hyphenator missing;
+    CHECK(!missing.load(dir + ".pat.txt", dir + ".no-such-exceptions"),
+          "a missing exceptions file fails to load");
+    Hyphenator patterns_only;
+    CHECK(patterns_only.load(dir + ".pat.txt"), "an empty exceptions path is optional");
 
     CharStyle cs; cs.size = 10;
     ParaStyle ps; ps.align = Align::Justify;
@@ -1674,6 +1695,28 @@ static void test_tounicode(const FontLibrary &fonts) {
           "fi stops before the next run");
 }
 
+/* Translucent color becomes an ExtGState. Opaque text does not. */
+static void test_pdf_alpha(const FontLibrary &fonts) {
+    auto exported = [&](float alpha) {
+        CharStyle cs; cs.size = 12; cs.color.a = alpha;
+        PageDoc doc;
+        StoryId id = doc.add_story(one_para("Hi", cs, ParaStyle()));
+        doc.add_text_frame(0, id, 200, 40, Transform::translate(36, 36));
+        std::vector<Composition> comps;
+        comps.push_back(compose(doc.stories[0].story, doc.thread_frames(doc.stories[0]), fonts));
+        const std::string path = "/tmp/pagemade_alpha.pdf";
+        CHECK(export_pdf(path, doc, comps), "export text at alpha %.3f", alpha);
+        return pdf_plain(read_bin(path));
+    };
+    const std::string solid = exported(1.f);
+    CHECK(solid.find("/ExtGState") == std::string::npos, "opaque text has no ExtGState");
+    const std::string half = exported(0.5f);
+    CHECK(half.find("/ExtGState") != std::string::npos, "half alpha uses an ExtGState");
+    CHECK(half.find("/ca 0.5") != std::string::npos && half.find("/CA 0.5") != std::string::npos,
+          "fill and stroke alpha are both 0.5");
+    CHECK(half.find("/A500 gs\n") != std::string::npos, "half alpha selects /A500");
+}
+
 /* outline() may be held across later lookups. The cache must not move it. */
 static void test_outline_cache(const FontLibrary &fonts) {
     CharStyle cs; cs.size = 12;
@@ -2334,6 +2377,7 @@ int main(int argc, char **argv) {
     test_align_ranges(fonts);
     test_pdf(fonts);
     test_tounicode(fonts);
+    test_pdf_alpha(fonts);
     test_deterministic(fonts);
     test_model(fonts);
     test_tabs(fonts);
