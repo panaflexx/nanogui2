@@ -220,13 +220,23 @@ void ComposerView::restore_snapshot() {
         m_doc.pages.emplace_back();
     if (m_page >= m_doc.pages.size())
         m_page = m_doc.pages.size() - 1;
-    /* Keep the selection and caret where they still exist, on this page. */
+    /* Keep a selection whose items still exist. If they all sit on one
+     * page, follow them — a cross-page move undoes back to that page. */
     m_sel.erase(std::remove_if(m_sel.begin(), m_sel.end(),
-                               [&](ItemId id) {
-                                   size_t pg = 0;
-                                   return !m_doc.find_item(id, &pg) || pg != m_page;
-                               }),
+                               [&](ItemId id) { return !m_doc.find_item(id); }),
                 m_sel.end());
+    size_t home = SIZE_MAX;
+    bool one_page = !m_sel.empty();
+    for (ItemId id : m_sel) {
+        size_t pg = 0;
+        m_doc.find_item(id, &pg);
+        if (home == SIZE_MAX)
+            home = pg;
+        else if (pg != home)
+            one_page = false;
+    }
+    if (one_page && home != SIZE_MAX && home != m_page)
+        m_page = home;
     if (m_edit_story && !m_doc.find_story(m_edit_story))
         m_edit_story = 0;
     if (Story *s = edit_story()) {
@@ -595,6 +605,8 @@ bool ComposerView::mouse_button_event(const Vector2i &p, int button, bool down, 
                 }
             }
         }
+        if (m_drag == Handle::Move && m_gesture_saved && m_tool != Tool::Crop)
+            adopt_moved_items();
         m_drag = Handle::None;
         m_drag_target = 0;
         m_selecting = false;
@@ -1102,6 +1114,7 @@ bool ComposerView::type_style(TypeStyle &o) const {
     o.strike = a.strike;
     o.kerning = a.kerning;
     o.ligatures = a.ligatures;
+    o.no_break = a.no_break;
     o.size = a.size;
     o.leading = a.leading;
     o.baseline = a.baseline_shift;
@@ -1109,7 +1122,7 @@ bool ComposerView::type_style(TypeStyle &o) const {
     o.hscale = a.hscale;
     o.mix_family = o.mix_style = o.mix_size = o.mix_leading = o.mix_baseline = false;
     o.mix_caps = o.mix_deco = o.mix_track = o.mix_hscale = false;
-    o.mix_kerning = o.mix_ligatures = false;
+    o.mix_kerning = o.mix_ligatures = o.mix_no_break = false;
     for (size_t i = 1; i < styles.size(); ++i) {
         const CharStyle &b = styles[i];
         o.mix_family |= b.family != a.family;
@@ -1123,6 +1136,7 @@ bool ComposerView::type_style(TypeStyle &o) const {
         o.mix_hscale |= b.hscale != a.hscale;
         o.mix_kerning |= b.kerning != a.kerning;
         o.mix_ligatures |= b.ligatures != a.ligatures;
+        o.mix_no_break |= b.no_break != a.no_break;
         o.mix_color |= b.swatch != a.swatch || !(b.color == a.color);
         o.mix_tint |= b.tint != a.tint;
         o.mix_char_style |= b.char_style != a.char_style;
@@ -2072,9 +2086,21 @@ bool ComposerView::keyboard_event(int key, int, int action, int modifiers) {
     }
 }
 
+bool ComposerView::insert_at_caret(const std::string &utf8) {
+    if (!editing())
+        return false;
+    insert_string(utf8, false);
+    return true;
+}
+
 bool ComposerView::keyboard_character_event(unsigned int codepoint) {
     if (!editing() || codepoint < 32)
         return false;
+    if (m_smart_quotes && (codepoint == '"' || codepoint == '\'')) {
+        /* What precedes the text that replaces the selection. */
+        const TextPos at = has_selection() ? (m_anchor < m_caret ? m_anchor : m_caret) : m_caret;
+        codepoint = smart_quote(codepoint, char_before(*edit_story(), at));
+    }
     char buf[5] = {0};
     if (codepoint < 0x80) {
         buf[0] = (char) codepoint;
@@ -2215,7 +2241,100 @@ void ComposerView::draw_text_overlays(NVGcontext *ctx, const Item &it, float px)
     nvgRestore(ctx);
 }
 
-void ComposerView::draw_chrome(NVGcontext *ctx, float px, size_t page) {
+namespace {
+
+bool keep_item(const std::vector<ItemId> *which, bool only, ItemId id) {
+    if (!which)
+        return true;
+    for (ItemId x : *which)
+        if (x == id)
+            return only;
+    return !only;
+}
+
+} // namespace
+
+void ComposerView::lifted_ids(std::vector<ItemId> &ids) const {
+    ids.clear();
+    if (m_placing) {
+        ids = m_sel;
+        return;
+    }
+    if (m_pointer_down && m_drag == Handle::Move && m_tool != Tool::Crop)
+        for (const Item &it : m_drag_items)
+            ids.push_back(it.id);
+}
+
+void ComposerView::adopt_moved_items() {
+    std::vector<PageSlot> slots;
+    float aw, ah;
+    arrangement(m_doc, m_page, m_page_view, slots, aw, ah);
+    if (slots.size() < 2)
+        return;
+    const float pw = m_doc.setup.width > 1.f ? m_doc.setup.width : 1.f;
+    const float ph = m_doc.setup.height > 1.f ? m_doc.setup.height : 1.f;
+    std::vector<ItemId> ids;
+    for (const Item &o : m_drag_items)
+        ids.push_back(o.id);
+    bool moved = false;
+    for (ItemId id : ids) {
+        size_t src = 0;
+        Item *it = m_doc.find_item(id, &src);
+        if (!it)
+            continue;
+        const Bounds b = item_bounds(*it);
+        if (b.empty())
+            continue;
+        float sx = 0.f, sy = 0.f;
+        bool on_screen = false;
+        for (const PageSlot &sl : slots)
+            if (sl.index == src) {
+                sx = sl.x;
+                sy = sl.y;
+                on_screen = true;
+            }
+        if (!on_screen)
+            continue;
+        const float cx = (b.x0 + b.x1) * 0.5f + sx;
+        const float cy = (b.y0 + b.y1) * 0.5f + sy;
+        size_t dest = src;
+        float dx = 0.f, dy = 0.f;
+        for (const PageSlot &sl : slots)
+            if (cx >= sl.x && cy >= sl.y && cx <= sl.x + pw && cy <= sl.y + ph) {
+                dest = sl.index;
+                dx = sx - sl.x;
+                dy = sy - sl.y;
+                break;
+            }
+        if (dest == src)
+            continue;
+        const float e = it->xf.e, f = it->xf.f;
+        it->xf.e = e + dx;
+        it->xf.f = f + dy;
+        if (m_doc.transfer_item(id, dest))
+            moved = true;
+        else {
+            it->xf.e = e;
+            it->xf.f = f;
+        }
+    }
+    if (!moved)
+        return;
+    if (m_drag_target) {
+        size_t pg = m_page;
+        if (m_doc.find_item(m_drag_target, &pg) && pg != m_page) {
+            m_page = pg;
+            if (on_page_change)
+                on_page_change();
+        }
+    }
+    selection_changed();
+    if (screen())
+        screen()->redraw();
+}
+
+void ComposerView::draw_chrome(NVGcontext *ctx, float px, size_t page,
+                               const std::vector<ItemId> *which, bool only) {
     enum Tab { Empty, Plus, Overset };
     float lpx = px;
     auto tab = [&](float cx, float cy, Tab kind) {
@@ -2247,6 +2366,8 @@ void ComposerView::draw_chrome(NVGcontext *ctx, float px, size_t page) {
     const std::vector<Item> &page_items =
         page < m_doc.pages.size() ? static_cast<const std::vector<Item> &>(m_doc.pages[page].items) : none;
     for (const Item &it : page_items) {
+        if (!keep_item(which, only, it.id))
+            continue;
         const bool selected = is_selected(it.id);
         nvgSave(ctx);
         apply_transform(ctx, it.xf);
@@ -2295,7 +2416,7 @@ void ComposerView::draw_chrome(NVGcontext *ctx, float px, size_t page) {
         nvgRestore(ctx);
     }
 
-    if (m_marquee && page == m_page) {
+    if (!only && m_marquee && page == m_page) {
         Bounds b;
         b.add(m_drag_start);
         b.add(m_marquee_end);
@@ -2450,6 +2571,12 @@ void ComposerView::draw(NVGcontext *ctx) {
     arrangement(m_doc, m_page, m_page_view, slots, aw, ah);
     const Vector2f o = page_origin();
     sync_textures(ctx);
+    std::vector<ItemId> lifted;
+    lifted_ids(lifted);
+    const std::vector<ItemId> *hand = lifted.empty() ? nullptr : &lifted;
+
+    /* Paper for every page first. An item that crosses onto the next page
+     * is then drawn over that page, not under its sheet. */
     for (const PageSlot &sl : slots) {
         nvgSave(ctx);
         nvgTranslate(ctx, o.x() + sl.x, o.y() + sl.y);
@@ -2461,15 +2588,26 @@ void ComposerView::draw(NVGcontext *ctx) {
             nvgText(ctx, 0, -4.f * px, "Hidden \u2014 not printed", nullptr);
         }
         draw_page(ctx, px, sl.index);
-        draw_list(ctx, build_page(m_doc, sl.index, m_comp), px,
-                  [&](const DrawImage &im) { return texture_for(ctx, im, px); });
-        if (sl.index < m_doc.pages.size())
-            for (const Item &it : m_doc.pages[sl.index].items)
-                if (it.is_text())
-                    draw_text_overlays(ctx, it, px);
-        draw_chrome(ctx, px, sl.index);
         nvgRestore(ctx);
     }
+
+    auto paint_items = [&](bool only) {
+        for (const PageSlot &sl : slots) {
+            nvgSave(ctx);
+            nvgTranslate(ctx, o.x() + sl.x, o.y() + sl.y);
+            draw_list(ctx, build_page(m_doc, sl.index, m_comp, hand, only), px,
+                      [&](const DrawImage &im) { return texture_for(ctx, im, px); });
+            if (sl.index < m_doc.pages.size())
+                for (const Item &it : m_doc.pages[sl.index].items)
+                    if (it.is_text() && keep_item(hand, only, it.id))
+                        draw_text_overlays(ctx, it, px);
+            draw_chrome(ctx, px, sl.index, hand, only);
+            nvgRestore(ctx);
+        }
+    };
+    paint_items(false);
+    if (hand)
+        paint_items(true);               // the item in hand, above both pages
 
     nvgRestore(ctx);
 }

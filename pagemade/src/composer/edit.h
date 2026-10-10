@@ -42,6 +42,13 @@ TextPos   clamp(const Story &s, TextPos p);
 /* Style for typing at p: the character before it, or after it at the
  * start of a paragraph. */
 CharStyle style_at(const Story &s, TextPos p);
+/* The character before p in its paragraph, 0 at the paragraph's start. */
+uint32_t char_before(const Story &s, TextPos p);
+/* Typographer's quotes: the curly form of a straight quote typed after
+ * `before` (0 at the start of a paragraph). After a space, a break, an
+ * opening bracket, a dash or a slash it opens; otherwise it closes, which
+ * is also the apostrophe. Anything else comes back unchanged. */
+uint32_t smart_quote(uint32_t typed, uint32_t before);
 
 /* Insert UTF-8 text; '\n' (or "\r\n") starts a new paragraph. Returns the
  * position after the inserted text. */

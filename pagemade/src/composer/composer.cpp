@@ -30,6 +30,7 @@
 #include <linebreak.h>
 
 #include <algorithm>
+#include <cctype>
 #include <chrono>
 #include <cmath>
 #include <mutex>
@@ -80,6 +81,23 @@ void to_upper(uint32_t cp, std::vector<uint32_t> &out) {
 
 bool is_space(uint32_t cp) { return cp == ' ' || cp == 0xA0; }
 
+/* The width of a fixed space in ems, or 0 for anything else. */
+float fixed_space_em(uint32_t cp) {
+    switch (cp) {
+    case 0x2002: return 0.5f;            // en space
+    case 0x2003: return 1.f;             // em space
+    case 0x2004: return 1.f / 3.f;       // three-per-em
+    case 0x2005: return 0.25f;           // four-per-em
+    case 0x2006: return 1.f / 6.f;       // six-per-em
+    case 0x2007: return 0.5f;            // figure space
+    case 0x2008: return 0.25f;           // punctuation space
+    case 0x2009: return 1.f / 6.f;       // thin space
+    case 0x200A: return 1.f / 24.f;      // hair space
+    case 0x202F: return 1.f / 6.f;       // narrow no-break space
+    }
+    return 0.f;
+}
+
 float leading_of(const CharStyle &cs, const ParaStyle &ps) {
     return cs.leading > 0 ? cs.leading : cs.size * ps.autoleading * 0.01f;
 }
@@ -105,6 +123,13 @@ public:
 
     const Font *font(size_t run) const { return m_font[run]; }
     const CharStyle &style(size_t run) const { return m_para.runs[run].style; }
+    /* The character at `byte` is in a No break run. */
+    bool no_break_at(uint32_t byte) const {
+        for (size_t r = 0; r < m_start.size(); ++r)
+            if (byte >= m_start[r] && byte < m_start[r] + (uint32_t) m_para.runs[r].text.size())
+                return m_para.runs[r].style.no_break;
+        return false;
+    }
 
     /* Shape text[a, b) run by run. With `hyphen`, a '-' is shaped after
      * the last character in its run's font, so it kerns against it. */
@@ -209,6 +234,22 @@ public:
             if (g.kind == Kind::Break || g.kind == Kind::SoftHyphen || g.kind == Kind::Tab) {
                 g.adv = 0;           // tabs are resolved during layout
                 g.track = 0;
+            }
+            /* Fixed spaces (em, en, thin, hair...) keep their width when
+             * lines are justified. A face without one draws a space glyph
+             * at the standard fraction of an em. A missing non-breaking
+             * hyphen borrows the hyphen. */
+            if (info[i].codepoint == 0) {
+                if (const float frac = fixed_space_em(cp); frac > 0.f) {
+                    g.gid = font->space_glyph();
+                    g.adv = frac * cs.size * scale * hs;
+                } else if (cp == 0x2011) {
+                    hb_codepoint_t hy = 0;
+                    if (hb_font_get_nominal_glyph(font->hb(), '-', &hy) && hy) {
+                        g.gid = hy;
+                        g.adv = font->advance(hy) * gem * hs;
+                    }
+                }
             }
             out.push_back(g);
         }
@@ -644,6 +685,8 @@ private:
             char b = brks[end - 1];
             if (b != LINEBREAK_MUSTBREAK && b != LINEBREAK_ALLOWBREAK)
                 continue;
+            if (b == LINEBREAK_ALLOWBREAK && m_sh.no_break_at(end - 1) && m_sh.no_break_at(end))
+                continue;                      // inside a No break run
             if (utf8_decode(t, utf8_prev(t, end)) == 0xAD)
                 continue;                      // discretionary hyphen: a hyphenation point
             m_segs.push_back({g0, i + 1, m_glyphs[g0].cluster, end, b == LINEBREAK_MUSTBREAK});
@@ -753,6 +796,11 @@ private:
                 k = e;
             }
         }
+        /* No hyphens inside a No break run. */
+        out.erase(std::remove_if(out.begin(), out.end(),
+                                 [&](uint32_t p) { return p > 0 && m_sh.no_break_at(p - 1) &&
+                                                          m_sh.no_break_at(p); }),
+                  out.end());
         m_points[si] = std::move(out);
         return *m_points[si];
     }
@@ -932,6 +980,57 @@ void place_line(Shaper &sh, const Paragraph &para, const LineCandidate &c, float
 
 } // namespace
 
+std::string list_marker(const ParaStyle &ps, int n) {
+    if (ps.list == ListKind::Bullet)
+        return ps.bullet;
+    if (ps.list != ListKind::Number)
+        return {};
+    n = std::max(1, n);
+    std::string s;
+    switch (ps.number_format) {
+    case NumberFormat::Arabic:
+        s = std::to_string(n);
+        break;
+    case NumberFormat::LowerAlpha:
+    case NumberFormat::UpperAlpha: {
+        /* a..z, then aa..zz, as spreadsheets count columns. */
+        const char a = ps.number_format == NumberFormat::LowerAlpha ? 'a' : 'A';
+        for (int k = n; k > 0; k = (k - 1) / 26)
+            s.insert(s.begin(), (char) (a + (k - 1) % 26));
+        break;
+    }
+    case NumberFormat::LowerRoman:
+    case NumberFormat::UpperRoman: {
+        if (n >= 4000) {
+            s = std::to_string(n);
+            break;
+        }
+        static const int val[] = {1000, 900, 500, 400, 100, 90, 50, 40, 10, 9, 5, 4, 1};
+        static const char *sym[] = {"M", "CM", "D", "CD", "C", "XC", "L", "XL", "X", "IX",
+                                    "V", "IV", "I"};
+        for (int i = 0, k = n; i < 13; ++i)
+            for (; k >= val[i]; k -= val[i])
+                s += sym[i];
+        if (ps.number_format == NumberFormat::LowerRoman)
+            for (char &c : s)
+                c = (char) std::tolower((unsigned char) c);
+        break;
+    }
+    }
+    return s + ps.number_suffix;
+}
+
+std::vector<int> list_numbers(const Story &story) {
+    std::vector<int> out(story.paragraphs.size(), 0);
+    for (size_t i = 0; i < story.paragraphs.size(); ++i) {
+        const ParaStyle &ps = story.paragraphs[i].style;
+        if (ps.list != ListKind::Number)
+            continue;
+        out[i] = ps.list_start > 0 ? ps.list_start : i > 0 && out[i - 1] > 0 ? out[i - 1] + 1 : 1;
+    }
+    return out;
+}
+
 std::string paragraph_text(const Paragraph &p) {
     std::string t;
     for (const Run &r : p.runs)
@@ -966,6 +1065,8 @@ Composition compose(const Story &story, const std::vector<Frame> &frames,
         bool next_frame = false;
         int  break_after = -1;
     };
+
+    const std::vector<int> numbers = list_numbers(story);
 
     /* Compose one paragraph from the current position. False when the text
      * runs out of frames (the story is overset from here). */
@@ -1079,6 +1180,40 @@ Composition compose(const Story &story, const std::vector<Frame> &frames,
             cap.on = false;
         };
 
+        /* Bullet or number, shaped in the paragraph's first type. A drop
+         * cap takes the marker's place. Clusters are 0 and the glyphs are
+         * inserted, so carets and copied text pass them by. */
+        GlyphRun marker;
+        float marker_w = 0;
+        if (st.list != ListKind::None && !cap.on && !para.runs.empty()) {
+            const std::string m = list_marker(st, numbers[pi]);
+            Paragraph mp;
+            mp.style = st;
+            CharStyle ms = para.runs.front().style;
+            ms.underline = ms.strike = ms.no_break = false;
+            mp.runs.push_back({ms, m});
+            Shaper msh(mp, fonts);
+            std::vector<PGlyph> g;
+            msh.shape(0, (uint32_t) m.size(), false, g);
+            marker.font = msh.font(0);
+            marker.size = ms.size;
+            marker.hscale = ms.hscale;
+            marker.color = ms.color;
+            marker.swatch = ms.swatch;
+            marker.tint = ms.tint;
+            for (const PGlyph &q : g) {
+                PlacedGlyph pg;
+                pg.gid = q.gid;
+                pg.cluster = 0;
+                pg.x = marker_w + q.dx;
+                pg.y = q.dy;
+                pg.adv = q.adv + q.track;
+                pg.flags = PlacedGlyph::Inserted;
+                marker.glyphs.push_back(pg);
+                marker_w += pg.adv;
+            }
+        }
+
         bool first_line = true;
         int placed = 0;                  // lines of this paragraph so far
         do {
@@ -1096,8 +1231,18 @@ Composition compose(const Story &story, const std::vector<Frame> &frames,
                 line.para = pi;
                 const bool beside = cap.on && (cap.line == SIZE_MAX ||
                                                (fi == cap.frame && y < cap.bottom - kEps));
-                const float lead_in = beside     ? cap.indent
-                                    : first_line ? st.first_indent : 0.f;
+                float lead_in = beside     ? cap.indent
+                              : first_line ? st.first_indent : 0.f;
+                /* The marker hangs at the first-line indent; the text goes
+                 * on at the left indent, or after the marker if that is
+                 * further. */
+                float marker_x = 0;
+                if (first_line && !marker.glyphs.empty()) {
+                    marker_x = f.x + st.left_indent + st.first_indent;
+                    const float text_x = std::max(f.x + st.left_indent,
+                                                  marker_x + marker_w + 0.5f * marker.size);
+                    lead_in = text_x - (f.x + st.left_indent);
+                }
                 line.left = f.x + st.left_indent + lead_in;
                 line.width = f.w - st.left_indent - st.right_indent - lead_in;
 
@@ -1148,6 +1293,14 @@ Composition compose(const Story &story, const std::vector<Frame> &frames,
                                                 right  ? line.left + line.width : line.left;
                 } else {
                     place_line(sh, para, c, f.x, last_line, line);
+                }
+                if (first_line && !marker.glyphs.empty()) {
+                    GlyphRun r = marker;
+                    for (PlacedGlyph &pg : r.glyphs) {
+                        pg.x += marker_x;
+                        pg.y = line.baseline - pg.y;
+                    }
+                    line.runs.insert(line.runs.begin(), std::move(r));
                 }
                 if (cap.on && cap.line == SIZE_MAX) {
                     /* The first line: the cap's characters belong to it. */

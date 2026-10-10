@@ -16,9 +16,11 @@
  * on empty space for a marquee (selects what it encloses), drag selected
  * items to move them, drag a corner handle to resize (a line's handles are
  * its ends), or drag a text block's bottom windowshade to change its
- * depth. Delete removes the selection. Arrange: Cmd/Ctrl+F brings the
- * selection to the front, Cmd/Ctrl+B sends it to the back, Cmd/Ctrl+]
- * brings it forward one step and Cmd/Ctrl+[ sends it backward one
+ * depth. A move whose center lands on another page that is on screen
+ * gives the item to that page. Delete removes the selection. Arrange:
+ * Cmd/Ctrl+F brings the selection to the front, Cmd/Ctrl+B sends it to
+ * the back, Cmd/Ctrl+] brings it forward one step and Cmd/Ctrl+[ sends it
+ * backward one
  * (Shift with the brackets jumps to the front or the back). With snapping
  * on, moved edges and
  * dragged handles snap to the page edges, margins and column guides.
@@ -85,6 +87,12 @@ public:
     void set_tool(Tool t);
     Tool tool() const { return m_tool; }
     bool editing() const { return edit_story() != nullptr; }
+    /* Insert text at the caret as its own undo step (the Insert Character
+     * menu). False when no text is being edited. */
+    bool insert_at_caret(const std::string &utf8);
+    /* Typographer's quotes as you type (on by default). */
+    bool smart_quotes() const { return m_smart_quotes; }
+    void set_smart_quotes(bool on) { m_smart_quotes = on; }
 
     /* Picture bytes live outside the document (undo snapshots stay small).
      * The view does not own the store. */
@@ -157,14 +165,14 @@ public:
         bool  bold = false, italic = false;
         pagemade::Caps caps = pagemade::Caps::Normal;
         bool  underline = false, strike = false;
-        bool  kerning = true, ligatures = true;
+        bool  kerning = true, ligatures = true, no_break = false;
         float size = 12.f, leading = 0.f, baseline = 0.f;
         float tracking = 0.f, hscale = 100.f;
         bool  mix_family = false, mix_style = false, mix_size = false;
         bool  mix_leading = false, mix_baseline = false;
         bool  mix_caps = false, mix_deco = false;
         bool  mix_track = false, mix_hscale = false;
-        bool  mix_kerning = false, mix_ligatures = false;
+        bool  mix_kerning = false, mix_ligatures = false, mix_no_break = false;
         /* Color (a swatch and tint; swatch 0 = the RGB) and the character
          * style; `char_overridden`: the text differs from that style. */
         uint32_t swatch = 0;
@@ -310,7 +318,16 @@ private:
     void draw_page(NVGcontext *ctx, float px, size_t page);
     /* Loose/tight lines, baselines, the text selection and the caret. */
     void draw_text_overlays(NVGcontext *ctx, const pagemade::Item &it, float px);
-    void draw_chrome(NVGcontext *ctx, float px, size_t page);   // outlines, handles, windowshades, marquee
+    /* Outlines, handles, windowshades, marquee. `which` skips those items,
+     * or draws only them when `only` is set. The marquee is part of the
+     * full pass, not the "only these" pass. */
+    void draw_chrome(NVGcontext *ctx, float px, size_t page,
+                     const std::vector<pagemade::ItemId> *which = nullptr, bool only = false);
+    /* Items in the hand: a move drag, or a story picked up to thread.
+     * Drawn after every page so the next page's paper cannot cover them. */
+    void lifted_ids(std::vector<pagemade::ItemId> &ids) const;
+    /* A finished move whose center lies on another visible page. */
+    void adopt_moved_items();
 
     /* ---- Threading ------------------------------------------------- */
     /* The red arrow was clicked: thread a new block after the selected
@@ -368,6 +385,7 @@ private:
     void after_edit();                    // recompose and redraw
     bool delete_selection();              // true when something was erased
     void insert_string(const std::string &utf8, bool burst);
+    bool m_smart_quotes = true;
     void move_caret_key(int key, int modifiers);
     void toggle_style(int key);           // B -> bold, I -> italic
 

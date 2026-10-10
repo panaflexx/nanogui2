@@ -280,6 +280,154 @@ static void test_keeps(const FontLibrary &fonts) {
     }
 }
 
+/* Smart quotes, fixed spaces, the non-breaking hyphen, and No break. */
+static void test_special_chars(const FontLibrary &fonts) {
+    CHECK(smart_quote('"', 0) == 0x201C && smart_quote('"', ' ') == 0x201C &&
+          smart_quote('"', 'o') == 0x201D && smart_quote('"', '.') == 0x201D,
+          "double quotes open after a space or at the start, close after text");
+    CHECK(smart_quote('\'', 'n') == 0x2019 && smart_quote('\'', '(') == 0x2018 &&
+          smart_quote('\'', 0x201C) == 0x2018 && smart_quote('\'', 0x2014) == 0x2018,
+          "single quotes: apostrophe after a letter, opening after ( “ or a dash");
+    CHECK(smart_quote('x', ' ') == 'x', "other characters pass through");
+    {
+        Story s = one_para("ab\u00E9", CharStyle(), ParaStyle());
+        CHECK(char_before(s, {0, 0}) == 0 && char_before(s, {0, 2}) == 'b' &&
+              char_before(s, {0, 4}) == 0xE9, "char_before");
+    }
+
+    CharStyle cs;
+    ParaStyle ps;
+    const std::vector<Frame> wide = {{0, 0, 2000, 200}};
+    auto width = [&](const std::string &t) {
+        Composition c = compose(one_para(t, cs, ps), wide, fonts);
+        return c.lines.empty() ? 0.f : c.lines[0].x_end - c.lines[0].x_start;
+    };
+    /* An em space is an em wide whether or not the face has the glyph. */
+    const float em = width("a\u2003b") - width("ab");
+    CHECK(std::fabs(em - cs.size) < 0.6f, "em space ~ one em (%g)", em);
+    const float hair = width("a\u200Ab") - width("ab");
+    CHECK(hair > 0.f && hair < cs.size * 0.2f, "hair space is narrow (%g)", hair);
+    CHECK(std::fabs(width("a\u2011b") - width("a-b")) < 0.01f,
+          "a non-breaking hyphen looks like a hyphen");
+
+    /* Justified: word spaces stretch, the em space keeps its width. */
+    {
+        ParaStyle j;
+        j.align = Align::Justify;
+        Composition c = compose(one_para("aa bb\u2003cc dd ee ff gg hh ii jj kk ll mm nn oo pp qq",
+                                         cs, j), {{0, 0, 150, 500}}, fonts);
+        float em_adv = -1;
+        for (const GlyphRun &r : c.lines.empty() ? std::vector<GlyphRun>() : c.lines[0].runs)
+            for (size_t i = 0; i + 1 < r.glyphs.size(); ++i)
+                if (r.glyphs[i].cluster == 5)
+                    em_adv = r.glyphs[i + 1].x - r.glyphs[i].x;
+        CHECK(c.lines.size() > 1 && std::fabs(em_adv - em) < 0.6f,
+              "the em space is not stretched (%g vs %g)", em_adv, em);
+    }
+
+    /* No break: a phrase that would break stays on one line. */
+    {
+        CharStyle nb = cs;
+        nb.no_break = true;
+        Paragraph p;
+        p.runs = {{cs, "aaaa bbbb cccc "}, {nb, "New York City"}, {cs, " dddd"}};
+        Story st;
+        st.paragraphs = {p};
+        const std::string text = paragraph_text(p);
+        const uint32_t a = (uint32_t) text.find("New"), b = a + 13;
+        for (float w : {80.f, 110.f, 140.f}) {
+            Composition c = compose(st, {{0, 0, w, 500}}, fonts);
+            bool split = false;
+            for (const ComposedLine &l : c.lines)
+                split |= l.byte_end > a && l.byte_end < b;
+            CHECK(!split, "No break keeps \"New York City\" together at %gpt", w);
+        }
+        /* Without it the phrase breaks somewhere at one of those widths. */
+        p.runs[1].style.no_break = false;
+        st.paragraphs = {p};
+        bool any = false;
+        for (float w : {80.f, 110.f, 140.f}) {
+            Composition c = compose(st, {{0, 0, w, 500}}, fonts);
+            for (const ComposedLine &l : c.lines)
+                any |= l.byte_end > a && l.byte_end < b;
+        }
+        CHECK(any, "without No break it does break");
+    }
+}
+
+/* Bullets and numbering. */
+static void test_lists(const FontLibrary &fonts) {
+    ParaStyle n;
+    n.list = ListKind::Number;
+    CHECK(list_marker(n, 3) == "3.", "arabic");
+    n.number_format = NumberFormat::LowerAlpha;
+    CHECK(list_marker(n, 1) == "a." && list_marker(n, 26) == "z." && list_marker(n, 28) == "ab.",
+          "letters (%s)", list_marker(n, 28).c_str());
+    n.number_format = NumberFormat::UpperRoman;
+    n.number_suffix = ")";
+    CHECK(list_marker(n, 1994) == "MCMXCIV)", "roman (%s)", list_marker(n, 1994).c_str());
+    n.number_format = NumberFormat::LowerRoman;
+    CHECK(list_marker(n, 4) == "iv)", "lower roman");
+    ParaStyle b;
+    b.list = ListKind::Bullet;
+    CHECK(list_marker(b, 7) == "\u2022" && list_marker(ParaStyle(), 1).empty(), "bullet, none");
+
+    /* Counting: consecutive numbered paragraphs, a restart, a break. */
+    {
+        ParaStyle num;
+        num.list = ListKind::Number;
+        ParaStyle again = num;
+        again.list_start = 10;
+        Story s;
+        const ParaStyle plain;
+        for (const ParaStyle *ps : std::initializer_list<const ParaStyle *>{&num, &num, &num, &again, &num, &plain, &num})
+            s.paragraphs.push_back(one_para("x", CharStyle(), *ps).paragraphs[0]);
+        const std::vector<int> got = list_numbers(s);
+        const std::vector<int> want = {1, 2, 3, 10, 11, 0, 1};
+        CHECK(got == want, "numbers count, restart and break");
+    }
+
+    /* The marker hangs at the first-line indent; the text sits at the
+     * left indent; the caret skips the marker. */
+    CharStyle cs;
+    ParaStyle li;
+    li.list = ListKind::Number;
+    li.left_indent = 18;
+    li.first_indent = -18;
+    Story st = one_para("Item text that runs onto a second line of the list", cs, li);
+    const Composition c = compose(st, {{0, 0, 150, 500}}, fonts);
+    CHECK(c.lines.size() >= 2, "two lines (%zu)", c.lines.size());
+    if (c.lines.size() >= 2 && !c.lines[0].runs.empty()) {
+        const GlyphRun &m = c.lines[0].runs.front();
+        CHECK(!m.glyphs.empty() && (m.glyphs[0].flags & PlacedGlyph::Inserted) &&
+              std::fabs(m.glyphs[0].x) < 0.5f, "the marker at the hanging indent (%g)",
+              m.glyphs.empty() ? -1.f : m.glyphs[0].x);
+        CHECK(std::fabs(c.lines[0].left - 18.f) < 0.01f && std::fabs(c.lines[1].left - 18.f) < 0.01f,
+              "text at the left indent on every line");
+        const Caret k = caret_at(c, st, {0, 0});
+        CHECK(k.valid() && std::fabs(k.x - 18.f) < 0.5f, "the caret starts at the text (%g)", k.x);
+    }
+    /* No hanging indent: the text follows the marker. */
+    {
+        ParaStyle flat;
+        flat.list = ListKind::Bullet;
+        const Composition f = compose(one_para("Item", cs, flat), {{0, 0, 150, 500}}, fonts);
+        CHECK(!f.lines.empty() && f.lines[0].left > 4.f, "text after a flush marker (%g)",
+              f.lines.empty() ? -1.f : f.lines[0].left);
+    }
+    /* A drop cap takes the marker's place. */
+    {
+        ParaStyle both = li;
+        both.drop_lines = 2;
+        const Composition d = compose(one_para(kLong, cs, both), {{0, 0, 200, 500}}, fonts);
+        bool inserted = false;
+        if (!d.lines.empty())
+            for (const PlacedGlyph &g : d.lines[0].runs.front().glyphs)
+                inserted |= (g.flags & PlacedGlyph::Inserted) != 0;
+        CHECK(!inserted, "no marker with a drop cap");
+    }
+}
+
 static bool near_f(float a, float b) { return std::fabs(a - b) < 1e-3f; }
 
 static void test_drop_caps(const FontLibrary &fonts) {
@@ -427,6 +575,55 @@ static void test_styles() {
     p.style.space_after = head->para.space_after;
     p.runs[2].style.size = 50;
     CHECK(style_overridden(p, *head), "changed type is an override");
+
+    /* Character styles set only their fields; paragraph styles keep them. */
+    {
+        const std::vector<CharStyleDef> cdefs = default_char_styles();
+        const CharStyleDef *em = nullptr, *accent = nullptr, *sc = nullptr;
+        for (const CharStyleDef &d : cdefs) {
+            if (d.name == "Emphasis") em = &d;
+            if (d.name == "Accent") accent = &d;
+            if (d.name == "Small caps") sc = &d;
+        }
+        CHECK(em && accent && sc, "default character styles");
+        if (em && accent && sc) {
+            CharStyle c;
+            c.family = "Sans";
+            c.size = 9;
+            c.face = "Light";
+            apply_char_style(c, *em);
+            CHECK(c.italic && c.family == "Sans" && c.size == 9 && c.face.empty() &&
+                  c.char_style == "Emphasis", "Emphasis sets italic only");
+            CHECK(!char_style_overridden(c, *em), "fresh: no override");
+            c.size = 20;
+            CHECK(!char_style_overridden(c, *em), "a field the style leaves alone is no override");
+            c.italic = false;
+            CHECK(char_style_overridden(c, *em), "its own field is");
+            apply_char_style(c, *accent);
+            CHECK(c.swatch == accent->type.swatch && c.bold && c.char_style == "Accent",
+                  "Accent sets a swatch");
+
+            /* A style made from a red italic word over plain text sets
+             * just those two things. */
+            CharStyle base;
+            CharStyle word = base;
+            word.italic = true;
+            word.swatch = 8;
+            word.tint = 60;
+            const CharStyleDef mine = char_style_from("Mine", word, base);
+            CHECK(mine.fields == (kCharItalic | kCharColor), "only what differs (%x)", mine.fields);
+            CHECK(char_style_from("Plain", base, base).fields != 0, "plain text: the whole type");
+
+            /* A paragraph style keeps a run's character style. */
+            Paragraph q;
+            CharStyle tagged;
+            apply_char_style(tagged, *sc);
+            q.runs = {{CharStyle(), "plain words here "}, {tagged, "SMALL"}};
+            apply_style(q, *body, cdefs);
+            CHECK(q.runs[1].style.caps == Caps::Small && q.runs[1].style.char_style == "Small caps" &&
+                  q.runs[1].style.size == body->type.size, "Small caps survives Body text");
+        }
+    }
 
     StyleDef made = style_from("Mine", p);
     CHECK(made.name == "Mine" && made.para.name == "Mine" && made.type.size == 50 &&
@@ -1354,6 +1551,8 @@ static void check_char(const CharStyle &a, const CharStyle &b) {
           "char style metrics");
     CHECK(a.kerning == b.kerning && a.ligatures == b.ligatures, "char style switches");
     check_color(a.color, b.color, "type");
+    CHECK(a.swatch == b.swatch && near(a.tint, b.tint) && a.char_style == b.char_style,
+          "swatch, tint and character style");
 }
 
 static void check_para(const ParaStyle &a, const ParaStyle &b) {
@@ -1369,6 +1568,8 @@ static void check_para(const ParaStyle &a, const ParaStyle &b) {
     CHECK(a.keep_together == b.keep_together && a.keep_with_next == b.keep_with_next &&
           a.start_new_frame == b.start_new_frame && a.orphans == b.orphans &&
           a.widows == b.widows, "keep options");
+    CHECK(a.list == b.list && a.bullet == b.bullet && a.number_format == b.number_format &&
+          a.number_suffix == b.number_suffix && a.list_start == b.list_start, "list");
     CHECK(near(a.word_min, b.word_min) && near(a.word_desired, b.word_desired) &&
           near(a.word_max, b.word_max) && near(a.letter_min, b.letter_min) &&
           near(a.letter_desired, b.letter_desired) && near(a.letter_max, b.letter_max),
@@ -1397,6 +1598,13 @@ static void check_doc(const PageDoc &a, const PageDoc &b) {
         CHECK(a.swatches[i].id == b.swatches[i].id && a.swatches[i].name == b.swatches[i].name,
               "swatch %zu", i);
         check_color(a.swatches[i].rgb, b.swatches[i].rgb, "swatch");
+    }
+    CHECK(a.char_styles.size() == b.char_styles.size(), "character styles %zu vs %zu",
+          a.char_styles.size(), b.char_styles.size());
+    for (size_t i = 0; i < std::min(a.char_styles.size(), b.char_styles.size()); ++i) {
+        CHECK(a.char_styles[i].name == b.char_styles[i].name &&
+              a.char_styles[i].fields == b.char_styles[i].fields, "character style %zu", i);
+        check_char(a.char_styles[i].type, b.char_styles[i].type);
     }
     CHECK(a.styles.size() == b.styles.size(), "styles %zu vs %zu", a.styles.size(),
           b.styles.size());
@@ -1539,6 +1747,22 @@ static void test_arrange() {
     CHECK(doc.pages.size() == 3 && doc.setup.facing && doc.pages[0].items.empty() &&
           doc.pages[2].items.empty(), "blank publication");
     CHECK(new_publication(s, 0).pages.size() == 1, "a publication keeps one page");
+
+    PageDoc moved;
+    moved.pages.resize(2);
+    Item box;
+    box.w = 10;
+    box.h = 20;
+    box.xf = Transform::translate(3, 4);
+    const ItemId id = moved.add_item(0, box);
+    CHECK(moved.transfer_item(id, 1), "an item can move to another page");
+    size_t pg = 99;
+    const Item *got = moved.find_item(id, &pg);
+    CHECK(got && pg == 1 && got->id == id && got->xf.e == 3 && got->xf.f == 4 &&
+          moved.pages[0].items.empty() && moved.pages[1].items.size() == 1,
+          "the move keeps the id and the transform");
+    CHECK(!moved.transfer_item(id, 1), "an item already on the page stays");
+    CHECK(!moved.transfer_item(id, 9), "a missing page is refused");
 }
 
 static void test_docfile(const FontLibrary &fonts) {
@@ -1569,6 +1793,9 @@ static void test_docfile(const FontLibrary &fonts) {
     note.hscale = 0.9f;
     note.kerning = false;
     note.color = {0.2f, 0.3f, 0.4f, 1};
+    note.swatch = 6;
+    note.tint = 40;
+    note.char_style = "Accent";
     ParaStyle note_ps;
     note_ps.name = "Note";
     note_ps.hyphenate = false;
@@ -1588,6 +1815,10 @@ static void test_docfile(const FontLibrary &fonts) {
     note_ps.start_new_frame = true;
     note_ps.orphans = 2;
     note_ps.widows = 3;
+    note_ps.list = ListKind::Number;
+    note_ps.number_format = NumberFormat::UpperRoman;
+    note_ps.number_suffix = ")";
+    note_ps.list_start = 4;
     note_ps.tabs.push_back({120, TabAlign::Decimal, "."});
     Story extra = one_para("He said \"hello\"\nsecond\tline\\end", note, note_ps);
     doc.add_text_frame(1, doc.add_story(std::move(extra)), 200, 80, Transform::translate(40, 200));
@@ -2622,6 +2853,8 @@ int main(int argc, char **argv) {
     test_paragraph_attributes(fonts);
     test_drop_caps(fonts);
     test_keeps(fonts);
+    test_special_chars(fonts);
+    test_lists(fonts);
     test_styles();
     test_edit(fonts);
     test_align_ranges(fonts);

@@ -43,6 +43,7 @@ struct CharStyle {
     float baseline_shift = 0.f;  // positive = up
     bool  kerning = true;        // pair kerning from GPOS / kern
     bool  ligatures = true;      // fi, fl, ...
+    bool  no_break = false;      // keep the run on one line: no breaks or hyphens inside
     /* Text color: a swatch of the publication with a tint, as shapes are
      * painted. Swatch 0 means the RGB `color` (text from before swatches). */
     Color    color;
@@ -69,6 +70,10 @@ struct TabStop {
     TabAlign    align = TabAlign::Left;
     std::string leader;          // fill character(s), e.g. "." or "_"; empty = none
 };
+
+/* Bullets and numbering. */
+enum class ListKind { None, Bullet, Number };
+enum class NumberFormat { Arabic, LowerAlpha, UpperAlpha, LowerRoman, UpperRoman };
 
 struct ParaStyle {
     std::string name;            // Styles palette name ("Body text", "Subhead 1", ...)
@@ -104,6 +109,17 @@ struct ParaStyle {
     bool  start_new_frame = false;   // always begin at the top of a text block
     int   orphans = 0;
     int   widows = 0;
+
+    /* Bullets and numbering: a marker before the first line, set at the
+     * first-line indent (in the hanging indent of a list, left_indent 18
+     * and first_indent -18), the text after it. Numbers count through
+     * consecutive numbered paragraphs; list_start begins again at a value
+     * (0 = go on counting). */
+    ListKind     list = ListKind::None;
+    std::string  bullet = "\u2022";
+    NumberFormat number_format = NumberFormat::Arabic;
+    std::string  number_suffix = ".";
+    int          list_start = 0;
 
     /* Spacing attributes (PageMaker defaults). Both are percentages of the
      * font's space width. Justified lines move word spaces between min and
@@ -158,7 +174,8 @@ inline bool operator==(const CharStyle &a, const CharStyle &b) {
            a.strike == b.strike && a.size == b.size && a.leading == b.leading &&
            a.tracking == b.tracking && a.hscale == b.hscale &&
            a.baseline_shift == b.baseline_shift && a.kerning == b.kerning &&
-           a.ligatures == b.ligatures && a.color == b.color && a.swatch == b.swatch &&
+           a.ligatures == b.ligatures && a.no_break == b.no_break && a.color == b.color &&
+           a.swatch == b.swatch &&
            a.tint == b.tint && a.char_style == b.char_style;
 }
 inline bool operator!=(const CharStyle &a, const CharStyle &b) { return !(a == b); }

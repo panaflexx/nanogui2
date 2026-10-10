@@ -107,6 +107,18 @@ std::vector<StyleDef> default_styles() {
             p.keep_with_next = p.keep_together = true;
         }, true),
         def("Caption", "Sans", 8.5f, 10.5f, [](ParaStyle &p) { p.space_before = 4; }, false, true),
+        def("Bulleted list", "Serif", 10.5f, 13, [](ParaStyle &p) {
+            p.left_indent = 18;
+            p.first_indent = -18;
+            p.space_after = 3;
+            p.list = ListKind::Bullet;
+        }),
+        def("Numbered list", "Serif", 10.5f, 13, [](ParaStyle &p) {
+            p.left_indent = 18;
+            p.first_indent = -18;
+            p.space_after = 3;
+            p.list = ListKind::Number;
+        }),
         def("Hanging indent", "Serif", 10.5f, 13, [](ParaStyle &p) {
             p.left_indent = 18;
             p.first_indent = -18;
@@ -130,7 +142,7 @@ std::vector<StyleDef> default_styles() {
 const char *char_field_name(int bit) {
     static const char *names[] = {"family", "face", "bold", "italic", "size", "leading",
                                   "color", "underline", "strike", "caps", "tracking",
-                                  "hscale", "baseline", "kerning", "ligatures"};
+                                  "hscale", "baseline", "kerning", "ligatures", "no_break"};
     return bit >= 0 && bit < (int) (sizeof names / sizeof names[0]) ? names[bit] : "";
 }
 
@@ -173,6 +185,7 @@ void apply_char_style(CharStyle &cs, const CharStyleDef &def) {
     if (f & kCharBaseline) cs.baseline_shift = t.baseline_shift;
     if (f & kCharKerning) cs.kerning = t.kerning;
     if (f & kCharLigatures) cs.ligatures = t.ligatures;
+    if (f & kCharNoBreak) cs.no_break = t.no_break;
     cs.char_style = def.name;
 }
 
@@ -196,6 +209,7 @@ uint32_t char_differences(const CharStyle &a, const CharStyle &b) {
     if (a.baseline_shift != b.baseline_shift) d |= kCharBaseline;
     if (a.kerning != b.kerning) d |= kCharKerning;
     if (a.ligatures != b.ligatures) d |= kCharLigatures;
+    if (a.no_break != b.no_break) d |= kCharNoBreak;
     return d;
 }
 
@@ -271,7 +285,9 @@ bool same_format(const ParaStyle &a, const ParaStyle &b) {
            a.drop_lines == b.drop_lines && a.drop_chars == b.drop_chars &&
            a.drop_scale == b.drop_scale && a.keep_together == b.keep_together &&
            a.keep_with_next == b.keep_with_next && a.start_new_frame == b.start_new_frame &&
-           a.orphans == b.orphans && a.widows == b.widows &&
+           a.orphans == b.orphans && a.widows == b.widows && a.list == b.list &&
+           a.bullet == b.bullet && a.number_format == b.number_format &&
+           a.number_suffix == b.number_suffix && a.list_start == b.list_start &&
            a.word_min == b.word_min && a.word_desired == b.word_desired &&
            a.word_max == b.word_max && a.letter_min == b.letter_min &&
            a.letter_desired == b.letter_desired && a.letter_max == b.letter_max &&
@@ -475,6 +491,25 @@ bool PageDoc::image_placed(uint32_t id) const {
             if (const PlacedImage *im = it.image())
                 if (im->asset == id)
                     return true;
+    return false;
+}
+
+bool PageDoc::transfer_item(ItemId id, size_t page) {
+    if (page >= pages.size())
+        return false;
+    for (size_t pi = 0; pi < pages.size(); ++pi) {
+        std::vector<Item> &items = pages[pi].items;
+        for (size_t i = 0; i < items.size(); ++i) {
+            if (items[i].id != id)
+                continue;
+            if (pi == page)
+                return false;
+            Item moved = std::move(items[i]);
+            items.erase(items.begin() + (long) i);
+            pages[page].items.push_back(std::move(moved));
+            return true;
+        }
+    }
     return false;
 }
 

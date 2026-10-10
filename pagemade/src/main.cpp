@@ -166,6 +166,14 @@ public:
     }
 
     bool mouse_button_event(const Vector2i &p, int button, bool down, int modifiers) override {
+        /* The view buttons sit on this strip. Hand them the click before the
+         * page-icon logic, which otherwise treats that area as empty. */
+        for (auto it = m_children.rbegin(); it != m_children.rend(); ++it) {
+            Widget *child = *it;
+            if (child->visible() && child->contains(p - m_pos) &&
+                child->mouse_button_event(p - m_pos, button, down, modifiers))
+                return true;
+        }
         if (button != GLFW_MOUSE_BUTTON_1)
             return false;
         if (!down) {
@@ -391,6 +399,39 @@ public:
          * popup would stay at PopupButton's 320 x 250 and squeeze the rows
          * until they clip. Fixed, it fits the panel. */
         para_popup->set_resizable(false);
+
+        /* The Character panel: character styles, text color and tint. */
+        m_char_btn = new PopupButton(toolbar, "A");
+        m_char_btn->set_side(Popup::Bottom);
+        m_char_btn->set_chevron_icon(0);
+        m_char_btn->set_font_size(18);
+        m_char_btn->set_fixed_size(Vector2i(32, 28));
+        m_char_btn->set_tooltip("Character: character styles, text color and tint");
+        Popup *char_popup = m_char_btn->popup();
+        char_popup->set_layout(new BoxLayout(Orientation::Vertical, Alignment::Fill, 0, 0));
+        CharacterPanel::Hooks ch;
+        ch.apply_style = [this](const std::string &name) { m_view->apply_char_style(name); };
+        ch.delete_style = [this](const std::string &name) { m_view->delete_char_style(name); };
+        ch.swatch = [this](uint32_t id) {
+            m_view->apply_type([id](CharStyle &cs) { cs.swatch = id; });
+        };
+        ch.tint = [this](float t, const void *spin) {
+            m_view->set_undo_merge(spin);
+            m_view->apply_type([t](CharStyle &cs) { cs.tint = t; });
+            m_view->set_undo_merge(nullptr);
+        };
+        ch.new_style = [this] {
+            ComposerView::TypeStyle t;
+            m_view->type_style(t);
+            const std::string name = t.mix_char_style || t.char_style.empty() ? "New style"
+                                                                               : t.char_style;
+            ask_text(this, "New Character Style", "Name:", name,
+                     "Made from the selected text: what it changes from its paragraph's "
+                     "type. A name already in the list redefines that style.",
+                     [this](const std::string &n) { m_view->define_char_style(n); });
+        };
+        m_char_panel = new CharacterPanel(char_popup, std::move(ch));
+        char_popup->set_resizable(false);
 
         /* Kerning, ligatures, baselines, loose/tight: one toggle each. */
         Widget *flags = new Widget(toolbar);
@@ -659,6 +700,48 @@ public:
                                {SYSTEM_COMMAND_MOD, GLFW_KEY_Y}},
                 [this] { m_view->redo(); });
 
+        /* Type: typographer's quotes, and the characters a keyboard lacks.
+         * Shortcuts follow InDesign's where it has them. Line and frame
+         * breaks are typed in the text (Shift+Return, Ctrl+Return); their
+         * items only name the key, so the key does not insert twice. */
+        Dropdown *type = m_menubar->add_menu("Type");
+        m_smart_quotes = add_cmd(type, "Smart Quotes", {}, [this] {
+            m_view->set_smart_quotes(!m_view->smart_quotes());
+            m_smart_quotes->set_icon(m_view->smart_quotes() ? FA_CHECK : 0);
+        });
+        m_smart_quotes->set_icon(FA_CHECK);
+        new Separator(type->popup());
+        const int C = SYSTEM_COMMAND_MOD, S = GLFW_MOD_SHIFT, A = GLFW_MOD_ALT;
+        struct Special { const char *caption, *text; std::vector<Shortcut> keys; };
+        const Special specials[] = {
+            {"Em Dash \u2014", "\u2014", {{C | S, GLFW_KEY_MINUS}}},
+            {"En Dash \u2013", "\u2013", {{C | A, GLFW_KEY_MINUS}}},
+            {"Em Space", "\u2003", {{C | S, GLFW_KEY_M}}},
+            {"En Space", "\u2002", {{C | S, GLFW_KEY_N}}},
+            {"Thin Space", "\u2009", {{C | A | S, GLFW_KEY_M}}},
+            {"Hair Space", "\u200A", {}},
+            {"Nonbreaking Space", "\u00A0", {{C | A, GLFW_KEY_X}}},
+            {"Nonbreaking Hyphen", "\u2011", {}},
+            {"Discretionary Hyphen", "\u00AD", {}},
+            {"Bullet \u2022", "\u2022", {}},
+            {"Ellipsis \u2026", "\u2026", {}},
+            {"Copyright \u00A9", "\u00A9", {}},
+            {"Registered \u00AE", "\u00AE", {}},
+            {"Trademark \u2122", "\u2122", {}},
+            {"Section \u00A7", "\u00A7", {}},
+            {"Paragraph \u00B6", "\u00B6", {}},
+            {"Degree \u00B0", "\u00B0", {}},
+        };
+        for (const Special &sp : specials) {
+            const std::string text = sp.text;
+            add_cmd(type, sp.caption, sp.keys, [this, text] { m_view->insert_at_caret(text); });
+        }
+        new Separator(type->popup());
+        add_cmd(type, "Line Break (Shift+Return)", {},
+                [this] { m_view->insert_at_caret("\u2028"); });
+        add_cmd(type, "Frame Break (Ctrl+Return)", {},
+                [this] { m_view->insert_at_caret("\x0C"); });
+
         Dropdown *layout = m_menubar->add_menu("Layout");
         add_cmd(layout, "Insert Page", {}, [this] { m_view->insert_page(true); });
         add_cmd(layout, "Insert Page Before", {}, [this] { m_view->insert_page(false); });
@@ -691,6 +774,11 @@ public:
                 [this] { type_specs(); });
         add_cmd(element, "Paragraph...", {{SYSTEM_COMMAND_MOD, GLFW_KEY_M}},
                 [this] { toggle_paragraph_panel(); });
+        add_cmd(element, "Character...", {{SYSTEM_COMMAND_MOD | GLFW_MOD_SHIFT, GLFW_KEY_T}},
+                [this] {
+                    m_char_btn->set_pushed(!m_char_btn->pushed());
+                    perform_layout();
+                });
     }
 
     /* ---- Control palette ------------------------------------------- */
@@ -1058,6 +1146,7 @@ public:
         cs.strike = t.strike;
         cs.kerning = t.kerning;
         cs.ligatures = t.ligatures;
+        cs.no_break = t.no_break;
         cs.size = t.size;
         cs.leading = t.leading;
         cs.baseline_shift = t.baseline;
@@ -1069,7 +1158,7 @@ public:
     static bool type_is_mixed(const ComposerView::TypeStyle &t) {
         return t.mix_family || t.mix_style || t.mix_size || t.mix_leading ||
                t.mix_baseline || t.mix_caps || t.mix_deco || t.mix_track ||
-               t.mix_hscale || t.mix_kerning || t.mix_ligatures;
+               t.mix_hscale || t.mix_kerning || t.mix_ligatures || t.mix_no_break;
     }
 
     void apply_type_specs(const CharStyle &before, const CharStyle &after) {
@@ -1091,6 +1180,7 @@ public:
                 cs.baseline_shift = after.baseline_shift;
             if (after.kerning != before.kerning) cs.kerning = after.kerning;
             if (after.ligatures != before.ligatures) cs.ligatures = after.ligatures;
+            if (after.no_break != before.no_break) cs.no_break = after.no_break;
         });
     }
 
@@ -1174,6 +1264,25 @@ public:
         sync_spacing();
         if (m_para_panel)
             m_para_panel->load(m_view->selected_paragraphs(), m_view->document().styles);
+        sync_character_panel();
+    }
+
+    void sync_character_panel() {
+        if (!m_char_panel)
+            return;
+        ComposerView::TypeStyle t;
+        CharacterPanel::State st;
+        st.enabled = m_view->type_style(t);
+        st.style = t.char_style;
+        st.mixed_style = t.mix_char_style;
+        st.overridden = t.char_overridden;
+        st.swatch = t.swatch;
+        st.mixed_color = t.mix_color;
+        st.tint = t.tint;
+        st.mixed_tint = t.mix_tint;
+        const PageDoc &doc = m_view->document();
+        st.shown = doc.text_color(t.swatch, t.tint, t.rgb);
+        m_char_panel->load(st, doc.char_styles, doc.swatches);
     }
 
     void toggle_paragraph_panel() {
@@ -1631,6 +1740,9 @@ private:
     bool            m_syncing_type = false;
     PopupButton     *m_para_btn = nullptr;
     ParagraphPanel  *m_para_panel = nullptr;
+    PopupButton     *m_char_btn = nullptr;
+    MenuItem        *m_smart_quotes = nullptr;
+    CharacterPanel  *m_char_panel = nullptr;
     Dropdown        *m_font = nullptr, *m_face = nullptr;
     Button          *m_specs = nullptr;
     TypeSpecsPanel  *m_type_panel = nullptr;
@@ -1669,6 +1781,7 @@ static bool parse_key(const std::string &spec, int &key, int &mods) {
         {"down", GLFW_KEY_DOWN},         {"home", GLFW_KEY_HOME},
         {"end", GLFW_KEY_END},           {"escape", GLFW_KEY_ESCAPE},
         {"space", GLFW_KEY_SPACE},       {"tab", GLFW_KEY_TAB},
+        {"minus", GLFW_KEY_MINUS},
     };
     mods = 0;
     size_t i = 0;

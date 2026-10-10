@@ -2,7 +2,7 @@
  * pagemade/paragraph_panel.h — the Paragraph panel the ¶ button pops open,
  * laid out after VectorStyler's: the style menu, seven alignments, line
  * spacing and extra spacing, the four indents, space before and after, and
- * the drop cap (lines, size, characters), keep options (orphans, widows,
+ * bullets and numbering, the drop cap (lines, size, characters), keep options (orphans, widows,
  * keep together, keep with next, start in the next text block),
  * with Remove (delete the style) and Add (new style from the selection)
  * below.
@@ -36,6 +36,7 @@ enum class ParaIcon {
     SpaceBefore, SpaceAfter,
     DropCap, DropSize, DropChars,
     Orphans, Widows, KeepTogether, KeepWithNext, StartNewFrame,
+    List, ListStart,
 };
 void draw_para_icon(NVGcontext *ctx, ParaIcon icon, float x, float y, float w, float h,
                     const nanogui::Color &color);
@@ -86,6 +87,7 @@ private:
 
     Hooks m_hooks;
     nanogui::Dropdown *m_style = nullptr;
+    nanogui::Dropdown *m_list = nullptr;
     std::vector<std::string> m_style_names;
     std::string m_current_style;         // the selection's style, when it has one
     std::vector<IconButton *> m_align;
@@ -94,5 +96,51 @@ private:
     std::vector<IntField> m_int_fields;
     pagemade::ParaStyle m_first;         // the first selected paragraph's
     nanogui::Button *m_delete = nullptr, *m_new = nullptr;
+    bool m_loading = false;
+};
+
+/* The Character panel, popped open beside the Paragraph panel: the
+ * character style menu, the text's color (a swatch) and tint, and Remove /
+ * Add for styles. Like the Paragraph panel it edits through Hooks and
+ * shows the selection through load(). */
+class CharacterPanel : public nanogui::Widget {
+public:
+    struct Hooks {
+        std::function<void(const std::string &)> apply_style;   // "" = none
+        std::function<void()> new_style;
+        std::function<void(const std::string &)> delete_style;
+        std::function<void(uint32_t swatch)> swatch;
+        /* `spin`: the field when this is a spin step, else nullptr. */
+        std::function<void(float tint, const void *spin)> tint;
+    };
+    /* What the selection is set in. */
+    struct State {
+        bool enabled = false;
+        std::string style;                 // character style name, "" = none
+        bool mixed_style = false, overridden = false;
+        uint32_t swatch = 0;               // 0: an RGB color, not a swatch
+        bool mixed_color = false;
+        float tint = 100.f;
+        bool mixed_tint = false;
+        pagemade::Color shown;             // the color the text draws in
+    };
+
+    CharacterPanel(nanogui::Widget *parent, Hooks hooks);
+    void load(const State &state, const std::vector<pagemade::CharStyleDef> &styles,
+              const std::vector<pagemade::Swatch> &swatches);
+    void draw(NVGcontext *ctx) override;
+
+private:
+    class Chip;
+    Hooks m_hooks;
+    nanogui::Dropdown *m_style = nullptr, *m_color = nullptr;
+    FloatSpin *m_tint = nullptr;
+    Chip *m_chip = nullptr;
+    nanogui::Button *m_delete = nullptr, *m_new = nullptr;
+    std::vector<std::string> m_style_names;
+    std::vector<std::string> m_color_names;
+    std::vector<uint32_t> m_swatch_ids;
+    std::string m_current;
+    float m_first_tint = 100.f;
     bool m_loading = false;
 };

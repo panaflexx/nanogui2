@@ -128,6 +128,12 @@ struct Composition {
 Composition compose(const Story &story, const std::vector<Frame> &frames,
                     const FontLibrary &fonts, const Hyphenator *hyphenator = nullptr);
 
+/* A list paragraph's marker: its bullet, or number `n` in its format with
+ * its suffix ("3.", "c.", "iii."). Empty for other paragraphs. */
+std::string list_marker(const ParaStyle &ps, int n);
+/* Each paragraph's list number (0 when it is not numbered). */
+std::vector<int> list_numbers(const Story &story);
+
 /* Concatenated run texts of a paragraph; clusters index into this. */
 std::string paragraph_text(const Paragraph &p);
 

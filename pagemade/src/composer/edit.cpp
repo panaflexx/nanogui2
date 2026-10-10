@@ -171,6 +171,28 @@ CharStyle style_at(const Story &s, TextPos p) {
     return para.runs.front().style;
 }
 
+uint32_t char_before(const Story &s, TextPos p) {
+    p = clamp(s, p);
+    if (p.para >= s.paragraphs.size() || p.byte == 0)
+        return 0;
+    const std::string t = paragraph_text(s.paragraphs[p.para]);
+    return utf8_decode(t, utf8_prev(t, std::min<size_t>(p.byte, t.size())));
+}
+
+uint32_t smart_quote(uint32_t typed, uint32_t before) {
+    if (typed != '"' && typed != '\'')
+        return typed;
+    bool open = before == 0 || before == ' ' || before == '\t' || before == 0xA0 ||
+                is_break(before) || (before >= 0x2000 && before <= 0x200A);
+    /* Also after an opening quote of the other kind: “‘ and ‘“. */
+    for (uint32_t c : std::initializer_list<uint32_t>{'(', '[', '{', '<', '/', '-', 0x2013,
+                                                      0x2014, 0x201C, 0x2018})
+        open |= before == c;
+    if (typed == '"')
+        return open ? 0x201C : 0x201D;
+    return open ? 0x2018 : 0x2019;
+}
+
 TextPos split_paragraph(Story &s, TextPos p) {
     p = clamp(s, p);
     const CharStyle carry = style_at(s, p);

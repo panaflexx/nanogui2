@@ -229,6 +229,7 @@ void write_char_style(JsonOut &j, const CharStyle &cs) {
     if (cs.baseline_shift != d.baseline_shift) j.key("baseline_shift").value(cs.baseline_shift);
     if (!cs.kerning) j.key("kerning").value(false);
     if (!cs.ligatures) j.key("ligatures").value(false);
+    if (cs.no_break) j.key("no_break").value(true);
     if (!(cs.color == d.color)) write_color(j, "color", cs.color);
     if (cs.swatch != d.swatch) j.key("swatch").value(cs.swatch);
     if (cs.tint != d.tint) j.key("tint").value(cs.tint);
@@ -258,6 +259,15 @@ void write_para_style(JsonOut &j, const ParaStyle &ps) {
     if (ps.start_new_frame) j.key("start_new_frame").value(true);
     if (ps.orphans != d.orphans) j.key("orphans").value(ps.orphans);
     if (ps.widows != d.widows) j.key("widows").value(ps.widows);
+    if (ps.list != ListKind::None) {
+        j.key("list").value(ps.list == ListKind::Bullet ? "bullet" : "number");
+        if (ps.bullet != d.bullet) j.key("bullet").value(ps.bullet);
+        static const char *formats[] = {"1", "a", "A", "i", "I"};
+        if (ps.number_format != d.number_format)
+            j.key("number_format").value(formats[(int) ps.number_format]);
+        if (ps.number_suffix != d.number_suffix) j.key("number_suffix").value(ps.number_suffix);
+        if (ps.list_start != d.list_start) j.key("list_start").value(ps.list_start);
+    }
     if (ps.word_min != d.word_min || ps.word_desired != d.word_desired || ps.word_max != d.word_max)
         j.key("word_spacing").numbers({ps.word_min, ps.word_desired, ps.word_max});
     if (ps.letter_min != d.letter_min || ps.letter_desired != d.letter_desired ||
@@ -703,6 +713,7 @@ CharStyle read_char_style(const DictValue *o) {
     get(o, "baseline_shift", cs.baseline_shift);
     get(o, "kerning", cs.kerning);
     get(o, "ligatures", cs.ligatures);
+    get(o, "no_break", cs.no_break);
     get(o, "color", cs.color);
     get(o, "swatch", cs.swatch);
     get(o, "tint", cs.tint);
@@ -741,6 +752,19 @@ ParaStyle read_para_style(const DictValue *o) {
     get(o, "widows", ps.widows);
     ps.orphans = std::clamp(ps.orphans, 0, kMaxKeepLines);
     ps.widows = std::clamp(ps.widows, 0, kMaxKeepLines);
+    std::string list, format;
+    get(o, "list", list);
+    ps.list = list == "bullet" ? ListKind::Bullet : list == "number" ? ListKind::Number
+                                                                     : ListKind::None;
+    get(o, "bullet", ps.bullet);
+    get(o, "number_format", format);
+    ps.number_format = format == "a" ? NumberFormat::LowerAlpha
+                     : format == "A" ? NumberFormat::UpperAlpha
+                     : format == "i" ? NumberFormat::LowerRoman
+                     : format == "I" ? NumberFormat::UpperRoman : NumberFormat::Arabic;
+    get(o, "number_suffix", ps.number_suffix);
+    get(o, "list_start", ps.list_start);
+    ps.list_start = std::max(0, ps.list_start);
     float w[3] = {ps.word_min, ps.word_desired, ps.word_max};
     if (floats(o, "word_spacing", w, 3) == 3) {
         ps.word_min = w[0]; ps.word_desired = w[1]; ps.word_max = w[2];

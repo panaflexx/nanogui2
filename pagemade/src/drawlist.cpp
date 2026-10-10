@@ -5,11 +5,27 @@
 
 namespace pagemade {
 
-DrawList build_page(const PageDoc &doc, size_t page, const std::vector<Composition> &comps) {
+namespace {
+
+bool keep_item(const std::vector<ItemId> *which, bool only, ItemId id) {
+    if (!which)
+        return true;
+    for (ItemId x : *which)
+        if (x == id)
+            return only;
+    return !only;
+}
+
+} // namespace
+
+DrawList build_page(const PageDoc &doc, size_t page, const std::vector<Composition> &comps,
+                    const std::vector<ItemId> *which, bool only) {
     DrawList out;
     if (page >= doc.pages.size())
         return out;
     for (const Item &it : doc.pages[page].items) {
+        if (!keep_item(which, only, it.id))
+            continue;
         if (const Shape *sh = it.shape()) {
             const Path path = shape_path(it);
             if (!sh->fill.none() && sh->kind != Shape::Kind::Line)

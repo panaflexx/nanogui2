@@ -682,6 +682,7 @@ struct TypeSpecsPanel::State {
     FloatBox<float> *size_box = nullptr, *leading = nullptr;
     FloatBox<float> *hscale = nullptr, *tracking = nullptr, *baseline = nullptr;
     CheckBox *underline = nullptr, *strike = nullptr, *kerning = nullptr, *ligatures = nullptr;
+    CheckBox *no_break = nullptr;
     Button *apply_btn = nullptr;
     std::function<void(const CharStyle &, const CharStyle &)> apply;
     std::vector<std::string> document, slants;
@@ -997,6 +998,8 @@ TypeSpecsPanel::TypeSpecsPanel(Screen *screen, FontLibrary &fonts, FontMenuModel
     st->strike = check("Strikethrough", [st](bool v) { st->style.strike = v; });
     st->kerning = check("Kerning", [st](bool v) { st->style.kerning = v; });
     st->ligatures = check("Ligatures", [st](bool v) { st->style.ligatures = v; });
+    st->no_break = check("No break", [st](bool v) { st->style.no_break = v; });
+    st->no_break->set_tooltip("Keep the text on one line: no line breaks or hyphens inside it");
 
     auto refill_holder = std::make_shared<std::function<void()>>();
     std::weak_ptr<std::function<void()>> refill_weak = refill_holder;
@@ -1186,6 +1189,8 @@ void TypeSpecsPanel::load(const CharStyle &style, bool mixed,
         st.kerning->set_checked(style.kerning);
     if (st.ligatures)
         st.ligatures->set_checked(style.ligatures);
+    if (st.no_break)
+        st.no_break->set_checked(style.no_break);
     if (st.caps)
         st.caps->set_selected_index(style.caps == Caps::Small ? 1 :
                                     style.caps == Caps::All ? 2 : 0);

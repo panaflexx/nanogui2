@@ -56,7 +56,10 @@ struct DrawImage {
 using DrawOp = std::variant<DrawFill, DrawStroke, DrawGlyphs, DrawImage>;
 using DrawList = std::vector<DrawOp>;
 
-/* `comps` holds one composition per story, in PageDoc::stories order. */
-DrawList build_page(const PageDoc &doc, size_t page, const std::vector<Composition> &comps);
+/* `comps` holds one composition per story, in PageDoc::stories order.
+ * `which`, when set, skips those items, or draws only them when `only`
+ * is set. A null list draws the whole page. */
+DrawList build_page(const PageDoc &doc, size_t page, const std::vector<Composition> &comps,
+                    const std::vector<ItemId> *which = nullptr, bool only = false);
 
 } // namespace pagemade

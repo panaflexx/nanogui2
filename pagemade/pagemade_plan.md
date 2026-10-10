@@ -59,6 +59,35 @@ and its nanovgd renderer. The composer lays out in points and every backend
   keeps italic or bold emphasis, underline and color; the menu shows "Name+"
   for overrides; Add makes or redefines a style from the paragraph (its
   paragraphs without overrides follow); Remove deletes one.
+- **Keep options and breaks**: keep lines together, keep with next, widow and
+  orphan control (the fewest lines at the top and bottom of a text block),
+  start in the next text block (Paragraph panel), and a frame break
+  character, U+000C (Ctrl/Cmd+Return, or Type > Frame Break). The composer
+  saves a checkpoint before each paragraph; one that breaks a rule gets a
+  decision (start in the next block, or end a block early so a widow has
+  company) and is composed again from there. Decisions only accumulate, so
+  composition settles. Headings in the default styles keep with next; body
+  text keeps two lines at a block break.
+- **Character styles and swatch colors**: text color is a swatch with a tint,
+  resolved by the draw list for the screen and PDF (text from before
+  swatches keeps its RGB). Character styles set only the fields they define
+  (Emphasis is just italic; Accent is bold red); "Add" makes one from what
+  the selection changes from its paragraph's type. The Character panel (the
+  A button, Element > Character…, Ctrl/Cmd+Shift+T) has the style menu
+  ("Name+" for overrides), color, tint, Remove and Add. Paragraph styles
+  keep a run's character style.
+- **Special characters and smart quotes**: the Type menu turns typographer's
+  quotes on and off and inserts dashes, fixed spaces (em, en, thin, hair:
+  they keep their width when justified, and a face without them gets the
+  standard width), non-breaking space and hyphen, discretionary hyphen,
+  common symbols, and line and frame breaks, with InDesign's shortcuts where
+  it has them. No break (Type Specs) keeps a phrase on one line.
+- **Bullets and numbering**: a list on the paragraph (three bullets; 1, a, A,
+  i, I numbers with a suffix; a start value), set from the Paragraph panel.
+  The marker hangs at the first-line indent and the text sits at the left
+  indent; numbers count through consecutive numbered paragraphs. The marker
+  is inserted text: carets and copied text pass over it. Bulleted list and
+  Numbered list styles.
 - **Spinners**: number fields in the palettes and Type Specs step with their
   arrows, the scroll wheel or a right-drag (`spinbox.h`). A run of steps is
   one undo step, and it keeps changing the text it started on even as that
@@ -100,30 +129,15 @@ and its nanovgd renderer. The composer lays out in points and every backend
 
 ## Next, in order
 
-1. **Keep options and breaks**: keep lines together, keep with next, widow and
-   orphan control (minimum lines at the top and bottom of a text block), start
-   in the next text block, and a frame break character (Ctrl/Cmd+Return).
-   The composer gains lookahead at frame ends: a paragraph that breaks a rule
-   is composed again from a checkpoint.
-2. **Character styles and swatch colors**: text color is a swatch with a tint,
-   as shapes are; named character styles set only the attributes they define
-   (an Emphasis style is just italic), with a menu that shows overrides.
-3. **Special characters and smart quotes**: curly quotes as you type (a
-   preference); em and en dashes; em, en, thin and hair spaces that keep their
-   width when justified; non-breaking space and hyphen; a No break attribute
-   that keeps a word or phrase on one line. Insert them from a menu.
-4. **Bullets and numbering**: a list attribute on the paragraph (bullet or
-   number format, start value), the marker set in the hanging indent, numbers
-   counted through consecutive list paragraphs.
-5. **SVG import**: nanosvg makes a group of path items in the shape format. This
+1. **SVG import**: nanosvg makes a group of path items in the shape format. This
    step brings even-odd fill and per-subpath winding to nanovgd. The fill rule
    reaches the backend through the `renderFill` hook, which the Metal backend
    (`ext/nanovg_metal`) implements too, so Mac builds need the matching change.
    Multi-stop gradients come with it. Rectangular picture crops are already
    clipped; this step is where a clip becomes an arbitrary path.
-6. **Text wrap**: lines ask which horizontal spans are free at their height,
+2. **Text wrap**: lines ask which horizontal spans are free at their height,
    from the wrap outlines of items in front of the text.
-7. **Print dialog**: choose the printer, copies and page range. Linux first (the
+3. **Print dialog**: choose the printer, copies and page range. Linux first (the
    CUPS API with our own dialog, or GTK's), then Mac (NSPrintOperation on the
    PDF), then Windows. Today printing exports a PDF and hands it to `lp`.
 
@@ -178,7 +192,13 @@ and its nanovgd renderer. The composer lays out in points and every backend
   - Paragraph rules (lines above/below). Drop cap options: a raised cap
     (baseline on line 1), a font or color of its own, and text that follows
     the cap's outline instead of its box.
-  - Nested numbering levels and list continuation across interruptions.
+  - Nested numbering levels and list continuation across interruptions;
+    a custom bullet character and number suffix in the panel (the model and
+    file have them).
+  - Smart quotes: a leading apostrophe ('90s) types as an opening quote;
+    "--" to an em dash as you type.
+  - Keep rules work between text blocks; columns inside one block (a
+    later frame option) will need them too.
   - Whether a block selected with the pointer should restyle its whole story
     (PageMaker does) rather than only the text in that block (pagemade does).
 

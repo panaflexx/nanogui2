@@ -209,6 +209,29 @@ void draw_para_icon(NVGcontext *ctx, ParaIcon icon, float x, float y, float w, f
         stroke();
         break;
     }
+    case ParaIcon::List:
+        /* Three items, each a dot and a line. */
+        for (int i = 0; i < 3; ++i) {
+            nvgBeginPath(ctx);
+            nvgCircle(ctx, ox + 2.5f, oy + 2.5f + i * 5.5f, 1.7f);
+            nvgFill(ctx);
+        }
+        nvgBeginPath(ctx);
+        for (int i = 0; i < 3; ++i)
+            bar(ctx, ox + 7, ox + 19, oy + 2.5f + i * 5.5f);
+        stroke();
+        break;
+    case ParaIcon::ListStart:
+        /* A "1" and the line it starts. */
+        nvgBeginPath(ctx);
+        nvgMoveTo(ctx, ox + 1.5f, oy + 3.5f);
+        nvgLineTo(ctx, ox + 4, oy + 1.5f);
+        nvgLineTo(ctx, ox + 4, oy + 14.5f);
+        bar(ctx, ox + 1.5f, ox + 6.5f, oy + 14.5f);
+        nvgLineJoin(ctx, NVG_MITER);
+        stroke();
+        lines4(9, 19, 2, 4, -1, 0);
+        break;
     case ParaIcon::KeepTogether:
         /* Lines held by a bracket. */
         lines4(7, 19, 2, 4, -1, 0);
@@ -374,6 +397,42 @@ private:
 
 /* ---- The panel ---------------------------------------------------------------- */
 
+namespace {
+
+/* The List menu: none, three bullets, five number formats. */
+struct ListChoice {
+    const char *caption;
+    pagemade::ListKind kind;
+    const char *bullet;
+    pagemade::NumberFormat format;
+};
+const ListChoice kLists[] = {
+    {"None", pagemade::ListKind::None, "", pagemade::NumberFormat::Arabic},
+    {"\u2022  Bullet", pagemade::ListKind::Bullet, "\u2022", pagemade::NumberFormat::Arabic},
+    {"\u2013  Dash", pagemade::ListKind::Bullet, "\u2013", pagemade::NumberFormat::Arabic},
+    {"\u203A  Chevron", pagemade::ListKind::Bullet, "\u203A", pagemade::NumberFormat::Arabic},
+    {"1.  Numbers", pagemade::ListKind::Number, "", pagemade::NumberFormat::Arabic},
+    {"a.  Letters", pagemade::ListKind::Number, "", pagemade::NumberFormat::LowerAlpha},
+    {"A.  Capitals", pagemade::ListKind::Number, "", pagemade::NumberFormat::UpperAlpha},
+    {"i.  Roman", pagemade::ListKind::Number, "", pagemade::NumberFormat::LowerRoman},
+    {"I.  Roman caps", pagemade::ListKind::Number, "", pagemade::NumberFormat::UpperRoman},
+};
+
+int list_index(const ParaStyle &ps) {
+    for (int i = 0; i < (int) (sizeof kLists / sizeof kLists[0]); ++i) {
+        const ListChoice &c = kLists[i];
+        if (ps.list != c.kind)
+            continue;
+        if (c.kind == pagemade::ListKind::None ||
+            (c.kind == pagemade::ListKind::Bullet && ps.bullet == c.bullet) ||
+            (c.kind == pagemade::ListKind::Number && ps.number_format == c.format))
+            return i;
+    }
+    return -1;
+}
+
+} // namespace
+
 ParagraphPanel::ParagraphPanel(Widget *parent, Hooks hooks)
     : Widget(parent), m_hooks(std::move(hooks)) {
     set_layout(new BoxLayout(Orientation::Vertical, Alignment::Fill, 14, 8));
@@ -456,6 +515,41 @@ ParagraphPanel::ParagraphPanel(Widget *parent, Hooks hooks)
               0.f, 1000.f, 1.f, "%.1f", "pt");
     add_field(space, ParaIcon::SpaceAfter, "Space after the paragraph", &P::space_after, 1.f,
               0.f, 1000.f, 1.f, "%.1f", "pt");
+
+    /* Bullets and numbering. Starting a list on a paragraph without
+     * indents gives it the usual hanging indent. */
+    new Rule(this);
+    Widget *list = grid();
+    auto *list_icon = new IconLabel(list, ParaIcon::List);
+    list_icon->set_tooltip("Bullets and numbering");
+    std::vector<std::string> list_items;
+    for (const ListChoice &c : kLists)
+        list_items.push_back(c.caption);
+    m_list = new Dropdown(list, list_items, {}, Dropdown::ComboBox, "None");
+    m_list->set_fixed_size(Vector2i(104, 28));
+    m_list->set_max_size(Vector2i(104, 28));
+    m_list->set_tooltip("Bullets and numbering");
+    m_list->set_selected_callback([this](int i) {
+        if (m_loading || i < 0 || i >= (int) (sizeof kLists / sizeof kLists[0]))
+            return;
+        const ListChoice c = kLists[i];
+        if (m_hooks.apply)
+            m_hooks.apply([c](ParaStyle &ps) {
+                if (c.kind != pagemade::ListKind::None && ps.list == pagemade::ListKind::None &&
+                    ps.left_indent == 0.f && ps.first_indent == 0.f) {
+                    ps.left_indent = 18.f;
+                    ps.first_indent = -18.f;
+                }
+                ps.list = c.kind;
+                if (c.kind == pagemade::ListKind::Bullet)
+                    ps.bullet = c.bullet;
+                if (c.kind == pagemade::ListKind::Number)
+                    ps.number_format = c.format;
+            }, nullptr);
+    });
+    add_int_field(list, ParaIcon::ListStart,
+                  "Start numbering at (0 = go on from the paragraph before)", &P::list_start, 0,
+                  9999, "");
 
     new Rule(this);
     Widget *drop = grid();
@@ -664,6 +758,20 @@ void ParagraphPanel::load(const std::vector<const Paragraph *> &paras,
             f.box->TextBox::set_value("");
     }
 
+    {
+        bool same = any;
+        for (const Paragraph *p : paras)
+            same &= list_index(p->style) == list_index(paras.front()->style);
+        const int li = any ? list_index(paras.front()->style) : -1;
+        m_list->set_selected_index(same ? li : -1);
+        if (!same)
+            m_list->set_caption("\u2014");
+        else if (li < 0)
+            m_list->set_caption(paras.front()->style.list == pagemade::ListKind::Bullet
+                                ? paras.front()->style.bullet : std::string("Custom"));
+        m_list->set_enabled(any);
+    }
+
     for (IntField &f : m_int_fields) {
         f.box->set_enabled(any);
         if (f.box->focused() || f.box->spinning())
@@ -678,6 +786,192 @@ void ParagraphPanel::load(const std::vector<const Paragraph *> &paras,
     }
 
     m_delete->set_enabled(any && !m_current_style.empty());
+    m_new->set_enabled(any);
+    m_loading = false;
+}
+
+/* ---- The Character panel ------------------------------------------------------ */
+
+/* A square of the text's color. */
+class CharacterPanel::Chip : public Widget {
+public:
+    explicit Chip(Widget *parent) : Widget(parent) { set_fixed_size(Vector2i(22, 22)); }
+    void set_color(const pagemade::Color &c, bool known) {
+        m_color = c;
+        m_known = known;
+    }
+    void draw(NVGcontext *ctx) override {
+        const float x = m_pos.x() + 2.f, y = m_pos.y() + 2.f;
+        const float w = m_size.x() - 4.f, h = m_size.y() - 4.f;
+        nvgBeginPath(ctx);
+        nvgRoundedRect(ctx, x, y, w, h, 4);
+        if (m_known && m_enabled) {
+            nvgFillColor(ctx, nvgRGBAf(m_color.r, m_color.g, m_color.b, m_color.a));
+            nvgFill(ctx);
+        }
+        nvgStrokeWidth(ctx, 1.f);
+        nvgStrokeColor(ctx, Color(0, 0, 0, 90));
+        nvgStroke(ctx);
+    }
+private:
+    pagemade::Color m_color;
+    bool m_known = false;
+};
+
+CharacterPanel::CharacterPanel(Widget *parent, Hooks hooks)
+    : Widget(parent), m_hooks(std::move(hooks)) {
+    set_layout(new BoxLayout(Orientation::Vertical, Alignment::Fill, 14, 8));
+
+    Widget *head = new Widget(this);
+    head->set_layout(new BoxLayout(Orientation::Horizontal, Alignment::Middle, 0, 10));
+    new Label(head, "Character", "sans-bold");
+    m_style = new Dropdown(head, std::vector<std::string>{"None"}, {}, Dropdown::ComboBox, "None");
+    m_style->set_fixed_size(Vector2i(200, 28));
+    m_style->set_max_size(Vector2i(200, 28));
+    m_style->set_tooltip("Character style. “Name+”: the text differs from its style.");
+    m_style->set_selected_callback([this](int i) {
+        if (m_loading || i < 0 || i > (int) m_style_names.size())
+            return;
+        if (m_hooks.apply_style)
+            m_hooks.apply_style(i == 0 ? std::string() : m_style_names[(size_t) i - 1]);
+    });
+
+    new Rule(this);
+    Widget *color = new Widget(this);
+    color->set_layout(new BoxLayout(Orientation::Horizontal, Alignment::Middle, 0, 6));
+    new Label(color, "Color", "sans-bold");
+    m_chip = new Chip(color);
+    m_color = new Dropdown(color, std::vector<std::string>{"[Black]"}, {}, Dropdown::ComboBox,
+                           "[Black]");
+    m_color->set_fixed_size(Vector2i(118, 28));
+    m_color->set_max_size(Vector2i(118, 28));
+    m_color->set_tooltip("Text color: a swatch of the publication");
+    m_color->set_selected_callback([this](int i) {
+        if (m_loading || i < 0 || i >= (int) m_swatch_ids.size())
+            return;
+        if (m_hooks.swatch)
+            m_hooks.swatch(m_swatch_ids[(size_t) i]);
+    });
+    new Label(color, "Tint", "sans-bold");
+    m_tint = new FloatSpin(color, 100.f, 5.f, 0.f, 100.f);
+    m_tint->number_format("%.0f");
+    m_tint->set_units("%");
+    m_tint->set_default_value("");
+    m_tint->set_alignment(TextBox::Alignment::Left);
+    m_tint->set_fixed_size(Vector2i(84, 28));
+    m_tint->set_tooltip("Tint: a screen of the swatch over paper");
+    m_tint->set_blank_value([this] { return m_first_tint; });
+    m_tint->TextBox::set_callback([this](const std::string &s) {
+        char *end = nullptr;
+        const float v = std::strtof(s.c_str(), &end);
+        if (end == s.c_str())
+            return false;
+        const float t = std::clamp(v, 0.f, 100.f);
+        m_tint->set_value(t);
+        if (m_hooks.tint)
+            m_hooks.tint(t, m_tint->spinning() ? m_tint : nullptr);
+        return true;
+    });
+
+    new Rule(this);
+    RightRow *bottom = new RightRow(this, 6);
+    m_delete = new Button(bottom, "Remove");
+    m_delete->set_fixed_size(Vector2i(84, 28));
+    m_delete->set_tooltip("Delete this character style (its text keeps its formatting)");
+    m_delete->set_callback([this] {
+        if (m_hooks.delete_style && !m_current.empty())
+            m_hooks.delete_style(m_current);
+    });
+    m_new = new Button(bottom, "Add");
+    m_new->set_fixed_size(Vector2i(84, 28));
+    m_new->set_tooltip("New character style from the selected text (an existing name "
+                       "redefines that style)");
+    m_new->set_callback([this] {
+        if (m_hooks.new_style)
+            m_hooks.new_style();
+    });
+}
+
+void CharacterPanel::draw(NVGcontext *ctx) {
+    Color bg = m_theme->m_window_popup;
+    bg.a() = 1.f;
+    const float cr = std::max(10.f, (float) m_theme->m_window_corner_radius - 2.f);
+    nvgBeginPath(ctx);
+    nvgRoundedRect(ctx, m_pos.x() + 1.f, m_pos.y() + 1.f, m_size.x() - 2.f, m_size.y() - 2.f,
+                   cr - 1.f);
+    nvgFillColor(ctx, bg);
+    nvgFill(ctx);
+    Widget::draw(ctx);
+}
+
+void CharacterPanel::load(const State &st, const std::vector<pagemade::CharStyleDef> &styles,
+                          const std::vector<pagemade::Swatch> &swatches) {
+    m_loading = true;
+    const bool any = st.enabled;
+
+    std::vector<std::string> names;
+    for (const pagemade::CharStyleDef &d : styles)
+        names.push_back(d.name);
+    if (names != m_style_names) {
+        m_style_names = names;
+        std::vector<std::string> items{"None"};
+        items.insert(items.end(), names.begin(), names.end());
+        m_style->set_items(items);
+    }
+    m_current.clear();
+    if (st.mixed_style) {
+        m_style->set_selected_index(-1);
+        m_style->set_caption("\u2014");
+    } else if (st.style.empty()) {
+        m_style->set_selected_index(0);
+    } else {
+        auto it = std::find(m_style_names.begin(), m_style_names.end(), st.style);
+        if (it != m_style_names.end()) {
+            m_current = st.style;
+            m_style->set_selected_index((int) (it - m_style_names.begin()) + 1);
+        } else {
+            m_style->set_selected_index(-1);
+        }
+        m_style->set_caption(st.overridden ? st.style + "+" : st.style);
+    }
+    m_style->set_enabled(any);
+
+    /* The swatch menu. Text from before swatches shows as RGB. */
+    std::vector<std::string> cnames;
+    m_swatch_ids.clear();
+    for (const pagemade::Swatch &sw : swatches) {
+        cnames.push_back(sw.name);
+        m_swatch_ids.push_back(sw.id);
+    }
+    if (cnames != m_color_names) {
+        m_color_names = cnames;
+        m_color->set_items(cnames);
+    }
+    int ci = -1;
+    for (size_t i = 0; i < m_swatch_ids.size(); ++i)
+        if (m_swatch_ids[i] == st.swatch)
+            ci = (int) i;
+    m_color->set_selected_index(st.mixed_color ? -1 : ci);
+    if (st.mixed_color)
+        m_color->set_caption("\u2014");
+    else if (ci < 0)
+        m_color->set_caption(st.shown.r == 0 && st.shown.g == 0 && st.shown.b == 0 ? "[Black]"
+                                                                                   : "RGB");
+    m_color->set_enabled(any);
+    m_chip->set_color(st.shown, !st.mixed_color);
+    m_chip->set_enabled(any);
+
+    /* A tint screens a swatch; RGB text has none. */
+    m_first_tint = st.tint;
+    m_tint->set_enabled(any && !st.mixed_color && st.swatch != 0);
+    if (!m_tint->focused() && !m_tint->spinning()) {
+        if (st.mixed_tint || st.swatch == 0)
+            m_tint->TextBox::set_value("");
+        else
+            m_tint->set_value(st.tint);
+    }
+
+    m_delete->set_enabled(any && !m_current.empty());
     m_new->set_enabled(any);
     m_loading = false;
 }

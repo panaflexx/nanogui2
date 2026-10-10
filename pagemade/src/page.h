@@ -234,7 +234,8 @@ enum CharField : uint32_t {
     kCharBaseline  = 1u << 12,
     kCharKerning   = 1u << 13,
     kCharLigatures = 1u << 14,
-    kCharAllFields = (1u << 15) - 1,
+    kCharNoBreak   = 1u << 15,
+    kCharAllFields = (1u << 16) - 1,
 };
 /* The field names in the file, in bit order. */
 const char *char_field_name(int bit);
@@ -327,6 +328,10 @@ struct PageDoc {
      * frames is removed too. A picture's asset leaves with its last frame
      * (the bytes stay in the ImageStore, so undo can bring it back). */
     void    remove_item(ItemId id);
+    /* Move an item onto `page`, on top of that page's stack. The id and the
+     * transform stay as they are; the caller shifts the transform into the
+     * new page's space. False when the item is missing or already there. */
+    bool    transfer_item(ItemId id, size_t page);
     void    bring_to_front(ItemId id);
     void    send_to_back(ItemId id);
     /* One step up (dir > 0, toward the front) or down. Items in `ids` keep
