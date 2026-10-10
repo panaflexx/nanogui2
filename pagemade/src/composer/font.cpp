@@ -275,10 +275,12 @@ void classify_contours(GlyphOutline &o) {
 const GlyphOutline &Font::outline(uint32_t gid) const {
     auto it = m_outlines.find(gid);
     if (it != m_outlines.end())
-        return it->second;
-    GlyphOutline &o = m_outlines[gid];
+        return *it->second;
+    m_outline_nodes.emplace_back();
+    GlyphOutline &o = m_outline_nodes.back();
     hb_font_draw_glyph(m_font, gid, outline_funcs(), &o);
     classify_contours(o);
+    m_outlines.emplace(gid, &o);
     return o;
 }
 

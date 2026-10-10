@@ -589,7 +589,10 @@ void Window::dispose() {
     Widget* widget = this;
     while (widget->parent())
         widget = widget->parent();
-    ((Screen*)widget)->dispose_window(this);
+    /* Off the screen already (the Screen is tearing down): whoever holds
+       the window releases it. */
+    if (Screen* screen = dynamic_cast<Screen*>(widget))
+        screen->dispose_window(this);
 }
 
 void Window::center() {

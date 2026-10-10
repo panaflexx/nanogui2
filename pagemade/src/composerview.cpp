@@ -160,7 +160,7 @@ void ComposerView::push_snapshot(PageDoc doc, uint64_t version) {
 }
 
 void ComposerView::push_undo() {
-    if (m_merge_key && m_merge_key == m_merged_key && m_version == m_merged_version)
+    if (continues_run())
         bump_version();                  // same undo step, but a changed document
     else
         push_snapshot(m_doc, m_version);
@@ -1153,6 +1153,114 @@ void ComposerView::apply_align(Align align) {
         screen()->redraw();
 }
 
+std::vector<std::pair<size_t, size_t>> ComposerView::selected_para_indices() const {
+    std::vector<AlignHit> hits;
+    collect_align_hits(hits);
+    std::vector<std::pair<size_t, size_t>> out;
+    for (const AlignHit &h : hits) {
+        if (h.story >= m_doc.stories.size())
+            continue;
+        const Story &s = m_doc.stories[h.story].story;
+        const size_t last = std::max(h.a.para, h.b.para);
+        for (size_t pi = std::min(h.a.para, h.b.para); pi <= last && pi < s.paragraphs.size(); ++pi)
+            if (std::find(out.begin(), out.end(), std::make_pair(h.story, pi)) == out.end())
+                out.push_back({h.story, pi});
+    }
+    return out;
+}
+
+std::vector<const Paragraph *> ComposerView::selected_paragraphs() const {
+    std::vector<const Paragraph *> out;
+    for (auto [si, pi] : selected_para_indices())
+        out.push_back(&m_doc.stories[si].story.paragraphs[pi]);
+    return out;
+}
+
+void ComposerView::apply_style(const std::string &name) {
+    const StyleDef *def = m_doc.find_style(name);
+    const auto paras = selected_para_indices();
+    if (!def || paras.empty())
+        return;
+    const StyleDef d = *def;
+    if (editing())
+        will_edit(false);
+    else
+        push_undo();
+    for (auto [si, pi] : paras)
+        pagemade::apply_style(m_doc.stories[si].story.paragraphs[pi], d);
+    if (editing())
+        m_typing_on = false;         // type at the caret follows the new style
+    recompose();
+    selection_changed();
+    if (screen())
+        screen()->redraw();
+}
+
+void ComposerView::define_style(const std::string &name) {
+    const auto paras = selected_para_indices();
+    if (name.empty() || paras.empty())
+        return;
+    if (editing())
+        will_edit(false);
+    else
+        push_undo();
+    const auto [fs, fp] = paras.front();
+    const StyleDef d = style_from(name, m_doc.stories[fs].story.paragraphs[fp]);
+    if (StyleDef *old = m_doc.find_style(name)) {
+        const StyleDef before = *old;
+        *old = d;
+        for (StoryEntry &se : m_doc.stories)
+            for (Paragraph &p : se.story.paragraphs)
+                if (p.style.name == name && !style_overridden(p, before))
+                    pagemade::apply_style(p, d);
+    } else {
+        m_doc.styles.push_back(d);
+    }
+    for (auto [si, pi] : paras)
+        m_doc.stories[si].story.paragraphs[pi].style.name = name;
+    recompose();
+    selection_changed();
+    if (screen())
+        screen()->redraw();
+}
+
+void ComposerView::delete_style(const std::string &name) {
+    auto it = std::find_if(m_doc.styles.begin(), m_doc.styles.end(),
+                           [&](const StyleDef &s) { return s.name == name; });
+    if (it == m_doc.styles.end())
+        return;
+    if (editing())
+        will_edit(false);
+    else
+        push_undo();
+    m_doc.styles.erase(it);
+    for (StoryEntry &se : m_doc.stories)
+        for (Paragraph &p : se.story.paragraphs)
+            if (p.style.name == name)
+                p.style.name.clear();
+    selection_changed();
+    if (screen())
+        screen()->redraw();
+}
+
+void ComposerView::apply_para(const std::function<void(ParaStyle &)> &fn) {
+    if (!continues_run())
+        m_run_paras = selected_para_indices();
+    if (m_run_paras.empty())
+        return;
+    if (editing())
+        will_edit(false);
+    else
+        push_undo();
+    for (auto [si, pi] : m_run_paras)
+        if (si < m_doc.stories.size() && pi < m_doc.stories[si].story.paragraphs.size())
+            fn(m_doc.stories[si].story.paragraphs[pi].style);
+    recompose();
+    selection_changed();
+    if (screen())
+        screen()->redraw();
+}
+
 void ComposerView::apply_type(const std::function<void(CharStyle &)> &fn) {
     if (Story *s = edit_story()) {
         if (has_selection()) {
@@ -1172,9 +1280,10 @@ void ComposerView::apply_type(const std::function<void(CharStyle &)> &fn) {
         selection_changed();
         return;
     }
-    struct Range { Story *story; TextPos a, b; };
-    std::vector<Range> ranges;
     bool saw_frame = false;
+    const bool run = continues_run();
+    if (!run)
+        m_run_type.clear();
     for (ItemId id : m_sel) {
         size_t ti = 0;
         StoryEntry *se = m_doc.story_of(id, &ti);
@@ -1183,13 +1292,13 @@ void ComposerView::apply_type(const std::function<void(CharStyle &)> &fn) {
             continue;
         saw_frame = true;
         size_t si = m_doc.story_index(se->id);
-        if (si >= m_comp.size())
+        if (run || si >= m_comp.size())
             continue;
         for (const ComposedLine &l : m_comp[si].lines)
             if (l.frame == ti)
-                ranges.push_back({&se->story, {l.para, l.byte_start}, {l.para, l.byte_end}});
+                m_run_type.push_back({si, {l.para, l.byte_start}, {l.para, l.byte_end}});
     }
-    if (ranges.empty()) {
+    if (m_run_type.empty()) {
         if (saw_frame)
             return;
         fn(m_default_type);
@@ -1197,8 +1306,9 @@ void ComposerView::apply_type(const std::function<void(CharStyle &)> &fn) {
         return;
     }
     push_undo();
-    for (Range &r : ranges)
-        restyle(*r.story, r.a, r.b, fn);
+    for (const TypeRange &r : m_run_type)
+        if (r.story < m_doc.stories.size())
+            restyle(m_doc.stories[r.story].story, r.a, r.b, fn);
     recompose();
     selection_changed();
     if (screen())

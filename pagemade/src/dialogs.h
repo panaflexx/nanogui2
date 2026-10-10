@@ -83,6 +83,12 @@ void ask_replace(nanogui::Screen *screen, const std::string &path, std::function
 
 void show_alert(nanogui::Screen *screen, const std::string &title, const std::string &message);
 
+/* A one-field prompt ("New Style", "Name:"). `done` gets the trimmed text;
+ * it isn't called on Cancel or when the text is empty. */
+void ask_text(nanogui::Screen *screen, const std::string &title, const std::string &label,
+              const std::string &initial, const std::string &hint,
+              std::function<void(const std::string &)> done);
+
 namespace pagemade {
 class FontLibrary;
 class FontMenuModel;

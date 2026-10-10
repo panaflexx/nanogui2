@@ -457,7 +457,7 @@ public:
         c.next_seg = m_next;
         c.carry = m_carry;
         const ParaStyle &ps = m_para.style;
-        const bool justify = ps.align == Align::Justify || ps.align == Align::ForceJustify;
+        const bool justify = is_justified(ps.align);
         const LineCtx lc{&ps, &m_sh.text, frame_x};
 
         auto fits = [&](const Piece *extra) {
@@ -584,8 +584,14 @@ private:
             m_segs.push_back({g0, i + 1, m_glyphs[g0].cluster, end, b == LINEBREAK_MUSTBREAK});
             g0 = i + 1;
         }
-        if (g0 < n)
-            m_segs.push_back({g0, n, m_glyphs[g0].cluster, (uint32_t) t.size(), false});
+        /* The loop never records a break at the last byte: `end` there is
+         * t.size() and the iteration is skipped. A paragraph that ends in a
+         * mandatory break (Shift+Return) still has to force that last
+         * segment, so the empty line after it is produced. */
+        if (g0 < n) {
+            const bool forced = !t.empty() && brks[t.size() - 1] == LINEBREAK_MUSTBREAK;
+            m_segs.push_back({g0, n, m_glyphs[g0].cluster, (uint32_t) t.size(), forced});
+        }
     }
 
     Piece from_seg(size_t si) const {
@@ -720,10 +726,13 @@ void place_line(Shaper &sh, const Paragraph &para, const LineCandidate &c, float
     line.hyphenated = !c.pieces.empty() && c.pieces.back().hyphen;
 
     /* Lines with tabs are set flush left. The last line of a justified
-     * paragraph is ragged unless it only fits by tightening. */
+     * paragraph is set left, centered or right (by the alignment) unless
+     * it only fits by tightening; force justify stretches it as well. */
     const bool justify = !m.has_tab &&
         (ps.align == Align::ForceJustify ||
-         (ps.align == Align::Justify && (!last_line || m.natural > avail + kEps)));
+         (is_justified(ps.align) && (!last_line || m.natural > avail + kEps)));
+    const bool right = ps.align == Align::Right || ps.align == Align::JustifyRight;
+    const bool center = ps.align == Align::Center || ps.align == Align::JustifyCenter;
 
     Spacing sp{ps.word_desired, ps.letter_desired};
     float x0 = line.left;
@@ -766,9 +775,9 @@ void place_line(Shaper &sh, const Paragraph &para, const LineCandidate &c, float
             (letter_r >= 0 ? letter_r * (ps.letter_max - ps.letter_desired)
                            : letter_r * (ps.letter_desired - ps.letter_min));
     } else {
-        if (!m.has_tab && ps.align == Align::Right)
+        if (!m.has_tab && right)
             x0 += avail - m.natural;
-        else if (!m.has_tab && ps.align == Align::Center)
+        else if (!m.has_tab && center)
             x0 += (avail - m.natural) * 0.5f;
         if (m.natural > avail + kEps)
             line.tight = true;
@@ -908,6 +917,20 @@ Composition compose(const Story &story, const std::vector<Frame> &frames,
 
                 LineCandidate c = br.next_line(line.left, line.width, f.x);
 
+                /* The last line takes the last-line indent. When the line
+                 * no longer fits there, the break comes earlier and the
+                 * words left over make a new, indented last line. */
+                if (st.last_indent != 0.f && br.last_after(c) &&
+                    line.width - st.last_indent > 0.f) {
+                    LineCandidate in = br.next_line(line.left + st.last_indent,
+                                                    line.width - st.last_indent, f.x);
+                    if (br.last_after(in)) {
+                        line.left += st.last_indent;
+                        line.width -= st.last_indent;
+                    }
+                    c = std::move(in);
+                }
+
                 /* Slug height: the largest leading on the line, hanging
                  * spaces included. */
                 float leading = 0;
@@ -916,6 +939,9 @@ Composition compose(const Story &story, const std::vector<Frame> &frames,
                         leading = std::max(leading, leading_of(sh.style(g.run), st));
                 if (leading == 0)
                     leading = leading_of(empty_style, st);
+                leading = std::max(0.f, leading * std::clamp(st.line_spacing, kMinLineSpacing,
+                                                             kMaxLineSpacing) +
+                                            st.extra_spacing);
 
                 if (y + leading > f.y + f.h + kEps) {
                     ++fi;
@@ -934,9 +960,11 @@ Composition compose(const Story &story, const std::vector<Frame> &frames,
                 const bool last_line = line.para_end ||
                                        (!c.pieces.empty() && c.pieces.back().forced);
                 if (c.pieces.empty()) {
-                    line.x_start = line.x_end =
-                        st.align == Align::Center ? line.left + line.width * 0.5f :
-                        st.align == Align::Right  ? line.left + line.width : line.left;
+                    const bool center = st.align == Align::Center ||
+                                        st.align == Align::JustifyCenter;
+                    const bool right = st.align == Align::Right || st.align == Align::JustifyRight;
+                    line.x_start = line.x_end = center ? line.left + line.width * 0.5f :
+                                                right  ? line.left + line.width : line.left;
                 } else {
                     place_line(sh, para, c, f.x, last_line, line);
                 }

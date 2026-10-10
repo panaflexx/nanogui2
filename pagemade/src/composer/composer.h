@@ -18,7 +18,8 @@
  * the same line breaks.
  *
  * Leading is proportional: each line's slug is as tall as its largest
- * leading, with the baseline two thirds of the way down.
+ * leading, times the paragraph's line spacing, with the baseline two thirds
+ * of the way down.
  */
 #pragma once
 

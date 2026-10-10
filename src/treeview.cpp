@@ -116,6 +116,10 @@ void TreeView::set_items(NanoTree* items) {
         screen()->m_focus_path.erase(std::remove(screen()->m_focus_path.begin(), screen()->m_focus_path.end(), m_items_container->child_at(0)), screen()->m_focus_path.end());
         m_items_container->remove_child_at(0);
     }
+    /* The rows are released at the next cleanup; a tree passed in again
+       must not point at them. */
+    for (auto &kv : m_data_tree->Objects)
+        kv.second->NodeWidget = nullptr;
     if (m_data_tree->Objects.size() == 0)return;
 
     update_tree_items(m_data_tree->Root->KeyString, 0, true);

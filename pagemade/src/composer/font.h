@@ -8,11 +8,13 @@
  * every output (screen, SVG, PDF).
  *
  * Glyph outlines are cached in design units (y up) for backends that
- * draw glyphs as paths.
+ * draw glyphs as paths. A returned outline stays at that address for the
+ * life of the Font, so a caller may hold it across later outline() calls.
  */
 #pragma once
 
 #include <cstdint>
+#include <deque>
 #include <memory>
 #include <string>
 #include <unordered_map>
@@ -105,7 +107,10 @@ private:
     float       m_ul_pos = -100, m_ul_thick = 50;
     float       m_st_pos = 250, m_st_thick = 50;
     mutable bool m_smcp_known = false, m_smcp = false;
-    mutable std::unordered_map<uint32_t, GlyphOutline> m_outlines;
+    /* The deque owns the outlines; the map only points at them. Inserting
+     * another glyph rehashes the map and does not move the outlines. */
+    mutable std::deque<GlyphOutline> m_outline_nodes;
+    mutable std::unordered_map<uint32_t, GlyphOutline *> m_outlines;
 };
 
 /* One cut of a family, whether or not its file has been loaded yet. */

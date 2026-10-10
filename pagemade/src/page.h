@@ -177,16 +177,44 @@ struct StoryEntry {
 /* [Paper], [Black], [Registration] and PageMaker's default colors. */
 std::vector<Swatch> default_swatches();
 
+/* A named paragraph style (the Paragraph panel's style menu): paragraph
+ * attributes, and the type its text is set in. A paragraph that uses it
+ * carries the name in ParaStyle::name. */
+struct StyleDef {
+    std::string name;
+    ParaStyle   para;            // para.name == name
+    CharStyle   type;
+};
+
+/* Normal, then PageMaker's predefined styles and a few more. */
+std::vector<StyleDef> default_styles();
+
+/* The run that stands for a paragraph's type: the longest. Runs whose bold
+ * or italic differ from it are emphasis. */
+const Run *base_run(const Paragraph &p);
+/* Give `p` the style: all of its paragraph attributes, and the style's
+ * family, face, size, leading, tracking, set width and caps on every run.
+ * Emphasis keeps its bold or italic; underline, strikethrough, color and
+ * baseline shift stay as they were. */
+void apply_style(Paragraph &p, const StyleDef &def);
+/* `p` is formatted differently from `def` (shown as "Name+"). */
+bool style_overridden(const Paragraph &p, const StyleDef &def);
+/* A style named `name` made from `p`'s formatting. */
+StyleDef style_from(const std::string &name, const Paragraph &p);
+
 struct PageDoc {
     PageSetup               setup;
     std::vector<Page>       pages{1};
     std::vector<StoryEntry> stories;
     std::vector<Swatch>     swatches = default_swatches();
+    std::vector<StyleDef>   styles = default_styles();
     std::vector<ImageAsset> images;        // the publication's pictures
     uint32_t                next_id = 1;   // shared by items and stories
     uint32_t                next_asset = 1;
 
     const Swatch *find_swatch(SwatchId id) const;
+    const StyleDef *find_style(const std::string &name) const;
+    StyleDef       *find_style(const std::string &name);
     /* The screen color of a paint; transparent for none. */
     Color resolve(const Paint &p) const;
     /* Adds a swatch (ids above the built-ins) and returns its id. */

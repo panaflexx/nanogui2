@@ -150,12 +150,16 @@ const char *align_name(Align a) {
     case Align::Right: return "right";
     case Align::Justify: return "justify";
     case Align::ForceJustify: return "force-justify";
+    case Align::JustifyCenter: return "justify-center";
+    case Align::JustifyRight: return "justify-right";
     }
     return "left";
 }
 Align align_from(const std::string &s) {
     return s == "center" ? Align::Center : s == "right" ? Align::Right :
-           s == "justify" ? Align::Justify : s == "force-justify" ? Align::ForceJustify : Align::Left;
+           s == "justify" ? Align::Justify : s == "force-justify" ? Align::ForceJustify :
+           s == "justify-center" ? Align::JustifyCenter :
+           s == "justify-right" ? Align::JustifyRight : Align::Left;
 }
 
 const char *tab_name(TabAlign a) {
@@ -237,9 +241,12 @@ void write_para_style(JsonOut &j, const ParaStyle &ps) {
     if (ps.left_indent != d.left_indent) j.key("left_indent").value(ps.left_indent);
     if (ps.right_indent != d.right_indent) j.key("right_indent").value(ps.right_indent);
     if (ps.first_indent != d.first_indent) j.key("first_indent").value(ps.first_indent);
+    if (ps.last_indent != d.last_indent) j.key("last_indent").value(ps.last_indent);
     if (ps.space_before != d.space_before) j.key("space_before").value(ps.space_before);
     if (ps.space_after != d.space_after) j.key("space_after").value(ps.space_after);
     if (ps.autoleading != d.autoleading) j.key("autoleading").value(ps.autoleading);
+    if (ps.line_spacing != d.line_spacing) j.key("line_spacing").value(ps.line_spacing);
+    if (ps.extra_spacing != d.extra_spacing) j.key("extra_spacing").value(ps.extra_spacing);
     if (ps.word_min != d.word_min || ps.word_desired != d.word_desired || ps.word_max != d.word_max)
         j.key("word_spacing").numbers({ps.word_min, ps.word_desired, ps.word_max});
     if (ps.letter_min != d.letter_min || ps.letter_desired != d.letter_desired ||
@@ -510,6 +517,18 @@ std::string make_json(const PageDoc &doc, const SaveOptions &opts, const std::ve
     }
     j.end_array();
 
+    j.key("styles").begin_array();
+    for (const StyleDef &st : doc.styles) {
+        j.begin_object();
+        j.key("name").value(st.name);
+        j.key("para");
+        write_para_style(j, st.para);
+        j.key("type");
+        write_char_style(j, st.type);
+        j.end_object();
+    }
+    j.end_array();
+
     j.key("assets").begin_array();
     for (const FontRef &r : refs) {
         if (!r.font)
@@ -669,9 +688,13 @@ ParaStyle read_para_style(const DictValue *o) {
     get(o, "left_indent", ps.left_indent);
     get(o, "right_indent", ps.right_indent);
     get(o, "first_indent", ps.first_indent);
+    get(o, "last_indent", ps.last_indent);
     get(o, "space_before", ps.space_before);
     get(o, "space_after", ps.space_after);
     get(o, "autoleading", ps.autoleading);
+    get(o, "line_spacing", ps.line_spacing);
+    ps.line_spacing = std::clamp(ps.line_spacing, kMinLineSpacing, kMaxLineSpacing);
+    get(o, "extra_spacing", ps.extra_spacing);
     float w[3] = {ps.word_min, ps.word_desired, ps.word_max};
     if (floats(o, "word_spacing", w, 3) == 3) {
         ps.word_min = w[0]; ps.word_desired = w[1]; ps.word_max = w[2];
@@ -996,6 +1019,21 @@ OpenResult open_document(const std::string &path, const FontLibrary &installed) 
             get(at(sw, i), "rgb", s.rgb);
             if (s.id != kNoPaint && !d.find_swatch(s.id))
                 d.swatches.push_back(s);
+        }
+    }
+
+    /* A file from before styles keeps the default set. */
+    if (const DictValue *styles = field(root, "styles")) {
+        d.styles.clear();
+        for (size_t i = 0; i < count(styles); ++i) {
+            StyleDef st;
+            get(at(styles, i), "name", st.name);
+            if (st.name.empty() || d.find_style(st.name))
+                continue;
+            st.para = read_para_style(field(at(styles, i), "para"));
+            st.para.name = st.name;
+            st.type = read_char_style(field(at(styles, i), "type"));
+            d.styles.push_back(std::move(st));
         }
     }
 

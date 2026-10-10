@@ -82,6 +82,176 @@ static const std::string kLong =
     "with the same metrics the printer will use. Every line here is broken in points, "
     "not pixels, so the column breaks the same way at any zoom.";
 
+/* Line spacing multiplies the slug, auto or fixed leading alike. */
+static void test_line_spacing(const FontLibrary &fonts) {
+    CharStyle cs;
+    ParaStyle ps;
+    const std::vector<Frame> wide = {{0, 0, 200, 1000}};
+    auto pitch = [&](float spacing, float leading) {
+        CharStyle c = cs;
+        c.leading = leading;
+        ParaStyle p = ps;
+        p.line_spacing = spacing;
+        Composition comp = compose(one_para(kLong, c, p), wide, fonts);
+        if (comp.lines.size() < 3)
+            return -1.f;
+        const ComposedLine &l = comp.lines[1];
+        CHECK(std::fabs((l.baseline - l.top) - l.leading * (2.f / 3.f)) < 1e-3f,
+              "baseline two thirds down the spaced slug");
+        return comp.lines[2].top - comp.lines[1].top;
+    };
+    CHECK(std::fabs(pitch(1.f, 0) - 14.4f) < 0.01f, "single spacing: auto leading (%g)", pitch(1.f, 0));
+    CHECK(std::fabs(pitch(2.f, 0) - 28.8f) < 0.01f, "double spacing doubles auto leading (%g)",
+          pitch(2.f, 0));
+    CHECK(std::fabs(pitch(0.5f, 0) - 7.2f) < 0.01f, "half spacing (%g)", pitch(0.5f, 0));
+    CHECK(std::fabs(pitch(1.5f, 20.f) - 30.f) < 0.01f, "1.5 times fixed 20pt leading (%g)",
+          pitch(1.5f, 20.f));
+    CHECK(std::fabs(pitch(9.f, 0) - 14.4f * kMaxLineSpacing) < 0.01f, "clamped to %g",
+          kMaxLineSpacing);
+
+    /* A 100pt frame holds three double-spaced 28.8pt lines, then oversets. */
+    ParaStyle dbl = ps;
+    dbl.line_spacing = 2.f;
+    Composition c = compose(one_para(kLong, cs, dbl), {{0, 0, 200, 100}}, fonts);
+    CHECK(c.lines.size() == 3 && c.overset, "double spacing fits 3 lines in 100pt (%zu)",
+          c.lines.size());
+
+    /* An empty paragraph's line is spaced too. */
+    Story empty;
+    empty.paragraphs.resize(2);
+    empty.paragraphs[0].style.line_spacing = 2.f;
+    Composition e = compose(empty, wide, fonts);
+    CHECK(e.lines.size() == 2 && std::fabs(e.lines[1].top - 28.8f) < 0.01f,
+          "empty paragraph line is double spaced");
+}
+
+/* The Paragraph panel's attributes: last-line alignment of justified
+ * text, extra spacing and the last-line indent. */
+static void test_paragraph_attributes(const FontLibrary &fonts) {
+    auto close = [](float x, float y) { return std::fabs(x - y) < 1e-3f; };
+    CharStyle cs;
+    const std::vector<Frame> wide = {{0, 0, 200, 1000}};
+    auto last_line = [&](Align a, float last_indent = 0) {
+        ParaStyle ps;
+        ps.align = a;
+        ps.last_indent = last_indent;
+        Composition c = compose(one_para(kLong, cs, ps), wide, fonts);
+        return c.lines.empty() ? ComposedLine() : c.lines.back();
+    };
+    const ComposedLine l = last_line(Align::Justify);
+    const ComposedLine c = last_line(Align::JustifyCenter);
+    const ComposedLine r = last_line(Align::JustifyRight);
+    const ComposedLine f = last_line(Align::ForceJustify);
+    CHECK(close(l.x_start, 0), "justify: last line starts left (%g)", l.x_start);
+    CHECK(std::fabs((c.x_start + c.x_end) * 0.5f - 100.f) < 0.05f,
+          "justify center: last line centered (%g..%g)", c.x_start, c.x_end);
+    CHECK(std::fabs(r.x_end - 200.f) < 0.05f, "justify right: last line ends right (%g)", r.x_end);
+    CHECK(std::fabs(f.x_end - 200.f) < 0.05f && close(f.x_start, 0), "force justify: full width");
+    CHECK(std::fabs(r.x_end - r.x_start - (l.x_end - l.x_start)) < 0.05f,
+          "the last line keeps its natural width (%g vs %g)", r.x_end - r.x_start,
+          l.x_end - l.x_start);
+    {
+        ParaStyle ps;
+        ps.align = Align::JustifyCenter;
+        Composition jc = compose(one_para(kLong, cs, ps), wide, fonts);
+        ps.align = Align::Justify;
+        Composition j = compose(one_para(kLong, cs, ps), wide, fonts);
+        bool same = jc.lines.size() == j.lines.size();
+        for (size_t i = 0; same && i + 1 < j.lines.size(); ++i)
+            same = close(jc.lines[i].x_start, j.lines[i].x_start) &&
+                   close(jc.lines[i].x_end, j.lines[i].x_end);
+        CHECK(same, "justify center sets every other line like justify");
+    }
+
+    /* Last-line indent: from the left indent; a last line too long for it
+     * gives up words to a new last line. */
+    const ComposedLine li = last_line(Align::Left, 30);
+    CHECK(std::fabs(li.x_start - 30.f) < 0.01f && std::fabs(li.left - 30.f) < 0.01f,
+          "last line indented 30pt (%g)", li.x_start);
+    {
+        ParaStyle ps;
+        Composition plain = compose(one_para(kLong, cs, ps), wide, fonts);
+        ps.last_indent = 190;            // leaves 10pt: no last line fits
+        Composition in = compose(one_para(kLong, cs, ps), wide, fonts);
+        CHECK(in.lines.size() > plain.lines.size(),
+              "a long last line breaks again for the indent (%zu vs %zu lines)",
+              in.lines.size(), plain.lines.size());
+        bool only_last = true;
+        for (size_t i = 0; i + 1 < in.lines.size(); ++i)
+            only_last &= close(in.lines[i].left, 0);
+        CHECK(only_last, "only the last line is indented");
+    }
+
+    /* Extra spacing adds points after line spacing; it may be negative. */
+    auto pitch = [&](float spacing, float extra) {
+        ParaStyle ps;
+        ps.line_spacing = spacing;
+        ps.extra_spacing = extra;
+        Composition comp = compose(one_para(kLong, cs, ps), wide, fonts);
+        return comp.lines.size() < 2 ? -1.f : comp.lines[1].top - comp.lines[0].top;
+    };
+    CHECK(std::fabs(pitch(1, 3) - 17.4f) < 0.01f, "extra 3pt (%g)", pitch(1, 3));
+    CHECK(std::fabs(pitch(2, -4) - 24.8f) < 0.01f, "double, minus 4pt (%g)", pitch(2, -4));
+    CHECK(pitch(1, -100) == 0.f, "spacing never goes below zero (%g)", pitch(1, -100));
+}
+
+/* Named paragraph styles. */
+static void test_styles() {
+    const std::vector<StyleDef> defs = default_styles();
+    std::vector<std::string> names;
+    for (const StyleDef &d : defs) {
+        names.push_back(d.name);
+        CHECK(d.para.name == d.name, "%s: the paragraph carries the name", d.name.c_str());
+    }
+    for (const char *want : {"Normal", "Body text", "Headline", "Subhead 1", "Subhead 2",
+                             "Caption", "Hanging indent", "Pull quote"})
+        CHECK(std::find(names.begin(), names.end(), want) != names.end(), "default style %s", want);
+    CHECK(names.front() == "Normal", "Normal comes first");
+
+    PageDoc doc;
+    const StyleDef *body = doc.find_style("Body text");
+    const StyleDef *head = doc.find_style("Headline");
+    CHECK(body && head && !doc.find_style("Nope"), "find_style");
+    if (!body || !head)
+        return;
+
+    /* Body text with an italic word, set as a headline: the italic stays
+     * emphasis, the rest takes the headline's type; color is kept. */
+    CharStyle plain;
+    plain.family = "Sans";
+    plain.size = 9;
+    plain.underline = true;
+    plain.color = {1, 0, 0, 1};
+    CharStyle em = plain;
+    em.italic = true;
+    Paragraph p;
+    p.style.align = Align::Right;
+    p.style.left_indent = 7;
+    p.runs = {{plain, "The quick "}, {em, "brown"}, {plain, " fox jumps over the dog"}};
+    CHECK(base_run(p) == &p.runs[2], "the longest run stands for the paragraph");
+    apply_style(p, *head);
+    CHECK(p.style.name == "Headline" && p.style.align == head->para.align &&
+          p.style.left_indent == head->para.left_indent, "paragraph attributes replaced");
+    CHECK(p.runs[0].style.family == head->type.family && p.runs[0].style.size == head->type.size &&
+          p.runs[0].style.bold == head->type.bold && !p.runs[0].style.italic,
+          "plain runs take the style's type");
+    CHECK(p.runs[1].style.italic != head->type.italic && p.runs[1].style.bold == head->type.bold,
+          "the italic word stays emphasized");
+    CHECK(p.runs[0].style.underline && p.runs[0].style.color.r == 1.f,
+          "underline and color are kept");
+    CHECK(!style_overridden(p, *head), "a fresh paragraph has no overrides");
+    p.style.space_after = 99;
+    CHECK(style_overridden(p, *head), "a changed attribute is an override");
+    p.style.space_after = head->para.space_after;
+    p.runs[2].style.size = 50;
+    CHECK(style_overridden(p, *head), "changed type is an override");
+
+    StyleDef made = style_from("Mine", p);
+    CHECK(made.name == "Mine" && made.para.name == "Mine" && made.type.size == 50 &&
+          !made.type.underline && made.type.color == Color(),
+          "style_from takes the base run's type, without ornament");
+}
+
 static void test_kerning(const FontLibrary &fonts) {
     for (const char *family : {"Serif", "Display"}) {
         CharStyle cs; cs.family = family; cs.bold = true; cs.size = 48;
@@ -219,6 +389,29 @@ static void test_breaks(const FontLibrary &fonts) {
         CHECK(t.substr(hy.lines[0].byte_start, hy.lines[0].byte_end) == "page-" &&
               hy.lines[1].byte_start == 5,
               "break falls after the hyphen, not inside a word");
+    }
+
+    /* A break at the end of the paragraph opens a line for the caret. */
+    {
+        Story s = one_para("hello\n", cs, ps);
+        Composition t = compose(s, wide, fonts);
+        CHECK(t.lines.size() == 2, "a trailing newline opens a line (%zu)", t.lines.size());
+        if (t.lines.size() == 2) {
+            CHECK(!t.lines[0].para_end && t.lines[1].para_end, "the new line ends the paragraph");
+            CHECK(t.lines[1].byte_start == 6 && t.lines[1].byte_end == 6, "the new line is empty");
+            Caret at = caret_at(t, s, {0, 6});
+            CHECK(at.valid() && at.line == 1, "the caret sits on the new line");
+        }
+        Story u = one_para("hello\xE2\x80\xA8", cs, ps);
+        Composition cu = compose(u, wide, fonts);
+        CHECK(cu.lines.size() == 2, "a trailing Shift+Return opens a line (%zu)", cu.lines.size());
+        if (cu.lines.size() == 2) {
+            Caret at = caret_at(cu, u, {0, 8});
+            CHECK(at.valid() && at.line == 1, "the caret sits after Shift+Return");
+        }
+        Story twice = one_para("hello\n\n", cs, ps);
+        CHECK(compose(twice, wide, fonts).lines.size() == 3,
+              "two trailing breaks open two lines");
     }
 }
 
@@ -961,7 +1154,9 @@ static void check_para(const ParaStyle &a, const ParaStyle &b) {
     CHECK(a.name == b.name && a.align == b.align, "paragraph name/align");
     CHECK(near(a.left_indent, b.left_indent) && near(a.right_indent, b.right_indent) &&
           near(a.first_indent, b.first_indent) && near(a.space_before, b.space_before) &&
-          near(a.space_after, b.space_after) && near(a.autoleading, b.autoleading),
+          near(a.space_after, b.space_after) && near(a.autoleading, b.autoleading) &&
+          near(a.line_spacing, b.line_spacing) && near(a.extra_spacing, b.extra_spacing) &&
+          near(a.last_indent, b.last_indent),
           "paragraph spacing");
     CHECK(near(a.word_min, b.word_min) && near(a.word_desired, b.word_desired) &&
           near(a.word_max, b.word_max) && near(a.letter_min, b.letter_min) &&
@@ -990,6 +1185,13 @@ static void check_doc(const PageDoc &a, const PageDoc &b) {
         CHECK(a.swatches[i].id == b.swatches[i].id && a.swatches[i].name == b.swatches[i].name,
               "swatch %zu", i);
         check_color(a.swatches[i].rgb, b.swatches[i].rgb, "swatch");
+    }
+    CHECK(a.styles.size() == b.styles.size(), "styles %zu vs %zu", a.styles.size(),
+          b.styles.size());
+    for (size_t i = 0; i < std::min(a.styles.size(), b.styles.size()); ++i) {
+        CHECK(a.styles[i].name == b.styles[i].name, "style %zu name", i);
+        check_para(a.styles[i].para, b.styles[i].para);
+        check_char(a.styles[i].type, b.styles[i].type);
     }
     CHECK(a.pages.size() == b.pages.size(), "pages %zu vs %zu", a.pages.size(), b.pages.size());
     for (size_t p = 0; p < std::min(a.pages.size(), b.pages.size()); ++p) {
@@ -1108,12 +1310,15 @@ static void test_docfile(const FontLibrary &fonts) {
     note.color = {0.2f, 0.3f, 0.4f, 1};
     ParaStyle note_ps;
     note_ps.name = "Note";
-    note_ps.align = Align::Right;
     note_ps.hyphenate = false;
     note_ps.hyphen_limit = 2;
     note_ps.hyphen_zone = 28;
     note_ps.default_tab = 48;
     note_ps.word_min = 80;
+    note_ps.line_spacing = 1.5f;
+    note_ps.extra_spacing = -1.5f;
+    note_ps.last_indent = 24;
+    note_ps.align = Align::JustifyRight;
     note_ps.tabs.push_back({120, TabAlign::Decimal, "."});
     Story extra = one_para("He said \"hello\"\nsecond\tline\\end", note, note_ps);
     doc.add_text_frame(1, doc.add_story(std::move(extra)), 200, 80, Transform::translate(40, 200));
@@ -1191,13 +1396,21 @@ static void test_docfile(const FontLibrary &fonts) {
         "{\"id\":8,\"type\":\"image\",\"w\":1,\"h\":1,\"xf\":[1,0,0,1,0,0]}"
         "]}],"
         "\"stories\":["
-        "{\"id\":9,\"thread\":[5,99],\"paragraphs\":[{\"runs\":[{\"text\":\"Kept\"}]}]},"
+        "{\"id\":9,\"thread\":[5,99],\"paragraphs\":[{\"style\":{\"line_spacing\":9},"
+        "\"runs\":[{\"text\":\"Kept\"}]}]},"
         "{\"id\":9,\"thread\":[],\"paragraphs\":[{\"runs\":[{\"text\":\"Gone\"}]}]}"
         "]}";
     const std::string repair_path = "/tmp/pagemade-doc-repair.pagemade";
     CHECK(write_zip(repair_path, kPublicationMimeType, repair_json), "write a damaged package");
     OpenResult repaired = open_document(repair_path, fonts);
     CHECK(repaired.ok, "a newer, damaged file still opens: %s", repaired.error.c_str());
+    CHECK(repaired.doc.styles.size() == default_styles().size(),
+          "a file from before styles gets the default set (%zu)", repaired.doc.styles.size());
+    for (const StoryEntry &se : repaired.doc.stories)
+        for (const Paragraph &p : se.story.paragraphs)
+            if (!p.runs.empty() && p.runs.front().text == "Kept")
+                CHECK(p.style.line_spacing == kMaxLineSpacing,
+                      "line spacing is clamped on open (%g)", p.style.line_spacing);
     CHECK(!repaired.warnings.empty(), "damage and a newer version are reported");
     if (repaired.ok) {
         CHECK(repaired.doc.pages.size() == 1 && repaired.doc.pages[0].hidden, "the page survived");
@@ -1415,6 +1628,73 @@ public:
         return false;
     }
 };
+
+/* A ligature that ends its run must map to every character it covers. */
+static void test_tounicode(const FontLibrary &fonts) {
+    CharStyle cs; cs.size = 24;
+    ParaStyle ps;
+    std::vector<Frame> wide = {{0, 0, 400, 80}};
+    Composition one = compose(one_para("fi", cs, ps), wide, fonts);
+    size_t visible = 0;
+    if (!one.lines.empty())
+        for (const GlyphRun &r : one.lines[0].runs)
+            for (const PlacedGlyph &g : r.glyphs)
+                if (!(g.flags & PlacedGlyph::Invisible))
+                    ++visible;
+    if (visible != 1) {
+        std::printf("  (skip: the Serif face does not ligate fi)\n");
+        return;
+    }
+
+    auto exported = [&](Story story) {
+        PageDoc doc;
+        StoryId id = doc.add_story(std::move(story));
+        doc.add_text_frame(0, id, 400, 80, Transform::translate(36, 36));
+        std::vector<Composition> comps;
+        comps.push_back(compose(doc.stories[0].story, doc.thread_frames(doc.stories[0]), fonts));
+        const std::string path = "/tmp/pagemade_tounicode.pdf";
+        CHECK(export_pdf(path, doc, comps), "export the ligature");
+        return pdf_plain(read_bin(path));
+    };
+
+    const std::string alone = exported(one_para("fi", cs, ps));
+    CHECK(alone.find("<00660069>") != std::string::npos,
+          "a final fi ligature maps to both characters");
+
+    Story split;
+    Paragraph p;
+    p.runs.push_back({cs, "fi"});
+    CharStyle bold = cs;
+    bold.bold = true;
+    p.runs.push_back({bold, "sh"});
+    split.paragraphs.push_back(p);
+    const std::string both = exported(std::move(split));
+    CHECK(both.find("<00660069>") != std::string::npos, "fi at the end of a run maps to fi");
+    CHECK(both.find("<0066006900730068>") == std::string::npos,
+          "fi stops before the next run");
+}
+
+/* outline() may be held across later lookups. The cache must not move it. */
+static void test_outline_cache(const FontLibrary &fonts) {
+    CharStyle cs; cs.size = 12;
+    Composition c = compose(one_para(
+        "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789",
+        cs, ParaStyle()), {{0, 0, 4000, 80}}, fonts);
+    CHECK(!c.lines.empty() && !c.lines[0].runs.empty() && !c.lines[0].runs[0].glyphs.empty(),
+          "the alphabet composes");
+    if (c.lines.empty() || c.lines[0].runs.empty() || c.lines[0].runs[0].glyphs.empty())
+        return;
+    const Font *face = c.lines[0].runs[0].font;
+    const uint32_t gid = c.lines[0].runs[0].glyphs[0].gid;
+    const GlyphOutline &first = face->outline(gid);
+    const GlyphOutline *p = &first;
+    const size_t n = first.cmds.size();
+    for (const GlyphRun &r : c.lines[0].runs)
+        for (const PlacedGlyph &g : r.glyphs)
+            face->outline(g.gid);
+    CHECK(&face->outline(gid) == p, "an outline stays put while other glyphs are cached");
+    CHECK(p->cmds.size() == n && n > 0, "the cached outline keeps its commands (%zu)", n);
+}
 
 static void test_images(const FontLibrary &fonts) {
     CHECK(std::fabs(image_print_points(300, 300) - 72.f) < 0.01f, "300 px at 300 ppi is 72 pt");
@@ -2046,9 +2326,14 @@ int main(int argc, char **argv) {
     test_alignment(fonts);
     test_threading(fonts);
     test_breaks(fonts);
+    test_outline_cache(fonts);
+    test_line_spacing(fonts);
+    test_paragraph_attributes(fonts);
+    test_styles();
     test_edit(fonts);
     test_align_ranges(fonts);
     test_pdf(fonts);
+    test_tounicode(fonts);
     test_deterministic(fonts);
     test_model(fonts);
     test_tabs(fonts);

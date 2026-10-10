@@ -302,10 +302,35 @@ void Widget::add_child(int index, Widget* widget) {
         auto it = std::find(g_widgets_to_cleanup.begin(), g_widgets_to_cleanup.end(), widget);
         if (it != g_widgets_to_cleanup.end()) {
             g_widgets_to_cleanup.erase(it);
-            // release the extra ref that remove_child added to keep it alive
+            // release the reference the queue took over from the old list
             widget->dec_ref();
         }
     }
+}
+
+/* Detach a child and hand its list entry's reference to the cleanup queue,
+   so the destructor runs after the current event rather than inside it.
+   Re-adding the widget before then cancels the release. */
+static void release_child(Screen* sc, std::vector<Widget*>& children,
+                          std::vector<Widget*>::iterator it) {
+    Widget* widget = *it;
+    // Scrub Screen drag/focus before unparenting: destructor cannot
+    // find the Screen once m_parent is null, and a live drag would
+    // then walk parent() into a nullptr.
+    if (sc)
+        sc->notify_widget_destroyed(widget);
+    children.erase(it);
+    widget->set_parent(nullptr);
+
+    std::lock_guard<std::mutex> lock(g_widgets_to_cleanup_mutex);
+    if (std::find(g_widgets_to_cleanup.begin(), g_widgets_to_cleanup.end(), widget) !=
+        g_widgets_to_cleanup.end()) {
+        // Already queued (it was in two lists): the queue keeps its own
+        // reference, so this list's can go now without destroying it.
+        widget->dec_ref();
+        return;
+    }
+    g_widgets_to_cleanup.push_back(widget);
 }
 
 void Widget::add_child(Widget* widget) {
@@ -313,41 +338,16 @@ void Widget::add_child(Widget* widget) {
 }
 
 void Widget::remove_child(const Widget* widget) {
-    // Scrub Screen drag/focus before unparenting: destructor cannot
-    // find the Screen once m_parent is null, and a live drag would
-    // then walk parent() into a nullptr.
-    if (Screen* sc = screen())
-        sc->notify_widget_destroyed(const_cast<Widget*>(widget));
-
-    // Immediate removal from the tree (so child_count/iteration see the change)
-    m_children.erase(std::remove(m_children.begin(), m_children.end(), widget),
-                     m_children.end());
-    const_cast<Widget*>(widget)->set_parent(nullptr);
-
-    // Queue the final dec_ref so destructor runs outside the event path
-    std::lock_guard<std::mutex> lock(g_widgets_to_cleanup_mutex);
-    if (std::find(g_widgets_to_cleanup.begin(), g_widgets_to_cleanup.end(), widget) != g_widgets_to_cleanup.end())
-        return;
-    widget->inc_ref();
-    g_widgets_to_cleanup.push_back(const_cast<Widget*>(widget));
+    auto it = std::find(m_children.begin(), m_children.end(), widget);
+    if (it == m_children.end())
+        return;                          // not ours: no reference to give up
+    release_child(screen(), m_children, it);
 }
 
 void Widget::remove_child_at(int index) {
     if (index < 0 || index >= (int)m_children.size())
         throw std::runtime_error("Widget::remove_child_at(): out of bounds!");
-    Widget* widget = m_children[index];
-    if (Screen* sc = screen())
-        sc->notify_widget_destroyed(widget);
-    // Immediate removal from the tree
-    m_children.erase(m_children.begin() + index);
-    widget->set_parent(nullptr);
-
-    // Queue the final dec_ref
-    std::lock_guard<std::mutex> lock(g_widgets_to_cleanup_mutex);
-    if (std::find(g_widgets_to_cleanup.begin(), g_widgets_to_cleanup.end(), widget) != g_widgets_to_cleanup.end())
-        return;
-    widget->inc_ref();
-    g_widgets_to_cleanup.push_back(widget);
+    release_child(screen(), m_children, m_children.begin() + index);
 }
 
 void Widget::reparent(Widget* new_parent) {
@@ -369,14 +369,13 @@ void Widget::reparent(Widget* new_parent) {
 
     m_parent = new_parent;
 
-    // If this widget was queued for destruction, cancel it
-    {
+    // If this widget was queued for destruction, cancel it: the reference
+    // the queue holds becomes the new list entry's.
+    if (new_parent) {
         std::lock_guard<std::mutex> lock(g_widgets_to_cleanup_mutex);
         auto it = std::find(g_widgets_to_cleanup.begin(), g_widgets_to_cleanup.end(), this);
-        if (it != g_widgets_to_cleanup.end()) {
+        if (it != g_widgets_to_cleanup.end())
             g_widgets_to_cleanup.erase(it);
-            dec_ref(); // release the extra ref from remove_child
-        }
     }
 }
 

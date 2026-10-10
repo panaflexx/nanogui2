@@ -170,6 +170,22 @@ public:
      * step. Does nothing when text_align would return false. */
     void apply_align(pagemade::Align align);
 
+    /* The other paragraph attributes (spacing, indents) belong to whole
+     * paragraphs: the ones the alignment lines touch. Empty when no text
+     * is selected. apply_para changes them all, as one undo step. */
+    std::vector<const pagemade::Paragraph *> selected_paragraphs() const;
+    void apply_para(const std::function<void(pagemade::ParaStyle &)> &fn);
+
+    /* Named paragraph styles (PageDoc::styles), each one undo step.
+     * apply_style sets the selected paragraphs in a style. define_style
+     * makes one from the first selected paragraph and tags the selection
+     * with it; redefining a name in use updates the paragraphs that follow
+     * it (those without overrides). delete_style drops a style; its
+     * paragraphs keep their formatting. */
+    void apply_style(const std::string &name);
+    void define_style(const std::string &name);
+    void delete_style(const std::string &name);
+
     /* Undo/redo: whole-document snapshots (the model is small), one per
      * action. A run of typing or deleting coalesces into a single step;
      * caret moves and other actions close the run. View state (zoom) is
@@ -302,6 +318,8 @@ private:
         pagemade::TextPos a, b;       // half-open range in that story
     };
     void collect_align_hits(std::vector<AlignHit> &out) const;
+    /* (story index, paragraph index) for selected_paragraphs. */
+    std::vector<std::pair<size_t, size_t>> selected_para_indices() const;
 
     pagemade::Story *edit_story();
     const pagemade::Story *edit_story() const;
@@ -366,6 +384,16 @@ private:
     const void *m_merge_key = nullptr;    // set_undo_merge
     const void *m_merged_key = nullptr;   // key of the newest undo step
     uint64_t m_merged_version = 0;        // the version that step left
+    /* The next change continues a spin run (joins the last undo step). */
+    bool continues_run() const {
+        return m_merge_key && m_merge_key == m_merged_key && m_version == m_merged_version;
+    }
+    /* A spin run's targets, fixed at its first step: with a text block
+     * selected, a step can push text out of the block (or pull more in),
+     * and the rest of the run must change the same text. */
+    struct TypeRange { size_t story; pagemade::TextPos a, b; };
+    std::vector<TypeRange> m_run_type;
+    std::vector<std::pair<size_t, size_t>> m_run_paras;
     bool m_gesture_saved = false;         // drag pushed its snapshot
     pagemade::Point m_drag_start;         // page point at press
     std::vector<pagemade::Item> m_drag_items;   // the selected items at press

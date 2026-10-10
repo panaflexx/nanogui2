@@ -984,6 +984,10 @@ Dropdown::Dropdown(Widget *parent, Mode mode, const string &caption) : MenuItem(
     set_flags(Flags::ToggleButton);
 
     m_popup = new PopupMenu(screen(), window(), this, m_mode == ComboBox);
+    /* Our own reference: the Screen's can go first. Tearing the Screen down
+       releases its children in order, and a Dropdown inside a window the
+       pass defers (a Popup) would otherwise be destroyed after its menu. */
+    m_popup->inc_ref();
     m_popup->set_visible(false);
 
     if (m_mode == Menu)
@@ -1001,6 +1005,7 @@ Dropdown::~Dropdown() {
         if (Screen *s = screen())
             s->remove_popup_visible(m_popup);
         m_popup->dispose();
+        m_popup->dec_ref();
         m_popup = nullptr;
     }
 }
@@ -1112,13 +1117,9 @@ void Dropdown::clear_items()
         return;
     m_popup->set_highlighted_index(-1);
     while (m_popup->child_count() > 0) {
-        MenuItem *old = m_popup->item(m_popup->child_count() - 1);
-        /* The parent holds one ref. remove_child adds another and drops it
-           at frame cleanup, so a second dec_ref releases the item. */
-        old->inc_ref();
-        m_popup->remove_child(old);
-        old->dec_ref();
-        old->dec_ref();
+        /* remove_child hands the list's reference to the frame cleanup,
+           which releases the item. */
+        m_popup->remove_child_at(m_popup->child_count() - 1);
     }
     m_popup->set_selected_index(-1);
     m_popup->set_scroll(0);

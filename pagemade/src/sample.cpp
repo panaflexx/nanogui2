@@ -14,6 +14,17 @@ Paragraph para(const ParaStyle &ps, std::initializer_list<Run> runs) {
     return p;
 }
 
+/* Define (or redefine) the style a sample paragraph uses, from the sample's
+ * own formatting, so the sample shows no overrides. */
+void define(PageDoc &doc, const ParaStyle &ps, const CharStyle &cs) {
+    StyleDef d{ps.name, ps, cs};
+    d.type.color = Color();
+    if (StyleDef *old = doc.find_style(ps.name))
+        *old = d;
+    else
+        doc.styles.push_back(d);
+}
+
 } // namespace
 
 PageDoc sample_document() {
@@ -55,8 +66,9 @@ PageDoc sample_document() {
     CharStyle sub;
     sub.family = "Sans"; sub.bold = true; sub.size = 11; sub.leading = 13;
 
-    ParaStyle first_ps; first_ps.name = "Body text"; first_ps.align = Align::Justify;
+    ParaStyle first_ps; first_ps.name = "Body first"; first_ps.align = Align::Justify;
     ParaStyle body_ps = first_ps;
+    body_ps.name = "Body text";
     body_ps.first_indent = 12;
     ParaStyle sub_ps;   sub_ps.name = "Subhead 1"; sub_ps.space_before = 9; sub_ps.space_after = 2;
 
@@ -124,6 +136,16 @@ PageDoc sample_document() {
         para(note_ps, {{side_note, "This box is turned three degrees. Its text is composed "
                                    "upright, in the block\u2019s own space, and turned with it."}}),
     };
+
+    define(doc, head_ps, head);
+    define(doc, deck_ps, deck);
+    define(doc, byline_ps, byline);
+    define(doc, first_ps, body);
+    define(doc, body_ps, body);
+    define(doc, sub_ps, sub);
+    define(doc, side_head_ps, side_head);
+    define(doc, contents_ps, side);
+    define(doc, note_ps, side_note);
 
     /* ---- Page items, bottom to top ---- */
     const float body_w = s.width - s.margin_inside - s.margin_outside;

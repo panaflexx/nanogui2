@@ -7,8 +7,9 @@
  * Page icons along the bottom of the window show the document — click one
  * to turn to it, drag to rearrange. The toolbar holds the toolbox
  * (pointer, crop, rotate, text, line, rectangle, ellipse, polygon), snap to
- * guides, undo/redo (Ctrl+Z / Ctrl+Shift+Z), a zoom dropdown, and switches
- * for alignment of the selected lines, kerning and ligatures. Below it, the control palette
+ * guides, undo/redo (Ctrl+Z / Ctrl+Shift+Z), a zoom dropdown, the ¶ button
+ * for the Paragraph panel (style, alignment, spacing, indents), and switches
+ * for kerning and ligatures. Below it, the control palette
  * switches between the object view (position, size, angle, fill and
  * stroke; with nothing selected, the defaults for new shapes) and the
  * type view (font, size, style, leading and baseline). Type on that palette,
@@ -54,6 +55,7 @@
 #include "font_menu_ui.h"
 #include "system_fonts.h"
 #include "page.h"
+#include "paragraph_panel.h"
 #include "pdf.h"
 #include "spinbox.h"
 
@@ -286,16 +288,40 @@ public:
             zv[i] > 0 ? zoom_to(zv[i]) : fit_page();
         });
 
-        new Label(toolbar, "  Align:", "sans-bold");
-        m_align = new Dropdown(toolbar, {"Left", "Center", "Right", "Justify", "Force justify"},
-                               {}, Dropdown::ComboBox, "Justify");
-        m_align->set_selected_index(3);
-        m_align->set_tooltip("Alignment of the selected text block, or of the selected lines");
-        m_align->set_selected_callback([this](int i) {
-            if (m_syncing_align || i < 0 || i > (int) Align::ForceJustify)
-                return;
-            set_body_align((Align) i);
-        });
+        /* ¶ pops open the Paragraph panel (also Element > Paragraph…). */
+        m_para_btn = new PopupButton(toolbar, "\u00B6");
+        m_para_btn->set_side(Popup::Bottom);
+        m_para_btn->set_chevron_icon(0);        // after set_side, which sets one
+        m_para_btn->set_font_size(20);
+        m_para_btn->set_fixed_size(Vector2i(32, 28));
+        m_para_btn->set_tooltip("Paragraph: style, alignment, spacing and indents (Ctrl+M)");
+        Popup *para_popup = m_para_btn->popup();
+        para_popup->set_layout(new BoxLayout(Orientation::Vertical, Alignment::Fill, 0, 0));
+        ParagraphPanel::Hooks hooks;
+        hooks.apply = [this](const std::function<void(ParaStyle &)> &fn, const void *spin) {
+            m_view->set_undo_merge(spin);
+            m_view->apply_para(fn);
+            m_view->set_undo_merge(nullptr);
+        };
+        /* The panel aligns whole paragraphs. */
+        hooks.align = [this](Align a) {
+            m_view->apply_para([a](ParaStyle &ps) { ps.align = a; });
+        };
+        hooks.apply_style = [this](const std::string &name) { m_view->apply_style(name); };
+        hooks.delete_style = [this](const std::string &name) { m_view->delete_style(name); };
+        hooks.new_style = [this] {
+            const auto paras = m_view->selected_paragraphs();
+            std::string name = paras.empty() ? std::string() : paras.front()->style.name;
+            ask_text(this, "New Paragraph Style", "Name:", name.empty() ? "New style" : name,
+                     "Made from the selected paragraph. A name already in the list "
+                     "redefines that style, and its paragraphs follow.",
+                     [this](const std::string &n) { m_view->define_style(n); });
+        };
+        m_para_panel = new ParagraphPanel(para_popup, std::move(hooks));
+        /* A resizable window keeps its size as its preferred size, so the
+         * popup would stay at PopupButton's 320 x 250 and squeeze the rows
+         * until they clip. Fixed, it fits the panel. */
+        para_popup->set_resizable(false);
 
         m_kern = new CheckBox(toolbar, "Kerning", [this](bool on) {
             for_each_run([on](CharStyle &cs) { cs.kerning = on; });
@@ -576,6 +602,8 @@ public:
         new Separator(element->popup());
         add_cmd(element, "Type Specs...", {{SYSTEM_COMMAND_MOD, GLFW_KEY_T}},
                 [this] { type_specs(); });
+        add_cmd(element, "Paragraph...", {{SYSTEM_COMMAND_MOD, GLFW_KEY_M}},
+                [this] { toggle_paragraph_panel(); });
     }
 
     /* ---- Control palette ------------------------------------------- */
@@ -710,6 +738,7 @@ public:
             new Label(type, label, "sans-bold");
             auto *box = new FloatSpin(type, 0.f, step, lo, hi);
             box->number_format("%.2f");
+            box->set_default_value("");     // left blank (mixed): no change
             box->set_units(units);
             box->set_fixed_size(Vector2i(width, 26));
             return box;
@@ -786,8 +815,10 @@ public:
         });
         m_leading->set_format("([Aa]uto)|([-+]?[0-9]*\\.?[0-9]+)");
         m_leading->TextBox::set_callback([this](const std::string &s) {
+            if (s.empty())
+                return false;
             float lead = 0;
-            if (!s.empty() && s != "Auto" && s != "auto") {
+            if (s != "Auto" && s != "auto") {
                 char *end = nullptr;
                 lead = std::strtof(s.c_str(), &end);
                 if (end == s.c_str())
@@ -816,6 +847,27 @@ public:
             m_baseline->set_value(shift);
             palette_change(m_baseline, [&] {
                 m_view->apply_type([shift](CharStyle &cs) { cs.baseline_shift = shift; });
+            });
+            return true;
+        });
+
+        /* Line spacing is the paragraph's: a multiple of each line's
+         * leading. */
+        m_spacing = type_number("Spacing", "\u00D7", 76, 0.1f, kMinLineSpacing, kMaxLineSpacing);
+        m_spacing->set_tooltip("Line spacing, a multiple of the leading: 1 single, 2 double");
+        m_spacing->set_blank_value([this] {
+            const auto paras = m_view->selected_paragraphs();
+            return paras.empty() ? 1.f : paras.front()->style.line_spacing;
+        });
+        m_spacing->TextBox::set_callback([this](const std::string &s) {
+            char *end = nullptr;
+            const float v = std::strtof(s.c_str(), &end);
+            if (end == s.c_str())
+                return false;
+            const float spacing = std::clamp(v, kMinLineSpacing, kMaxLineSpacing);
+            m_spacing->set_value(spacing);
+            palette_change(m_spacing, [&] {
+                m_view->apply_para([spacing](ParaStyle &ps) { ps.line_spacing = spacing; });
             });
             return true;
         });
@@ -1032,28 +1084,32 @@ public:
         if (!m_star->focused())
             m_star->set_value((int) sh.star_inset);
         sync_type();
-        sync_align();
+        sync_spacing();
+        if (m_para_panel)
+            m_para_panel->load(m_view->selected_paragraphs(), m_view->document().styles);
     }
 
-    /* The toolbar alignment menu follows the selected lines. A mixed
-     * selection shows an em dash until the user picks one. */
-    void sync_align() {
-        if (!m_align)
+    void toggle_paragraph_panel() {
+        if (!m_para_btn)
             return;
-        Align a = Align::Left;
+        m_para_btn->set_pushed(!m_para_btn->pushed());
+        perform_layout();
+    }
+
+    void sync_spacing() {
+        if (!m_spacing)
+            return;
+        const auto paras = m_view->selected_paragraphs();
+        m_spacing->set_enabled(!paras.empty());
+        if (m_spacing->focused() || m_spacing->spinning())
+            return;                      // it shows the value being set
         bool mixed = false;
-        const bool ok = m_view->text_align(a, mixed);
-        m_align->set_enabled(ok);
-        if (!ok)
-            return;
-        m_syncing_align = true;
-        if (mixed) {
-            m_align->set_selected_index(-1);
-            m_align->set_caption("\u2014");
-        } else if (m_align->selected_index() != (int) a) {
-            m_align->set_selected_index((int) a);
-        }
-        m_syncing_align = false;
+        for (const Paragraph *p : paras)
+            mixed |= p->style.line_spacing != paras.front()->style.line_spacing;
+        if (paras.empty() || mixed)
+            m_spacing->TextBox::set_value("");
+        else
+            m_spacing->set_value(paras.front()->style.line_spacing);
     }
 
     void sync_type() {
@@ -1098,13 +1154,13 @@ public:
             }
         }
         m_syncing_type = false;
-        if (!m_size->focused()) {
+        if (!m_size->focused() && !m_size->spinning()) {
             if (t.mix_size)
                 m_size->TextBox::set_value("");
             else
                 m_size->set_value(t.size);
         }
-        if (!m_leading->focused()) {
+        if (!m_leading->focused() && !m_leading->spinning()) {
             if (t.mix_leading)
                 m_leading->TextBox::set_value("");
             else if (t.leading <= 0.f)
@@ -1112,7 +1168,7 @@ public:
             else
                 m_leading->set_value(t.leading);
         }
-        if (!m_baseline->focused()) {
+        if (!m_baseline->focused() && !m_baseline->spinning()) {
             if (t.mix_baseline)
                 m_baseline->TextBox::set_value("");
             else
@@ -1175,10 +1231,6 @@ public:
         Vector2f v = m_view->page_origin() + page_pt;
         m_scroll->set_pan_offset(ZoomScrollPanel::Vector2d(m_scroll->size().x() * 0.5 - v.x() * z,
                                                            m_scroll->size().y() * 0.5 - v.y() * z));
-    }
-
-    void set_body_align(Align a) {
-        m_view->apply_align(a);
     }
 
     template <typename F> void for_each_run(F fn) {
@@ -1450,7 +1502,6 @@ private:
     ZoomScrollPanel *m_scroll = nullptr;
     ComposerView    *m_view = nullptr;
     PageIconStrip   *m_pages = nullptr;
-    Dropdown        *m_align = nullptr;
     Dropdown        *m_zoom_menu = nullptr;
     Button          *m_undo_btn = nullptr, *m_redo_btn = nullptr;
     CheckBox        *m_kern = nullptr, *m_baselines = nullptr, *m_loose = nullptr;
@@ -1470,11 +1521,13 @@ private:
     std::vector<FaceDesc> m_styles;
     std::string     m_style_family;
     bool            m_syncing_type = false;
-    bool            m_syncing_align = false;
+    PopupButton     *m_para_btn = nullptr;
+    ParagraphPanel  *m_para_panel = nullptr;
     Dropdown        *m_font = nullptr, *m_face = nullptr;
     Button          *m_specs = nullptr;
     TypeSpecsPanel  *m_type_panel = nullptr;
     FloatSpin       *m_size = nullptr, *m_leading = nullptr, *m_baseline = nullptr;
+    FloatSpin       *m_spacing = nullptr;
     MenuItem        *m_remove_page = nullptr, *m_move_earlier = nullptr, *m_move_later = nullptr;
     MenuItem        *m_hide_page = nullptr;
     MenuItem        *m_to_front = nullptr, *m_forward = nullptr, *m_backward = nullptr, *m_to_back = nullptr;
@@ -1633,6 +1686,7 @@ int main(int argc, char **argv) {
         if (no_snap)
             app->set_snap(false);
         for (const Action &act : actions) {
+            app->do_widget_cleanup();    // as the main loop does between events
             app->perform_layout();
             app->draw_all();
             switch (act.kind) {

@@ -77,11 +77,6 @@ std::string flate(const std::string &in) {
     return out;
 }
 
-size_t char_len(const std::string &s, size_t i) {
-    unsigned char c = (unsigned char) s[i];
-    return c < 0x80 ? 1 : c >= 0xF0 ? 4 : c >= 0xE0 ? 3 : 2;
-}
-
 /* ---- The writer ------------------------------------------------------------
  *
  * Objects are collected as strings; byte offsets and the xref table are
@@ -164,7 +159,8 @@ void collect_unicodes(const PageDoc &doc, const std::vector<Composition> &comps,
                     continue;
             }
             const std::string text = paragraph_text(story.paragraphs[l.para]);
-            for (const GlyphRun &r : l.runs) {
+            for (size_t ri = 0; ri < l.runs.size(); ++ri) {
+                const GlyphRun &r = l.runs[ri];
                 if (!r.font)
                     continue;
                 PdfFont &pf = fonts[r.font];
@@ -176,16 +172,27 @@ void collect_unicodes(const PageDoc &doc, const std::vector<Composition> &comps,
                     pf.gids.insert(g.gid);
                     if (pf.unicode.count(g.gid) || (g.flags & PlacedGlyph::Inserted))
                         continue;
+                    /* A ligature's cluster is its first character. The end is
+                     * the next glyph on the line, including a later run: the
+                     * last glyph of a run has no neighbor inside the run, and
+                     * one character would drop the rest of "fi". */
                     uint32_t from = g.cluster, to = from;
-                    for (size_t k = i + 1; k < r.glyphs.size(); ++k)
-                        if (r.glyphs[k].cluster > from) {
-                            to = r.glyphs[k].cluster;
-                            break;
+                    bool found = false;
+                    auto take = [&](uint32_t cluster) {
+                        if (!found && cluster > from) {
+                            to = cluster;
+                            found = true;
                         }
-                    if (to <= from)
-                        to = from + (uint32_t) char_len(text, from);
+                    };
+                    for (size_t k = i + 1; k < r.glyphs.size(); ++k)
+                        take(r.glyphs[k].cluster);
+                    for (size_t rj = ri + 1; rj < l.runs.size() && !found; ++rj)
+                        for (const PlacedGlyph &ng : l.runs[rj].glyphs)
+                            take(ng.cluster);
+                    if (!found)
+                        to = l.byte_end;
                     to = std::min(to, (uint32_t) text.size());
-                    if (from < text.size())
+                    if (from < to)
                         pf.unicode[g.gid] = text.substr(from, to - from);
                 }
             }

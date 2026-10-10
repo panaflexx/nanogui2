@@ -45,7 +45,14 @@ struct CharStyle {
     Color color;
 };
 
-enum class Align { Left, Center, Right, Justify, ForceJustify };
+/* Justify sets its last line left; JustifyCenter and JustifyRight center it
+ * or set it right; ForceJustify stretches it too. */
+enum class Align { Left, Center, Right, Justify, ForceJustify, JustifyCenter, JustifyRight };
+
+inline bool is_justified(Align a) {
+    return a == Align::Justify || a == Align::ForceJustify || a == Align::JustifyCenter ||
+           a == Align::JustifyRight;
+}
 
 enum class TabAlign { Left, Center, Right, Decimal };
 
@@ -61,9 +68,14 @@ struct ParaStyle {
     float left_indent = 0.f;
     float right_indent = 0.f;
     float first_indent = 0.f;    // relative to left_indent; negative = hanging
+    float last_indent = 0.f;     // the paragraph's last line, relative to left_indent
     float space_before = 0.f;    // not applied at the top of a text block
     float space_after = 0.f;
     float autoleading = 120.f;   // percent of point size
+    /* A multiple of each line's leading, auto or fixed: 2 is double
+     * spacing, 0.5 sets lines on half their slugs. */
+    float line_spacing = 1.f;
+    float extra_spacing = 0.f;   // points added to every line, after line_spacing
 
     /* Spacing attributes (PageMaker defaults). Both are percentages of the
      * font's space width. Justified lines move word spaces between min and
@@ -87,6 +99,8 @@ struct ParaStyle {
     int   hyphen_limit = 0;
     float hyphen_zone = 36.f;
 };
+
+constexpr float kMinLineSpacing = 0.1f, kMaxLineSpacing = 3.f;
 
 struct Run {
     CharStyle   style;

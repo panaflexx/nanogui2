@@ -977,6 +977,7 @@ if (NANOGUI_BUILD_EXAMPLES)
         pagemade/src/docfile.cpp
         pagemade/src/image.cpp
         pagemade/src/dialogs.cpp
+        pagemade/src/paragraph_panel.cpp
         pagemade/src/sample.cpp)
     add_executable(pagemade_compose_test
         pagemade/src/compose_test.cpp

@@ -54,6 +54,160 @@ std::vector<Swatch> default_swatches() {
     };
 }
 
+/* ---- Paragraph styles --------------------------------------------------- */
+
+std::vector<StyleDef> default_styles() {
+    auto def = [](const char *name, const char *family, float size, float leading,
+                  auto &&para, bool bold = false, bool italic = false) {
+        StyleDef d;
+        d.name = name;
+        d.para.name = name;
+        para(d.para);
+        d.type.family = family;
+        d.type.size = size;
+        d.type.leading = leading;
+        d.type.bold = bold;
+        d.type.italic = italic;
+        return d;
+    };
+    return {
+        def("Normal", "Serif", 12, 0, [](ParaStyle &) {}),
+        def("Body text", "Serif", 10.5f, 13, [](ParaStyle &p) {
+            p.align = Align::Justify;
+            p.first_indent = 12;
+        }),
+        def("Body first", "Serif", 10.5f, 13, [](ParaStyle &p) { p.align = Align::Justify; }),
+        def("Headline", "Display", 34, 36, [](ParaStyle &p) {
+            p.align = Align::Center;
+            p.space_after = 6;
+            p.hyphenate = false;
+        }, true),
+        def("Subhead 1", "Sans", 14, 17, [](ParaStyle &p) {
+            p.space_before = 12;
+            p.space_after = 3;
+            p.hyphenate = false;
+        }, true),
+        def("Subhead 2", "Sans", 11, 13, [](ParaStyle &p) {
+            p.space_before = 9;
+            p.space_after = 2;
+            p.hyphenate = false;
+        }, true),
+        def("Caption", "Sans", 8.5f, 10.5f, [](ParaStyle &p) { p.space_before = 4; }, false, true),
+        def("Hanging indent", "Serif", 10.5f, 13, [](ParaStyle &p) {
+            p.left_indent = 18;
+            p.first_indent = -18;
+            p.space_after = 4;
+        }),
+        def("Pull quote", "Serif", 16, 20, [](ParaStyle &p) {
+            p.align = Align::Center;
+            p.left_indent = p.right_indent = 18;
+            p.space_before = p.space_after = 12;
+            p.hyphenate = false;
+        }, false, true),
+        def("Byline", "Sans", 8.5f, 0, [](ParaStyle &p) {
+            p.align = Align::Center;
+            p.space_before = 12;
+        }, true),
+    };
+}
+
+const StyleDef *PageDoc::find_style(const std::string &name) const {
+    for (const StyleDef &s : styles)
+        if (s.name == name)
+            return &s;
+    return nullptr;
+}
+
+StyleDef *PageDoc::find_style(const std::string &name) {
+    return const_cast<StyleDef *>(static_cast<const PageDoc *>(this)->find_style(name));
+}
+
+const Run *base_run(const Paragraph &p) {
+    const Run *best = nullptr;
+    for (const Run &r : p.runs)
+        if (!best || r.text.size() > best->text.size())
+            best = &r;
+    return best;
+}
+
+namespace {
+
+bool same_tabs(const std::vector<TabStop> &a, const std::vector<TabStop> &b) {
+    if (a.size() != b.size())
+        return false;
+    for (size_t i = 0; i < a.size(); ++i)
+        if (a[i].pos != b[i].pos || a[i].align != b[i].align || a[i].leader != b[i].leader)
+            return false;
+    return true;
+}
+
+/* Everything but the name. */
+bool same_format(const ParaStyle &a, const ParaStyle &b) {
+    return a.align == b.align && a.left_indent == b.left_indent &&
+           a.right_indent == b.right_indent && a.first_indent == b.first_indent &&
+           a.last_indent == b.last_indent && a.space_before == b.space_before &&
+           a.space_after == b.space_after && a.autoleading == b.autoleading &&
+           a.line_spacing == b.line_spacing && a.extra_spacing == b.extra_spacing &&
+           a.word_min == b.word_min && a.word_desired == b.word_desired &&
+           a.word_max == b.word_max && a.letter_min == b.letter_min &&
+           a.letter_desired == b.letter_desired && a.letter_max == b.letter_max &&
+           same_tabs(a.tabs, b.tabs) && a.default_tab == b.default_tab &&
+           a.hyphenate == b.hyphenate && a.hyphen_limit == b.hyphen_limit &&
+           a.hyphen_zone == b.hyphen_zone;
+}
+
+/* The attributes a style sets on its text. */
+bool same_type(const CharStyle &a, const CharStyle &b) {
+    return a.family == b.family && a.face == b.face && a.bold == b.bold &&
+           a.italic == b.italic && a.caps == b.caps && a.size == b.size &&
+           a.leading == b.leading && a.tracking == b.tracking && a.hscale == b.hscale;
+}
+
+} // namespace
+
+void apply_style(Paragraph &p, const StyleDef &def) {
+    p.style = def.para;
+    p.style.name = def.name;
+    const Run *base = base_run(p);
+    const bool base_bold = base ? base->style.bold : false;
+    const bool base_italic = base ? base->style.italic : false;
+    for (Run &r : p.runs) {
+        const bool em_bold = r.style.bold != base_bold;
+        const bool em_italic = r.style.italic != base_italic;
+        CharStyle &cs = r.style;
+        cs.family = def.type.family;
+        cs.face = (em_bold || em_italic) ? std::string() : def.type.face;
+        cs.bold = def.type.bold != em_bold;
+        cs.italic = def.type.italic != em_italic;
+        cs.caps = def.type.caps;
+        cs.size = def.type.size;
+        cs.leading = def.type.leading;
+        cs.tracking = def.type.tracking;
+        cs.hscale = def.type.hscale;
+    }
+}
+
+bool style_overridden(const Paragraph &p, const StyleDef &def) {
+    if (!same_format(p.style, def.para))
+        return true;
+    const Run *base = base_run(p);
+    return base && !same_type(base->style, def.type);
+}
+
+StyleDef style_from(const std::string &name, const Paragraph &p) {
+    StyleDef d;
+    d.name = name;
+    d.para = p.style;
+    d.para.name = name;
+    if (const Run *base = base_run(p))
+        d.type = base->style;
+    /* A style is type, not ornament. */
+    d.type.underline = d.type.strike = false;
+    d.type.baseline_shift = 0;
+    d.type.color = Color();
+    return d;
+}
+
 const Swatch *PageDoc::find_swatch(SwatchId id) const {
     for (const Swatch &s : swatches)
         if (s.id == id)

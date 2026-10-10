@@ -224,6 +224,36 @@ void show_alert(Screen *screen, const std::string &title, const std::string &mes
     d->open();
 }
 
+void ask_text(Screen *screen, const std::string &title, const std::string &label,
+              const std::string &initial, const std::string &hint,
+              std::function<void(const std::string &)> done) {
+    auto text = std::make_shared<std::string>(initial);
+    auto *d = new ModalDialog(screen, title);
+    Widget *row = new Widget(d->body());
+    row->set_layout(new BoxLayout(Orientation::Horizontal, Alignment::Middle, 0, 10));
+    new Label(row, label, "sans-bold");
+    TextBox *box = new TextBox(row, initial);
+    box->set_editable(true);
+    box->set_alignment(TextBox::Alignment::Left);
+    box->set_fixed_size(Vector2i(260, 28));
+    box->set_callback([text](const std::string &v) { *text = v; return true; });
+    if (!hint.empty()) {
+        Label *h = new Label(d->body(), hint, "sans", 14);
+        h->set_fixed_size(Vector2i(320, 0));
+        h->set_color(kHintText);
+    }
+    d->add_button("Cancel", {}, ModalDialog::Role::Cancel);
+    d->add_button("OK", [text, done] {
+        std::string t = *text;
+        while (!t.empty() && std::isspace((unsigned char) t.back())) t.pop_back();
+        while (!t.empty() && std::isspace((unsigned char) t.front())) t.erase(0, 1);
+        if (!t.empty())
+            done(t);
+    }, ModalDialog::Role::Default);
+    d->open();
+    box->request_focus();
+}
+
 void ask_save_as(Screen *screen, const std::string &current_path, bool embed_assets,
                  std::function<void(const std::string &, bool)> done) {
     const bool untitled = current_path.empty();
