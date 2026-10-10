@@ -100,15 +100,30 @@ and its nanovgd renderer. The composer lays out in points and every backend
 
 ## Next, in order
 
-1. **SVG import**: nanosvg makes a group of path items in the shape format. This
+1. **Keep options and breaks**: keep lines together, keep with next, widow and
+   orphan control (minimum lines at the top and bottom of a text block), start
+   in the next text block, and a frame break character (Ctrl/Cmd+Return).
+   The composer gains lookahead at frame ends: a paragraph that breaks a rule
+   is composed again from a checkpoint.
+2. **Character styles and swatch colors**: text color is a swatch with a tint,
+   as shapes are; named character styles set only the attributes they define
+   (an Emphasis style is just italic), with a menu that shows overrides.
+3. **Special characters and smart quotes**: curly quotes as you type (a
+   preference); em and en dashes; em, en, thin and hair spaces that keep their
+   width when justified; non-breaking space and hyphen; a No break attribute
+   that keeps a word or phrase on one line. Insert them from a menu.
+4. **Bullets and numbering**: a list attribute on the paragraph (bullet or
+   number format, start value), the marker set in the hanging indent, numbers
+   counted through consecutive list paragraphs.
+5. **SVG import**: nanosvg makes a group of path items in the shape format. This
    step brings even-odd fill and per-subpath winding to nanovgd. The fill rule
    reaches the backend through the `renderFill` hook, which the Metal backend
    (`ext/nanovg_metal`) implements too, so Mac builds need the matching change.
    Multi-stop gradients come with it. Rectangular picture crops are already
    clipped; this step is where a clip becomes an arbitrary path.
-2. **Text wrap**: lines ask which horizontal spans are free at their height,
+6. **Text wrap**: lines ask which horizontal spans are free at their height,
    from the wrap outlines of items in front of the text.
-3. **Print dialog**: choose the printer, copies and page range. Linux first (the
+7. **Print dialog**: choose the printer, copies and page range. Linux first (the
    CUPS API with our own dialog, or GTK's), then Mac (NSPrintOperation on the
    PDF), then Windows. Today printing exports a PDF and hands it to `lp`.
 
@@ -117,7 +132,6 @@ and its nanovgd renderer. The composer lays out in points and every backend
 - Small text on screen: a nanovgd entry point that draws cached glyph bitmaps by
   glyph id at exact composed positions; cache drawn pages as display lists.
 - Paragraph-at-a-time (Knuth-Plass) composer; right-to-left text.
-- Text colors as swatches (character styles still carry RGB).
 - Groups; master pages; spreads or a continuous page view (the view shows one
   page at a time). An asset library that moves pictures between documents and
   pages; the publication's asset table is the record it will move.
@@ -133,22 +147,38 @@ and its nanovgd renderer. The composer lays out in points and every backend
 - Adding and editing swatches (the Colors palette); the palette's swatch menus
   are built when a document is loaded.
 - Fills and strokes for text blocks (PageMaker 7 frames).
-- Text formatting, roughly in order of payoff:
+- Text and type, the gaps from professional layout software (outlines and
+  tables are left out for now), roughly in order of payoff:
+  - Styles: "based on" chains and "next style" for paragraph styles, and a
+    Styles palette for editing a style without a paragraph to make it from.
   - The rest of ParaStyle in the panel (or a Specs dialog off it):
-    autoleading percent, hyphenation, the spacing attributes, tab stops.
-  - Styles that carry character color, and a Styles palette for editing a
-    style without a paragraph to make it from (and "based on" chains).
-  - Text color from swatches (with tint), replacing CharStyle's RGB.
-  - Keep lines together, keep with next, and widow/orphan control. The
-    composer breaks frames line by line today, so this needs lookahead at
-    frame ends.
-  - Superscript/subscript (PageMaker's Position: size and offset percents)
-    and real small caps or old-style figures from OpenType features (smcp,
-    onum, lnum, tnum) when the face has them.
+    autoleading percent, hyphenation settings, the spacing attributes, tab
+    stops.
+  - OpenType features: old-style, lining, tabular and proportional figures,
+    fractions, ordinals, discretionary ligatures, stylistic sets, swashes.
+    Superscript and subscript from sups/subs, synthesized (PageMaker's size
+    and position percents) when the face has neither.
+  - Manual kerning at the caret with keyboard nudges; tracking shortcuts.
+  - Optical margin alignment (hanging punctuation), and glyph scaling
+    (about ±3%) as a third justification tool after word and letter spacing.
+  - Paragraph-at-a-time (Knuth-Plass) composer (see above).
+  - Underline and strikethrough options: weight, offset, color, dashes.
+  - Text frame options: inset, vertical alignment (top, center, bottom,
+    justified), first-baseline offset, columns inside one frame, paragraphs
+    that span columns; a baseline grid with align to grid.
+  - Inline graphics anchored in the text flow (they share plumbing with
+    text wrap).
+  - Find and Change, including formatting; spell check (Hunspell) with a
+    language per paragraph or run, which hyphenation then follows (English
+    only today); the Story Editor; show invisibles.
+  - Fonts: a missing-font alert on open (the list is already collected),
+    Find Font, per-glyph fallback to another font (emoji, CJK), variable
+    font axes.
+  - Automatic page number markers (with master pages).
   - Paragraph rules (lines above/below). Drop cap options: a raised cap
     (baseline on line 1), a font or color of its own, and text that follows
     the cap's outline instead of its box.
-  - Align to grid: snap baselines to a leading grid across columns.
+  - Nested numbering levels and list continuation across interruptions.
   - Whether a block selected with the pointer should restyle its whole story
     (PageMaker does) rather than only the text in that block (pagemade does).
 
