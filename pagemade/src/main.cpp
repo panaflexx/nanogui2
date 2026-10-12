@@ -4,6 +4,8 @@
  * One page on a pasteboard with text blocks and shapes. The menu bar is
  * PageMaker's (File, Edit, Layout, Element): pages are inserted, removed,
  * reordered and hidden from Layout, and Arrange lives under Element.
+ * Element > Image Assets... browses pictures in this publication and in
+ * folders, and Remove Unused drops pictures that are not placed.
  * Page icons along the bottom of the window show the document — click one
  * to turn to it, drag to rearrange. Beside them, three buttons show one
  * page, a side-by-side spread, or every page in a stack. File > New Document
@@ -54,6 +56,7 @@
 #include "composer/hyphenator.h"
 #include "composerview.h"
 #include "dialogs.h"
+#include "image_assets.h"
 #include "docfile.h"
 #include "default_fonts.h"
 #include "font_menu_ui.h"
@@ -477,7 +480,28 @@ public:
         };
         m_view->on_selection_change = [this] { sync_palette(); update_status(); };
         m_view->on_page_change = [this] { update_status(); };
-        m_view->on_document_change = [this] { update_title(); };
+        m_view->on_document_change = [this] {
+            update_title();
+            if (m_assets)
+                m_assets->refresh();
+        };
+        /* Files dropped on a page are read off the UI thread, then placed.
+         * A run of files steps down the page so they don't stack exactly. */
+        m_view->on_drop_files = [this](const std::vector<std::string> &paths, size_t page, Point at) {
+            for (size_t i = 0; i < paths.size(); ++i) {
+                Point where = at;
+                where.x += 12.f * (float) i;
+                where.y += 12.f * (float) i;
+                const std::string path = paths[i];
+                const std::string name = std::filesystem::path(path).filename().string();
+                m_view->place_image_file(path, page, &where, [this, name](const std::string &error) {
+                    if (!error.empty())
+                        show_alert(this, "The picture couldn't be placed.", error);
+                    else
+                        set_note("placed " + name);
+                });
+            }
+        };
 
         m_pages = new PageIconStrip(window, m_view);
         m_pages->on_view = [this] { fit_page(); };
@@ -498,6 +522,17 @@ public:
     }
 
     ~PagemadeApp() override {
+        /* The asset window's thumbnail loader reads m_images. Dispose it
+         * before the members die: Screen destroys its children afterwards. */
+        std::vector<ImageAssetsPanel *> panels;
+        for (Widget *child : children())
+            if (auto *panel = dynamic_cast<ImageAssetsPanel *>(child))
+                panels.push_back(panel);
+        for (ImageAssetsPanel *panel : panels) {
+            panel->set_close_callback({});
+            panel->dispose();
+        }
+        m_assets = nullptr;
         if (s_instance == this)
             s_instance = nullptr;
     }
@@ -594,11 +629,15 @@ public:
                                  false, false, folder);
         if (paths.empty() || paths[0].empty())
             return;
-        std::string error;
-        if (!m_view->place_image_file(paths[0], &error))
-            show_alert(this, "The picture couldn't be placed.", error);
-        else
-            set_note("placed " + std::filesystem::path(paths[0]).filename().string());
+        const std::string path = paths[0];
+        const std::string name = std::filesystem::path(path).filename().string();
+        m_view->place_image_file(path, m_view->page_index(), nullptr,
+                                 [this, name](const std::string &error) {
+            if (!error.empty())
+                show_alert(this, "The picture couldn't be placed.", error);
+            else
+                set_note("placed " + name);
+        });
     }
 
     /* Open without asking about the current publication (callers do that). */
@@ -779,6 +818,9 @@ public:
                     m_char_btn->set_pushed(!m_char_btn->pushed());
                     perform_layout();
                 });
+        new Separator(element->popup());
+        add_cmd(element, "Image Assets...", {}, [this] { show_image_assets(); });
+        add_cmd(element, "Remove Unused", {}, [this] { m_view->remove_unused_images(); });
     }
 
     /* ---- Control palette ------------------------------------------- */
@@ -1184,6 +1226,23 @@ public:
         });
     }
 
+    void show_image_assets() {
+        if (!m_assets) {
+            m_assets = new ImageAssetsPanel(this, m_view, &m_images);
+            m_assets->set_close_callback([this] {
+                ImageAssetsPanel *panel = m_assets;
+                m_assets = nullptr;
+                if (panel)
+                    panel->close_soon();
+            });
+            m_assets->center();
+        } else {
+            move_window_to_front(m_assets);
+        }
+        m_assets->refresh();
+        m_assets->request_focus();
+    }
+
     void type_specs() {
         ComposerView::TypeStyle t;
         if (!m_view || !m_view->type_style(t))
@@ -1518,7 +1577,14 @@ public:
     }
 
     bool export_pdf_to(const std::string &path) {
-        return export_pdf(path, m_view->document(), m_view->compositions(), &m_images);
+        /* Off-screen linked pictures are unloaded. Export needs the bytes,
+         * or the page is drawn with a gray stand-in. */
+        const PageDoc &doc = m_view->document();
+        for (const Page &page : doc.pages)
+            for (const Item &it : page.items)
+                if (const PlacedImage *im = it.image())
+                    m_images.load(im->asset, nullptr);
+        return export_pdf(path, doc, m_view->compositions(), &m_images);
     }
 
     void export_pdf_dialog() {
@@ -1746,6 +1812,7 @@ private:
     Dropdown        *m_font = nullptr, *m_face = nullptr;
     Button          *m_specs = nullptr;
     TypeSpecsPanel  *m_type_panel = nullptr;
+    ImageAssetsPanel *m_assets = nullptr;
     FloatSpin       *m_size = nullptr, *m_leading = nullptr, *m_baseline = nullptr;
     FloatSpin       *m_spacing = nullptr;
     MenuItem        *m_remove_page = nullptr, *m_move_earlier = nullptr, *m_move_later = nullptr;

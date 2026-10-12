@@ -77,7 +77,9 @@ public:
     /// Metadata + file info for one catalogued image.
     struct Entry {
         std::string name;                 ///< Base file name (display label)
-        std::string path;                 ///< Full path to the image file
+        std::string path;                 ///< Full path to the image file (may be empty)
+        std::string label;                ///< Shown instead of name when set
+        uint32_t    user_id = 0;          ///< Caller's id, 0 if none
         uint64_t    file_size = 0;        ///< File size in bytes
         int         orig_width  = 0;      ///< Displayed image width  (0 until loaded)
         int         orig_height = 0;      ///< Displayed image height (0 until loaded)
@@ -87,6 +89,13 @@ public:
         bool loaded() const { return thumb_width > 0; }
     };
 
+    /// malloc'd upright RGBA (freed with free), or null to load `path` instead.
+    using Loader = std::function<unsigned char *(const Entry &entry, int max_edge,
+                                                 int *w, int *h)>;
+    /// Draws a mark on a cell (use count, missing file). `size` is the cell box.
+    using BadgeCallback = std::function<void(NVGcontext *ctx, const Entry &entry,
+                                             float x, float y, float size)>;
+
     ImageStashWidget(Widget *parent, int thumb_size = 128);
     virtual ~ImageStashWidget();
 
@@ -95,8 +104,15 @@ public:
     void add_image(const std::string &path);
     /// Catalogue several image files (thread-safe).
     void add_images(const std::vector<std::string> &paths);
+    /// Catalogue one entry, including one with no file (thread-safe).
+    void add_entry(const Entry &entry);
     /// Remove all images and sections and reset the atlas.
     void clear();
+
+    /// Thumbnail and preview pixels. Null falls back to loading `path`.
+    void set_loader(const Loader &loader);
+    /// Called while a cell is drawn. Empty draws nothing.
+    void set_badge_callback(const BadgeCallback &cb);
 
     /// Append a section header after the current items (thread-safe).
     void add_section(const std::string &text,
@@ -223,7 +239,8 @@ protected:
 
     /// Cross-thread input, drained into m_items/m_sections by rebuild_layout.
     struct PendingItem {
-        Entry photo;            ///< photo to catalogue; empty path = section
+        Entry photo;            ///< photo to catalogue
+        bool section = false;   ///< a header, not a photo (path may be empty either way)
         std::string text;       ///< section text
         int  align = 0;
         bool rule = false;
@@ -321,7 +338,8 @@ protected:
     pthread_t       m_highres_thread;
     pthread_mutex_t m_highres_mutex;
     pthread_cond_t  m_highres_cond;
-    std::string     m_highres_path;           ///< pending request, empty = none
+    bool            m_highres_pending = false;
+    Entry           m_highres_entry;
     int  m_highres_max_w = 0, m_highres_max_h = 0;   ///< downscale target (px)
     int             m_highres_req = 0;        ///< bumped by each request/release
     unsigned char  *m_pending_highres = nullptr;
@@ -342,6 +360,8 @@ protected:
     std::function<void(int)> m_selection_callback;
     std::function<void(int, DragData &)> m_drag_data_callback;
     std::function<bool(const std::vector<std::string> &)> m_drop_callback;
+    Loader m_loader;
+    BadgeCallback m_badge;
 };
 
 NAMESPACE_END(nanogui)

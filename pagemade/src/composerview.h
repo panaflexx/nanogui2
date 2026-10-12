@@ -59,15 +59,18 @@
 #include "composer/edit.h"
 #include "drawlist.h"
 
+#include <atomic>
 #include <deque>
 #include <functional>
 #include <map>
+#include <memory>
 #include <vector>
 
 class ComposerView : public nanogui::Widget {
 public:
     ComposerView(nanogui::Widget *parent, const pagemade::FontLibrary *fonts,
                  const pagemade::Hyphenator *hyphenator = nullptr);
+    ~ComposerView() override;
 
     void set_document(pagemade::PageDoc doc);
     /* Edit freely, then call recompose(). */
@@ -99,12 +102,27 @@ public:
     void set_image_store(pagemade::ImageStore *images);
     /* Place a file: one undo step, selected, then back to the pointer.
      * The id is taken before the file is read, and a failure does not
-     * reuse it. False leaves the document unchanged. */
+     * reuse it. False leaves the document unchanged. This form reads on
+     * the caller (the command line). The other reads on a background
+     * thread and runs `done` on the UI thread; an empty error placed it.
+     * A null point is the margin of `page`. */
     bool place_image_file(const std::string &path, std::string *error);
-    /* Another frame of a picture the publication already has. */
+    void place_image_file(const std::string &path, size_t page, const pagemade::Point *at,
+                          std::function<void(const std::string &error)> done);
+    /* One undo step that adds a picture the store already holds, without
+     * placing it. */
+    void add_asset(pagemade::ImageAsset asset);
+    /* Read `path` off the UI thread and add_asset it. */
+    void import_asset(const std::string &path, std::function<void(const std::string &error)> done);
+    /* Another frame of a picture the publication already has, at the margin
+     * or with its top-left at `at` on the current page. */
     void place_image(uint32_t asset);
+    void place_image(uint32_t asset, const pagemade::Point &at);
     /* The same at a point: its top-left corner at `at` on `page`. */
     void place_image_at(uint32_t asset, size_t page, const pagemade::Point &at);
+    /* Take out every picture that is not placed. One undo step, and a
+     * no-op when every picture is placed. */
+    void remove_unused_images();
 
     /* Drag and drop. A publication picture (kImageAssetDragType) is placed
      * where it drops. Files ("text/uri-list") go to on_drop_files with the
@@ -369,6 +387,15 @@ private:
      * top-left at `at` on `page`. */
     void place_frame(uint32_t asset, const pagemade::ImageMetadata &meta,
                      size_t page, const pagemade::Point *at = nullptr);
+    /* Store the bytes (or a link), stamp the asset, one undo step, and
+     * optionally place it. */
+    bool commit_import(uint32_t id, const std::string &path, pagemade::ImageImport imported,
+                       size_t page, bool place, const pagemade::Point *at, std::string *error);
+    /* Load linked pictures on the pages in view; unload the others. */
+    void sync_live_images();
+    void request_image_load(uint32_t id, const std::string &path);
+    void finish_image_load(uint32_t id, const pagemade::ImageImport &imported);
+    bool image_is_live(uint32_t id) const;
     /* Print size of a picture on `page`, shrunk to fit inside the margins. */
     void frame_size(const pagemade::ImageMetadata &meta, size_t page, float &w, float &h) const;
     /* The asset id a drag offers, 0 if none. */
@@ -480,6 +507,11 @@ private:
     bool m_show_guides = true;
 
     pagemade::ImageStore *m_images = nullptr;
+    /* Cleared in the destructor so a load still in flight does not touch
+     * the view after it is gone. */
+    struct LoadGate { std::atomic<bool> open{true}; };
+    std::shared_ptr<LoadGate> m_load_gate = std::make_shared<LoadGate>();
+    std::vector<uint32_t> m_loading;
 
     /* A drag over the view: where it would land, and the frame's size (0
      * while unknown: files are only probed on drop) */

@@ -489,9 +489,16 @@ bool export_pdf(const std::string &path, const PageDoc &doc,
         for (const DrawList &list : pages)
             for (const DrawOp &op : list)
                 if (const auto *im = std::get_if<DrawImage>(&op))
-                    if (im->asset && !image_res.count(im->asset))
-                        if (const ImageStore::Entry *e = images->find(im->asset))
-                            image_res[im->asset] = embed_picture(w, *e);
+                    if (im->asset && !image_res.count(im->asset)) {
+                        ImageStore::Bytes bytes;
+                        ImageMetadata meta;
+                        if (images->export_source(im->asset, &bytes, &meta)) {
+                            ImageStore::Entry held;
+                            held.source = std::move(bytes);
+                            held.meta = std::move(meta);
+                            image_res[im->asset] = embed_picture(w, held);
+                        }
+                    }
     }
 
     /* Page streams first, so translucent colors can name ExtGState objects

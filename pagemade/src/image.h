@@ -26,6 +26,7 @@
 #include <cstdint>
 #include <map>
 #include <memory>
+#include <mutex>
 #include <string>
 #include <vector>
 
@@ -76,6 +77,36 @@ bool make_display(const uint8_t *data, size_t n, int long_edge,
 /* Read a whole file. */
 bool read_file(const std::string &path, std::vector<uint8_t> *out, std::string *error);
 
+/* 64-bit FNV-1a of `n` bytes. The same bytes always hash the same. */
+uint64_t image_bytes_hash(const uint8_t *data, size_t n);
+
+/* Size, mtime and hash of a file just read. `size` is the byte count when
+ * the file cannot be stat'd. */
+struct ImageStamp {
+    uint64_t size = 0;
+    int64_t mtime = 0;
+    uint64_t hash = 0;
+};
+
+/* Read, probe and stamp a picture file. Does not touch an ImageStore, so a
+ * background thread can run it and hand the result back. */
+struct ImageImport {
+    bool ok = false;
+    std::vector<uint8_t> bytes;
+    ImageMetadata meta;
+    ImageStamp stamp;
+    std::string error;
+};
+ImageImport read_image_import(const std::string &path);
+
+/* Ok: the file matches the stamps, or there is no file to drift (embedded,
+ * or a stamp left at 0 by an older document). Modified: size, mtime or the
+ * hash of bytes already in `images` differs. Missing: the file URI does
+ * not exist. A zero stamp is not itself a difference. */
+enum class AssetStatus { Ok, Modified, Missing };
+const char *asset_status_name(AssetStatus s);
+AssetStatus asset_status(const struct ImageAsset &asset, const class ImageStore *images);
+
 /* Full upright decode: straight RGBA, top row first, width * height * 4. */
 struct DecodedImage {
     ImageMetadata meta;
@@ -123,8 +154,9 @@ ImageLoader &image_loader();
  * loaded later: synchronously with load(), or by a loader thread that reads
  * and decodes on its own and hands the result to install(). unload() lets
  * the bytes go again; the path stays, so it can be read back. The source is
- * shared and never changed in place, so another thread can keep reading a
- * copy of the pointer while the store moves on. */
+ * shared and never changed in place. A mutex guards the map: source_of()
+ * copies the pointer for another thread (a thumbnail loader), and the
+ * pointer find() returns is for the thread that edits the store. */
 class ImageStore {
 public:
     using Bytes = std::shared_ptr<const std::vector<uint8_t>>;
@@ -162,6 +194,8 @@ public:
 
     /* A linked picture, not read yet; `meta` is the document's copy. */
     void add_link(uint32_t id, const std::string &path, const ImageMetadata &meta);
+    /* Remember where a picture's bytes are reloaded from. */
+    void set_path(uint32_t id, const std::string &path);
     /* Read a linked picture now (Save, Print, Export). True if loaded. */
     bool load(uint32_t id, std::string *error);
     /* Bytes read and probed elsewhere, with an optional display view. The
@@ -171,12 +205,19 @@ public:
     /* A larger display view decoded elsewhere from the loaded bytes. */
     void set_proxy(uint32_t id, std::vector<uint8_t> proxy, int w, int h);
     /* Drop a linked picture's bytes and display view (keeps path and meta).
-     * Pictures without a path keep their bytes: there is no file to reload. */
+     * Pictures without a path keep their bytes: there is no file to reload.
+     * Bumps the generation so a GPU cache drops the old texture. */
     bool unload(uint32_t id);
     /* Bytes held for pictures that could be unloaded (linked ones). */
     size_t unloadable_bytes() const;
 
     const Entry *find(uint32_t id) const;
+    /* A copy of the source pointer, safe to keep on another thread. */
+    Bytes source_of(uint32_t id) const;
+    /* source_of plus the metadata, under the same lock. False when unloaded. */
+    bool export_source(uint32_t id, Bytes *bytes, ImageMetadata *meta) const;
+    bool is_loaded(uint32_t id) const;
+    std::string path_of(uint32_t id) const;
     /* The current display view without decoding (it may be smaller than
      * wanted, or missing while not loaded). */
     bool cached_display(uint32_t id, const uint8_t **rgba, int *w, int *h) const;
@@ -188,6 +229,7 @@ public:
     bool display(uint32_t id, int long_edge, const uint8_t **rgba, int *w, int *h);
 
 private:
+    mutable std::recursive_mutex m_mu;
     std::map<uint32_t, Entry> m_entries;
     uint32_t m_next_id = 0;
     uint64_t m_gen = 0;

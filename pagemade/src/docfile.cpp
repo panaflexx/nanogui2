@@ -446,9 +446,9 @@ bool read_whole_file(const std::string &path, std::vector<uint8_t> *out) {
 
 std::vector<uint8_t> picture_bytes(const ImageAsset &a, const ImageStore *images) {
     if (images)
-        if (const ImageStore::Entry *e = images->find(a.id))
-            if (e->loaded())
-                return *e->source;
+        if (ImageStore::Bytes bytes = images->source_of(a.id))
+            if (!bytes->empty())
+                return *bytes;
     std::string path;
     std::vector<uint8_t> bytes;
     if (!a.source.empty() && file_path_from_uri(a.source, path) && read_whole_file(path, &bytes))
@@ -595,6 +595,11 @@ std::string make_json(const PageDoc &doc, const SaveOptions &opts, const std::ve
             j.key("source").value(a.source);
         if (a.source_size) j.key("source_size").value((double) a.source_size);
         if (a.source_mtime) j.key("source_mtime").value((double) a.source_mtime);
+        if (a.hash) {
+            char hex[17];
+            std::snprintf(hex, sizeof hex, "%016llx", (unsigned long long) a.hash);
+            j.key("hash").value(hex);
+        }
         write_image_meta(j, a.meta);
         j.end_object();
     }
@@ -1203,6 +1208,20 @@ OpenResult open_document(const std::string &path, const FontLibrary &installed,
         double stamp = 0;
         if (number(field(a, "source_size"), stamp) && stamp > 0) asset.source_size = (uint64_t) stamp;
         if (number(field(a, "source_mtime"), stamp)) asset.source_mtime = (int64_t) stamp;
+        std::string hex;
+        get(a, "hash", hex);
+        if (!hex.empty()) {
+            uint64_t h = 0;
+            for (char c : hex) {
+                int d;
+                if (c >= '0' && c <= '9') d = c - '0';
+                else if (c >= 'a' && c <= 'f') d = c - 'a' + 10;
+                else if (c >= 'A' && c <= 'F') d = c - 'A' + 10;
+                else break;
+                h = (h << 4) | (uint64_t) d;
+            }
+            asset.hash = h;
+        }
         std::string uri;
         get(a, "uri", uri);
         if (const DictValue *meta = field(a, "meta")) {
@@ -1237,6 +1256,7 @@ OpenResult open_document(const std::string &path, const FontLibrary &installed,
         const std::string uri = image_uris.count(asset.id) ? image_uris[asset.id] : std::string();
         std::vector<uint8_t> bytes;
         std::string where = asset.name.empty() ? uri : asset.name;
+        std::string link_path;
         bool got = false;
         if (is_package_ref(uri)) {
             const std::string entry = package_entry(uri);
@@ -1248,6 +1268,7 @@ OpenResult open_document(const std::string &path, const FontLibrary &installed,
                 got = true;
             }
         } else if (std::string path; file_path_from_uri(uri, path)) {
+            link_path = path;
             if (!load_linked) {
                 r.images.add_link(asset.id, path, asset.meta);   // read when needed
                 continue;
@@ -1262,9 +1283,11 @@ OpenResult open_document(const std::string &path, const FontLibrary &installed,
         }
         ImageMetadata probed;
         std::string err;
-        if (r.images.add(asset.id, std::move(bytes), &probed, &err))
+        if (r.images.add(asset.id, std::move(bytes), &probed, &err)) {
             asset.meta = std::move(probed);   // the file wins over the JSON copy
-        else
+            if (!link_path.empty())
+                r.images.set_path(asset.id, link_path);
+        } else
             r.warnings.push_back("couldn't read the picture " + where +
                                  (err.empty() ? "" : ": " + err));
     }

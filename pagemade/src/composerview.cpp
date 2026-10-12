@@ -13,6 +13,7 @@
 #include <algorithm>
 #include <cmath>
 #include <cstdlib>
+#include <thread>
 
 using namespace nanogui;
 using namespace pagemade;
@@ -123,6 +124,11 @@ ComposerView::ComposerView(Widget *parent, const FontLibrary *fonts, const Hyphe
     set_live(true);   // zoom-dependent hairlines; never bake into a parent's draw list
 }
 
+ComposerView::~ComposerView() {
+    if (m_load_gate)
+        m_load_gate->open.store(false);
+}
+
 void ComposerView::set_document(PageDoc doc) {
     m_doc = std::move(doc);
     m_page = 0;
@@ -135,6 +141,7 @@ void ComposerView::set_document(PageDoc doc) {
     m_version = m_clean_version = ++m_next_version;   // as loaded: unmodified
     recompose();
     selection_changed();
+    sync_live_images();
     if (on_document_change)
         on_document_change();
 }
@@ -248,6 +255,7 @@ void ComposerView::restore_snapshot() {
     }
     recompose();
     selection_changed();
+    sync_live_images();
     if (on_page_change)
         on_page_change();
     if (screen())
@@ -335,6 +343,7 @@ void ComposerView::set_page_view(PageView view) {
     if (m_page_view == view)
         return;
     m_page_view = view;
+    sync_live_images();
     if (screen()) {
         screen()->perform_layout();
         screen()->redraw();
@@ -1654,6 +1663,7 @@ void ComposerView::page_changed() {
     m_burst_open = false;
     m_selecting = false;
     selection_changed();
+    sync_live_images();
     if (on_page_change)
         on_page_change();
     if (screen())
@@ -2455,12 +2465,12 @@ void ComposerView::frame_size(const ImageMetadata &meta, size_t page, float &pw,
 
 void ComposerView::place_frame(uint32_t asset, const ImageMetadata &meta,
                                size_t page, const Point *at) {
-    if (page != m_page)
-        show_page(page);
+    if (page >= m_doc.pages.size())
+        return;
     float pw, ph;
-    frame_size(meta, m_page, pw, ph);
+    frame_size(meta, page, pw, ph);
     float left = 0.f, right = 0.f;
-    page_side_margins(m_doc.setup, m_page, left, right);
+    page_side_margins(m_doc.setup, page, left, right);
     Item it;
     it.w = pw;
     it.h = ph;
@@ -2473,7 +2483,13 @@ void ComposerView::place_frame(uint32_t asset, const ImageMetadata &meta,
     im.w = pw;
     im.h = ph;
     it.content = im;
-    m_sel = {m_doc.add_item(m_page, it)};
+    /* The item exists before the page turns, so a live-image sync sees it. */
+    const ItemId id = m_doc.add_item(page, it);
+    if (page != m_page)
+        show_page(page);
+    else
+        sync_live_images();
+    m_sel = {id};
     m_edit_story = 0;
     if (m_tool != Tool::Pointer)
         set_tool(Tool::Pointer);
@@ -2481,6 +2497,52 @@ void ComposerView::place_frame(uint32_t asset, const ImageMetadata &meta,
         selection_changed();
     if (screen())
         screen()->redraw();
+}
+
+namespace {
+
+std::string image_leaf_name(const std::string &path) {
+    const size_t slash = path.find_last_of("/\\");
+    return slash == std::string::npos ? path : path.substr(slash + 1);
+}
+
+} // namespace
+
+bool ComposerView::commit_import(uint32_t id, const std::string &path, ImageImport imported,
+                                 size_t page, bool place, const Point *at, std::string *error) {
+    if (!m_images) {
+        if (error) *error = "pictures aren't available";
+        return false;
+    }
+    if (!imported.ok) {
+        if (error) *error = imported.error.empty() ? "couldn't read the picture" : imported.error;
+        return false;
+    }
+    ImageMetadata meta = imported.meta;
+    if (!imported.bytes.empty()) {
+        if (!m_images->add(id, std::move(imported.bytes), &meta, error))
+            return false;
+        m_images->set_path(id, path);
+    } else {
+        m_images->add_link(id, path, meta);
+    }
+    ImageAsset asset;
+    asset.id = id;
+    asset.name = image_leaf_name(path);
+    asset.source = file_uri(path);
+    asset.meta = meta;
+    asset.source_size = imported.stamp.size;
+    asset.source_mtime = imported.stamp.mtime;
+    asset.hash = imported.stamp.hash;
+    push_undo();
+    m_doc.add_image(std::move(asset));
+    if (place)
+        place_frame(id, meta, page, at);
+    else
+        sync_live_images();
+    if (on_document_change)
+        on_document_change();
+    return true;
 }
 
 bool ComposerView::place_image_file(const std::string &path, std::string *error) {
@@ -2491,19 +2553,87 @@ bool ComposerView::place_image_file(const std::string &path, std::string *error)
     /* Taken before the read, and not given back: undo must not hand this
      * id to a later picture while a redo still names it. */
     const uint32_t id = m_images->take_id();
-    ImageMetadata meta;
-    if (!m_images->load_file(id, path, &meta, error))
-        return false;
+    return commit_import(id, path, read_image_import(path), m_page, true, nullptr, error);
+}
+
+void ComposerView::place_image_file(const std::string &path, size_t page, const Point *at,
+                                    std::function<void(const std::string &error)> done) {
+    if (!m_images) {
+        if (done) done("pictures aren't available");
+        return;
+    }
+    const uint32_t id = m_images->take_id();
+    const bool have_at = at != nullptr;
+    const Point where = at ? *at : Point();
+    auto gate = m_load_gate;
+    ref<ComposerView> self = this;
+    ComposerView *view = this; /* ref's const operator-> won't call this */
+    std::thread([gate, self, view, path, id, page, have_at, where, done]() {
+        auto held = std::make_shared<ImageImport>(read_image_import(path));
+        async([gate, self, view, path, id, page, have_at, where, done, held]() {
+            if (!gate->open)
+                return;
+            std::string err;
+            const Point *drop = have_at ? &where : nullptr;
+            view->commit_import(id, path, std::move(*held), page, true, drop, &err);
+            if (done)
+                done(err);
+        });
+    }).detach();
+}
+
+void ComposerView::import_asset(const std::string &path,
+                                std::function<void(const std::string &error)> done) {
+    if (!m_images) {
+        if (done) done("pictures aren't available");
+        return;
+    }
+    const uint32_t id = m_images->take_id();
+    auto gate = m_load_gate;
+    ref<ComposerView> self = this;
+    ComposerView *view = this;
+    std::thread([gate, self, view, path, id, done]() {
+        ImageImport imported = read_image_import(path);
+        imported.bytes.clear();          // a link: the file is read when placed
+        auto held = std::make_shared<ImageImport>(std::move(imported));
+        async([gate, self, view, path, id, done, held]() {
+            if (!gate->open)
+                return;
+            std::string err;
+            view->commit_import(id, path, std::move(*held), view->m_page, false, nullptr, &err);
+            if (done)
+                done(err);
+        });
+    }).detach();
+}
+
+void ComposerView::add_asset(ImageAsset asset) {
+    if (!asset.id || m_doc.find_image(asset.id))
+        return;
     push_undo();
-    ImageAsset asset;
-    asset.id = id;
-    const size_t slash = path.find_last_of("/\\");
-    asset.name = slash == std::string::npos ? path : path.substr(slash + 1);
-    asset.source = file_uri(path);
-    asset.meta = meta;
     m_doc.add_image(std::move(asset));
-    place_frame(id, meta, m_page);
-    return true;
+    sync_live_images();
+    if (on_document_change)
+        on_document_change();
+    if (screen())
+        screen()->redraw();
+}
+
+void ComposerView::remove_unused_images() {
+    bool any = false;
+    for (const ImageAsset &a : m_doc.images)
+        if (!m_doc.image_placed(a.id)) {
+            any = true;
+            break;
+        }
+    if (!any)
+        return;
+    push_undo();
+    m_doc.remove_unused_images();
+    if (on_document_change)
+        on_document_change();
+    if (screen())
+        screen()->redraw();
 }
 
 void ComposerView::place_image(uint32_t asset) {
@@ -2512,15 +2642,22 @@ void ComposerView::place_image(uint32_t asset) {
     const ImageStore::Entry *e = m_images->find(asset);
     if (!e)
         return;
+    const ImageMetadata meta = e->meta;
     push_undo();
     if (!m_doc.find_image(asset)) {
         ImageAsset a;
         a.id = asset;
         a.name = "image";
-        a.meta = e->meta;
+        a.meta = meta;
         m_doc.add_image(std::move(a));
     }
-    place_frame(asset, e->meta, m_page);
+    place_frame(asset, meta, m_page);
+    if (on_document_change)
+        on_document_change();
+}
+
+void ComposerView::place_image(uint32_t asset, const Point &at) {
+    place_image_at(asset, m_page, at);
 }
 
 void ComposerView::place_image_at(uint32_t asset, size_t page, const Point &at) {
@@ -2530,6 +2667,85 @@ void ComposerView::place_image_at(uint32_t asset, size_t page, const Point &at) 
     const ImageMetadata meta = a->meta;
     push_undo();
     place_frame(asset, meta, page, &at);
+    if (on_document_change)
+        on_document_change();
+}
+
+bool ComposerView::image_is_live(uint32_t id) const {
+    std::vector<PageSlot> slots;
+    float aw, ah;
+    arrangement(m_doc, m_page, m_page_view, slots, aw, ah);
+    for (const PageSlot &sl : slots) {
+        if (sl.index >= m_doc.pages.size())
+            continue;
+        for (const Item &it : m_doc.pages[sl.index].items)
+            if (const PlacedImage *im = it.image())
+                if (im->asset == id)
+                    return true;
+    }
+    return false;
+}
+
+void ComposerView::sync_live_images() {
+    if (!m_images)
+        return;
+    std::vector<PageSlot> slots;
+    float aw, ah;
+    arrangement(m_doc, m_page, m_page_view, slots, aw, ah);
+    std::vector<char> visible(m_doc.pages.size(), 0);
+    for (const PageSlot &sl : slots)
+        if (sl.index < visible.size())
+            visible[sl.index] = 1;
+    std::vector<uint32_t> live;
+    for (size_t i = 0; i < m_doc.pages.size(); ++i) {
+        if (!visible[i])
+            continue;
+        for (const Item &it : m_doc.pages[i].items)
+            if (const PlacedImage *im = it.image())
+                live.push_back(im->asset);
+    }
+    auto on_screen = [&](uint32_t id) {
+        return std::find(live.begin(), live.end(), id) != live.end();
+    };
+    for (const ImageAsset &a : m_doc.images) {
+        const std::string path = m_images->path_of(a.id);
+        const bool loaded = m_images->is_loaded(a.id);
+        if (on_screen(a.id)) {
+            if (!loaded && !path.empty())
+                request_image_load(a.id, path);
+        } else if (loaded && !path.empty()) {
+            m_images->unload(a.id);
+        }
+    }
+}
+
+void ComposerView::request_image_load(uint32_t id, const std::string &path) {
+    if (std::find(m_loading.begin(), m_loading.end(), id) != m_loading.end())
+        return;
+    m_loading.push_back(id);
+    auto gate = m_load_gate;
+    ref<ComposerView> self = this;
+    ComposerView *view = this;
+    std::thread([gate, self, view, id, path]() {
+        auto held = std::make_shared<ImageImport>(read_image_import(path));
+        async([gate, self, view, id, held]() {
+            if (!gate->open)
+                return;
+            view->finish_image_load(id, *held);
+        });
+    }).detach();
+}
+
+void ComposerView::finish_image_load(uint32_t id, const ImageImport &imported) {
+    m_loading.erase(std::remove(m_loading.begin(), m_loading.end(), id), m_loading.end());
+    if (!m_images || !imported.ok || !image_is_live(id))
+        return;
+    if (m_images->path_of(id).empty())
+        return;
+    auto bytes = std::make_shared<const std::vector<uint8_t>>(imported.bytes);
+    m_images->install(id, bytes, imported.meta, {}, 0, 0);
+    if (screen())
+        screen()->redraw();
 }
 
 /* ---- Drag and drop ------------------------------------------------------- */

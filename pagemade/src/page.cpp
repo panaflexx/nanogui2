@@ -567,6 +567,19 @@ bool PageDoc::remove_image(uint32_t id) {
     return true;
 }
 
+size_t PageDoc::remove_unused_images() {
+    size_t n = 0;
+    for (auto it = images.begin(); it != images.end(); ) {
+        if (!image_placed(it->id)) {
+            it = images.erase(it);
+            ++n;
+        } else {
+            ++it;
+        }
+    }
+    return n;
+}
+
 void PageDoc::bring_to_front(ItemId id) {
     for (Page &p : pages) {
         auto it = std::find_if(p.items.begin(), p.items.end(),

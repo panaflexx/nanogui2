@@ -7,6 +7,8 @@
  * it does in the rest of the toolkit. The source buffer is never rewritten.
  */
 #include "image.h"
+#include "page.h"
+#include "uri.h"
 
 #include "nanovg_exif.h"
 
@@ -17,6 +19,7 @@
 #include <cmath>
 #include <cstdio>
 #include <cstring>
+#include <sys/stat.h>
 
 namespace pagemade {
 
@@ -641,10 +644,69 @@ ImageLoader &image_loader() {
     return loader;
 }
 
+uint64_t image_bytes_hash(const uint8_t *data, size_t n) {
+    uint64_t h = 14695981039346656037ull;
+    for (size_t i = 0; i < n; ++i) {
+        h ^= data ? data[i] : 0;
+        h *= 1099511628211ull;
+    }
+    return h;
+}
+
+ImageImport read_image_import(const std::string &path) {
+    ImageImport out;
+    if (!read_file(path, &out.bytes, &out.error))
+        return out;
+    if (!image_loader().probe(out.bytes.data(), out.bytes.size(), &out.meta, &out.error)) {
+        out.bytes.clear();
+        return out;
+    }
+    out.stamp.hash = image_bytes_hash(out.bytes.data(), out.bytes.size());
+    out.stamp.size = out.bytes.size();
+    struct stat st;
+    if (stat(path.c_str(), &st) == 0) {
+        out.stamp.size = (uint64_t) st.st_size;
+        out.stamp.mtime = (int64_t) st.st_mtime;
+    }
+    out.ok = true;
+    return out;
+}
+
+const char *asset_status_name(AssetStatus s) {
+    switch (s) {
+    case AssetStatus::Missing:  return "Missing";
+    case AssetStatus::Modified: return "Modified";
+    case AssetStatus::Ok:       return "Ok";
+    }
+    return "Ok";
+}
+
+AssetStatus asset_status(const ImageAsset &asset, const ImageStore *images) {
+    std::string path;
+    if (asset.source.empty() || !file_path_from_uri(asset.source, path))
+        return AssetStatus::Ok;             // embedded, or no file to drift
+    struct stat st;
+    if (stat(path.c_str(), &st) != 0)
+        return AssetStatus::Missing;
+    if (asset.source_size && (uint64_t) st.st_size != asset.source_size)
+        return AssetStatus::Modified;
+    if (asset.source_mtime && (int64_t) st.st_mtime != asset.source_mtime)
+        return AssetStatus::Modified;
+    if (asset.hash && images) {
+        ImageStore::Bytes bytes = images->source_of(asset.id);
+        if (bytes && !bytes->empty() &&
+            image_bytes_hash(bytes->data(), bytes->size()) != asset.hash)
+            return AssetStatus::Modified;
+    }
+    return AssetStatus::Ok;
+}
+
 ImageStore::ImageStore() { bump(); }
 
-ImageStore::ImageStore(ImageStore &&o) noexcept
-    : m_entries(std::move(o.m_entries)), m_next_id(o.m_next_id) {
+ImageStore::ImageStore(ImageStore &&o) noexcept {
+    std::lock_guard<std::recursive_mutex> lock(o.m_mu);
+    m_entries = std::move(o.m_entries);
+    m_next_id = o.m_next_id;
     o.m_entries.clear();
     o.m_next_id = 0;
     bump();
@@ -653,6 +715,7 @@ ImageStore::ImageStore(ImageStore &&o) noexcept
 
 ImageStore &ImageStore::operator=(ImageStore &&o) noexcept {
     if (this != &o) {
+        std::scoped_lock lock(m_mu, o.m_mu);
         m_entries = std::move(o.m_entries);
         m_next_id = o.m_next_id;
         o.m_entries.clear();
@@ -666,14 +729,19 @@ ImageStore &ImageStore::operator=(ImageStore &&o) noexcept {
 void ImageStore::bump() { m_gen = ++g_store_gen; }
 
 void ImageStore::clear() {
+    std::lock_guard<std::recursive_mutex> lock(m_mu);
     m_entries.clear();
     m_next_id = 0;
     bump();
 }
 
-uint32_t ImageStore::take_id() { return ++m_next_id; }
+uint32_t ImageStore::take_id() {
+    std::lock_guard<std::recursive_mutex> lock(m_mu);
+    return ++m_next_id;
+}
 
 void ImageStore::note_id(uint32_t id) {
+    std::lock_guard<std::recursive_mutex> lock(m_mu);
     if (id > m_next_id)
         m_next_id = id;
 }
@@ -686,6 +754,7 @@ bool ImageStore::add(uint32_t id, std::vector<uint8_t> bytes, ImageMetadata *met
     ImageMetadata probed;
     if (!image_loader().probe(bytes.data(), bytes.size(), &probed, error))
         return false;
+    std::lock_guard<std::recursive_mutex> lock(m_mu);
     note_id(id);
     bool replace = m_entries.count(id) != 0;
     Entry e;
@@ -706,13 +775,14 @@ bool ImageStore::load_file(uint32_t id, const std::string &path, ImageMetadata *
         return false;
     if (!add(id, std::move(bytes), meta, error))
         return false;
-    m_entries[id].path = path;
+    set_path(id, path);
     return true;
 }
 
 void ImageStore::add_link(uint32_t id, const std::string &path, const ImageMetadata &meta) {
     if (id == 0)
         return;
+    std::lock_guard<std::recursive_mutex> lock(m_mu);
     note_id(id);
     Entry e;
     e.path = path;
@@ -720,34 +790,51 @@ void ImageStore::add_link(uint32_t id, const std::string &path, const ImageMetad
     m_entries[id] = std::move(e);
 }
 
-bool ImageStore::load(uint32_t id, std::string *error) {
+void ImageStore::set_path(uint32_t id, const std::string &path) {
+    std::lock_guard<std::recursive_mutex> lock(m_mu);
     auto it = m_entries.find(id);
-    if (it == m_entries.end()) {
-        if (error) *error = "no such picture";
-        return false;
+    if (it != m_entries.end())
+        it->second.path = path;
+}
+
+bool ImageStore::load(uint32_t id, std::string *error) {
+    std::string path;
+    {
+        std::lock_guard<std::recursive_mutex> lock(m_mu);
+        auto it = m_entries.find(id);
+        if (it == m_entries.end()) {
+            if (error) *error = "no such picture";
+            return false;
+        }
+        if (it->second.loaded())
+            return true;
+        if (it->second.path.empty()) {
+            if (error) *error = "the picture has no file";
+            return false;
+        }
+        path = it->second.path;
     }
-    if (it->second.loaded())
-        return true;
-    if (it->second.path.empty()) {
-        if (error) *error = "the picture has no file";
-        return false;
-    }
-    return load_file(id, it->second.path, nullptr, error);
+    return load_file(id, path, nullptr, error);
 }
 
 void ImageStore::install(uint32_t id, Bytes source, const ImageMetadata &meta,
                          std::vector<uint8_t> proxy, int proxy_w, int proxy_h) {
+    std::lock_guard<std::recursive_mutex> lock(m_mu);
     auto it = m_entries.find(id);
     if (it == m_entries.end() || !source || source->empty())
         return;
     Entry &e = it->second;
+    const bool replace = e.loaded();
     e.source = std::move(source);
     e.meta = meta;
     if (!proxy.empty())
         set_proxy(id, std::move(proxy), proxy_w, proxy_h);
+    if (replace)
+        bump();
 }
 
 void ImageStore::set_proxy(uint32_t id, std::vector<uint8_t> proxy, int w, int h) {
+    std::lock_guard<std::recursive_mutex> lock(m_mu);
     auto it = m_entries.find(id);
     if (it == m_entries.end() || proxy.empty() || std::max(w, h) <= it->second.proxy_edge)
         return;
@@ -759,6 +846,7 @@ void ImageStore::set_proxy(uint32_t id, std::vector<uint8_t> proxy, int w, int h
 }
 
 bool ImageStore::unload(uint32_t id) {
+    std::lock_guard<std::recursive_mutex> lock(m_mu);
     auto it = m_entries.find(id);
     if (it == m_entries.end() || it->second.path.empty() || !it->second.loaded())
         return false;
@@ -767,10 +855,12 @@ bool ImageStore::unload(uint32_t id) {
     e.proxy.clear();
     e.proxy.shrink_to_fit();
     e.proxy_w = e.proxy_h = e.proxy_edge = 0;
+    bump();
     return true;
 }
 
 size_t ImageStore::unloadable_bytes() const {
+    std::lock_guard<std::recursive_mutex> lock(m_mu);
     size_t n = 0;
     for (const auto &kv : m_entries)
         if (!kv.second.path.empty() && kv.second.loaded())
@@ -779,35 +869,85 @@ size_t ImageStore::unloadable_bytes() const {
 }
 
 const ImageStore::Entry *ImageStore::find(uint32_t id) const {
+    std::lock_guard<std::recursive_mutex> lock(m_mu);
     auto it = m_entries.find(id);
     return it == m_entries.end() ? nullptr : &it->second;
 }
 
-bool ImageStore::cached_display(uint32_t id, const uint8_t **rgba, int *w, int *h) const {
-    const Entry *e = find(id);
-    if (!e || e->proxy.empty())
+ImageStore::Bytes ImageStore::source_of(uint32_t id) const {
+    std::lock_guard<std::recursive_mutex> lock(m_mu);
+    auto it = m_entries.find(id);
+    if (it == m_entries.end())
+        return {};
+    return it->second.source;
+}
+
+bool ImageStore::export_source(uint32_t id, Bytes *bytes, ImageMetadata *meta) const {
+    std::lock_guard<std::recursive_mutex> lock(m_mu);
+    auto it = m_entries.find(id);
+    if (it == m_entries.end() || !it->second.loaded())
         return false;
-    *rgba = e->proxy.data();
-    *w = e->proxy_w;
-    *h = e->proxy_h;
+    if (bytes) *bytes = it->second.source;
+    if (meta) *meta = it->second.meta;
+    return true;
+}
+
+bool ImageStore::is_loaded(uint32_t id) const {
+    std::lock_guard<std::recursive_mutex> lock(m_mu);
+    auto it = m_entries.find(id);
+    return it != m_entries.end() && it->second.loaded();
+}
+
+std::string ImageStore::path_of(uint32_t id) const {
+    std::lock_guard<std::recursive_mutex> lock(m_mu);
+    auto it = m_entries.find(id);
+    return it == m_entries.end() ? std::string() : it->second.path;
+}
+
+bool ImageStore::cached_display(uint32_t id, const uint8_t **rgba, int *w, int *h) const {
+    std::lock_guard<std::recursive_mutex> lock(m_mu);
+    auto it = m_entries.find(id);
+    if (it == m_entries.end() || it->second.proxy.empty())
+        return false;
+    const Entry &e = it->second;
+    *rgba = e.proxy.data();
+    *w = e.proxy_w;
+    *h = e.proxy_h;
     return true;
 }
 
 bool ImageStore::display(uint32_t id, int long_edge, const uint8_t **rgba, int *w, int *h) {
+    Bytes bytes;
+    int want = 0;
+    {
+        std::lock_guard<std::recursive_mutex> lock(m_mu);
+        auto it = m_entries.find(id);
+        if (it == m_entries.end() || !it->second.loaded())
+            return false;
+        Entry &e = it->second;
+        int src_long = std::max(e.meta.width_px, e.meta.height_px);
+        if (src_long < 1)
+            src_long = 1;
+        want = long_edge < 1 ? src_long : std::min(long_edge, src_long);
+        if (!e.proxy.empty() && e.proxy_edge >= want) {
+            if (rgba) *rgba = e.proxy.data();
+            if (w) *w = e.proxy_w;
+            if (h) *h = e.proxy_h;
+            return true;
+        }
+        bytes = e.source;
+    }
+    std::vector<uint8_t> proxy;
+    int pw = 0, ph = 0;
+    std::string err;
+    if (!bytes || !make_display(bytes->data(), bytes->size(), want, &proxy, &pw, &ph, &err))
+        return false;
+    std::lock_guard<std::recursive_mutex> lock(m_mu);
     auto it = m_entries.find(id);
-    if (it == m_entries.end() || !it->second.loaded())
+    if (it == m_entries.end())
         return false;
     Entry &e = it->second;
-    int src_long = std::max(e.meta.width_px, e.meta.height_px);
-    if (src_long < 1)
-        src_long = 1;
-    int want = long_edge < 1 ? src_long : std::min(long_edge, src_long);
-    if (e.proxy.empty() || e.proxy_edge < want) {
-        std::vector<uint8_t> proxy;
-        int pw = 0, ph = 0;
-        std::string err;
-        if (!make_display(e.data(), e.size(), want, &proxy, &pw, &ph, &err))
-            return false;
+    if ((int) e.proxy_edge < std::max(pw, ph)) {
         e.proxy = std::move(proxy);
         e.proxy_w = pw;
         e.proxy_h = ph;

@@ -89,6 +89,53 @@ unsigned char *imgsw__fit(unsigned char *pixels, int *w, int *h, int max_w, int 
     return resized;
 }
 
+/// Colors taken from the screen theme. A null theme keeps the original dark sheet.
+struct ImgswColors {
+    nanogui::Color sheet;
+    nanogui::Color scrim;
+    nanogui::Color caption;
+    nanogui::Color heading;
+    nanogui::Color rule;
+    nanogui::Color label;
+    nanogui::Color accent;
+    nanogui::Color failed;
+    nanogui::Color placeholder;
+};
+
+ImgswColors imgsw_colors(const nanogui::Theme *theme) {
+    using nanogui::Color;
+    ImgswColors c;
+    if (theme) {
+        c.sheet = theme->m_screen_background;
+        c.scrim = c.sheet;
+        c.caption = theme->m_text_muted;
+        c.heading = theme->m_text_heading;
+        /* Hairline keeps the old rule's strength, in the theme's text color. */
+        c.rule = theme->m_text_color;
+        c.rule.a() *= 70.f / 255.f;
+        c.label = theme->m_text_color;
+        c.accent = theme->m_accent_color;
+        c.failed = theme->m_danger_color;
+        c.placeholder = theme->m_window_fill_unfocused;
+    } else {
+        c.sheet = Color(28, 28, 32, 255);
+        c.scrim = Color(0, 0, 0, 255);
+        c.caption = Color(255, 255, 255, 128);
+        c.heading = Color(255, 255, 255, 230);
+        c.rule = Color(255, 255, 255, 70);
+        c.label = Color(255, 255, 255, 200);
+        c.accent = Color(70, 130, 255, 255);
+        c.failed = Color(120, 40, 40, 255);
+        c.placeholder = Color(60, 60, 70, 160);
+    }
+    return c;
+}
+
+nanogui::Color imgsw_alpha(nanogui::Color c, float a) {
+    c.a() *= a;
+    return c;
+}
+
 } // anonymous namespace
 
 NAMESPACE_BEGIN(nanogui)
@@ -165,6 +212,29 @@ void ImageStashWidget::add_image(const std::string &path) {
     add_images({ path });
 }
 
+void ImageStashWidget::add_entry(const Entry &entry) {
+    PendingItem pi;
+    pi.photo = entry;
+    if (pi.photo.name.empty() && !pi.photo.path.empty())
+        pi.photo.name = std::filesystem::path(pi.photo.path).filename().string();
+    pthread_mutex_lock(&m_mutex);
+    m_pending_items.push_back(std::move(pi));
+    m_layout_dirty = true;
+    pthread_mutex_unlock(&m_mutex);
+    set_needs_redraw();
+}
+
+void ImageStashWidget::set_loader(const Loader &loader) {
+    pthread_mutex_lock(&m_mutex);
+    m_loader = loader;
+    pthread_mutex_unlock(&m_mutex);
+}
+
+void ImageStashWidget::set_badge_callback(const BadgeCallback &cb) {
+    m_badge = cb;
+    set_needs_redraw();
+}
+
 void ImageStashWidget::add_images(const std::vector<std::string> &paths) {
     /* Entries are queued here and appended to m_entries by the UI thread in
        rebuild_layout(), so draw() never sees the vector reallocate.
@@ -192,6 +262,7 @@ void ImageStashWidget::add_images(const std::vector<std::string> &paths) {
 
 void ImageStashWidget::add_section(const std::string &text, SectionAlign align, bool rule) {
     PendingItem pi;
+    pi.section = true;
     pi.text  = text;
     pi.align = (int) align;
     pi.rule  = rule;
@@ -205,6 +276,7 @@ void ImageStashWidget::add_section(const std::string &text, SectionAlign align, 
 void ImageStashWidget::insert_section(int item_index, const std::string &text,
                                       SectionAlign align, bool rule) {
     PendingItem pi;
+    pi.section = true;
     pi.text  = text;
     pi.align = (int) align;
     pi.rule  = rule;
@@ -319,13 +391,13 @@ void ImageStashWidget::rebuild_layout() {
     pthread_mutex_lock(&m_mutex);
     for (auto &pi : m_pending_items) {
         Item it;
-        if (!pi.photo.path.empty()) {
+        if (pi.section) {
+            m_sections.push_back({ pi.text, pi.align, pi.rule });
+            it.section = (int) m_sections.size() - 1;
+        } else {
             it.entry = (int) m_entries.size();
             m_entries.push_back(std::move(pi.photo));
             m_slots.push_back(Slot());
-        } else {
-            m_sections.push_back({ pi.text, pi.align, pi.rule });
-            it.section = (int) m_sections.size() - 1;
         }
         if (pi.insert_pos >= 0 && pi.insert_pos < (int) m_items.size())
             m_items.insert(m_items.begin() + pi.insert_pos, it);
@@ -460,22 +532,34 @@ void *ImageStashWidget::load_thumbnails(void *arg) {
         int index = self->m_queue.front();
         self->m_queue.pop_front();
         bool last_item = self->m_queue.empty();
-        std::string path = self->m_entries[index].path;
+        Entry entry = self->m_entries[index];
+        Loader loader = self->m_loader;
         int generation = self->m_generation;
         pthread_mutex_unlock(&self->m_mutex);
 
         /* Decode, downscale and orient without the lock: the UI thread takes
-           it every frame, so holding it here would stall drawing. */
-        int w, h, orient;
-        uint64_t fsize;
-        unsigned char *data = imgsw__load(path, &w, &h, &orient, &fsize);
+           it every frame, so holding it here would stall drawing. A loader
+           result is already upright; null falls back to the file. */
+        int w = 0, h = 0, orient = 1;
+        uint64_t fsize = entry.file_size;
+        bool from_loader = false;
+        unsigned char *data = nullptr;
+        if (loader)
+            data = loader(entry, self->m_thumb_size, &w, &h);
+        if (data) {
+            from_loader = true;
+        } else if (!entry.path.empty()) {
+            data = imgsw__load(entry.path, &w, &h, &orient, &fsize);
+        }
         int tw = w, th = h;
         if (!data) {
-            std::cerr << "ImageStashWidget: failed to load " << path << std::endl;
+            const std::string &what = entry.path.empty() ? entry.name : entry.path;
+            if (!what.empty())
+                std::cerr << "ImageStashWidget: failed to load " << what << std::endl;
         } else {
             data = imgsw__fit(data, &tw, &th, self->m_thumb_size, self->m_thumb_size);
-            /* Apply EXIF orientation to the thumbnail (cheap at thumb size) */
-            data = imgsw__apply_orient(data, &tw, &th, orient);
+            if (!from_loader)
+                data = imgsw__apply_orient(data, &tw, &th, orient);
         }
 
         pthread_mutex_lock(&self->m_mutex);
@@ -690,29 +774,46 @@ void *ImageStashWidget::load_high_res(void *arg) {
     ImageStashWidget *self = (ImageStashWidget *) arg;
     pthread_mutex_lock(&self->m_highres_mutex);
     for (;;) {
-        while (self->m_highres_path.empty() && !self->m_highres_stop)
+        while (!self->m_highres_pending && !self->m_highres_stop)
             pthread_cond_wait(&self->m_highres_cond, &self->m_highres_mutex);
         if (self->m_highres_stop)
             break;
-        std::string path;
-        path.swap(self->m_highres_path);
+        Entry entry = self->m_highres_entry;
+        self->m_highres_pending = false;
         int req = self->m_highres_req;
         int max_w = self->m_highres_max_w, max_h = self->m_highres_max_h;
         pthread_mutex_unlock(&self->m_highres_mutex);
 
-        int w, h, orient;
-        uint64_t fsize;
-        unsigned char *pixels = imgsw__load(path, &w, &h, &orient, &fsize);
+        pthread_mutex_lock(&self->m_mutex);
+        Loader loader = self->m_loader;
+        pthread_mutex_unlock(&self->m_mutex);
+
+        int w = 0, h = 0, orient = 1;
+        uint64_t fsize = 0;
+        bool from_loader = false;
+        int edge = std::max(max_w, max_h);
+        unsigned char *pixels = nullptr;
+        if (loader)
+            pixels = loader(entry, edge, &w, &h);
+        if (pixels) {
+            from_loader = true;
+        } else if (!entry.path.empty()) {
+            pixels = imgsw__load(entry.path, &w, &h, &orient, &fsize);
+        }
         if (pixels) {
             /* Shrink to what the preview can show: a smaller texture upload
                on the UI thread, and no aliasing when minified (no mipmaps).
                The limits apply after rotation, so swap them for 90/270. */
-            if (orient >= 5)
-                std::swap(max_w, max_h);
-            pixels = imgsw__fit(pixels, &w, &h, max_w, max_h);
-            pixels = imgsw__apply_orient(pixels, &w, &h, orient);
-        } else
-            std::cerr << "ImageStashWidget: failed to load high-res " << path << std::endl;
+            int box_w = max_w, box_h = max_h;
+            if (!from_loader && orient >= 5)
+                std::swap(box_w, box_h);
+            pixels = imgsw__fit(pixels, &w, &h, box_w, box_h);
+            if (!from_loader)
+                pixels = imgsw__apply_orient(pixels, &w, &h, orient);
+        } else if (!entry.path.empty() || !entry.name.empty()) {
+            const std::string &what = entry.path.empty() ? entry.name : entry.path;
+            std::cerr << "ImageStashWidget: failed to load high-res " << what << std::endl;
+        }
 
         pthread_mutex_lock(&self->m_highres_mutex);
         if (pixels && req == self->m_highres_req && !self->m_highres_stop) {
@@ -733,7 +834,8 @@ void ImageStashWidget::request_high_res(int entry) {
     float vx, vy, vw, vh;
     view_rect(vx, vy, vw, vh);
     pthread_mutex_lock(&m_highres_mutex);
-    m_highres_path = m_entries[entry].path;
+    m_highres_entry = m_entries[entry];
+    m_highres_pending = true;
     m_highres_max_w = (int) (vw * ratio);
     m_highres_max_h = (int) (vh * ratio);
     m_highres_req++;
@@ -747,7 +849,8 @@ void ImageStashWidget::request_high_res(int entry) {
 
 void ImageStashWidget::release_high_res() {
     pthread_mutex_lock(&m_highres_mutex);
-    m_highres_path.clear();
+    m_highres_pending = false;
+    m_highres_entry = Entry();
     m_highres_req++;                 /* discard a load still in flight */
     if (m_pending_highres) {
         stbi_image_free(m_pending_highres);
@@ -944,7 +1047,7 @@ void ImageStashWidget::begin_drag(int entry, const Vector2i &content_p) {
         m_drag_data_callback(entry, data);
 
     DragPreview preview;
-    preview.label = e.name;
+    preview.label = e.label.empty() ? e.name : e.label;
     auto it = m_thumb_cache.find(entry);
     int item = entry < (int) m_item_of_entry.size() ? m_item_of_entry[entry] : -1;
     if (it != m_thumb_cache.end() && item >= 0) {
@@ -1112,10 +1215,14 @@ void ImageStashWidget::draw_photo(NVGcontext *ctx, int entry, float x, float y,
         nvgFill(ctx);
     } else {
         /* Placeholder while the thumbnail is not materialized */
+        ImgswColors ink = imgsw_colors(m_theme.get());
+        Color tile = s.failed ? ink.failed : ink.placeholder;
+        if (s.failed)
+            tile.a() *= 160.f / 255.f;
+        tile.a() *= alpha;
         nvgBeginPath(ctx);
         nvgRoundedRect(ctx, x, y, w, h, 3.0f);
-        nvgFillColor(ctx, s.failed ? nvgRGBA(120, 40, 40, (unsigned char) (160 * alpha))
-                                   : nvgRGBA(60, 60, 70, (unsigned char) (160 * alpha)));
+        nvgFillColor(ctx, tile);
         nvgFill(ctx);
     }
 }
@@ -1178,6 +1285,14 @@ void ImageStashWidget::draw(NVGcontext *ctx) {
     Widget::draw(ctx);
     m_redraw = false;
 
+    /* Opaque screen color: a translucent window fill would show the page through. */
+    const ImgswColors ink = imgsw_colors(m_theme.get());
+    nvgBeginPath(ctx);
+    nvgRect(ctx, (float) m_pos.x(), (float) m_pos.y(),
+            (float) m_size.x(), (float) m_size.y());
+    nvgFillColor(ctx, ink.sheet);
+    nvgFill(ctx);
+
     /* Move freshly loaded thumbnails into the atlas */
     flush_pending(ctx);
 
@@ -1215,7 +1330,7 @@ void ImageStashWidget::draw(NVGcontext *ctx) {
         std::string title = std::to_string(m_entries.size()) + " images";
         nvgFontSize(ctx, 18.0f);
         nvgFontFace(ctx, "sans");
-        nvgFillColor(ctx, nvgRGBA(255, 255, 255, 128));
+        nvgFillColor(ctx, ink.caption);
         nvgTextAlign(ctx, NVG_ALIGN_CENTER | NVG_ALIGN_TOP);
         nvgText(ctx, vx + vw * 0.5f, 12.0f, title.c_str(), nullptr);
     }
@@ -1243,11 +1358,19 @@ void ImageStashWidget::draw(NVGcontext *ctx) {
         }
     }
 
-    /* Background fade to black over the visible area in fullscreen */
+    /* The preview stays inside the widget (or the scroll viewport), so a
+       dialog can host the grid without the photo covering the screen. */
+    const bool preview = t > 0.0f || m_fullscreen != -1;
+    if (preview) {
+        nvgSave(ctx);
+        nvgIntersectScissor(ctx, vx, vy, std::max(vw, 0.0f), std::max(vh, 0.0f));
+    }
+
+    /* Fade the preview onto the same sheet, so light mode does not go black. */
     if (t > 0.0f) {
         nvgBeginPath(ctx);
         nvgRect(ctx, vx, vy, vw, vh);
-        nvgFillColor(ctx, nvgRGBA(0, 0, 0, (unsigned char) (t * 255)));
+        nvgFillColor(ctx, imgsw_alpha(ink.scrim, t));
         nvgFill(ctx);
     }
 
@@ -1295,14 +1418,14 @@ void ImageStashWidget::draw(NVGcontext *ctx) {
             }
             nvgFontSize(ctx, 22.0f);
             nvgFontFace(ctx, "sans-bold");
-            nvgFillColor(ctx, nvgRGBA(255, 255, 255, (unsigned char) (230 * grid_alpha)));
+            nvgFillColor(ctx, imgsw_alpha(ink.heading, grid_alpha));
             nvgTextAlign(ctx, align | NVG_ALIGN_TOP);
             nvgText(ctx, tx, cell.y() + 8.0f, sec.text.c_str(), nullptr);
             if (sec.rule) {
                 nvgBeginPath(ctx);
                 nvgRect(ctx, grid_x0, cell.y() + section_height() - 5.0f,
                         content_w - 2.0f * grid_x0, 1.0f);
-                nvgFillColor(ctx, nvgRGBA(255, 255, 255, (unsigned char) (70 * grid_alpha)));
+                nvgFillColor(ctx, imgsw_alpha(ink.rule, grid_alpha));
                 nvgFill(ctx);
             }
             continue;
@@ -1314,9 +1437,9 @@ void ImageStashWidget::draw(NVGcontext *ctx) {
             /* Selection: tinted cell, brighter while the widget has focus */
             nvgBeginPath(ctx);
             nvgRoundedRect(ctx, cell.x(), cell.y(), box, box, 4.0f);
-            nvgFillColor(ctx, nvgRGBA(70, 130, 255, (unsigned char) ((focused() ? 90 : 45) * grid_alpha)));
+            nvgFillColor(ctx, imgsw_alpha(ink.accent, ((focused() ? 90.f : 45.f) / 255.f) * grid_alpha));
             nvgFill(ctx);
-            nvgStrokeColor(ctx, nvgRGBA(70, 130, 255, (unsigned char) ((focused() ? 230 : 120) * grid_alpha)));
+            nvgStrokeColor(ctx, imgsw_alpha(ink.accent, ((focused() ? 230.f : 120.f) / 255.f) * grid_alpha));
             nvgStrokeWidth(ctx, 2.0f);
             nvgStroke(ctx);
         }
@@ -1329,27 +1452,33 @@ void ImageStashWidget::draw(NVGcontext *ctx) {
 
         /* Label, clipped to the cell width so it never overlaps neighbors */
         if (m_show_labels) {
+            const std::string &caption = m_entries[ei].label.empty()
+                ? m_entries[ei].name : m_entries[ei].label;
             nvgSave(ctx);
             nvgIntersectScissor(ctx, cell.x(), cell.y() + box,
                                 cell_stride_x() - m_gap_x, (float) m_label_h);
             nvgFontSize(ctx, 13.0f);
             nvgFontFace(ctx, "sans");
-            nvgFillColor(ctx, nvgRGBA(255, 255, 255, (unsigned char) (200 * grid_alpha)));
+            nvgFillColor(ctx, imgsw_alpha(ink.label, grid_alpha));
             nvgTextAlign(ctx, NVG_ALIGN_CENTER | NVG_ALIGN_TOP);
             nvgText(ctx, cell.x() + (cell_stride_x() - m_gap_x) * 0.5f,
-                    cell.y() + box, m_entries[ei].name.c_str(), nullptr);
+                    cell.y() + box, caption.c_str(), nullptr);
             nvgRestore(ctx);
         }
+        if (m_badge && grid_alpha > 0.0f)
+            m_badge(ctx, m_entries[ei], cell.x(), cell.y(), box);
     }
 
     if (m_fullscreen != -1)
         draw_fullscreen(ctx, t);
+    if (preview)
+        nvgRestore(ctx);
 
     /* Drop highlight around the visible area */
     if (m_drop_hover) {
         nvgBeginPath(ctx);
         nvgRoundedRect(ctx, vx + 2.0f, vy + 2.0f, vw - 4.0f, vh - 4.0f, 4.0f);
-        nvgStrokeColor(ctx, nvgRGBA(70, 130, 255, 220));
+        nvgStrokeColor(ctx, imgsw_alpha(ink.accent, 220.f / 255.f));
         nvgStrokeWidth(ctx, 3.0f);
         nvgStroke(ctx);
     }

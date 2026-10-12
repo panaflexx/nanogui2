@@ -189,9 +189,11 @@ struct ImageAsset {
     std::string source;
     ImageMetadata meta;
     /* The source file as it was read, to tell when it has changed since
-     * (0 when unknown: older files, or a picture with no file). */
+     * (0 when unknown: older files, or a picture with no file). `hash` is
+     * the 64-bit FNV-1a of those bytes. */
     uint64_t source_size = 0;
     int64_t  source_mtime = 0;           // seconds since the epoch
+    uint64_t hash = 0;
 };
 
 /* Drag and drop type for a picture of this publication; the bytes are the
@@ -315,6 +317,9 @@ struct PageDoc {
      * false). Pictures otherwise stay when their last frame goes, so an
      * asset library can show and place them again. */
     bool remove_image(uint32_t id);
+    /* Every picture remove_image would take. One pass, so a caller can
+     * make it a single undo step. */
+    size_t remove_unused_images();
 
     /* Lookups. `page` (when given) receives the item's page index. */
     Item       *find_item(ItemId id, size_t *page = nullptr);

@@ -35,6 +35,7 @@
 #include <fstream>
 #include <memory>
 #include <string>
+#include <sys/stat.h>
 #include <vector>
 
 #ifndef PAGEMADE_DATA_DIR
@@ -1669,6 +1670,8 @@ static void check_doc(const PageDoc &a, const PageDoc &b) {
     for (size_t i = 0; i < std::min(a.images.size(), b.images.size()); ++i) {
         const ImageAsset &x = a.images[i], &y = b.images[i];
         CHECK(x.id == y.id && x.name == y.name && x.source == y.source, "picture %zu identity", i);
+        CHECK(x.source_size == y.source_size && x.source_mtime == y.source_mtime &&
+              x.hash == y.hash, "picture %zu stamp", i);
         CHECK(x.meta.format == y.meta.format && x.meta.width_px == y.meta.width_px &&
               x.meta.height_px == y.meta.height_px &&
               x.meta.stored_width_px == y.meta.stored_width_px &&
@@ -2280,6 +2283,8 @@ static void test_images(const FontLibrary &fonts) {
         CHECK(std::max(w, h) <= 8 && std::max(w, h) <= 32 && w > 0 && h > 0,
               "proxy long edge %d is within the request and the source", std::max(w, h));
         CHECK(source_is(store.find(id), source), "display leaves the source bytes");
+        ImageStore::Bytes copied = store.source_of(id);
+        CHECK(copied && *copied == source, "source_of copies the bytes for another thread");
         const int kept_w = w, kept_h = h;
         CHECK(store.display(id, 4, &rgba, &w, &h) && w == kept_w && h == kept_h,
               "a smaller request keeps the proxy already built");
@@ -2333,6 +2338,18 @@ static void test_images(const FontLibrary &fonts) {
         CHECK(doc.find_image(id), "an unused picture stays in the publication");
         CHECK(doc.remove_image(id) && !doc.find_image(id),
               "remove_image takes an unused picture out");
+        ImageAsset spare;
+        spare.name = "spare.png";
+        uint32_t spare_id = doc.add_image(spare);
+        ImageAsset used;
+        used.name = "used.png";
+        uint32_t used_id = doc.add_image(used);
+        Item kept_item;
+        kept_item.w = kept_item.h = 10;
+        kept_item.content = PlacedImage{used_id, 0, 0, 10, 10};
+        doc.add_item(0, kept_item);
+        CHECK(doc.remove_unused_images() == 1 && !doc.find_image(spare_id) &&
+              doc.find_image(used_id), "remove unused leaves a placed picture");
         CHECK(source_is(store.find(id), kept),
               "the bytes stay in the store for undo");
         const uint32_t next = store.take_id();
@@ -2358,6 +2375,25 @@ static void test_images(const FontLibrary &fonts) {
         asset.name = "pic.png";
         asset.source = file_uri(linked_png);
         asset.meta = store.find(id)->meta;
+        asset.source_size = png.size();
+        asset.hash = image_bytes_hash(png.data(), png.size());
+        struct stat st;
+        if (stat(linked_png.c_str(), &st) == 0)
+            asset.source_mtime = (int64_t) st.st_mtime;
+        CHECK(asset_status(asset, &store) == AssetStatus::Ok, "a fresh import is ok");
+        ImageAsset drifted = asset;
+        drifted.hash = 1;
+        CHECK(asset_status(drifted, &store) == AssetStatus::Modified,
+              "a different hash of the loaded bytes is modified");
+        ImageAsset unstamped = asset;
+        unstamped.source_size = 0;
+        unstamped.source_mtime = 0;
+        unstamped.hash = 0;
+        CHECK(asset_status(unstamped, &store) == AssetStatus::Ok,
+              "a missing stamp is not itself a change");
+        ImageAsset ghost = asset;
+        ghost.source = file_uri("/tmp/pagemade-no-such-picture.png");
+        CHECK(asset_status(ghost, nullptr) == AssetStatus::Missing, "a missing file is missing");
         doc.add_image(asset);
         Item it;
         it.w = 30; it.h = 16;
