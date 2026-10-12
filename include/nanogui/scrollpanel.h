@@ -61,6 +61,8 @@ NAMESPACE_BEGIN(nanogui)
         virtual bool mouse_drag_event(const Vector2i& p, const Vector2i& rel,
             int button, int modifiers) override;
         virtual bool scroll_event(const Vector2i& p, const Vector2f& rel) override;
+        /// Auto-scrolls while a drag rests near the top or bottom edge.
+        virtual bool drag_motion_event(const Vector2i& p, DragEvent& e) override;
         virtual void draw(NVGcontext* ctx) override;
 
     protected:
@@ -74,6 +76,7 @@ NAMESPACE_BEGIN(nanogui)
         float  m_vel_x  = 0.0f;   // inertia scroll velocity (px/s)
         float  m_vel_y  = 0.0f;
         double m_last_t = 0.0;    // glfwGetTime() timestamp of last draw
+        double m_autoscroll_t = 0.0;  // last drag auto-scroll step, 0 = idle
 };
 
 NAMESPACE_END(nanogui)

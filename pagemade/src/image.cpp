@@ -94,6 +94,86 @@ void read_tiff_ifd0(const uint8_t *t, size_t n, int &orientation, double &ppi_x,
     }
 }
 
+/* Display tags from a TIFF/EXIF block: IFD0 (camera, software, date,
+ * author) and the EXIF sub-IFD (exposure). Offsets are from `t`. */
+void read_exif_tags(const uint8_t *t, size_t n, std::vector<std::pair<std::string, std::string>> &out) {
+    if (n < 8 || !((t[0] == 'I' && t[1] == 'I') || (t[0] == 'M' && t[1] == 'M')))
+        return;
+    const bool le = t[0] == 'I';
+    if (tiff_u16(t, 2, le) != 42)
+        return;
+    std::map<unsigned, std::string> text;   // ASCII tags
+    std::map<unsigned, double> num;         // SHORT, LONG, RATIONAL (first value)
+    auto read_ifd = [&](uint32_t ifd, uint32_t *exif_ifd) {
+        if (ifd < 8 || (size_t) ifd + 2 > n)
+            return;
+        unsigned count = tiff_u16(t, (int) ifd, le);
+        if ((size_t) ifd + 2 + (size_t) count * 12 > n)
+            return;
+        for (unsigned i = 0; i < count; ++i) {
+            int e = (int) ifd + 2 + (int) i * 12;
+            unsigned tag = tiff_u16(t, e, le), type = tiff_u16(t, e + 2, le);
+            uint32_t cnt = tiff_u32(t, e + 4, le);
+            if (type == 2 && cnt > 0) {                       // ASCII
+                uint32_t off = cnt <= 4 ? (uint32_t) e + 8 : tiff_u32(t, e + 8, le);
+                if ((size_t) off + cnt <= n) {
+                    std::string s((const char *) t + off, cnt);
+                    s = s.substr(0, s.find('\0'));
+                    while (!s.empty() && s.back() == ' ')
+                        s.pop_back();
+                    if (!s.empty())
+                        text[tag] = s;
+                }
+            } else if (type == 3 && cnt >= 1) {               // SHORT
+                num[tag] = tiff_u16(t, e + 8, le);
+            } else if (type == 4 && cnt >= 1) {               // LONG
+                num[tag] = tiff_u32(t, e + 8, le);
+                if (tag == 0x8769 && exif_ifd)
+                    *exif_ifd = tiff_u32(t, e + 8, le);
+            } else if ((type == 5 || type == 10) && cnt >= 1) { // RATIONAL
+                uint32_t off = tiff_u32(t, e + 8, le);
+                if ((size_t) off + 8 <= n) {
+                    double a = type == 5 ? (double) tiff_u32(t, (int) off, le)
+                                         : (double) (int32_t) tiff_u32(t, (int) off, le);
+                    double b = type == 5 ? (double) tiff_u32(t, (int) off + 4, le)
+                                         : (double) (int32_t) tiff_u32(t, (int) off + 4, le);
+                    if (b != 0)
+                        num[tag] = a / b;
+                }
+            }
+        }
+    };
+    uint32_t exif_ifd = 0;
+    read_ifd(tiff_u32(t, 4, le), &exif_ifd);
+    if (exif_ifd)
+        read_ifd(exif_ifd, nullptr);
+
+    auto has = [&](unsigned tag) { return num.count(tag) != 0; };
+    char buf[64];
+    std::string camera = text.count(0x010F) ? text[0x010F] : "";
+    if (text.count(0x0110)) {
+        const std::string &model = text[0x0110];
+        camera = model.compare(0, camera.size(), camera) == 0 || camera.empty()
+                 ? model : camera + " " + model;     // models often repeat the make
+    }
+    if (!camera.empty()) out.emplace_back("Camera", camera);
+    if (text.count(0xA434)) out.emplace_back("Lens", text[0xA434]);
+    if (text.count(0x9003)) out.emplace_back("Taken", text[0x9003]);
+    else if (text.count(0x0132)) out.emplace_back("Date", text[0x0132]);
+    if (has(0x829A)) {
+        double s = num[0x829A];
+        if (s > 0 && s < 1) std::snprintf(buf, sizeof buf, "1/%.0f s", 1.0 / s);
+        else std::snprintf(buf, sizeof buf, "%g s", s);
+        out.emplace_back("Exposure", buf);
+    }
+    if (has(0x829D)) { std::snprintf(buf, sizeof buf, "f/%.1f", num[0x829D]); out.emplace_back("Aperture", buf); }
+    if (has(0x8827)) { std::snprintf(buf, sizeof buf, "%.0f", num[0x8827]); out.emplace_back("ISO", buf); }
+    if (has(0x920A)) { std::snprintf(buf, sizeof buf, "%.0f mm", num[0x920A]); out.emplace_back("Focal length", buf); }
+    if (text.count(0x0131)) out.emplace_back("Software", text[0x0131]);
+    if (text.count(0x013B)) out.emplace_back("Artist", text[0x013B]);
+    if (text.count(0x8298)) out.emplace_back("Copyright", text[0x8298]);
+}
+
 void apply_orientation_size(ImageMetadata &m) {
     if (m.orientation < 1 || m.orientation > 8)
         m.orientation = 1;
@@ -240,6 +320,7 @@ public:
                     inflate_zlib(chunk + k + 2, len - (k + 2), &m.icc);
             } else if (std::memcmp(type, "eXIf", 4) == 0) {
                 read_tiff_ifd0(chunk, len, m.orientation, m.ppi_x, m.ppi_y);
+                read_exif_tags(chunk, len, m.exif);
             } else if (std::memcmp(type, "IEND", 4) == 0) {
                 break;
             }
@@ -345,6 +426,7 @@ public:
                 double x = 0, y = 0;
                 int orient = m.orientation;
                 read_tiff_ifd0(pay + 6, paylen - 6, orient, x, y);
+                read_exif_tags(pay + 6, paylen - 6, m.exif);
                 m.orientation = orient;
                 if (x > 0) { m.ppi_x = x; m.ppi_y = y > 0 ? y : x; }
             } else if (marker == 0xE2 && paylen > 15 &&
@@ -423,7 +505,7 @@ void oriented_uv(int orient, float u, float v, float &ox, float &oy) {
 
 uint64_t g_store_gen = 0;
 
-bool read_file(const std::string &path, std::vector<uint8_t> *out, std::string *error) {
+bool read_file_bytes(const std::string &path, std::vector<uint8_t> *out, std::string *error) {
     FILE *f = std::fopen(path.c_str(), "rb");
     if (!f) {
         if (error) *error = "couldn't open " + path;
@@ -452,6 +534,29 @@ bool read_file(const std::string &path, std::vector<uint8_t> *out, std::string *
 }
 
 } // namespace
+
+bool read_file(const std::string &path, std::vector<uint8_t> *out, std::string *error) {
+    return read_file_bytes(path, out, error);
+}
+
+bool make_display(const uint8_t *data, size_t n, int long_edge,
+                  std::vector<uint8_t> *rgba, int *w, int *h, std::string *error) {
+    DecodedImage full;
+    if (!data || !image_loader().decode(data, n, &full, error))
+        return false;
+    int longest = std::max(full.width, full.height);
+    int dw = full.width, dh = full.height;
+    if (long_edge > 0 && longest > long_edge) {
+        dw = std::max(1, (int) ((long long) full.width * long_edge / longest));
+        dh = std::max(1, (int) ((long long) full.height * long_edge / longest));
+        downsample_rgba(full.rgba.data(), full.width, full.height, dw, dh, *rgba);
+    } else {
+        *rgba = std::move(full.rgba);
+    }
+    *w = dw;
+    *h = dh;
+    return true;
+}
 
 const char *color_model_name(ColorModel m) {
     switch (m) {
@@ -584,7 +689,9 @@ bool ImageStore::add(uint32_t id, std::vector<uint8_t> bytes, ImageMetadata *met
     note_id(id);
     bool replace = m_entries.count(id) != 0;
     Entry e;
-    e.source = std::move(bytes);
+    if (replace)
+        e.path = m_entries[id].path;
+    e.source = std::make_shared<const std::vector<uint8_t>>(std::move(bytes));
     e.meta = probed;
     m_entries[id] = std::move(e);
     if (meta) *meta = probed;
@@ -597,7 +704,78 @@ bool ImageStore::load_file(uint32_t id, const std::string &path, ImageMetadata *
     std::vector<uint8_t> bytes;
     if (!read_file(path, &bytes, error))
         return false;
-    return add(id, std::move(bytes), meta, error);
+    if (!add(id, std::move(bytes), meta, error))
+        return false;
+    m_entries[id].path = path;
+    return true;
+}
+
+void ImageStore::add_link(uint32_t id, const std::string &path, const ImageMetadata &meta) {
+    if (id == 0)
+        return;
+    note_id(id);
+    Entry e;
+    e.path = path;
+    e.meta = meta;
+    m_entries[id] = std::move(e);
+}
+
+bool ImageStore::load(uint32_t id, std::string *error) {
+    auto it = m_entries.find(id);
+    if (it == m_entries.end()) {
+        if (error) *error = "no such picture";
+        return false;
+    }
+    if (it->second.loaded())
+        return true;
+    if (it->second.path.empty()) {
+        if (error) *error = "the picture has no file";
+        return false;
+    }
+    return load_file(id, it->second.path, nullptr, error);
+}
+
+void ImageStore::install(uint32_t id, Bytes source, const ImageMetadata &meta,
+                         std::vector<uint8_t> proxy, int proxy_w, int proxy_h) {
+    auto it = m_entries.find(id);
+    if (it == m_entries.end() || !source || source->empty())
+        return;
+    Entry &e = it->second;
+    e.source = std::move(source);
+    e.meta = meta;
+    if (!proxy.empty())
+        set_proxy(id, std::move(proxy), proxy_w, proxy_h);
+}
+
+void ImageStore::set_proxy(uint32_t id, std::vector<uint8_t> proxy, int w, int h) {
+    auto it = m_entries.find(id);
+    if (it == m_entries.end() || proxy.empty() || std::max(w, h) <= it->second.proxy_edge)
+        return;
+    Entry &e = it->second;
+    e.proxy = std::move(proxy);
+    e.proxy_w = w;
+    e.proxy_h = h;
+    e.proxy_edge = std::max(w, h);
+}
+
+bool ImageStore::unload(uint32_t id) {
+    auto it = m_entries.find(id);
+    if (it == m_entries.end() || it->second.path.empty() || !it->second.loaded())
+        return false;
+    Entry &e = it->second;
+    e.source.reset();
+    e.proxy.clear();
+    e.proxy.shrink_to_fit();
+    e.proxy_w = e.proxy_h = e.proxy_edge = 0;
+    return true;
+}
+
+size_t ImageStore::unloadable_bytes() const {
+    size_t n = 0;
+    for (const auto &kv : m_entries)
+        if (!kv.second.path.empty() && kv.second.loaded())
+            n += kv.second.size() + kv.second.proxy.size();
+    return n;
 }
 
 const ImageStore::Entry *ImageStore::find(uint32_t id) const {
@@ -605,40 +783,39 @@ const ImageStore::Entry *ImageStore::find(uint32_t id) const {
     return it == m_entries.end() ? nullptr : &it->second;
 }
 
+bool ImageStore::cached_display(uint32_t id, const uint8_t **rgba, int *w, int *h) const {
+    const Entry *e = find(id);
+    if (!e || e->proxy.empty())
+        return false;
+    *rgba = e->proxy.data();
+    *w = e->proxy_w;
+    *h = e->proxy_h;
+    return true;
+}
+
 bool ImageStore::display(uint32_t id, int long_edge, const uint8_t **rgba, int *w, int *h) {
     auto it = m_entries.find(id);
-    if (it == m_entries.end())
+    if (it == m_entries.end() || !it->second.loaded())
         return false;
     Entry &e = it->second;
     int src_long = std::max(e.meta.width_px, e.meta.height_px);
     if (src_long < 1)
         src_long = 1;
     int want = long_edge < 1 ? src_long : std::min(long_edge, src_long);
-    if (!e.proxy.empty() && e.proxy_edge >= want && rgba && w && h) {
-        *rgba = e.proxy.data();
-        *w = e.proxy_w;
-        *h = e.proxy_h;
-        return true;
+    if (e.proxy.empty() || e.proxy_edge < want) {
+        std::vector<uint8_t> proxy;
+        int pw = 0, ph = 0;
+        std::string err;
+        if (!make_display(e.data(), e.size(), want, &proxy, &pw, &ph, &err))
+            return false;
+        e.proxy = std::move(proxy);
+        e.proxy_w = pw;
+        e.proxy_h = ph;
+        e.proxy_edge = std::max(pw, ph);
     }
-    DecodedImage full;
-    std::string err;
-    if (!image_loader().decode(e.source.data(), e.source.size(), &full, &err))
-        return false;
-    int longest = std::max(full.width, full.height);
-    int dw = full.width, dh = full.height;
-    if (longest > want && longest > 0) {
-        dw = std::max(1, (int) ((long long) full.width * want / longest));
-        dh = std::max(1, (int) ((long long) full.height * want / longest));
-        downsample_rgba(full.rgba.data(), full.width, full.height, dw, dh, e.proxy);
-    } else {
-        e.proxy = std::move(full.rgba);
-    }
-    e.proxy_w = dw;
-    e.proxy_h = dh;
-    e.proxy_edge = std::max(dw, dh);
     if (rgba) *rgba = e.proxy.data();
-    if (w) *w = dw;
-    if (h) *h = dh;
+    if (w) *w = e.proxy_w;
+    if (h) *h = e.proxy_h;
     return true;
 }
 

@@ -69,6 +69,20 @@ void ScrollPanel::perform_layout(NVGcontext* ctx) {
     // THEN: Get child's preferred size within that constraint
     Vector2i constrained_preferred = child->preferred_size(ctx);
 
+    // Preserve the pixel scroll offset when the content size changes (e.g. an
+    // incrementally populated view), so the viewport does not jump.  m_scroll
+    // is a fraction of the scrollable excess; rescale it to the new excess.
+    {
+        float old_excess_x = (float) (m_child_preferred_size.x() - m_size.x());
+        float old_excess_y = (float) (m_child_preferred_size.y() - m_size.y());
+        float new_excess_x = (float) (constrained_preferred.x() - m_size.x());
+        float new_excess_y = (float) (constrained_preferred.y() - m_size.y());
+        if (old_excess_y > 0.f && new_excess_y > 0.f && new_excess_y != old_excess_y)
+            m_scroll.y() = std::clamp(m_scroll.y() * old_excess_y / new_excess_y, 0.f, 1.f);
+        if (old_excess_x > 0.f && new_excess_x > 0.f && new_excess_x != old_excess_x)
+            m_scroll.x() = std::clamp(m_scroll.x() * old_excess_x / new_excess_x, 0.f, 1.f);
+    }
+
     // Update stored preferred size for scrolling calculations
     m_child_preferred_size = constrained_preferred;
 
@@ -116,6 +130,26 @@ Vector2i ScrollPanel::preferred_size(NVGcontext* ctx) const {
     if (m_children.empty())
         return Vector2i(0);
     return m_children[0]->preferred_size(ctx) + Vector2i(12, 0);
+}
+
+bool ScrollPanel::drag_motion_event(const Vector2i& p, DragEvent& e) {
+    const int edge = 24;
+    const float speed = 800.0f;     // px/s at the edge
+    int y = p.y() - m_pos.y();
+    int dir = y < edge ? -1 : (y > m_size.y() - edge ? 1 : 0);
+    float range = (float) (m_child_preferred_size.y() - m_size.y());
+    if (dir != 0 && VScrollable() && range > 0.f &&
+        !(dir < 0 && m_scroll.y() <= 0.f) && !(dir > 0 && m_scroll.y() >= 1.f)) {
+        double now = glfwGetTime();
+        float dt = m_autoscroll_t > 0.0 ? std::min((float) (now - m_autoscroll_t), 0.05f) : 0.f;
+        m_autoscroll_t = now;
+        m_scroll.y() = std::clamp(m_scroll.y() + dir * speed * dt / range, 0.f, 1.f);
+        propagate_cache_dirty();
+        e.autoscroll = true;
+    } else {
+        m_autoscroll_t = 0.0;
+    }
+    return Widget::drag_motion_event(p, e);
 }
 
 bool ScrollPanel::mouse_drag_event(const Vector2i& p, const Vector2i& rel, int button, int modifiers) {

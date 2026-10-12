@@ -706,6 +706,11 @@ void Screen::initialize(GLFWwindow* window, bool shutdown_glfw) {
 #else
             GLFW_ARROW_CURSOR,
 #endif
+#if defined(GLFW_NOT_ALLOWED_CURSOR)
+            GLFW_NOT_ALLOWED_CURSOR,  // NotAllowed
+#else
+            GLFW_ARROW_CURSOR,
+#endif
         };
 
         GLFWcursor* arrow = glfwCreateStandardCursor(GLFW_ARROW_CURSOR);
@@ -1062,6 +1067,9 @@ void Screen::nvg_flush() {
 }
 
 void Screen::draw_widgets() {
+    if (m_dnd && m_dnd->autoscroll)
+        drag_motion(m_mouse_pos);
+
     // A popup item takes focus on click; the popup then closes. If that item
     // is still focused, the ring below is stroked at its last position after
     // the popup has already been omitted from this frame. Drop it first so a
@@ -1157,7 +1165,9 @@ void Screen::draw_widgets() {
 
     double elapsed = glfwGetTime() - m_last_interaction;
 
-    if (elapsed > 0.5f) {
+    if (m_dnd) {
+        draw_drag_preview(m_nvg_context);
+    } else if (elapsed > 0.5f) {
         /* Draw tooltips */
         const Widget* widget = find_widget(m_mouse_pos);
         if (widget && !widget->tooltip().empty()) {
@@ -1398,18 +1408,28 @@ void Screen::redraw() {
     }
 }
 
-void Screen::cursor_pos_callback_event(double x, double y) {
+/* GLFW cursor coordinates -> logical screen pixels */
+static Vector2i logical_cursor(double x, double y, float pixel_ratio) {
     Vector2i p((int)x, (int)y);
-
 #if defined(NANOGUI_WAYLAND) || defined(__APPLE__)
     // Coordinates already in logical pixels.
+    (void) pixel_ratio;
 #elif defined(_WIN32) || defined(__linux__) || defined(EMSCRIPTEN)
-    p = Vector2i(Vector2f(p) / m_pixel_ratio);
+    p = Vector2i(Vector2f(p) / pixel_ratio);
 #endif
+    return p - Vector2i(1, 2);
+}
+
+void Screen::cursor_pos_callback_event(double x, double y) {
+    Vector2i p = logical_cursor(x, y, m_pixel_ratio);
 
     m_last_interaction = glfwGetTime();
     try {
-        p -= Vector2i(1, 2);
+        if (m_dnd) {
+            m_mouse_pos = p;    /* before dispatch: targets read mouse_pos() */
+            drag_motion(p);
+            return;
+        }
 
         bool ret = false;
         if (!m_drag_active) {
@@ -1463,6 +1483,15 @@ void Screen::mouse_button_callback_event(int button, int action, int modifiers) 
             m_mouse_state |= 1 << button;
         else
             m_mouse_state &= ~(1 << button);
+
+        if (m_dnd) {
+            /* The drag owns the pointer: releasing drops, another press cancels */
+            if (action == GLFW_RELEASE && button == GLFW_MOUSE_BUTTON_1)
+                end_drag(true);
+            else if (action == GLFW_PRESS)
+                end_drag(false);
+            return;
+        }
 
         auto drop_widget = find_widget(m_mouse_pos);
         if (m_drag_active && action == GLFW_RELEASE && drop_widget != m_drag_widget) {
@@ -1577,6 +1606,17 @@ void Screen::mouse_button_callback_event(int button, int action, int modifiers) 
 void Screen::key_callback_event(int key, int scancode, int action, int mods) {
     m_last_interaction = glfwGetTime();
     try {
+        if (m_dnd) {
+            /* Keys don't reach widgets mid-drag; Escape cancels, and a
+               modifier change may change the action a target picks */
+            if (key == GLFW_KEY_ESCAPE && action == GLFW_PRESS) {
+                end_drag(false);
+            } else {
+                m_modifiers = mods;
+                drag_motion(m_mouse_pos);
+            }
+            return;
+        }
         m_redraw |= keyboard_event(key, scancode, action, mods);
     }
     catch (const std::exception& e) {
@@ -1598,7 +1638,146 @@ void Screen::drop_callback_event(int count, const char** filenames) {
     std::vector<std::string> arg(count);
     for (int i = 0; i < count; ++i)
         arg[i] = filenames[i];
-    m_redraw |= drop_event(arg);
+    try {
+        if (drop_event(arg)) {
+            m_redraw = true;
+            return;
+        }
+        /* Not taken by the screen: offer the files to the widget under the
+           cursor as a drag from outside the application */
+        double x, y;
+        glfwGetCursorPos(m_glfw_window, &x, &y);
+        m_mouse_pos = logical_cursor(x, y, m_pixel_ratio);
+        DragData data;
+        data.set("text/uri-list", DragData::uri_list(arg));
+        DragEvent e(data, DropCopy | DropLink, m_modifiers, nullptr);
+        if (drag_dispatch(m_mouse_pos, e, false) && e.target) {
+            DragEvent drop(data, DropCopy | DropLink, m_modifiers, nullptr);
+            drag_dispatch(m_mouse_pos, drop, true);
+        }
+        m_redraw = true;
+    } catch (const std::exception& e) {
+        std::cerr << "Screen::drop_callback_event: Caught exception in event handler: " << e.what() << std::endl;
+    }
+}
+
+/* ---- Drag and drop ------------------------------------------------------ */
+
+bool Screen::start_drag(Widget* source, DragData data, DragPreview preview, int allowed) {
+    if (m_dnd || allowed == DropNone)
+        return false;
+    m_dnd = std::make_unique<DragSession>();
+    m_dnd->source = source;
+    m_dnd->data = std::move(data);
+    m_dnd->preview = std::move(preview);
+    m_dnd->allowed = allowed;
+    /* The press that began the drag no longer belongs to the source */
+    m_drag_active = false;
+    m_drag_widget = nullptr;
+    drag_motion(m_mouse_pos);
+    return true;
+}
+
+/* Route a drag point down the tree, as a motion event would go: into the
+   front modal dialog only, if there is one. */
+bool Screen::drag_dispatch(const Vector2i& p, DragEvent& e, bool drop) {
+    if (Window* modal = front_modal(m_children)) {
+        if (!modal->contains(p))
+            return false;
+        return drop ? modal->drag_drop_event(p, e) : modal->drag_motion_event(p, e);
+    }
+    return drop ? Widget::drag_drop_event(p, e) : Widget::drag_motion_event(p, e);
+}
+
+void Screen::drag_motion(const Vector2i& p) {
+    DragEvent e(m_dnd->data, m_dnd->allowed, m_modifiers, m_dnd->source);
+    drag_dispatch(p, e, false);
+    if (m_dnd->target && m_dnd->target != e.target)
+        m_dnd->target->drag_leave_event();
+    m_dnd->target = e.target;
+    m_dnd->action = e.target ? e.action : DropNone;
+    m_dnd->autoscroll = e.autoscroll;
+    set_screen_cursor(m_dnd->action != DropNone ? Cursor::Arrow : Cursor::NotAllowed);
+    redraw();
+}
+
+void Screen::end_drag(bool drop) {
+    if (!m_dnd)
+        return;
+    /* Dispatch while the session is still registered, so a widget destroyed
+       by a handler is cleared from it (notify_widget_destroyed) */
+    DropAction result = DropNone;
+    if (drop && m_dnd->target) {
+        DragEvent e(m_dnd->data, m_dnd->allowed, m_modifiers, m_dnd->source);
+        if (drag_dispatch(m_mouse_pos, e, true) && e.target)
+            result = e.action;
+    }
+    std::unique_ptr<DragSession> s = std::move(m_dnd);
+    if (s->target && result == DropNone)
+        s->target->drag_leave_event();
+    if (s->source)
+        s->source->drag_finished(result);
+    if (s->image)
+        nvgDeleteImage(m_nvg_context, s->image);
+
+    Widget* w = find_widget(m_mouse_pos);
+    set_screen_cursor(w ? w->cursor() : Cursor::Arrow);
+    redraw();
+}
+
+void Screen::set_screen_cursor(Cursor cursor) {
+    if (cursor == m_cursor)
+        return;
+    m_cursor = cursor;
+    glfwSetCursor(m_glfw_window, m_cursors[(int) cursor]);
+}
+
+/* The preview card under the cursor: image, then label; faded where it
+   can't be dropped. */
+void Screen::draw_drag_preview(NVGcontext* ctx) {
+    DragPreview& pv = m_dnd->preview;
+    if (m_dnd->image == 0 && !pv.rgba.empty() && pv.w > 0 && pv.h > 0)
+        m_dnd->image = nvgCreateImageRGBA(ctx, pv.w, pv.h, 0, pv.rgba.data());
+
+    const float max_edge = 160.0f;
+    float scale = std::min(1.0f, max_edge / (float) std::max(1, std::max(pv.w, pv.h)));
+    float w = m_dnd->image ? pv.w * scale : 0.0f;
+    float h = m_dnd->image ? pv.h * scale : 0.0f;
+    float x = m_mouse_pos.x() - pv.hotspot.x() * scale;
+    float y = m_mouse_pos.y() - pv.hotspot.y() * scale;
+
+    nvgSave(ctx);
+    nvgResetScissor(ctx);
+    nvgGlobalAlpha(ctx, m_dnd->action != DropNone ? 0.85f : 0.45f);
+
+    if (m_dnd->image) {
+        NVGpaint paint = nvgImagePattern(ctx, x, y, w, h, 0.0f, m_dnd->image, 1.0f);
+        nvgBeginPath(ctx);
+        nvgRoundedRect(ctx, x, y, w, h, 3.0f);
+        nvgFillPaint(ctx, paint);
+        nvgFill(ctx);
+        nvgStrokeColor(ctx, nvgRGBA(255, 255, 255, 160));
+        nvgStrokeWidth(ctx, 1.0f);
+        nvgStroke(ctx);
+    }
+
+    if (!pv.label.empty()) {
+        nvgFontFace(ctx, "sans");
+        nvgFontSize(ctx, 14.0f);
+        nvgTextAlign(ctx, NVG_ALIGN_CENTER | NVG_ALIGN_TOP);
+        float bounds[4];
+        float cx = m_dnd->image ? x + w * 0.5f : (float) m_mouse_pos.x() + 12.0f;
+        float ty = m_dnd->image ? y + h + 4.0f : (float) m_mouse_pos.y() + 16.0f;
+        nvgTextBounds(ctx, cx, ty, pv.label.c_str(), nullptr, bounds);
+        nvgBeginPath(ctx);
+        nvgRoundedRect(ctx, bounds[0] - 6.0f, bounds[1] - 2.0f,
+                       bounds[2] - bounds[0] + 12.0f, bounds[3] - bounds[1] + 4.0f, 4.0f);
+        nvgFillColor(ctx, nvgRGBA(0, 0, 0, 200));
+        nvgFill(ctx);
+        nvgFillColor(ctx, nvgRGBA(255, 255, 255, 255));
+        nvgText(ctx, cx, ty, pv.label.c_str(), nullptr);
+    }
+    nvgRestore(ctx);
 }
 
 void Screen::scroll_callback_event(double x, double y) {

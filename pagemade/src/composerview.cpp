@@ -12,6 +12,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cstdlib>
 
 using namespace nanogui;
 using namespace pagemade;
@@ -2435,14 +2436,14 @@ void ComposerView::set_image_store(ImageStore *images) {
     m_tex_gen = 0;                       // the next draw drops whatever was cached
 }
 
-void ComposerView::place_frame(uint32_t asset, const ImageMetadata &meta) {
+void ComposerView::frame_size(const ImageMetadata &meta, size_t page, float &pw, float &ph) const {
     const PageSetup &s = m_doc.setup;
-    float pw = image_print_points(meta.width_px, meta.ppi_x);
-    float ph = image_print_points(meta.height_px, meta.ppi_y);
+    pw = image_print_points(meta.width_px, meta.ppi_x);
+    ph = image_print_points(meta.height_px, meta.ppi_y);
     if (!(pw > 0.f)) pw = 36.f;
     if (!(ph > 0.f)) ph = 36.f;
     float left = 0.f, right = 0.f;
-    page_side_margins(s, m_page, left, right);
+    page_side_margins(s, page, left, right);
     const float live_w = std::max(36.f, s.width - left - right);
     const float live_h = std::max(36.f, s.height - s.margin_top - s.margin_bottom);
     if (pw > live_w || ph > live_h) {
@@ -2450,10 +2451,21 @@ void ComposerView::place_frame(uint32_t asset, const ImageMetadata &meta) {
         pw *= scale;
         ph *= scale;
     }
+}
+
+void ComposerView::place_frame(uint32_t asset, const ImageMetadata &meta,
+                               size_t page, const Point *at) {
+    if (page != m_page)
+        show_page(page);
+    float pw, ph;
+    frame_size(meta, m_page, pw, ph);
+    float left = 0.f, right = 0.f;
+    page_side_margins(m_doc.setup, m_page, left, right);
     Item it;
     it.w = pw;
     it.h = ph;
-    it.xf = Transform::translate(left, s.margin_top);
+    it.xf = at ? Transform::translate(at->x, at->y)
+               : Transform::translate(left, m_doc.setup.margin_top);
     PlacedImage im;
     im.asset = asset;
     im.x = 0;
@@ -2490,7 +2502,7 @@ bool ComposerView::place_image_file(const std::string &path, std::string *error)
     asset.source = file_uri(path);
     asset.meta = meta;
     m_doc.add_image(std::move(asset));
-    place_frame(id, meta);
+    place_frame(id, meta, m_page);
     return true;
 }
 
@@ -2508,7 +2520,71 @@ void ComposerView::place_image(uint32_t asset) {
         a.meta = e->meta;
         m_doc.add_image(std::move(a));
     }
-    place_frame(asset, e->meta);
+    place_frame(asset, e->meta, m_page);
+}
+
+void ComposerView::place_image_at(uint32_t asset, size_t page, const Point &at) {
+    const ImageAsset *a = m_doc.find_image(asset);
+    if (!a || page >= m_doc.pages.size())
+        return;
+    const ImageMetadata meta = a->meta;
+    push_undo();
+    place_frame(asset, meta, page, &at);
+}
+
+/* ---- Drag and drop ------------------------------------------------------- */
+
+uint32_t ComposerView::dragged_asset(const DragData &data) const {
+    const std::string *id = data.get(kImageAssetDragType);
+    if (!id)
+        return 0;
+    uint32_t asset = (uint32_t) std::strtoul(id->c_str(), nullptr, 10);
+    return m_doc.find_image(asset) ? asset : 0;
+}
+
+bool ComposerView::drag_motion_event(const Vector2i &, DragEvent &e) {
+    const uint32_t asset = dragged_asset(e.data);
+    const bool files = !asset && on_drop_files && e.data.has("text/uri-list");
+    if (!(asset || files) || m_placing || !e.accept(this, DropCopy)) {
+        drag_leave_event();
+        return false;
+    }
+    /* The screen's pointer is current during a drag (full precision, zoom
+       applied); event points are rounded */
+    m_drop_at = page_point_from_screen(screen()->mouse_pos());
+    m_drop_page = m_point_page;
+    m_drop_w = m_drop_h = 0.f;
+    if (asset)
+        frame_size(m_doc.find_image(asset)->meta, m_drop_page, m_drop_w, m_drop_h);
+    m_drop_hover = true;
+    screen()->redraw();
+    return true;
+}
+
+void ComposerView::drag_leave_event() {
+    if (!m_drop_hover)
+        return;
+    m_drop_hover = false;
+    if (screen())
+        screen()->redraw();
+}
+
+bool ComposerView::drag_drop_event(const Vector2i &, DragEvent &e) {
+    drag_leave_event();
+    const Point at = page_point_from_screen(screen()->mouse_pos());
+    const size_t page = m_point_page;
+    if (const uint32_t asset = dragged_asset(e.data)) {
+        place_image_at(asset, page, at);
+    } else if (on_drop_files && e.data.has("text/uri-list")) {
+        std::vector<std::string> paths = e.data.file_paths();
+        if (paths.empty())
+            return false;
+        on_drop_files(paths, page, at);
+    } else {
+        return false;
+    }
+    request_focus();
+    return e.accept(this, DropCopy);
 }
 
 void ComposerView::sync_textures(NVGcontext *ctx) {
@@ -2608,6 +2684,28 @@ void ComposerView::draw(NVGcontext *ctx) {
     paint_items(false);
     if (hand)
         paint_items(true);               // the item in hand, above both pages
+
+    /* A drag over the view: the frame it would place, or a place-gun mark
+     * while its size isn't known yet */
+    if (m_drop_hover)
+        for (const PageSlot &sl : slots) {
+            if (sl.index != m_drop_page)
+                continue;
+            nvgSave(ctx);
+            nvgTranslate(ctx, o.x() + sl.x + m_drop_at.x, o.y() + sl.y + m_drop_at.y);
+            nvgBeginPath(ctx);
+            if (m_drop_w > 0.f && m_drop_h > 0.f) {
+                nvgRect(ctx, 0, 0, m_drop_w, m_drop_h);
+            } else {
+                nvgRect(ctx, 0, 0, 24.f * px, 18.f * px);
+                nvgMoveTo(ctx, 0, 0);
+                nvgLineTo(ctx, 24.f * px, 18.f * px);
+            }
+            nvgStrokeColor(ctx, kColumnGuide);
+            nvgStrokeWidth(ctx, 1.5f * px);
+            nvgStroke(ctx);
+            nvgRestore(ctx);
+        }
 
     nvgRestore(ctx);
 }

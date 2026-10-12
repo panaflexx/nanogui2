@@ -447,8 +447,8 @@ bool read_whole_file(const std::string &path, std::vector<uint8_t> *out) {
 std::vector<uint8_t> picture_bytes(const ImageAsset &a, const ImageStore *images) {
     if (images)
         if (const ImageStore::Entry *e = images->find(a.id))
-            if (!e->source.empty())
-                return e->source;
+            if (e->loaded())
+                return *e->source;
     std::string path;
     std::vector<uint8_t> bytes;
     if (!a.source.empty() && file_path_from_uri(a.source, path) && read_whole_file(path, &bytes))
@@ -593,6 +593,8 @@ std::string make_json(const PageDoc &doc, const SaveOptions &opts, const std::ve
         j.key("uri").value(uri->second);
         if (!a.source.empty())
             j.key("source").value(a.source);
+        if (a.source_size) j.key("source_size").value((double) a.source_size);
+        if (a.source_mtime) j.key("source_mtime").value((double) a.source_mtime);
         write_image_meta(j, a.meta);
         j.end_object();
     }
@@ -1017,7 +1019,8 @@ bool save_document(const PageDoc &doc, const FontLibrary &fonts, const std::stri
     return true;
 }
 
-OpenResult open_document(const std::string &path, const FontLibrary &installed) {
+OpenResult open_document(const std::string &path, const FontLibrary &installed,
+                         bool load_linked) {
     OpenResult r;
     mz_zip_archive zip;
     std::memset(&zip, 0, sizeof zip);
@@ -1197,6 +1200,9 @@ OpenResult open_document(const std::string &path, const FontLibrary &installed) 
         get(a, "id", asset.id);
         get(a, "name", asset.name);
         get(a, "source", asset.source);
+        double stamp = 0;
+        if (number(field(a, "source_size"), stamp) && stamp > 0) asset.source_size = (uint64_t) stamp;
+        if (number(field(a, "source_mtime"), stamp)) asset.source_mtime = (int64_t) stamp;
         std::string uri;
         get(a, "uri", uri);
         if (const DictValue *meta = field(a, "meta")) {
@@ -1242,6 +1248,10 @@ OpenResult open_document(const std::string &path, const FontLibrary &installed) 
                 got = true;
             }
         } else if (std::string path; file_path_from_uri(uri, path)) {
+            if (!load_linked) {
+                r.images.add_link(asset.id, path, asset.meta);   // read when needed
+                continue;
+            }
             where = path;
             got = read_whole_file(path, &bytes);
         }

@@ -188,7 +188,15 @@ struct ImageAsset {
     std::string name;
     std::string source;
     ImageMetadata meta;
+    /* The source file as it was read, to tell when it has changed since
+     * (0 when unknown: older files, or a picture with no file). */
+    uint64_t source_size = 0;
+    int64_t  source_mtime = 0;           // seconds since the epoch
 };
+
+/* Drag and drop type for a picture of this publication; the bytes are the
+ * asset id in decimal. */
+constexpr const char *kImageAssetDragType = "application/x-pagemade-image-asset";
 
 struct Page {
     std::vector<Item> items;     // bottom to top
@@ -303,6 +311,10 @@ struct PageDoc {
     uint32_t add_image(ImageAsset asset);
     /* True when some item still shows this picture. */
     bool image_placed(uint32_t id) const;
+    /* Take an unused picture out of the publication (a placed one stays:
+     * false). Pictures otherwise stay when their last frame goes, so an
+     * asset library can show and place them again. */
+    bool remove_image(uint32_t id);
 
     /* Lookups. `page` (when given) receives the item's page index. */
     Item       *find_item(ItemId id, size_t *page = nullptr);
@@ -325,8 +337,8 @@ struct PageDoc {
     ItemId  add_text_frame(size_t page, StoryId story, float w, float h, const Transform &xf,
                            size_t thread_index = SIZE_MAX);
     /* Removes the item and takes it out of its thread; a story left with no
-     * frames is removed too. A picture's asset leaves with its last frame
-     * (the bytes stay in the ImageStore, so undo can bring it back). */
+     * frames is removed too. A picture's asset stays, unused, after its
+     * last frame goes (remove_image takes it out). */
     void    remove_item(ItemId id);
     /* Move an item onto `page`, on top of that page's stack. The id and the
      * transform stay as they are; the caller shifts the transform into the

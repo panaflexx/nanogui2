@@ -902,6 +902,10 @@ int imgsExpandAtlas(IMGcontext* stash, int width, int height) {
         stash->atlas->nnodes++;
     }
 
+    // NB: no free node is added for the bottom strip on a height expansion.
+    // Nodes carry no height limit, so existing shelves may legally extend
+    // below old_h; a bottom-strip node would overlap them.
+
     for (i = 0; i < stash->atlas->nnodes; i++)
         maxy = (int)fmax(maxy, stash->atlas->nodes[i].y);
     stash->dirtyRect[0] = 0;

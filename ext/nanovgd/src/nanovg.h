@@ -474,6 +474,11 @@ extern NVG_EXPORT int nvgCreateImageRGBA(NVGcontext* ctx, int w, int h, int imag
 // Updates image data specified by image handle.
 extern NVG_EXPORT void nvgUpdateImage(NVGcontext* ctx, int image, const unsigned char* data);
 
+// Updates only the rectangle (x, y, w, h) of an image.  data points at the
+// whole image (same layout as nvgUpdateImage); only the rectangle is read.
+extern NVG_EXPORT void nvgUpdateImageRegion(NVGcontext* ctx, int image, int x, int y, int w, int h,
+                                            const unsigned char* data);
+
 // Returns the dimensions of a created image.
 extern NVG_EXPORT void nvgImageSize(NVGcontext* ctx, int image, int* w, int* h);
 

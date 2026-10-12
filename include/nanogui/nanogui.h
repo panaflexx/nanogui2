@@ -35,6 +35,8 @@
 #include <nanogui/textarea.h>
 #include <nanogui/slider.h>
 #include <nanogui/imagepanel.h>
+#include <nanogui/imagestash.h>
+#include <nanogui/dragdrop.h>
 #include <nanogui/scrollpanel.h>
 #include <nanogui/treeview.h>
 #include <nanogui/colorwheel.h>

@@ -146,6 +146,8 @@ public:
     virtual bool mouse_drag_event(const Vector2i& p, const Vector2i& rel,
                                   int button, int modifiers) override;
     virtual bool scroll_event(const Vector2i& p, const Vector2f& rel) override;
+    virtual bool drag_motion_event(const Vector2i& p, DragEvent& e) override;
+    virtual bool drag_drop_event(const Vector2i& p, DragEvent& e) override;
     virtual bool zoom_event(double magnification, const Vector2i& pos) override;
     virtual void draw(NVGcontext* ctx) override;
     virtual Widget* find_widget(const Vector2i& p) override;

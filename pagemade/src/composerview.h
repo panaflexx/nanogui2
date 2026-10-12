@@ -103,6 +103,17 @@ public:
     bool place_image_file(const std::string &path, std::string *error);
     /* Another frame of a picture the publication already has. */
     void place_image(uint32_t asset);
+    /* The same at a point: its top-left corner at `at` on `page`. */
+    void place_image_at(uint32_t asset, size_t page, const pagemade::Point &at);
+
+    /* Drag and drop. A publication picture (kImageAssetDragType) is placed
+     * where it drops. Files ("text/uri-list") go to on_drop_files with the
+     * drop point, for the app to import and then place_image_at(). */
+    std::function<void(const std::vector<std::string> &paths, size_t page,
+                       pagemade::Point at)> on_drop_files;
+    bool drag_motion_event(const nanogui::Vector2i &p, nanogui::DragEvent &e) override;
+    void drag_leave_event() override;
+    bool drag_drop_event(const nanogui::Vector2i &p, nanogui::DragEvent &e) override;
 
     /* The selection, in the order items were picked. */
     const std::vector<pagemade::ItemId> &selection() const { return m_sel; }
@@ -354,7 +365,15 @@ private:
 
     /* A new frame of `asset` at print size, at the margin. Caller recorded
      * the undo step and added the asset. */
-    void place_frame(uint32_t asset, const pagemade::ImageMetadata &meta);
+    /* A picture's frame: at the margin of the current page, or with its
+     * top-left at `at` on `page`. */
+    void place_frame(uint32_t asset, const pagemade::ImageMetadata &meta,
+                     size_t page, const pagemade::Point *at = nullptr);
+    /* Print size of a picture on `page`, shrunk to fit inside the margins. */
+    void frame_size(const pagemade::ImageMetadata &meta, size_t page, float &w, float &h) const;
+    /* The asset id a drag offers, 0 if none. */
+    uint32_t dragged_asset(const nanogui::DragData &data) const;
+
     /* Drop GPU copies when the store is replaced. Called from draw(). */
     void sync_textures(NVGcontext *ctx);
     /* Display view for one placement. 0 draws the stand-in. */
@@ -461,6 +480,13 @@ private:
     bool m_show_guides = true;
 
     pagemade::ImageStore *m_images = nullptr;
+
+    /* A drag over the view: where it would land, and the frame's size (0
+     * while unknown: files are only probed on drop) */
+    bool m_drop_hover = false;
+    size_t m_drop_page = 0;
+    pagemade::Point m_drop_at;
+    float m_drop_w = 0.f, m_drop_h = 0.f;
     /* Screen copies of display views. Freed when the store's generation
      * changes, not from the destructor: the screen may already be gone. */
     struct Tex { int id = 0; int w = 0, h = 0; };

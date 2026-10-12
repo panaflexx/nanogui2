@@ -15,6 +15,7 @@
 #include <nanogui/object.h>
 #include <nanogui/theme.h>
 #include <nanogui/fluent.h>
+#include <nanogui/dragdrop.h>
 #include <algorithm>
 #include <vector>
 
@@ -385,6 +386,25 @@ public:
 
     /// Handle a mouse scroll event (default implementation: propagate to children)
     virtual bool scroll_event(const Vector2i& p, const Vector2f& rel);
+
+    /**
+     * \name Drag and drop (see nanogui/dragdrop.h)
+     *
+     * Points are in the parent's coordinates, as for mouse events.  The
+     * defaults forward to the topmost child under the point; a container
+     * that transforms its children (zoom, pan) overrides both to convert.
+     */
+    ///@{
+    /// A drag moved over the widget: call e.accept() to take it.  Returns
+    /// true when this widget or a descendant accepted.
+    virtual bool drag_motion_event(const Vector2i& p, DragEvent& e);
+    /// The drag left the widget that last accepted it, or was cancelled.
+    virtual void drag_leave_event() { }
+    /// The drag was released over the widget that accepted it.
+    virtual bool drag_drop_event(const Vector2i& p, DragEvent& e);
+    /// A drag this widget started (Screen::start_drag) ended with `action`.
+    virtual void drag_finished(DropAction /* action */) { }
+    ///@}
 
     /// Handle a pinch-to-zoom gesture (default: propagate to children)
     virtual bool zoom_event(double magnification, const Vector2i& pos);

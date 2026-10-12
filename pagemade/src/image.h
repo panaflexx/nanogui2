@@ -49,6 +49,10 @@ struct ImageMetadata {
     double ppi_x = 0, ppi_y = 0;
     int orientation = 1;                // EXIF 1..8; 1 is upright already
     std::vector<uint8_t> icc;
+    /* Camera and authoring tags for display ("Camera", "Taken", "Exposure",
+     * …), in a fixed order. Not saved with the document: probing the file
+     * again brings them back. */
+    std::vector<std::pair<std::string, std::string>> exif;
 };
 
 const char *color_model_name(ColorModel m);
@@ -63,6 +67,14 @@ float image_print_points(int px, double ppi);
  * in y-down space. The same orientation the display view bakes into pixels,
  * so a JPEG can be embedded unchanged and still come out upright. */
 void image_pdf_matrix(int orientation, float x, float y, float w, float h, float m[6]);
+
+/* The display view of encoded bytes: decoded upright and shrunk so the long
+ * edge is at most `long_edge` (0 = full size). Safe on any thread. */
+bool make_display(const uint8_t *data, size_t n, int long_edge,
+                  std::vector<uint8_t> *rgba, int *w, int *h, std::string *error);
+
+/* Read a whole file. */
+bool read_file(const std::string &path, std::vector<uint8_t> *out, std::string *error);
 
 /* Full upright decode: straight RGBA, top row first, width * height * 4. */
 struct DecodedImage {
@@ -105,15 +117,28 @@ ImageLoader &image_loader();
 
 /* The session's picture bytes, keyed by ImageAsset::id.
  * Ids come from take_id() and only move forward, including across undo:
- * a placement brought back still finds the bytes it was placed with. */
+ * a placement brought back still finds the bytes it was placed with.
+ *
+ * A linked picture can be registered without its bytes (add_link) and
+ * loaded later: synchronously with load(), or by a loader thread that reads
+ * and decodes on its own and hands the result to install(). unload() lets
+ * the bytes go again; the path stays, so it can be read back. The source is
+ * shared and never changed in place, so another thread can keep reading a
+ * copy of the pointer while the store moves on. */
 class ImageStore {
 public:
+    using Bytes = std::shared_ptr<const std::vector<uint8_t>>;
     struct Entry {
-        std::vector<uint8_t> source;
+        std::string path;                // linked file to (re)load from; "" if none
+        Bytes source;                    // null while not loaded
         ImageMetadata meta;
         int proxy_edge = 0;             // longest edge of `proxy`; 0 if none yet
         int proxy_w = 0, proxy_h = 0;
         std::vector<uint8_t> proxy;      // upright straight RGBA
+
+        bool loaded() const { return source && !source->empty(); }
+        const uint8_t *data() const { return loaded() ? source->data() : nullptr; }
+        size_t size() const { return loaded() ? source->size() : 0; }
     };
 
     ImageStore();
@@ -135,7 +160,26 @@ public:
     bool add(uint32_t id, std::vector<uint8_t> bytes, ImageMetadata *meta, std::string *error);
     bool load_file(uint32_t id, const std::string &path, ImageMetadata *meta, std::string *error);
 
+    /* A linked picture, not read yet; `meta` is the document's copy. */
+    void add_link(uint32_t id, const std::string &path, const ImageMetadata &meta);
+    /* Read a linked picture now (Save, Print, Export). True if loaded. */
+    bool load(uint32_t id, std::string *error);
+    /* Bytes read and probed elsewhere, with an optional display view. The
+     * proxy only replaces a smaller one. */
+    void install(uint32_t id, Bytes source, const ImageMetadata &meta,
+                 std::vector<uint8_t> proxy, int proxy_w, int proxy_h);
+    /* A larger display view decoded elsewhere from the loaded bytes. */
+    void set_proxy(uint32_t id, std::vector<uint8_t> proxy, int w, int h);
+    /* Drop a linked picture's bytes and display view (keeps path and meta).
+     * Pictures without a path keep their bytes: there is no file to reload. */
+    bool unload(uint32_t id);
+    /* Bytes held for pictures that could be unloaded (linked ones). */
+    size_t unloadable_bytes() const;
+
     const Entry *find(uint32_t id) const;
+    /* The current display view without decoding (it may be smaller than
+     * wanted, or missing while not loaded). */
+    bool cached_display(uint32_t id, const uint8_t **rgba, int *w, int *h) const;
 
     /* The display view. `long_edge` is how many pixels the composer wants
      * on the long side (a power of two is the usual request). The proxy is

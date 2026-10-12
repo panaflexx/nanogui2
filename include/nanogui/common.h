@@ -138,6 +138,7 @@ enum class Cursor {
     HResize,    ///< The horizontal resize cursor.
     VResize,    ///< The vertical resize cursor.
     HVResize,    ///< The horizontal-vertical resize cursor.
+    NotAllowed,  ///< The "no drop here" cursor.
     CursorCount ///< Not a cursor --- should always be last: enables a loop over the cursor types.
 };
 

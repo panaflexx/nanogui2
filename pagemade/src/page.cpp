@@ -545,10 +545,6 @@ ItemId PageDoc::add_text_frame(size_t page, StoryId story, float w, float h,
 }
 
 void PageDoc::remove_item(ItemId id) {
-    uint32_t asset = 0;
-    if (const Item *it = find_item(id))
-        if (const PlacedImage *im = it->image())
-            asset = im->asset;
     for (Page &p : pages)
         p.items.erase(std::remove_if(p.items.begin(), p.items.end(),
                                      [&](const Item &it) { return it.id == id; }),
@@ -558,10 +554,17 @@ void PageDoc::remove_item(ItemId id) {
     stories.erase(std::remove_if(stories.begin(), stories.end(),
                                  [](const StoryEntry &s) { return s.thread.empty(); }),
                   stories.end());
-    if (asset && !image_placed(asset))
-        images.erase(std::remove_if(images.begin(), images.end(),
-                                    [&](const ImageAsset &a) { return a.id == asset; }),
-                     images.end());
+}
+
+bool PageDoc::remove_image(uint32_t id) {
+    if (image_placed(id))
+        return false;
+    auto it = std::find_if(images.begin(), images.end(),
+                           [&](const ImageAsset &a) { return a.id == id; });
+    if (it == images.end())
+        return false;
+    images.erase(it);
+    return true;
 }
 
 void PageDoc::bring_to_front(ItemId id) {

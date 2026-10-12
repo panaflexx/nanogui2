@@ -226,6 +226,24 @@ bool Widget::mouse_motion_event(const Vector2i& p, const Vector2i& rel, int butt
     return handled;
 }
 
+bool Widget::drag_motion_event(const Vector2i& p, DragEvent& e) {
+    for (auto it = m_children.rbegin(); it != m_children.rend(); ++it) {
+        Widget* child = *it;
+        if (child->visible() && child->contains(p - m_pos))
+            return child->drag_motion_event(p - m_pos, e);
+    }
+    return false;
+}
+
+bool Widget::drag_drop_event(const Vector2i& p, DragEvent& e) {
+    for (auto it = m_children.rbegin(); it != m_children.rend(); ++it) {
+        Widget* child = *it;
+        if (child->visible() && child->contains(p - m_pos))
+            return child->drag_drop_event(p - m_pos, e);
+    }
+    return false;
+}
+
 bool Widget::scroll_event(const Vector2i& p, const Vector2f& rel) {
     propagate_cache_dirty();
 

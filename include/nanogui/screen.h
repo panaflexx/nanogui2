@@ -17,6 +17,7 @@
 #include <nanogui/widget.h>
 #include <nanogui/texture.h>
 #include <list>
+#include <memory>
 #include <unordered_set>
 
 NAMESPACE_BEGIN(nanogui)
@@ -177,10 +178,23 @@ public:
     /// Return the ratio between pixel and device coordinates (e.g. >= 2 on Mac Retina displays)
     float pixel_ratio() const { return m_pixel_ratio; }
 
-    /// Handle a file drop event
+    /// Handle a file drop event.  Return false to deliver the files to the
+    /// widget under the cursor as a "text/uri-list" drag (drag_drop_event).
     virtual bool drop_event(const std::vector<std::string>& /* filenames */) {
         return false; /* To be overridden */
     }
+
+    /**
+     * Start dragging `data` from `source` (call from its mouse_drag_event).
+     * The preview follows the cursor until the button is released; the
+     * source then gets drag_finished().  False if a drag is already running.
+     */
+    bool start_drag(Widget* source, DragData data, DragPreview preview,
+                    int allowed = DropCopy);
+    /// Is a drag and drop in progress?
+    bool drag_in_progress() const { return (bool) m_dnd; }
+    /// End the current drag without dropping.
+    void cancel_drag() { end_drag(false); }
 
 	// Gets focuable widgets for handling tabbing around a form.
 	void collect_focusable_widgets(Widget* root, std::vector<Widget*>& focusable, Widget* stop_at);
@@ -273,6 +287,10 @@ public:
 			m_drag_widget = nullptr;
 			m_drag_active = false;
 		}
+		if (m_dnd && m_dnd->source && under(m_dnd->source))
+			m_dnd->source = nullptr;
+		if (m_dnd && m_dnd->target && under(m_dnd->target))
+			m_dnd->target = nullptr;
 
 		m_focus_path.erase(
 			std::remove_if(m_focus_path.begin(), m_focus_path.end(),
@@ -344,6 +362,24 @@ protected:
     Vector2i m_mouse_pos;
     bool m_drag_active;
     Widget* m_drag_widget = nullptr;
+
+    /* Drag and drop session (see dragdrop.h) */
+    struct DragSession {
+        Widget*     source = nullptr;
+        DragData    data;
+        DragPreview preview;
+        int         allowed = DropNone;
+        Widget*     target = nullptr;   ///< widget that last accepted
+        DropAction  action = DropNone;
+        bool        autoscroll = false;
+        int         image = 0;          ///< NVG texture of preview.rgba
+    };
+    std::unique_ptr<DragSession> m_dnd;
+    bool drag_dispatch(const Vector2i& p, DragEvent& e, bool drop);
+    void drag_motion(const Vector2i& p);
+    void end_drag(bool drop);
+    void set_screen_cursor(Cursor cursor);
+    void draw_drag_preview(NVGcontext* ctx);
     bool m_process_events = true;
     Color m_background;
     std::string m_caption;

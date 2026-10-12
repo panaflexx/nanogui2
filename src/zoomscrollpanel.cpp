@@ -397,6 +397,23 @@ bool ZoomScrollPanel::mouse_motion_event(const Vector2i& p, const Vector2i& rel,
     return false;
 }
 
+/* Drags reach the child in its logical space, like motion events */
+bool ZoomScrollPanel::drag_motion_event(const Vector2i& p, DragEvent& e) {
+    if (m_children.empty())
+        return false;
+    Widget* child = m_children[0];
+    Vector2i cp = to_child(p);
+    return child->visible() && child->contains(cp) && child->drag_motion_event(cp, e);
+}
+
+bool ZoomScrollPanel::drag_drop_event(const Vector2i& p, DragEvent& e) {
+    if (m_children.empty())
+        return false;
+    Widget* child = m_children[0];
+    Vector2i cp = to_child(p);
+    return child->visible() && child->contains(cp) && child->drag_drop_event(cp, e);
+}
+
 bool ZoomScrollPanel::mouse_drag_event(const Vector2i& p, const Vector2i& rel,
                                        int button, int modifiers) {
     if (m_scrolling_y || m_scrolling_x) { m_vel_x = 0.0; m_vel_y = 0.0; }

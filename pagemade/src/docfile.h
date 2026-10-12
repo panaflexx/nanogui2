@@ -70,8 +70,11 @@ bool save_document(const PageDoc &doc, const FontLibrary &fonts, const std::stri
                    const SaveOptions &opts, std::string *error = nullptr,
                    const ImageStore *images = nullptr);
 /* `installed` decides which linked fonts are needed: a family already
- * installed is used as is. */
-OpenResult open_document(const std::string &path, const FontLibrary &installed);
+ * installed is used as is. With `load_linked` false, linked pictures are
+ * registered in OpenResult::images without being read (their metadata comes
+ * from the document); an AssetManager loads them as they come on screen. */
+OpenResult open_document(const std::string &path, const FontLibrary &installed,
+                         bool load_linked = true);
 
 /* The document.json text for a document (tests and debugging).
  * `images` supplies picture bytes when an asset is embedded. */

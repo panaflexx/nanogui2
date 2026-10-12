@@ -2113,6 +2113,11 @@ static bool pdf_has_number(const std::string &pdf, const std::string &key, int v
     return false;
 }
 
+/* ImageStore keeps the file bytes behind a shared pointer. */
+static bool source_is(const ImageStore::Entry *e, const std::vector<uint8_t> &bytes) {
+    return e && e->source && *e->source == bytes;
+}
+
 class TiffStub : public ImageDecoder {
 public:
     const char *id() const override { return "tiff"; }
@@ -2274,7 +2279,7 @@ static void test_images(const FontLibrary &fonts) {
         CHECK(store.display(id, 8, &rgba, &w, &h), "display proxy");
         CHECK(std::max(w, h) <= 8 && std::max(w, h) <= 32 && w > 0 && h > 0,
               "proxy long edge %d is within the request and the source", std::max(w, h));
-        CHECK(store.find(id) && store.find(id)->source == source, "display leaves the source bytes");
+        CHECK(source_is(store.find(id), source), "display leaves the source bytes");
         const int kept_w = w, kept_h = h;
         CHECK(store.display(id, 4, &rgba, &w, &h) && w == kept_w && h == kept_h,
               "a smaller request keeps the proxy already built");
@@ -2325,8 +2330,10 @@ static void test_images(const FontLibrary &fonts) {
         doc.remove_item(ia);
         CHECK(doc.find_image(id), "one placement keeps the asset");
         doc.remove_item(ib);
-        CHECK(!doc.find_image(id), "the last placement removes the asset");
-        CHECK(store.find(id) && store.find(id)->source == kept,
+        CHECK(doc.find_image(id), "an unused picture stays in the publication");
+        CHECK(doc.remove_image(id) && !doc.find_image(id),
+              "remove_image takes an unused picture out");
+        CHECK(source_is(store.find(id), kept),
               "the bytes stay in the store for undo");
         const uint32_t next = store.take_id();
         CHECK(next == id + 1, "ids keep moving forward (%u)", next);
@@ -2364,7 +2371,7 @@ static void test_images(const FontLibrary &fonts) {
         if (emb.ok) {
             check_doc(doc, emb.doc);
             const ImageStore::Entry *e = emb.images.find(id);
-            CHECK(e && e->source == png, "embedded bytes match the file that was placed");
+            CHECK(source_is(e, png), "embedded bytes match the file that was placed");
             CHECK(emb.doc.find_image(id) && emb.doc.find_image(id)->meta.format == "png" &&
                   std::fabs(emb.doc.find_image(id)->meta.ppi_x - 300) < 0.1,
                   "opened metadata comes from the file");
@@ -2377,7 +2384,7 @@ static void test_images(const FontLibrary &fonts) {
         CHECK(link.ok, "open linked: %s", link.error.c_str());
         if (link.ok) {
             const ImageStore::Entry *e = link.images.find(id);
-            CHECK(e && e->source == png, "opening a link reads the file again");
+            CHECK(source_is(e, png), "opening a link reads the file again");
         }
         std::remove(linked_png.c_str());
         OpenResult gone = open_document(link_path, fonts);

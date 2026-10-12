@@ -523,6 +523,8 @@ add_library(nanogui ${NANOGUI_LIBRARY_TYPE}
   include/nanogui/document.h src/document.cpp
   include/nanogui/texteditor.h src/texteditor.cpp
   include/nanogui/imagepanel.h src/imagepanel.cpp
+  include/nanogui/imagestash.h src/imagestash.cpp
+  include/nanogui/dragdrop.h src/dragdrop.cpp
   include/nanogui/scrollpanel.h src/scrollpanel.cpp
     include/nanogui/zoomscrollpanel.h src/zoomscrollpanel.cpp
   include/nanogui/colorwheel.h src/colorwheel.cpp

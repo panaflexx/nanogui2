@@ -388,10 +388,12 @@ struct PdfPicture {
 
 PdfPicture embed_picture(Writer &w, const ImageStore::Entry &e) {
     PdfPicture out;
+    if (!e.loaded())
+        return out;                      // not read (the caller loads before export)
     const ImageMetadata &m = e.meta;
+    const uint8_t *src = e.data();
     const bool jpeg = m.format == "jpeg" ||
-                      (e.source.size() >= 3 && e.source[0] == 0xFF && e.source[1] == 0xD8 &&
-                       e.source[2] == 0xFF);
+                      (e.size() >= 3 && src[0] == 0xFF && src[1] == 0xD8 && src[2] == 0xFF);
     if (jpeg && m.stored_width_px > 0 && m.stored_height_px > 0) {
         const char *cs = (m.model == ColorModel::Gray || m.channels == 1) ? "DeviceGray"
                        : (m.model == ColorModel::CMYK || m.channels == 4) ? "DeviceCMYK"
@@ -402,14 +404,14 @@ PdfPicture embed_picture(Writer &w, const ImageStore::Entry &e) {
                            std::to_string(m.stored_height_px) + " /ColorSpace /" + cs +
                            " /BitsPerComponent " + std::to_string(bits) +
                            " /Interpolate true /Filter /DCTDecode";
-        out.obj = w.add_raw_stream(dict, std::string((const char *) e.source.data(), e.source.size()));
+        out.obj = w.add_raw_stream(dict, std::string((const char *) e.data(), e.size()));
         out.upright = false;
         return out;
     }
 
     DecodedImage full;
     std::string err;
-    if (!image_loader().decode(e.source.data(), e.source.size(), &full, &err) ||
+    if (!image_loader().decode(e.data(), e.size(), &full, &err) ||
         full.width <= 0 || full.height <= 0)
         return out;
     const size_t n = (size_t) full.width * (size_t) full.height;
