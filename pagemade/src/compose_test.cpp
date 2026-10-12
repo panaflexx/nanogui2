@@ -18,6 +18,7 @@
 #include "docfile.h"
 #include "uri.h"
 #include "nanovg_exif.h"
+#include "bg_worker.h"
 
 #include <miniz.h>
 
@@ -26,7 +27,12 @@
 #include "../../ext/glfw/deps/stb_image_write.h"
 
 #include <algorithm>
+#include <atomic>
+#include <chrono>
 #include <cmath>
+#include <condition_variable>
+#include <mutex>
+#include <thread>
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
@@ -2226,6 +2232,43 @@ static void test_outline_cache(const FontLibrary &fonts) {
     CHECK(p->cmds.size() == n && n > 0, "the cached outline keeps its commands (%zu)", n);
 }
 
+/* BackgroundWorker: keyed jobs replace queued ones; drop_if takes them out. */
+static void test_background_worker() {
+    BackgroundWorker worker;
+    std::mutex mu;
+    std::condition_variable cv;
+    bool go = false;
+    std::vector<int> ran;
+    std::atomic<int> done{0};
+    auto job = [&](int n) {
+        return [&, n] {
+            std::lock_guard<std::mutex> lock(mu);
+            ran.push_back(n);
+            ++done;
+        };
+    };
+    worker.post([&] {                    // hold the thread while the queue fills
+        std::unique_lock<std::mutex> lock(mu);
+        cv.wait(lock, [&] { return go; });
+    });
+    worker.post(job(1), "a");
+    worker.post(job(2), "a");            // replaces 1
+    worker.post(job(3), "b");
+    worker.post(job(4), "c");
+    worker.drop_if([](const std::string &key) { return key == "c"; });
+    CHECK(worker.queued("a") && worker.queued("b") && !worker.queued("c"),
+          "queued jobs by key after replace and drop");
+    {
+        std::lock_guard<std::mutex> lock(mu);
+        go = true;
+    }
+    cv.notify_all();
+    for (int i = 0; i < 200 && done < 2; ++i)
+        std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    std::lock_guard<std::mutex> lock(mu);
+    CHECK(ran == std::vector<int>({2, 3}), "the newest job per key ran, in order");
+}
+
 static void test_images(const FontLibrary &fonts) {
     CHECK(std::fabs(image_print_points(300, 300) - 72.f) < 0.01f, "300 px at 300 ppi is 72 pt");
     CHECK(std::fabs(image_print_points(100, 0) - 100.f) < 0.01f, "unspecified resolution is 72 ppi");
@@ -2394,6 +2437,31 @@ static void test_images(const FontLibrary &fonts) {
         ImageAsset ghost = asset;
         ghost.source = file_uri("/tmp/pagemade-no-such-picture.png");
         CHECK(asset_status(ghost, nullptr) == AssetStatus::Missing, "a missing file is missing");
+        /* The overload a background thread uses: loaded bytes passed in */
+        ImageStore::Bytes held_png = std::make_shared<const std::vector<uint8_t>>(png);
+        CHECK(asset_status(asset, held_png) == AssetStatus::Ok &&
+              asset_status(drifted, held_png) == AssetStatus::Modified,
+              "status from bytes handed to another thread");
+
+        ImageImport probed = probe_image_file(linked_png);
+        CHECK(probed.ok && probed.bytes.empty() && probed.stamp.size == png.size() &&
+              probed.meta.width_px == asset.meta.width_px &&
+              probed.meta.height_px == asset.meta.height_px,
+              "probe_image_file reads the header, keeps no bytes");
+        CHECK(!probe_image_file("/tmp/pagemade-no-such-picture.png").ok,
+              "probing a missing file fails");
+
+        /* A link loads on demand and unloads without dropping every texture */
+        ImageStore lazy;
+        lazy.add_link(7, linked_png, asset.meta);
+        CHECK(!lazy.is_loaded(7) && lazy.path_of(7) == linked_png, "a link starts unloaded");
+        std::string load_err;
+        CHECK(lazy.load(7, &load_err) && lazy.is_loaded(7), "load reads a link");
+        const uint64_t gen = lazy.generation();
+        CHECK(lazy.unload(7) && !lazy.is_loaded(7) && lazy.path_of(7) == linked_png,
+              "unload drops the bytes and keeps the path");
+        CHECK(lazy.generation() == gen, "unload leaves the generation alone");
+        CHECK(lazy.unloadable_bytes() == 0, "nothing left to unload");
         doc.add_image(asset);
         Item it;
         it.w = 30; it.h = 16;
@@ -2914,6 +2982,7 @@ int main(int argc, char **argv) {
     test_drawlist(fonts);
     test_docfile(fonts);
     test_images(fonts);
+    test_background_worker();
     test_caps(fonts);
     test_type_file(fonts);
     test_font_menu();

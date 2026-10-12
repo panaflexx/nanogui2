@@ -98,6 +98,9 @@ struct ImageImport {
     std::string error;
 };
 ImageImport read_image_import(const std::string &path);
+/* Metadata and size/mtime only, reading as little of the file as the probe
+ * needs (no bytes kept, no hash): for showing a picture's details. */
+ImageImport probe_image_file(const std::string &path);
 
 /* Ok: the file matches the stamps, or there is no file to drift (embedded,
  * or a stamp left at 0 by an older document). Modified: size, mtime or the
@@ -106,6 +109,11 @@ ImageImport read_image_import(const std::string &path);
 enum class AssetStatus { Ok, Modified, Missing };
 const char *asset_status_name(AssetStatus s);
 AssetStatus asset_status(const struct ImageAsset &asset, const class ImageStore *images);
+/* The same with the loaded bytes passed in (null if not loaded), so a
+ * background thread can check without touching the store. stat()s the file:
+ * slow on a network share, so not on the UI thread. */
+AssetStatus asset_status(const struct ImageAsset &asset,
+                         const std::shared_ptr<const std::vector<uint8_t>> &loaded);
 
 /* Full upright decode: straight RGBA, top row first, width * height * 4. */
 struct DecodedImage {
@@ -206,7 +214,7 @@ public:
     void set_proxy(uint32_t id, std::vector<uint8_t> proxy, int w, int h);
     /* Drop a linked picture's bytes and display view (keeps path and meta).
      * Pictures without a path keep their bytes: there is no file to reload.
-     * Bumps the generation so a GPU cache drops the old texture. */
+     * The generation stays: the caller drops that picture's texture itself. */
     bool unload(uint32_t id);
     /* Bytes held for pictures that could be unloaded (linked ones). */
     size_t unloadable_bytes() const;

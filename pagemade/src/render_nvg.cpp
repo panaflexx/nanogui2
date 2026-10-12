@@ -149,6 +149,14 @@ void draw_stroke(NVGcontext *ctx, const DrawStroke &s, float px) {
     }
 }
 
+/* A picture still being read: a plain tile, no cross. */
+void draw_loading_image(NVGcontext *ctx, const DrawImage &im) {
+    nvgBeginPath(ctx);
+    nvgRect(ctx, 0, 0, im.clip_w, im.clip_h);
+    nvgFillColor(ctx, nvgRGB(236, 236, 236));
+    nvgFill(ctx);
+}
+
 void draw_missing_image(NVGcontext *ctx, const DrawImage &im) {
     nvgBeginPath(ctx);
     nvgRect(ctx, 0, 0, im.clip_w, im.clip_h);
@@ -188,12 +196,14 @@ void draw_list(NVGcontext *ctx, const DrawList &list, float px,
              * The frame itself is exact, including when the picture is rotated. */
             nvgIntersectScissor(ctx, 0, 0, im->clip_w, im->clip_h);
             int img = texture ? texture(*im) : 0;
-            if (img && im->w != 0.f && im->h != 0.f) {
+            if (img > 0 && im->w != 0.f && im->h != 0.f) {
                 nvgBeginPath(ctx);
                 nvgRect(ctx, im->x, im->y, im->w, im->h);
                 NVGpaint paint = nvgImagePattern(ctx, im->x, im->y, im->w, im->h, 0, img, 1.f);
                 nvgFillPaint(ctx, paint);
                 nvgFill(ctx);
+            } else if (img < 0) {
+                draw_loading_image(ctx, *im);
             } else {
                 draw_missing_image(ctx, *im);
             }

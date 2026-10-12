@@ -151,7 +151,8 @@ std::string date_text(int64_t mtime, const ImageMetadata &meta) {
 
 std::string describe_picture(const std::string &filename, const std::string &path,
                              const ImageMetadata &meta, uint64_t bytes, int64_t mtime,
-                             const ImageAsset *asset, int uses, const ImageStore *images) {
+                             const ImageAsset *asset, int uses, const AssetStatus *status,
+                             bool live) {
     std::string out;
     add_line(out, "Filename", filename);
     if (!path.empty())
@@ -169,9 +170,11 @@ std::string describe_picture(const std::string &filename, const std::string &pat
         add_line(out, "Alpha", meta.alpha ? "yes" : "no");
     if (meta.orientation > 0)
         add_line(out, "Orientation", std::to_string(meta.orientation));
-    if (asset && images) {
-        add_line(out, "Status", asset_status_name(asset_status(*asset, images)));
-        add_line(out, "Placed", uses > 0 ? std::to_string(uses) : std::string("unused"));
+    if (asset) {
+        if (status)
+            add_line(out, "Status", asset_status_name(*status));
+        add_line(out, "Placed", uses > 0 ? std::to_string(uses) + (live ? ", on screen" : "")
+                                         : std::string("unused"));
     }
     for (const auto &tag : meta.exif) {
         if (tag.first == "Taken" || tag.first == "Date")
@@ -432,6 +435,8 @@ ImageAssetsPanel::ImageAssetsPanel(Widget *parent, ComposerView *view, ImageStor
     flex->set_flex_item(stash_scroll, FlexLayout::FlexItem(1.f, 1.f, 0));
     m_stash = new ImageStashWidget(stash_scroll, 112);
     m_stash->set_live(true);
+    m_stash->set_spacing(0, 0);
+    m_stash->set_animation_time(0.2f);
     m_stash->set_loader([images](const ImageStashWidget::Entry &entry, int max_edge,
                                  int *w, int *h) {
         return load_asset_pixels(images, entry, max_edge, w, h);
@@ -444,7 +449,18 @@ ImageAssetsPanel::ImageAssetsPanel(Widget *parent, ComposerView *view, ImageStor
         if (!asset)
             return;
         const int uses = m_uses.count(entry.user_id) ? m_uses.at(entry.user_id) : 0;
-        const AssetStatus status = asset_status(*asset, m_images);
+        auto known = m_status.find(entry.user_id);
+        const AssetStatus status = known != m_status.end() ? known->second : AssetStatus::Ok;
+        if (m_view->live_images().count(entry.user_id)) {
+            /* Live: placed in a frame on screen */
+            nvgBeginPath(ctx);
+            nvgCircle(ctx, x + 12.0f, y + 15.0f, 5.0f);
+            nvgFillColor(ctx, nvgRGBA(40, 180, 80, 235));
+            nvgFill(ctx);
+            nvgStrokeColor(ctx, nvgRGBA(255, 255, 255, 200));
+            nvgStrokeWidth(ctx, 1.0f);
+            nvgStroke(ctx);
+        }
         std::string text = std::to_string(uses);
         NVGcolor bg = nvgRGBA(30, 30, 36, 210);
         if (status == AssetStatus::Missing) {
@@ -502,7 +518,10 @@ ImageAssetsPanel::ImageAssetsPanel(Widget *parent, ComposerView *view, ImageStor
     m_meta->set_foreground_color(nanogui::Color(30, 30, 30, 255));
     m_meta->set_background_color(nanogui::Color(248, 248, 248, 255));
 
-    set_min_width(150);
+    /* Both floors explicit: the layout's own floor counts each scroll panel
+       as half the screen, which would pin the window near full height. */
+    set_min_width(200);
+    set_min_height(560);
     set_size(Vector2i(350, 780));
     rebuild();
     if (Screen *s = screen())
@@ -511,6 +530,8 @@ ImageAssetsPanel::ImageAssetsPanel(Widget *parent, ComposerView *view, ImageStor
 }
 
 ImageAssetsPanel::~ImageAssetsPanel() {
+    m_worker.stop();                     // a read in hand finishes; its result is dropped
+    m_status_worker.stop();
     if (m_probe_gate) {
         std::lock_guard<std::mutex> lock(m_probe_gate->mu);
         m_probe_gate->panel = nullptr;
@@ -543,11 +564,78 @@ void ImageAssetsPanel::refresh() {
         return;
     const std::string sig = asset_signature();
     if (sig != m_sig)
-        rebuild();
-    else
+        rebuild();                       // checks the status too
+    else {
         recount();
+        check_status(false);
+    }
     if (screen())
         screen()->redraw();
+}
+
+void ImageAssetsPanel::check_status(bool force) {
+    if (!m_view)
+        return;
+    if (m_status_busy) {
+        m_status_again = m_status_again || force;
+        return;
+    }
+    const double now = glfwGetTime();
+    if (!force && now - m_status_time < 5.0)
+        return;
+    m_status_time = now;
+    m_status_busy = true;
+
+    /* Just what the check reads, plus the loaded bytes for the hash */
+    struct Job { ImageAsset asset; ImageStore::Bytes loaded; };
+    auto jobs = std::make_shared<std::vector<Job>>();
+    for (const ImageAsset &a : m_view->document().images) {
+        Job j;
+        j.asset.id = a.id;
+        j.asset.source = a.source;
+        j.asset.source_size = a.source_size;
+        j.asset.source_mtime = a.source_mtime;
+        j.asset.hash = a.hash;
+        j.loaded = m_images ? m_images->source_of(a.id) : ImageStore::Bytes();
+        jobs->push_back(std::move(j));
+    }
+    const uint64_t gen = ++m_status_gen;
+    auto gate = m_probe_gate;
+    m_status_worker.post([jobs, gate, gen] {
+        auto status = std::make_shared<std::unordered_map<uint32_t, AssetStatus>>();
+        for (const Job &j : *jobs)
+            (*status)[j.asset.id] = asset_status(j.asset, j.loaded);
+        async([gate, gen, status] {
+            ImageAssetsPanel *panel = nullptr;
+            {
+                std::lock_guard<std::mutex> lock(gate->mu);
+                panel = gate->panel;
+            }
+            if (panel)
+                panel->apply_status(gen, std::move(*status));
+        });
+    }, "status");
+}
+
+void ImageAssetsPanel::apply_status(uint64_t gen, std::unordered_map<uint32_t, AssetStatus> status) {
+    if (gen != m_status_gen)
+        return;
+    m_status_busy = false;
+    /* The details pane only changes if the selected picture's status did */
+    const int sel = m_stash ? m_stash->selected() : -1;
+    const uint32_t sel_id = sel >= 0 && sel < (int) m_stash->image_count()
+                            ? m_stash->image_at((size_t) sel).user_id : 0;
+    const bool changed = sel_id &&
+        (!m_status.count(sel_id) || !status.count(sel_id) || m_status[sel_id] != status[sel_id]);
+    m_status = std::move(status);
+    if (changed)
+        show_metadata(sel);
+    if (screen())
+        screen()->redraw();
+    if (m_status_again) {
+        m_status_again = false;
+        check_status(true);
+    }
 }
 
 void ImageAssetsPanel::recount() {
@@ -658,6 +746,7 @@ void ImageAssetsPanel::rebuild() {
     m_stash->set_selected(restore);
     m_rebuilding = false;
     show_metadata(restore);
+    check_status(true);
 }
 
 void ImageAssetsPanel::show_metadata(int index) {
@@ -688,18 +777,19 @@ void ImageAssetsPanel::show_metadata(int index) {
         if (!asset->name.empty())
             filename = asset->name;
     }
+    const AssetStatus *status = nullptr;
+    if (asset && m_status.count(asset->id))
+        status = &m_status.at(asset->id);
+    const bool live = asset && m_view->live_images().count(asset->id);
     m_meta->set_text(describe_picture(filename, entry.path, meta, bytes, mtime,
-                                      asset, uses, m_images));
+                                      asset, uses, status, live));
     relayout();
     if (!entry.path.empty()) {
         const uint32_t asset_id = entry.user_id;
         const std::string path = entry.path;
         auto gate = m_probe_gate;
-        std::thread([gate, path, gen, asset_id] {
-            ImageImport imported = read_image_import(path);
-            imported.bytes.clear();
-            imported.bytes.shrink_to_fit();
-            auto held = std::make_shared<ImageImport>(std::move(imported));
+        m_worker.post([gate, path, gen, asset_id] {
+            auto held = std::make_shared<ImageImport>(probe_image_file(path));
             async([gate, gen, asset_id, held] {
                 ImageAssetsPanel *panel = nullptr;
                 {
@@ -709,7 +799,7 @@ void ImageAssetsPanel::show_metadata(int index) {
                 if (panel)
                     panel->apply_probe(gen, asset_id, *held);
             });
-        }).detach();
+        }, "probe");
     }
 }
 
@@ -738,9 +828,13 @@ void ImageAssetsPanel::apply_probe(uint64_t gen, uint32_t asset_id, const ImageI
             uses = m_uses.at(asset_id);
     }
     const std::string filename = entry.label.empty() ? entry.name : entry.label;
+    const AssetStatus *status = nullptr;
+    if (asset && m_status.count(asset->id))
+        status = &m_status.at(asset->id);
+    const bool live = asset && m_view->live_images().count(asset->id);
     m_meta->set_text(describe_picture(filename, entry.path, imported.meta,
                                       imported.stamp.size, imported.stamp.mtime,
-                                      asset, uses, m_images));
+                                      asset, uses, status, live));
     relayout();
 }
 

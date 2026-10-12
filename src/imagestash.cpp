@@ -1316,8 +1316,18 @@ void ImageStashWidget::draw(NVGcontext *ctx) {
     /* Grow the scroll area when the content height changes */
     if ((int) m_total_height != m_laid_out_height) {
         m_laid_out_height = (int) m_total_height;
+        /* Only the scroll panel around the grid depends on its height; a
+           whole-screen layout would also resize the windows around it. */
         ref<ImageStashWidget> self = this;   /* keep alive until it runs */
-        async([self]() mutable { if (self->screen()) self->screen()->perform_layout(); });
+        async([self]() mutable {
+            Screen *s = self->screen();
+            if (!s || !s->nvg_context())
+                return;
+            if (Widget *panel = dynamic_cast<ScrollPanel *>(self->parent()))
+                panel->perform_layout(s->nvg_context());
+            else
+                s->perform_layout();
+        });
     }
 
     /* ScrollWidget adjusts m_pos and clips the visual */

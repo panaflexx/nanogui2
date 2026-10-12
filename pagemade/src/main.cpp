@@ -485,6 +485,10 @@ public:
             if (m_assets)
                 m_assets->refresh();
         };
+        m_view->on_live_change = [this] {
+            if (m_assets)
+                redraw();                // the asset badges show what is live
+        };
         /* Files dropped on a page are read off the UI thread, then placed.
          * A run of files steps down the page so they don't stack exactly. */
         m_view->on_drop_files = [this](const std::vector<std::string> &paths, size_t page, Point at) {
@@ -532,6 +536,9 @@ public:
             panel->set_close_callback({});
             panel->dispose();
         }
+        /* dispose() only queues the window; destroy it now, so its grid's
+           loader thread is joined while m_images still exists */
+        do_widget_cleanup();
         m_assets = nullptr;
         if (s_instance == this)
             s_instance = nullptr;
@@ -642,7 +649,8 @@ public:
 
     /* Open without asking about the current publication (callers do that). */
     bool open_path(const std::string &path) {
-        OpenResult r = open_document(path, m_fonts);
+        /* Linked pictures are read as they come on screen, not here */
+        OpenResult r = open_document(path, m_fonts, false);
         if (!r.ok) {
             show_alert(this, "\u201C" + std::filesystem::path(path).filename().string() +
                              "\u201D couldn't be opened.", r.error);

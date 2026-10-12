@@ -15,6 +15,9 @@
 
 #include <nanogui/window.h>
 
+#include "bg_worker.h"
+#include "image.h"
+
 #include <cstdint>
 #include <memory>
 #include <string>
@@ -23,10 +26,6 @@
 #include <unordered_set>
 #include <vector>
 
-namespace pagemade {
-class ImageStore;
-struct ImageImport;
-}
 class ComposerView;
 namespace nanogui {
 class ImageStashWidget;
@@ -54,6 +53,11 @@ private:
 
     void rebuild();
     void recount();
+    /* Link status (missing, modified) of every picture, stat'ing the files
+     * on the worker: a network share answers slowly. At most every few
+     * seconds unless `force`. */
+    void check_status(bool force);
+    void apply_status(uint64_t gen, std::unordered_map<uint32_t, pagemade::AssetStatus> status);
     void show_metadata(int index);
     void apply_probe(uint64_t gen, uint32_t asset_id, const pagemade::ImageImport &imported);
     void relayout();
@@ -85,4 +89,12 @@ private:
     std::thread m_scan;
     std::shared_ptr<ProbeGate> m_probe_gate;
     uint64_t m_probe_gen = 0;
+
+    /* File work off the UI thread, the newest request winning: probes of
+     * the selection, and the (slower) status sweep on its own thread */
+    pagemade::BackgroundWorker m_worker, m_status_worker;
+    std::unordered_map<uint32_t, pagemade::AssetStatus> m_status;
+    uint64_t m_status_gen = 0;
+    double m_status_time = -1e9;
+    bool m_status_busy = false, m_status_again = false;
 };

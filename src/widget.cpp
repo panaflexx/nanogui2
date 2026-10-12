@@ -157,11 +157,16 @@ void Widget::perform_layout(NVGcontext* ctx) {
     }
     else {
         for (auto c : m_children) {
-            Vector2i pref = c->preferred_size(ctx), fix = c->fixed_size();
-            c->set_size(Vector2i(
-                fix[0] ? fix[0] : pref[0],
-                fix[1] ? fix[1] : pref[1]
-            ));
+            /* A resizable window keeps the size the user gave it: its
+               fixed_size() is the minimum set_min_width() wrote, not a size */
+            auto* win = dynamic_cast<Window*>(c);
+            if (!(win && win->resizable() && win->size() != Vector2i(0, 0))) {
+                Vector2i pref = c->preferred_size(ctx), fix = c->fixed_size();
+                c->set_size(Vector2i(
+                    fix[0] ? fix[0] : pref[0],
+                    fix[1] ? fix[1] : pref[1]
+                ));
+            }
             c->perform_layout(ctx);
         }
     }

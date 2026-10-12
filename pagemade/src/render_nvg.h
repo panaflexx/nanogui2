@@ -25,8 +25,9 @@ namespace pagemade {
 /* In `color` (the draw list's resolved swatch), or the run's own RGB. */
 void draw_glyph_run(NVGcontext *ctx, const GlyphRun &run, const Color &color);
 void draw_glyph_run(NVGcontext *ctx, const GlyphRun &run);
-/* `texture` returns a NanoVG image for a picture, or 0 to draw a stand-in.
- * The id is the display view, not the source file. */
+/* `texture` returns a NanoVG image for a picture, 0 for the missing-picture
+ * stand-in, or -1 for a plain tile while it loads. The id is the display
+ * view, not the source file. */
 void draw_list(NVGcontext *ctx, const DrawList &list, float px,
                const std::function<int(const DrawImage &)> &texture = {});
 void apply_transform(NVGcontext *ctx, const Transform &t);

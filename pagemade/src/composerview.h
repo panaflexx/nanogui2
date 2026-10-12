@@ -64,7 +64,10 @@
 #include <functional>
 #include <map>
 #include <memory>
+#include <set>
 #include <vector>
+
+namespace pagemade { class BackgroundWorker; }
 
 class ComposerView : public nanogui::Widget {
 public:
@@ -123,6 +126,14 @@ public:
     /* Take out every picture that is not placed. One undo step, and a
      * no-op when every picture is placed. */
     void remove_unused_images();
+
+    /* Pictures in a frame on screen as of the last draw. Linked pictures
+     * are read when they become live, on a background thread. */
+    const std::set<uint32_t> &live_images() const { return m_live; }
+    std::function<void()> on_live_change;
+    /* Bytes of linked pictures kept loaded off screen before the ones off
+     * screen longest are unloaded. */
+    void set_image_budget(size_t bytes) { m_image_budget = bytes; }
 
     /* Drag and drop. A publication picture (kImageAssetDragType) is placed
      * where it drops. Files ("text/uri-list") go to on_drop_files with the
@@ -391,11 +402,15 @@ private:
      * optionally place it. */
     bool commit_import(uint32_t id, const std::string &path, pagemade::ImageImport imported,
                        size_t page, bool place, const pagemade::Point *at, std::string *error);
-    /* Load linked pictures on the pages in view; unload the others. */
-    void sync_live_images();
-    void request_image_load(uint32_t id, const std::string &path);
-    void finish_image_load(uint32_t id, const pagemade::ImageImport &imported);
-    bool image_is_live(uint32_t id) const;
+    /* Picture loading: see "Picture loading" in composerview.cpp */
+    struct LoadResult;
+    pagemade::BackgroundWorker &loader();     // display views (reads, decodes)
+    pagemade::BackgroundWorker &importer();   // Place and import reads
+    void request_display(uint32_t id, int long_edge);
+    void finish_display(uint32_t id, const std::string &path, LoadResult &r);
+    void update_live_images();
+    void drop_texture(uint32_t id);
+    bool frame_on_screen(NVGcontext *ctx, const pagemade::DrawImage &im) const;
     /* Print size of a picture on `page`, shrunk to fit inside the margins. */
     void frame_size(const pagemade::ImageMetadata &meta, size_t page, float &w, float &h) const;
     /* The asset id a drag offers, 0 if none. */
@@ -508,10 +523,18 @@ private:
 
     pagemade::ImageStore *m_images = nullptr;
     /* Cleared in the destructor so a load still in flight does not touch
-     * the view after it is gone. */
+     * the view after it is gone; m_doc_epoch drops one meant for a
+     * document that has since been replaced. */
     struct LoadGate { std::atomic<bool> open{true}; };
     std::shared_ptr<LoadGate> m_load_gate = std::make_shared<LoadGate>();
-    std::vector<uint32_t> m_loading;
+    std::unique_ptr<pagemade::BackgroundWorker> m_loader, m_importer;
+    uint64_t m_doc_epoch = 0;
+    std::map<uint32_t, int> m_load_want;      // display edge asked for, per picture
+    std::set<uint32_t> m_load_failed;         // couldn't be read: not asked again
+    std::set<uint32_t> m_live, m_live_frame;  // on screen: last draw, this draw
+    std::map<uint32_t, uint64_t> m_last_live; // draw tick each was last on screen
+    uint64_t m_live_tick = 0;
+    size_t m_image_budget = (size_t) 512 << 20;
 
     /* A drag over the view: where it would land, and the frame's size (0
      * while unknown: files are only probed on drop) */

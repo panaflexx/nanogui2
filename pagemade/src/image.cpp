@@ -672,6 +672,40 @@ ImageImport read_image_import(const std::string &path) {
     return out;
 }
 
+ImageImport probe_image_file(const std::string &path) {
+    /* Headers sit near the front (a JPEG's EXIF and frame header, a PNG's
+     * chunks before the pixels); read the rest only if the probe needs it. */
+    const size_t kPrefix = 1 << 20;
+    ImageImport out;
+    struct stat st;
+    if (stat(path.c_str(), &st) != 0) {
+        out.error = "couldn't read " + path;
+        return out;
+    }
+    out.stamp.size = (uint64_t) st.st_size;
+    out.stamp.mtime = (int64_t) st.st_mtime;
+    std::vector<uint8_t> head;
+    if (FILE *f = std::fopen(path.c_str(), "rb")) {
+        head.resize(std::min((size_t) st.st_size, kPrefix));
+        head.resize(std::fread(head.data(), 1, head.size(), f));
+        std::fclose(f);
+    }
+    std::string err;
+    if (!head.empty() && image_loader().probe(head.data(), head.size(), &out.meta, &err)) {
+        out.ok = true;
+        return out;
+    }
+    if ((uint64_t) head.size() < out.stamp.size) {
+        std::vector<uint8_t> all;
+        if (read_file(path, &all, &out.error) &&
+            image_loader().probe(all.data(), all.size(), &out.meta, &out.error))
+            out.ok = true;
+        return out;
+    }
+    out.error = err.empty() ? "couldn't read " + path : err;
+    return out;
+}
+
 const char *asset_status_name(AssetStatus s) {
     switch (s) {
     case AssetStatus::Missing:  return "Missing";
@@ -682,6 +716,10 @@ const char *asset_status_name(AssetStatus s) {
 }
 
 AssetStatus asset_status(const ImageAsset &asset, const ImageStore *images) {
+    return asset_status(asset, images ? images->source_of(asset.id) : ImageStore::Bytes());
+}
+
+AssetStatus asset_status(const ImageAsset &asset, const ImageStore::Bytes &loaded) {
     std::string path;
     if (asset.source.empty() || !file_path_from_uri(asset.source, path))
         return AssetStatus::Ok;             // embedded, or no file to drift
@@ -692,12 +730,9 @@ AssetStatus asset_status(const ImageAsset &asset, const ImageStore *images) {
         return AssetStatus::Modified;
     if (asset.source_mtime && (int64_t) st.st_mtime != asset.source_mtime)
         return AssetStatus::Modified;
-    if (asset.hash && images) {
-        ImageStore::Bytes bytes = images->source_of(asset.id);
-        if (bytes && !bytes->empty() &&
-            image_bytes_hash(bytes->data(), bytes->size()) != asset.hash)
-            return AssetStatus::Modified;
-    }
+    if (asset.hash && loaded && !loaded->empty() &&
+        image_bytes_hash(loaded->data(), loaded->size()) != asset.hash)
+        return AssetStatus::Modified;
     return AssetStatus::Ok;
 }
 
@@ -855,7 +890,6 @@ bool ImageStore::unload(uint32_t id) {
     e.proxy.clear();
     e.proxy.shrink_to_fit();
     e.proxy_w = e.proxy_h = e.proxy_edge = 0;
-    bump();
     return true;
 }
 
