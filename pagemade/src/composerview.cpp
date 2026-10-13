@@ -12,6 +12,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cstdio>
 #include <cstdlib>
 #include "bg_worker.h"
 
@@ -20,7 +21,7 @@ using namespace pagemade;
 
 namespace {
 
-constexpr float kPasteboard = 72.f;     // pasteboard margin around the page, points
+constexpr float kPasteboard = 216.f;    // pasteboard margin around the pages, points
 constexpr float kMinBlock   = 12.f;     // smallest item, points
 constexpr float kMinDraw    = 2.f;      // a drawing drag shorter than this is a click
 constexpr float kHandlePx   = 7.f;      // handle sizes are in screen pixels
@@ -148,6 +149,7 @@ void ComposerView::set_document(PageDoc doc) {
         m_loader->drop_if([](const std::string &) { return true; });
     m_load_want.clear();
     m_load_failed.clear();
+    m_probing.clear();
     m_last_live.clear();
     m_doc = std::move(doc);
     m_page = 0;
@@ -391,18 +393,19 @@ float ComposerView::zoom() const {
     return zsp ? (float) zsp->zoom() : 1.f;
 }
 
-Point ComposerView::page_point_from_screen(const Vector2i &screen_p) const {
-    Vector2f local;
+Vector2f ComposerView::local_from_screen(const Vector2i &screen_p) const {
     if (auto *zsp = dynamic_cast<const ZoomScrollPanel *>(parent())) {
         Vector2i in = screen_p - zsp->absolute_position();
         auto pan = zsp->pan_offset();
         double z = zsp->zoom() != 0.0 ? zsp->zoom() : 1.0;
-        local = Vector2f((float) ((in.x() - pan.x()) / z),
-                         (float) ((in.y() - pan.y()) / z)) - Vector2f(m_pos);
-    } else {
-        local = Vector2f(screen_p - absolute_position());
+        return Vector2f((float) ((in.x() - pan.x()) / z),
+                        (float) ((in.y() - pan.y()) / z)) - Vector2f(m_pos);
     }
-    return page_point_from_local(local);
+    return Vector2f(screen_p - absolute_position());
+}
+
+Point ComposerView::page_point_from_screen(const Vector2i &screen_p) const {
+    return page_point_from_local(local_from_screen(screen_p));
 }
 
 Point ComposerView::page_point_from_local(const Vector2f &local_in) const {
@@ -430,10 +433,36 @@ Point ComposerView::page_point_from_local(const Vector2f &local_in) const {
 
 /* ---- Snapping ----------------------------------------------------------- */
 
-std::vector<float> ComposerView::guides_x() const {
+std::vector<float> ComposerView::guides_x(size_t page) const {
+    std::vector<float> g = base_guides_x(page);
+    auto add = [&](const std::vector<Guide> &gs) {
+        for (const Guide &rg : gs)
+            if (rg.vertical)
+                g.push_back(rg.pos);
+    };
+    add(m_doc.guides);
+    if (page < m_doc.pages.size())
+        add(m_doc.pages[page].guides);
+    return g;
+}
+
+std::vector<float> ComposerView::guides_y(size_t page) const {
+    std::vector<float> g = base_guides_y();
+    auto add = [&](const std::vector<Guide> &gs) {
+        for (const Guide &rg : gs)
+            if (!rg.vertical)
+                g.push_back(rg.pos);
+    };
+    add(m_doc.guides);
+    if (page < m_doc.pages.size())
+        add(m_doc.pages[page].guides);
+    return g;
+}
+
+std::vector<float> ComposerView::base_guides_x(size_t page) const {
     const PageSetup &s = m_doc.setup;
     float left = 0.f, right = 0.f;
-    page_side_margins(s, m_page, left, right);
+    page_side_margins(s, page, left, right);
     const float l = left, r = s.width - right;
     std::vector<float> g{0, s.width, l, r};
     if (s.columns > 1) {
@@ -447,7 +476,7 @@ std::vector<float> ComposerView::guides_x() const {
     return g;
 }
 
-std::vector<float> ComposerView::guides_y() const {
+std::vector<float> ComposerView::base_guides_y() const {
     const PageSetup &s = m_doc.setup;
     return {0, s.height, s.margin_top, s.height - s.margin_bottom};
 }
@@ -482,6 +511,188 @@ Point ComposerView::snap_move(const Bounds &b, Point d) const {
     };
     return {adjust({b.x0, (b.x0 + b.x1) * 0.5f, b.x1}, guides_x(), d.x),
             adjust({b.y0, (b.y0 + b.y1) * 0.5f, b.y1}, guides_y(), d.y)};
+}
+
+/* ---- Ruler guides ------------------------------------------------------- */
+
+namespace {
+
+const NVGcolor kPageGuide = nvgRGB(0, 140, 255);      // this page: blue
+const NVGcolor kAllPagesGuide = nvgRGB(150, 60, 220); // every page: purple
+
+} // namespace
+
+void ComposerView::set_show_guides(bool on) {
+    m_show_guides = on;
+    if (screen())
+        screen()->redraw();
+}
+
+Point ComposerView::point_on_page(const Vector2i &screen_p, size_t page) const {
+    const Vector2f local = local_from_screen(screen_p) - page_origin();
+    std::vector<PageSlot> slots;
+    float aw, ah;
+    arrangement(m_doc, m_page, m_page_view, slots, aw, ah);
+    for (const PageSlot &sl : slots)
+        if (sl.index == page)
+            return {local.x() - sl.x, local.y() - sl.y};
+    return {local.x(), local.y()};
+}
+
+bool ComposerView::screen_over_pages(const Vector2i &screen_p) const {
+    const Widget *view = parent() ? parent() : this;
+    const Vector2i a = view->absolute_position(), s = view->size();
+    return screen_p.x() >= a.x() && screen_p.y() >= a.y() &&
+           screen_p.x() < a.x() + s.x() && screen_p.y() < a.y() + s.y();
+}
+
+bool ComposerView::ruler_mapping(Vector2f &origin, float &scale) const {
+    std::vector<PageSlot> slots;
+    float aw, ah;
+    arrangement(m_doc, m_page, m_page_view, slots, aw, ah);
+    Vector2f local = page_origin();
+    for (const PageSlot &sl : slots)
+        if (sl.index == m_page)
+            local += Vector2f(sl.x, sl.y);
+    if (auto *zsp = dynamic_cast<const ZoomScrollPanel *>(parent())) {
+        const double z = zsp->zoom() != 0.0 ? zsp->zoom() : 1.0;
+        const auto pan = zsp->pan_offset();
+        origin = Vector2f(zsp->absolute_position()) + Vector2f((float) pan.x(), (float) pan.y()) +
+                 (local + Vector2f(m_pos)) * (float) z;
+        scale = (float) z;
+    } else {
+        origin = Vector2f(absolute_position()) + local;
+        scale = 1.f;
+    }
+    return width() > 0 && height() > 0;
+}
+
+int ComposerView::guide_at(const Point &pt, size_t page, bool &all_pages) const {
+    const float tol = kPickPx / zoom();
+    auto find = [&](const std::vector<Guide> &gs) {
+        for (int i = (int) gs.size() - 1; i >= 0; --i)
+            if (std::fabs((gs[i].vertical ? pt.x : pt.y) - gs[i].pos) <= tol)
+                return i;
+        return -1;
+    };
+    if (page < m_doc.pages.size()) {     // a page's own guides lie on top
+        int i = find(m_doc.pages[page].guides);
+        if (i >= 0) {
+            all_pages = false;
+            return i;
+        }
+    }
+    all_pages = true;
+    return find(m_doc.guides);
+}
+
+void ComposerView::begin_guide_drag(bool vertical) {
+    m_guide_drag = GuideDrag();
+    m_guide_drag.active = true;
+    m_guide_drag.vertical = vertical;
+}
+
+void ComposerView::guide_drag_to(const Vector2i &screen_p, bool all_pages) {
+    GuideDrag &g = m_guide_drag;
+    if (!g.active)
+        return;
+    g.over = screen_over_pages(screen_p);
+    if (g.index < 0) {                   // a new guide: the page under the pointer
+        g.all_pages = all_pages;
+        (void) page_point_from_screen(screen_p);
+        g.page = m_point_page;
+    }
+    const Point pt = point_on_page(screen_p, g.page);
+    float pos = g.vertical ? pt.x : pt.y;
+    if (m_snap) {                        // onto the page edges, margins and columns
+        const std::vector<float> base = g.vertical ? base_guides_x(g.page) : base_guides_y();
+        const float tol = kSnapPx / zoom();
+        float best = tol;
+        for (float b : base)
+            if (std::fabs(b - pos) <= best) {
+                best = std::fabs(b - pos);
+                pos = b;
+            }
+    }
+    g.pos = pos;
+    if (screen())
+        screen()->redraw();
+}
+
+void ComposerView::end_guide_drag(const Vector2i &screen_p, bool all_pages) {
+    if (!m_guide_drag.active)
+        return;
+    guide_drag_to(screen_p, all_pages);
+    const GuideDrag g = m_guide_drag;
+    m_guide_drag = GuideDrag();
+    if (g.page >= m_doc.pages.size() || (g.index < 0 && !g.over)) {
+        if (screen())
+            screen()->redraw();          // a new guide dropped off the pages: nothing
+        return;
+    }
+    push_undo();
+    std::vector<Guide> &list = g.all_pages ? m_doc.guides : m_doc.pages[g.page].guides;
+    if (g.index < 0)
+        list.push_back({g.vertical, g.pos});
+    else if (g.index < (int) list.size()) {
+        if (g.over)
+            list[(size_t) g.index].pos = g.pos;
+        else
+            list.erase(list.begin() + g.index);   // dragged back onto a ruler
+    }
+    if (screen())
+        screen()->redraw();
+}
+
+void ComposerView::clear_guides(bool all_pages) {
+    if (all_pages ? m_doc.guides.empty()
+                  : (m_page >= m_doc.pages.size() || m_doc.pages[m_page].guides.empty()))
+        return;
+    push_undo();
+    if (all_pages)
+        m_doc.guides.clear();
+    else
+        m_doc.pages[m_page].guides.clear();
+    if (screen())
+        screen()->redraw();
+}
+
+/* Every-page guides, then the page's own, over the items. The one being
+ * dragged is drawn where it is going instead. */
+void ComposerView::draw_ruler_guides(NVGcontext *ctx, float px, size_t page) {
+    if (page >= m_doc.pages.size())
+        return;
+    const PageSetup &s = m_doc.setup;
+    const GuideDrag &d = m_guide_drag;
+    auto line = [&](const Guide &g, NVGcolor color) {
+        nvgBeginPath(ctx);
+        if (g.vertical) {
+            nvgMoveTo(ctx, g.pos, 0);
+            nvgLineTo(ctx, g.pos, s.height);
+        } else {
+            nvgMoveTo(ctx, 0, g.pos);
+            nvgLineTo(ctx, s.width, g.pos);
+        }
+        nvgStrokeColor(ctx, color);
+        nvgStrokeWidth(ctx, px);
+        nvgStroke(ctx);
+    };
+    auto list = [&](const std::vector<Guide> &gs, bool all_pages, NVGcolor color) {
+        for (size_t i = 0; i < gs.size(); ++i) {
+            const bool moving = d.active && d.index == (int) i && d.all_pages == all_pages &&
+                                (all_pages || d.page == page);
+            if (!moving)
+                line(gs[i], color);
+        }
+    };
+    nvgSave(ctx);
+    if (m_show_guides) {
+        list(m_doc.guides, true, kAllPagesGuide);
+        list(m_doc.pages[page].guides, false, kPageGuide);
+    }
+    if (d.active && d.over && (d.all_pages || d.page == page))
+        line({d.vertical, d.pos}, d.all_pages ? kAllPagesGuide : kPageGuide);
+    nvgRestore(ctx);
 }
 
 /* ---- Hit testing (each item in its own space) ---------------------------- */
@@ -576,6 +787,17 @@ ItemId ComposerView::text_frame_at(const Point &pt, size_t page) const {
 
 /* ---- Mouse --------------------------------------------------------------- */
 
+/* A modifier as it is now. The screen refreshes the modifiers it passes
+ * along only on clicks, so one pressed mid-drag is read from the keyboard. */
+bool ComposerView::key_held(int modifiers, int mod, int key_left, int key_right) const {
+    if (modifiers & mod)
+        return true;
+    const Screen *s = screen();
+    GLFWwindow *win = s ? s->glfw_window() : nullptr;
+    return win && (glfwGetKey(win, key_left) == GLFW_PRESS ||
+                   glfwGetKey(win, key_right) == GLFW_PRESS);
+}
+
 bool ComposerView::mouse_button_event(const Vector2i &p, int button, bool down, int modifiers) {
     if (m_placing) {
         if (down)
@@ -584,6 +806,13 @@ bool ComposerView::mouse_button_event(const Vector2i &p, int button, bool down, 
     }
     if (button != GLFW_MOUSE_BUTTON_1)
         return Widget::mouse_button_event(p, button, down, modifiers);
+    if (!down && m_guide_drag.active) {
+        /* A guide moved with the pointer tool (a ruler's own drag ends on
+           the ruler, before this) */
+        m_pointer_down = false;
+        end_guide_drag(screen()->mouse_pos(), false);
+        return true;
+    }
     const Point pt = page_point_from_screen(screen()->mouse_pos());
 
     if (!down) {
@@ -701,6 +930,23 @@ bool ComposerView::mouse_button_event(const Vector2i &p, int button, bool down, 
     }
 
     Hit hit = hit_test(pt, m_page);
+    bool all_pages = false;
+    const int guide = m_tool == Tool::Pointer && !hit.item && m_show_guides && !m_lock_guides
+                      ? guide_at(pt, m_page, all_pages) : -1;
+    if (guide >= 0) {
+        /* Pick up a ruler guide: it moves along its axis, and dropped off
+           the pages it goes */
+        const std::vector<Guide> &gs = all_pages ? m_doc.guides : m_doc.pages[m_page].guides;
+        m_guide_drag = GuideDrag();
+        m_guide_drag.active = true;
+        m_guide_drag.vertical = gs[(size_t) guide].vertical;
+        m_guide_drag.all_pages = all_pages;
+        m_guide_drag.index = guide;
+        m_guide_drag.page = m_page;
+        m_guide_drag.pos = gs[(size_t) guide].pos;
+        m_guide_drag.over = true;
+        return true;
+    }
     if (m_tool == Tool::Rotate) {
         if (hit.item && !is_selected(hit.item))
             m_sel = {hit.item};
@@ -745,6 +991,10 @@ bool ComposerView::mouse_drag_event(const Vector2i &p, const Vector2i &, int, in
     /* Screen hands drags to us relative to our parent and without the
      * panel's zoom. Its mouse_pos() still holds the previous event here, so
      * rebuild this event's screen point instead. */
+    if (m_guide_drag.active) {
+        guide_drag_to(p + parent()->absolute_position(), m_guide_drag.all_pages);
+        return true;
+    }
     const Point pt = page_point_from_screen(p + parent()->absolute_position());
     const bool shift = (modifiers & GLFW_MOD_SHIFT) != 0;
     if (m_selecting && editing()) {
@@ -845,6 +1095,19 @@ bool ComposerView::mouse_drag_event(const Vector2i &p, const Vector2i &, int, in
         case Handle::Windowshade: y1 = std::max(y1 + dl.y, y0 + kMinBlock); break;
         default: break;
         }
+        /* A picture's corners keep its proportions, by whichever side moved
+         * further, about the opposite corner; Ctrl resizes freely. */
+        const bool corner = m_drag != Handle::Windowshade;
+        if (o.image() && m_tool == Tool::Pointer && corner && o.w > 0 && o.h > 0 &&
+            !key_held(modifiers, GLFW_MOD_CONTROL, GLFW_KEY_LEFT_CONTROL, GLFW_KEY_RIGHT_CONTROL)) {
+            const float s = std::max({(x1 - x0) / o.w, (y1 - y0) / o.h,
+                                      kMinBlock / std::min(o.w, o.h)});
+            const float w = o.w * s, h = o.h * s;
+            const bool left = m_drag == Handle::TopLeft || m_drag == Handle::BottomLeft;
+            const bool top = m_drag == Handle::TopLeft || m_drag == Handle::TopRight;
+            if (left) x0 = x1 - w; else x1 = x0 + w;
+            if (top)  y0 = y1 - h; else y1 = y0 + h;
+        }
     }
     it->w = x1 - x0;
     it->h = y1 - y0;
@@ -890,6 +1153,18 @@ bool ComposerView::mouse_motion_event(const Vector2i &p, const Vector2i &rel, in
             set_cursor(Cursor::HVResize); break;
         case Handle::Windowshade: set_cursor(Cursor::VResize); break;
         case Handle::TopTab: set_cursor(Cursor::Hand); break;
+        case Handle::None: {
+            /* Over a ruler guide (and no item): it can be dragged */
+            bool all_pages = false;
+            const int g = m_show_guides && !m_lock_guides ? guide_at(pt, page, all_pages) : -1;
+            if (g >= 0) {
+                const std::vector<Guide> &gs = all_pages ? m_doc.guides : m_doc.pages[page].guides;
+                set_cursor(gs[(size_t) g].vertical ? Cursor::HResize : Cursor::VResize);
+            } else {
+                set_cursor(Cursor::Arrow);
+            }
+            break;
+        }
         default: set_cursor(Cursor::Arrow); break;
         }
         break;
@@ -2567,29 +2842,105 @@ bool ComposerView::place_image_file(const std::string &path, std::string *error)
 }
 
 void ComposerView::place_image_file(const std::string &path, size_t page, const Point *at,
-                                    std::function<void(const std::string &error)> done) {
+                                    std::function<void(const std::string &error)> done,
+                                    Vector2i px_hint) {
     if (!m_images) {
         if (done) done("pictures aren't available");
         return;
     }
+    if (page >= m_doc.pages.size())
+        page = m_page;
+    /* Taken now and never given back (see the other form) */
     const uint32_t id = m_images->take_id();
-    const bool have_at = at != nullptr;
-    const Point where = at ? *at : Point();
+
+    /* The stand-in: a link not yet read, at the hinted size (or an inch and
+     * a half square), placed as one undo step */
+    ImageMetadata guess;
+    const bool hinted = px_hint.x() > 0 && px_hint.y() > 0;
+    guess.width_px = guess.stored_width_px = hinted ? px_hint.x() : 108;
+    guess.height_px = guess.stored_height_px = hinted ? px_hint.y() : 108;
+    m_images->add_link(id, path, guess);
+    ImageAsset asset;
+    asset.id = id;
+    asset.name = image_leaf_name(path);
+    asset.source = file_uri(path);
+    asset.meta = guess;
+    push_undo();
+    m_doc.add_image(std::move(asset));
+    place_frame(id, guess, page, at);
+    Probing probing;
+    if (!m_sel.empty())
+        if (const Item *it = m_doc.find_item(m_sel.front())) {
+            probing.item = it->id;
+            probing.w = it->w;
+            probing.h = it->h;
+        }
+    m_probing[id] = probing;
+    if (on_document_change)
+        on_document_change();
+
     auto gate = m_load_gate;
     ComposerView *view = this;
     const uint64_t epoch = m_doc_epoch;
-    importer().post([gate, view, epoch, path, id, page, have_at, where, done]() {
-        auto held = std::make_shared<ImageImport>(read_image_import(path));
-        async([gate, view, epoch, path, id, page, have_at, where, done, held]() {
+    importer().post([gate, view, epoch, path, id, done]() {
+        auto held = std::make_shared<ImageImport>(probe_image_file(path));
+        async([gate, view, epoch, id, done, held]() {
             if (!gate->open || epoch != view->m_doc_epoch)
                 return;                  // the view, or its document, is gone
-            std::string err;
-            const Point *drop = have_at ? &where : nullptr;
-            view->commit_import(id, path, std::move(*held), page, true, drop, &err);
-            if (done)
-                done(err);
+            view->finish_probe(id, *held, done);
         });
     });
+}
+
+void ComposerView::finish_probe(uint32_t id, const ImageImport &imported,
+                                const std::function<void(const std::string &)> &done) {
+    auto pending = m_probing.find(id);
+    if (pending == m_probing.end())
+        return;
+    const Probing probing = pending->second;
+    m_probing.erase(pending);
+    ImageAsset *asset = m_doc.find_image(id);
+    if (!asset) {                        // undone before the header came back
+        if (done)
+            done(std::string());
+        return;
+    }
+    if (!imported.ok) {
+        m_load_failed.insert(id);        // the frame shows the missing picture
+        if (screen())
+            screen()->redraw();
+        if (done)
+            done(imported.error.empty() ? "couldn't read the picture" : imported.error);
+        return;
+    }
+
+    /* The real metadata, part of the placement's undo step */
+    asset->meta = imported.meta;
+    asset->source_size = imported.stamp.size;
+    asset->source_mtime = imported.stamp.mtime;
+    if (!m_images->is_loaded(id))
+        m_images->add_link(id, m_images->path_of(id), imported.meta);
+
+    /* The frame takes the print size, unless it was resized meanwhile */
+    size_t page = 0;
+    Item *it = probing.item ? m_doc.find_item(probing.item, &page) : nullptr;
+    if (it && it->image() && it->image()->asset == id &&
+        std::fabs(it->w - probing.w) < 1e-3f && std::fabs(it->h - probing.h) < 1e-3f) {
+        float w, h;
+        frame_size(imported.meta, page, w, h);
+        it->content = scale_placement(*it->image(), it->w, it->h, w, h);
+        it->w = w;
+        it->h = h;
+        selection_changed();
+    }
+    m_load_want.erase(id);               // ask again at the real size
+    m_load_failed.erase(id);
+    if (on_document_change)
+        on_document_change();
+    if (screen())
+        screen()->redraw();
+    if (done)
+        done(std::string());
 }
 
 void ComposerView::import_asset(const std::string &path,
@@ -2844,6 +3195,46 @@ uint32_t ComposerView::dragged_asset(const DragData &data) const {
     return m_doc.find_image(asset) ? asset : 0;
 }
 
+void ComposerView::drop_target(const DragData &data, Point &at, size_t &page,
+                               float &w, float &h) const {
+    /* The screen's pointer is current during a drag (full precision, zoom
+       applied); event points are rounded */
+    at = page_point_from_screen(screen()->mouse_pos());
+    page = m_point_page;
+    w = h = 0.f;
+    const uint32_t asset = dragged_asset(data);
+    if (asset) {
+        frame_size(m_doc.find_image(asset)->meta, page, w, h);
+    } else if (const std::string *px = data.get(kImagePixelsDragType)) {
+        ImageMetadata guess;             // the outline of the stand-in it will place
+        if (std::sscanf(px->c_str(), "%d %d", &guess.width_px, &guess.height_px) == 2)
+            frame_size(guess, page, w, h);
+    }
+    if (!m_snap)
+        return;
+
+    /* Snap like a moved frame, to that page's guides: any edge or the
+       center when the size is real (a publication picture), else the
+       top-left (a file's frame takes its size once its header is read) */
+    const float tol = kSnapPx / zoom();
+    auto nudge = [&](std::initializer_list<float> edges, const std::vector<float> &gs) {
+        float best = tol + 1.f;
+        for (float e : edges)
+            for (float g : gs)
+                if (std::fabs(g - e) < std::fabs(best))
+                    best = g - e;
+        return std::fabs(best) <= tol ? best : 0.f;
+    };
+    const std::vector<float> gx = guides_x(page), gy = guides_y(page);
+    if (asset && w > 0.f && h > 0.f) {
+        at.x += nudge({at.x, at.x + w * 0.5f, at.x + w}, gx);
+        at.y += nudge({at.y, at.y + h * 0.5f, at.y + h}, gy);
+    } else {
+        at.x += nudge({at.x}, gx);
+        at.y += nudge({at.y}, gy);
+    }
+}
+
 bool ComposerView::drag_motion_event(const Vector2i &, DragEvent &e) {
     const uint32_t asset = dragged_asset(e.data);
     const bool files = !asset && on_drop_files && e.data.has("text/uri-list");
@@ -2851,13 +3242,7 @@ bool ComposerView::drag_motion_event(const Vector2i &, DragEvent &e) {
         drag_leave_event();
         return false;
     }
-    /* The screen's pointer is current during a drag (full precision, zoom
-       applied); event points are rounded */
-    m_drop_at = page_point_from_screen(screen()->mouse_pos());
-    m_drop_page = m_point_page;
-    m_drop_w = m_drop_h = 0.f;
-    if (asset)
-        frame_size(m_doc.find_image(asset)->meta, m_drop_page, m_drop_w, m_drop_h);
+    drop_target(e.data, m_drop_at, m_drop_page, m_drop_w, m_drop_h);
     m_drop_hover = true;
     screen()->redraw();
     return true;
@@ -2873,15 +3258,21 @@ void ComposerView::drag_leave_event() {
 
 bool ComposerView::drag_drop_event(const Vector2i &, DragEvent &e) {
     drag_leave_event();
-    const Point at = page_point_from_screen(screen()->mouse_pos());
-    const size_t page = m_point_page;
+    Point at;
+    size_t page = 0;
+    float w, h;
+    drop_target(e.data, at, page, w, h);   // where the outline showed it
     if (const uint32_t asset = dragged_asset(e.data)) {
         place_image_at(asset, page, at);
     } else if (on_drop_files && e.data.has("text/uri-list")) {
         std::vector<std::string> paths = e.data.file_paths();
         if (paths.empty())
             return false;
-        on_drop_files(paths, page, at);
+        Vector2i hint(0, 0);
+        if (const std::string *px = e.data.get(kImagePixelsDragType))
+            if (std::sscanf(px->c_str(), "%d %d", &hint.x(), &hint.y()) != 2)
+                hint = Vector2i(0, 0);
+        on_drop_files(paths, page, at, hint);
     } else {
         return false;
     }
@@ -2922,6 +3313,8 @@ int ComposerView::texture_for(NVGcontext *ctx, const DrawImage &im, float px) {
     want = std::min(q, src_long);
     const uint8_t *rgba = nullptr;
     int w = 0, h = 0;
+    if (m_probing.count(im.asset))
+        return -1;                        // placed, its header still on the way
     const bool failed = m_load_failed.count(im.asset) != 0;
     const bool have = m_images->cached_display(im.asset, &rgba, &w, &h) && rgba && w > 0 && h > 0;
     if (!failed && (!have || std::max(w, h) < want))
@@ -2988,6 +3381,8 @@ void ComposerView::draw(NVGcontext *ctx) {
                 for (const Item &it : m_doc.pages[sl.index].items)
                     if (it.is_text() && keep_item(hand, only, it.id))
                         draw_text_overlays(ctx, it, px);
+            if (!only)
+                draw_ruler_guides(ctx, px, sl.index);
             draw_chrome(ctx, px, sl.index, hand, only);
             nvgRestore(ctx);
         }

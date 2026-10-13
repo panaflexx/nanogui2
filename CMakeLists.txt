@@ -980,6 +980,7 @@ if (NANOGUI_BUILD_EXAMPLES)
         pagemade/src/image.cpp
         pagemade/src/dialogs.cpp
         pagemade/src/image_assets.cpp
+        pagemade/src/ruler.cpp
         pagemade/src/paragraph_panel.cpp
         pagemade/src/sample.cpp)
     add_executable(pagemade_compose_test

@@ -199,10 +199,22 @@ struct ImageAsset {
 /* Drag and drop type for a picture of this publication; the bytes are the
  * asset id in decimal. */
 constexpr const char *kImageAssetDragType = "application/x-pagemade-image-asset";
+/* Alongside a file dragged from the asset window: its pixel size ("w h"),
+ * when already known, so the frame placed for it starts at the right shape. */
+constexpr const char *kImagePixelsDragType = "application/x-pagemade-image-pixels";
+
+/* A ruler guide, dragged off a ruler: a vertical line at x (`vertical`), or
+ * a horizontal one at y, in points from the page's top-left. Guides snap
+ * like the margins and are never printed. */
+struct Guide {
+    bool  vertical = true;
+    float pos = 0;
+};
 
 struct Page {
     std::vector<Item> items;     // bottom to top
     bool hidden = false;         // kept, and shown, but not printed
+    std::vector<Guide> guides;   // ruler guides on this page only
 };
 
 struct StoryEntry {
@@ -291,6 +303,7 @@ struct PageDoc {
     std::vector<StyleDef>   styles = default_styles();
     std::vector<CharStyleDef> char_styles = default_char_styles();
     std::vector<ImageAsset> images;        // the publication's pictures
+    std::vector<Guide>      guides;        // ruler guides on every page
     uint32_t                next_id = 1;   // shared by items and stories
     uint32_t                next_asset = 1;
 

@@ -1111,7 +1111,11 @@ void Screen::draw_widgets() {
 
             // For ZoomScrollPanel: re-project pos/size through the zoom transform
             // (absolute_position() walks logical positions and doesn't know about zoom).
-            if (zoom_panel) {
+            if (zoom_panel && zoom_panel->child_fills_view() &&
+                focused_widget->parent() == zoom_panel) {
+                pos = zoom_panel->absolute_position();
+                size = zoom_panel->size();
+            } else if (zoom_panel) {
                 Vector2i panel_abs = zoom_panel->absolute_position();
                 Vector2i rel = pos - panel_abs;                  // logical offset within child
                 double z = zoom_panel->zoom();

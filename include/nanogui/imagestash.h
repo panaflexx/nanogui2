@@ -66,7 +66,8 @@ enum class SectionAlign {
  * move the selection).  Double-click, Enter or Space opens an animated
  * preview that fills the widget's visible area and loads the original
  * resolution image in the background; a click or Escape dismisses it, and
- * Left/Right slide to the previous/next photo.
+ * Left/Right slide to the previous/next photo.  The previewed photo drags
+ * out like a thumbnail.
  *
  * Dragging a thumbnail starts a drag and drop (nanogui/dragdrop.h) offering
  * the file as "text/uri-list" and "text/plain", with the thumbnail and its
@@ -79,6 +80,10 @@ public:
         std::string name;                 ///< Base file name (display label)
         std::string path;                 ///< Full path to the image file (may be empty)
         std::string label;                ///< Shown instead of name when set
+        /// Identity in the thumbnail cache, which outlives clear(): the same
+        /// key brings back the same thumbnail without a read.  Empty uses
+        /// `path`; with neither, the thumbnail is not kept across a clear().
+        std::string key;
         uint32_t    user_id = 0;          ///< Caller's id, 0 if none
         uint64_t    file_size = 0;        ///< File size in bytes
         int         orig_width  = 0;      ///< Displayed image width  (0 until loaded)
@@ -161,6 +166,7 @@ public:
 
     virtual bool drag_motion_event(const Vector2i &p, DragEvent &e) override;
     virtual void drag_leave_event() override;
+    virtual void drag_finished(DropAction action) override;
     virtual bool drag_drop_event(const Vector2i &p, DragEvent &e) override;
     virtual bool mouse_button_event(const Vector2i &p, int button, bool down,
                                     int modifiers) override;
@@ -300,15 +306,24 @@ protected:
     bool m_stop    = false;
     int  m_generation = 0;    ///< bumped by clear() to drop in-flight loads
 
-    /* CPU thumbnail cache (UI thread only).  front of LRU = most recent. */
+    /* CPU thumbnail cache (UI thread only), keyed by Entry::key (or path)
+       rather than position, and kept across clear(): a rebuilt grid takes
+       its thumbnails back from memory.  Front of LRU = most recent. */
     struct CachedThumb {
         unsigned char *pixels = nullptr;  ///< owned, stbi_image_free'd
         int w = 0, h = 0;
+        int orig_w = 0, orig_h = 0;
+        uint64_t file_size = 0;
     };
     static constexpr size_t kCacheEntries = 256;  ///< ~16 MB worst case
-    std::unordered_map<int, CachedThumb> m_thumb_cache;
-    std::deque<int> m_cache_lru;
-    void cache_put(int index, unsigned char *pixels, int w, int h);
+    std::unordered_map<std::string, CachedThumb> m_thumb_cache;
+    std::deque<std::string> m_cache_lru;
+    static std::string cache_key(const Entry &e) { return e.key.empty() ? e.path : e.key; }
+    const CachedThumb *cached(int entry) const;
+    /// Takes ownership of `thumb.pixels`; frees them if the entry has no key.
+    void cache_put(int entry, const CachedThumb &thumb);
+    /// Put a cached thumbnail into the atlas for `entry`.  False if it doesn't fit.
+    bool materialize(int entry, const CachedThumb &thumb);
 
     /* Atlas / GPU resources */
     NVGcontext *m_nvg_context = nullptr;
@@ -349,6 +364,7 @@ protected:
     /* Selection and pointer state (UI thread) */
     int      m_selected = -1;
     int      m_press_entry = -1;      ///< photo under the press, for dragging
+    bool     m_press_closes = false;  ///< a press on the open preview: a click closes it
     Vector2i m_press_pos;             ///< press point, content coordinates
     int      m_last_click_entry = -1; ///< for double-click detection
     double   m_last_click_time = 0.0;

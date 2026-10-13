@@ -23,6 +23,7 @@
 #include <nanogui/layout.h>
 #include <nanogui/screen.h>
 #include <nanogui/scrollpanel.h>
+#include <nanogui/split.h>
 #include <nanogui/textarea.h>
 #include <nanovg.h>
 
@@ -355,30 +356,63 @@ ImageAssetsPanel::ImageAssetsPanel(Widget *parent, ComposerView *view, ImageStor
     set_modal(false);
     set_traffic_lights_mask(0x1);
 
+    /* Title bar, top right: dock on the left or right of the pages */
+    auto dock_button = [this](int icon, const char *tip, Dock side) {
+        auto *b = new Button(button_panel(), "", icon);
+        b->set_flags(Button::ToggleButton);
+        b->set_tooltip(tip);
+        b->set_change_callback([this, side](bool on) {
+            if (on_dock)
+                on_dock(on ? side : Dock::None);
+        });
+        return b;
+    };
+    m_dock_left = dock_button(FA_ARROW_LEFT, "Dock on the left of the pages", Dock::Left);
+    m_dock_right = dock_button(FA_ARROW_RIGHT, "Dock on the right of the pages", Dock::Right);
+
     auto *flex = new FlexLayout(FlexDirection::Column, JustifyContent::FlexStart,
-                                AlignItems::Stretch, 12, 8);
+                                AlignItems::Stretch, 8, 6);
     set_layout(flex);
 
-    new Label(this, "Folders and files", "sans", 16);
+    new Label(this, "Folders and files", "sans-bold", 14);
 
+    /* Three rows of the folder list; it scrolls past that */
+    const int list_h = 3 * 22 + 4;
     auto *list_scroll = new ScrollPanel(this, ScrollPanel::ScrollTypes::Vertical);
-    list_scroll->set_min_height(110);
-    flex->set_flex_item(list_scroll, FlexLayout::FlexItem(0.f, 0.f, 110));
+    list_scroll->set_min_height(list_h);
+    flex->set_flex_item(list_scroll, FlexLayout::FlexItem(0.f, 0.f, list_h));
     m_roots_list = new RootList(list_scroll);
 
-    /* Two rows: one row of these captions is wider than the dialog. */
-    Widget *row_add = new Widget(this);
-    row_add->set_layout(new BoxLayout(Orientation::Horizontal, Alignment::Middle, 0, 6));
-    auto *add_images = new Button(row_add, "Add Images...");
-    auto *add_folder = new Button(row_add, "Add Folder...");
-    Widget *row_edit = new Widget(this);
-    row_edit->set_layout(new BoxLayout(Orientation::Horizontal, Alignment::Middle, 0, 6));
-    auto *remove = new Button(row_edit, "Remove");
-    auto *add_pub = new Button(row_edit, "Add to Publication");
-    add_images->set_tooltip("Add picture files to the library list");
-    add_folder->set_tooltip("Add a folder to the library list");
-    remove->set_tooltip("Remove the selected folder or file from the list");
-    add_pub->set_tooltip("Keep the selected library picture in this publication, without placing it");
+    /* The commands in a two-column grid: each row splits the width evenly */
+    auto grid_row = [this]() {
+        Widget *row = new Widget(this);
+        row->set_layout(new FlexLayout(FlexDirection::Row, JustifyContent::FlexStart,
+                                       AlignItems::Stretch, 0, 6));
+        return row;
+    };
+    auto cell = [](Widget *row, const char *caption, int icon, const char *tip) {
+        auto *b = new Button(row, caption, icon);
+        b->set_tooltip(tip);
+        static_cast<FlexLayout *>(row->layout())->set_flex_item(b, FlexLayout::FlexItem(1.f, 1.f, 0));
+        return b;
+    };
+    Widget *row1 = grid_row();
+    auto *add_images = cell(row1, "Images...", FA_FILE_IMAGE, "Add picture files to the library list");
+    auto *add_folder = cell(row1, "Folder...", FA_FOLDER_PLUS, "Add a folder to the library list");
+    Widget *row2 = grid_row();
+    auto *remove = cell(row2, "Remove", FA_MINUS,
+                        "Remove the selected folder or file from the list");
+    auto *add_pub = cell(row2, "Add to Pub", FA_PLUS,
+                         "Keep the selected library picture in this publication, without placing it");
+    Widget *row3 = grid_row();
+    m_clean = cell(row3, "Clean Up", FA_BROOM,
+                   "Remove the pictures this publication keeps but no page shows (undoable)");
+    m_clean->set_callback([this] {
+        if (m_view)
+            m_view->remove_unused_images();
+    });
+    auto *details = cell(row3, "Details", FA_INFO_CIRCLE, "Show or hide the picture details");
+    details->set_callback([this] { toggle_details(); });
     add_images->set_callback([this] {
         std::vector<std::string> paths;
         try {
@@ -430,9 +464,13 @@ ImageAssetsPanel::ImageAssetsPanel(Widget *parent, ComposerView *view, ImageStor
         if (root >= 0 && root < (int) m_roots.size() && is_image_file(m_roots[(size_t) root]))
             import_library_file(m_roots[(size_t) root]);
     });
-    auto *stash_scroll = new ScrollPanel(this, ScrollPanel::ScrollTypes::Vertical);
-    stash_scroll->set_min_height(160);
-    flex->set_flex_item(stash_scroll, FlexLayout::FlexItem(1.f, 1.f, 0));
+    /* The grid over the details, split by a bar dragged to taste. Dragged
+       to the bottom (or the info button) the details fold away entirely. */
+    m_split = new Split(this, Split::Orientation::Vertical);
+    m_split->set_min_size(Vector2i(0, 120));      // the grid keeps 120px
+    flex->set_flex_item(m_split, FlexLayout::FlexItem(1.f, 1.f, 0));
+
+    auto *stash_scroll = new ScrollPanel(m_split, ScrollPanel::ScrollTypes::Vertical);
     m_stash = new ImageStashWidget(stash_scroll, 112);
     m_stash->set_live(true);
     m_stash->set_spacing(0, 0);
@@ -495,6 +533,9 @@ ImageAssetsPanel::ImageAssetsPanel(Widget *parent, ComposerView *view, ImageStor
         const ImageStashWidget::Entry &e = m_stash->image_at((size_t) index);
         if (e.user_id != 0)
             data.set(kImageAssetDragType, std::to_string(e.user_id));
+        else if (e.orig_width > 0 && e.orig_height > 0)   // known once its thumbnail loaded
+            data.set(kImagePixelsDragType,
+                     std::to_string(e.orig_width) + " " + std::to_string(e.orig_height));
     });
     m_stash->set_drop_callback([this](const std::vector<std::string> &paths) {
         bool any = false;
@@ -508,9 +549,7 @@ ImageAssetsPanel::ImageAssetsPanel(Widget *parent, ComposerView *view, ImageStor
         return any;
     });
 
-    auto *meta_scroll = new ScrollPanel(this, ScrollPanel::ScrollTypes::Vertical);
-    meta_scroll->set_min_height(150);
-    flex->set_flex_item(meta_scroll, FlexLayout::FlexItem(0.f, 0.f, 150));
+    auto *meta_scroll = new ScrollPanel(m_split, ScrollPanel::ScrollTypes::Vertical);
     m_meta = new TextArea(meta_scroll);
     m_meta->set_live(true);
     m_meta->set_font("sans");
@@ -521,8 +560,9 @@ ImageAssetsPanel::ImageAssetsPanel(Widget *parent, ComposerView *view, ImageStor
     /* Both floors explicit: the layout's own floor counts each scroll panel
        as half the screen, which would pin the window near full height. */
     set_min_width(200);
-    set_min_height(560);
+    set_min_height(440);
     set_size(Vector2i(350, 780));
+    m_split->set_drag_position(m_details_at);
     rebuild();
     if (Screen *s = screen())
         if (s->nvg_context())
@@ -546,17 +586,25 @@ ImageAssetsPanel::~ImageAssetsPanel() {
     stop_scan();
 }
 
-void ImageAssetsPanel::close_soon() {
-    auto gate = m_probe_gate;
-    async([this, gate] {
-        {
-            std::lock_guard<std::mutex> lock(gate->mu);
-            if (gate->panel != this)
-                return;
-        }
-        if (parent())
-            dispose();
-    });
+void ImageAssetsPanel::set_docked(Dock side) {
+    m_dock = side;
+    m_dock_left->set_pushed(side == Dock::Left);
+    m_dock_right->set_pushed(side == Dock::Right);
+    set_draw_shadow(side == Dock::None);   // docked, it sits flush beside the pages
+    if (screen())
+        screen()->redraw();
+}
+
+bool ImageAssetsPanel::mouse_drag_event(const Vector2i &p, const Vector2i &rel, int button,
+                                        int modifiers) {
+    /* Moving a docked window takes it out of the dock first */
+    if (m_dock != Dock::None && m_drag && on_dock)
+        on_dock(Dock::None);
+    const Vector2i before = size();
+    const bool handled = Window::mouse_drag_event(p, rel, button, modifiers);
+    if (m_dock != Dock::None && m_resize && size() != before && on_dock_resize)
+        on_dock_resize();
+    return handled;
 }
 
 void ImageAssetsPanel::refresh() {
@@ -646,6 +694,12 @@ void ImageAssetsPanel::recount() {
         for (const Item &it : page.items)
             if (const PlacedImage *im = it.image())
                 m_uses[im->asset] += 1;
+    /* Clean Up only when some picture is kept but not placed */
+    bool unused = false;
+    for (const ImageAsset &a : m_view->document().images)
+        unused = unused || !m_uses.count(a.id);
+    if (m_clean)
+        m_clean->set_enabled(unused);
 }
 
 std::string ImageAssetsPanel::asset_signature() const {
@@ -690,6 +744,20 @@ bool ImageAssetsPanel::add_root(const std::string &path) {
     return true;
 }
 
+void ImageAssetsPanel::toggle_details() {
+    if (!m_split)
+        return;
+    const float at = m_split->drag_position();
+    if (at < 0.97f) {
+        m_details_at = at;               // remember where the user left it
+        m_split->set_drag_position(1.0f);
+    } else {
+        m_split->set_drag_position(m_details_at < 0.97f ? m_details_at : 0.72f);
+    }
+    if (screen())
+        screen()->redraw();
+}
+
 void ImageAssetsPanel::relayout() {
     if (Screen *s = screen())
         if (s->nvg_context())
@@ -722,6 +790,14 @@ void ImageAssetsPanel::rebuild() {
         e.orig_width = asset.meta.width_px;
         e.orig_height = asset.meta.height_px;
         e.path = asset_path(asset, m_images);
+        /* The grid's thumbnail cache outlives rebuilds by this key. A linked
+           file goes by its path, the same key as its Library cell, so a file
+           just dropped on a page keeps the thumbnail it had; a picture with
+           no file goes by id within this store's contents. */
+        e.key = !e.path.empty()
+            ? e.path
+            : "asset:" + std::to_string(m_images ? m_images->generation() : 0) + ":" +
+              std::to_string(asset.id);
         m_stash->add_entry(e);
     }
     m_stash->add_section("Library");

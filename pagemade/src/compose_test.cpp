@@ -1620,9 +1620,20 @@ static void check_doc(const PageDoc &a, const PageDoc &b) {
         check_para(a.styles[i].para, b.styles[i].para);
         check_char(a.styles[i].type, b.styles[i].type);
     }
+    auto same_guides = [](const std::vector<Guide> &x, const std::vector<Guide> &y) {
+        if (x.size() != y.size())
+            return false;
+        for (size_t i = 0; i < x.size(); ++i)
+            if (x[i].vertical != y[i].vertical || !near(x[i].pos, y[i].pos))
+                return false;
+        return true;
+    };
+    CHECK(same_guides(a.guides, b.guides), "every-page guides %zu vs %zu",
+          a.guides.size(), b.guides.size());
     CHECK(a.pages.size() == b.pages.size(), "pages %zu vs %zu", a.pages.size(), b.pages.size());
     for (size_t p = 0; p < std::min(a.pages.size(), b.pages.size()); ++p) {
         CHECK(a.pages[p].hidden == b.pages[p].hidden, "page %zu hidden", p);
+        CHECK(same_guides(a.pages[p].guides, b.pages[p].guides), "page %zu guides", p);
         CHECK(a.pages[p].items.size() == b.pages[p].items.size(),
               "page %zu items %zu vs %zu", p, a.pages[p].items.size(), b.pages[p].items.size());
         size_t n = std::min(a.pages[p].items.size(), b.pages[p].items.size());
@@ -1831,6 +1842,8 @@ static void test_docfile(const FontLibrary &fonts) {
     note_ps.tabs.push_back({120, TabAlign::Decimal, "."});
     Story extra = one_para("He said \"hello\"\nsecond\tline\\end", note, note_ps);
     doc.add_text_frame(1, doc.add_story(std::move(extra)), 200, 80, Transform::translate(40, 200));
+    doc.guides = {{true, 36.5f}, {false, 144.f}};         // ruler guides, every page
+    doc.pages[1].guides = {{false, 72.25f}, {true, 300.f}}; // and one page's own
 
     const std::string linked = "/tmp/pagemade-doc-linked.pagemade";
     const std::string embedded = "/tmp/pagemade-doc-embedded.pagemade";

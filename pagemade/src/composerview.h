@@ -84,9 +84,30 @@ public:
 
     void set_show_baselines(bool on)   { m_show_baselines = on; }
     void set_show_loose_tight(bool on) { m_show_loose_tight = on; }
-    void set_show_guides(bool on)      { m_show_guides = on; }
+    void set_show_guides(bool on);
+    bool show_guides() const           { return m_show_guides; }
+    /* Locked ruler guides stay put: the pointer tool no longer picks them
+     * up. New ones still come off the rulers, and the Clear commands work. */
+    void set_lock_guides(bool on)      { m_lock_guides = on; }
+    bool lock_guides() const           { return m_lock_guides; }
     void set_snap(bool on)             { m_snap = on; }
     bool snap() const                  { return m_snap; }
+
+    /* ---- Ruler guides ----------------------------------------------- *
+     * Dragged off a ruler onto the pages: the guide lands on the page
+     * under the pointer, or on every page with Shift (purple; a page's
+     * own guides are blue). The pointer tool drags a guide to move it, and
+     * back off the pages (onto a ruler) to remove it. Each is one undo
+     * step. Points are on screen, as the rulers see them. */
+    void begin_guide_drag(bool vertical);
+    void guide_drag_to(const nanogui::Vector2i &screen_p, bool all_pages);
+    void end_guide_drag(const nanogui::Vector2i &screen_p, bool all_pages);
+    bool guide_dragging() const { return m_guide_drag.active; }
+    /* Remove the current page's guides, or the every-page guides. */
+    void clear_guides(bool all_pages);
+    /* The current page's top-left on screen and pixels per point, for the
+     * rulers. False before the view has a size. */
+    bool ruler_mapping(nanogui::Vector2f &origin, float &scale) const;
 
     /* The toolbox. */
     enum class Tool { Pointer, Crop, Rotate, Text, Line, Rect, Ellipse, Polygon };
@@ -110,8 +131,14 @@ public:
      * thread and runs `done` on the UI thread; an empty error placed it.
      * A null point is the margin of `page`. */
     bool place_image_file(const std::string &path, std::string *error);
+    /* The frame goes down at once, as a stand-in sized from `px_hint` (the
+     * picture's pixel size, when the caller knows it); the file's header
+     * is read on a background thread, then the frame takes the picture's
+     * print size (unless it was resized meanwhile) and the picture loads
+     * like any linked one. `done` reports a file that can't be read. */
     void place_image_file(const std::string &path, size_t page, const pagemade::Point *at,
-                          std::function<void(const std::string &error)> done);
+                          std::function<void(const std::string &error)> done,
+                          nanogui::Vector2i px_hint = nanogui::Vector2i(0, 0));
     /* One undo step that adds a picture the store already holds, without
      * placing it. */
     void add_asset(pagemade::ImageAsset asset);
@@ -137,9 +164,10 @@ public:
 
     /* Drag and drop. A publication picture (kImageAssetDragType) is placed
      * where it drops. Files ("text/uri-list") go to on_drop_files with the
-     * drop point, for the app to import and then place_image_at(). */
+     * drop point and, from the asset window, the first file's pixel size
+     * (kImagePixelsDragType; 0 x 0 if unknown). */
     std::function<void(const std::vector<std::string> &paths, size_t page,
-                       pagemade::Point at)> on_drop_files;
+                       pagemade::Point at, nanogui::Vector2i px_hint)> on_drop_files;
     bool drag_motion_event(const nanogui::Vector2i &p, nanogui::DragEvent &e) override;
     void drag_leave_event() override;
     bool drag_drop_event(const nanogui::Vector2i &p, nanogui::DragEvent &e) override;
@@ -348,8 +376,33 @@ private:
     const pagemade::Composition *comp_of_frame(pagemade::ItemId id, size_t *thread_index) const;
 
     /* ---- Snapping ---------------------------------------------------- */
-    std::vector<float> guides_x() const;
-    std::vector<float> guides_y() const;
+    /* Margins, columns and ruler guides of the current page, or of `page` */
+    std::vector<float> guides_x() const { return guides_x(m_page); }
+    std::vector<float> guides_y() const { return guides_y(m_page); }
+    std::vector<float> guides_x(size_t page) const;
+    std::vector<float> guides_y(size_t page) const;
+    /* Page edges, margins and columns of `page` (what a ruler guide snaps to) */
+    std::vector<float> base_guides_x(size_t page) const;
+    std::vector<float> base_guides_y() const;
+
+    /* ---- Ruler guides (see the public section) ----------------------- */
+    struct GuideDrag {
+        bool   active = false;
+        bool   vertical = true;
+        bool   all_pages = false;  // on every page (doc guides) or one page
+        int    index = -1;         // the guide being moved; -1 for a new one
+        size_t page = 0;           // the page its position is measured on
+        float  pos = 0;
+        bool   over = false;       // over the pages (else a drop cancels or removes)
+    };
+    /* View-space point (widget top-left origin) of a screen point */
+    nanogui::Vector2f local_from_screen(const nanogui::Vector2i &screen_p) const;
+    /* A screen point in `page`'s coordinates */
+    pagemade::Point point_on_page(const nanogui::Vector2i &screen_p, size_t page) const;
+    bool screen_over_pages(const nanogui::Vector2i &screen_p) const;
+    /* The ruler guide under `pt` on `page`: its index, -1 if none */
+    int guide_at(const pagemade::Point &pt, size_t page, bool &all_pages) const;
+    void draw_ruler_guides(NVGcontext *ctx, float px, size_t page);
     /* Snap a page point to the guides, axis by axis. */
     pagemade::Point snap_point(pagemade::Point p) const;
     /* Adjust a move so one of the box's edges (or its center) lands on a guide. */
@@ -402,11 +455,20 @@ private:
      * optionally place it. */
     bool commit_import(uint32_t id, const std::string &path, pagemade::ImageImport imported,
                        size_t page, bool place, const pagemade::Point *at, std::string *error);
+    bool key_held(int modifiers, int mod, int key_left, int key_right) const;
+
     /* Picture loading: see "Picture loading" in composerview.cpp */
     struct LoadResult;
     pagemade::BackgroundWorker &loader();     // display views (reads, decodes)
     pagemade::BackgroundWorker &importer();   // Place and import reads
     void request_display(uint32_t id, int long_edge);
+    /* A file placed before its header was read (place_image_file) */
+    struct Probing {
+        pagemade::ItemId item = 0;
+        float w = 0, h = 0;              // the stand-in frame's size
+    };
+    void finish_probe(uint32_t id, const pagemade::ImageImport &imported,
+                      const std::function<void(const std::string &)> &done);
     void finish_display(uint32_t id, const std::string &path, LoadResult &r);
     void update_live_images();
     void drop_texture(uint32_t id);
@@ -415,6 +477,10 @@ private:
     void frame_size(const pagemade::ImageMetadata &meta, size_t page, float &w, float &h) const;
     /* The asset id a drag offers, 0 if none. */
     uint32_t dragged_asset(const nanogui::DragData &data) const;
+    /* Where a drag would place its frame: the page under the pointer, the
+     * top-left there (snapped), and the frame's size (0 while unknown) */
+    void drop_target(const nanogui::DragData &data, pagemade::Point &at, size_t &page,
+                     float &w, float &h) const;
 
     /* Drop GPU copies when the store is replaced. Called from draw(). */
     void sync_textures(NVGcontext *ctx);
@@ -520,6 +586,8 @@ private:
     bool m_show_baselines = false;
     bool m_show_loose_tight = false;
     bool m_show_guides = true;
+    GuideDrag m_guide_drag;
+    bool m_lock_guides = false;
 
     pagemade::ImageStore *m_images = nullptr;
     /* Cleared in the destructor so a load still in flight does not touch
@@ -531,6 +599,7 @@ private:
     uint64_t m_doc_epoch = 0;
     std::map<uint32_t, int> m_load_want;      // display edge asked for, per picture
     std::set<uint32_t> m_load_failed;         // couldn't be read: not asked again
+    std::map<uint32_t, Probing> m_probing;    // placed, header still being read
     std::set<uint32_t> m_live, m_live_frame;  // on screen: last draw, this draw
     std::map<uint32_t, uint64_t> m_last_live; // draw tick each was last on screen
     uint64_t m_live_tick = 0;

@@ -8,7 +8,9 @@
  * and the composer imports it, then places it.
  *
  * Library folders live here, not in the publication, so New and Open leave
- * them alone. Thumbnails of pictures the publication already holds are
+ * them alone. The app hides the window when it is closed rather than
+ * destroying it, so the folders, files and thumbnails are kept for the
+ * session. Thumbnails of pictures the publication already holds are
  * decoded from the ImageStore on the widget's loader thread.
  */
 #pragma once
@@ -29,6 +31,8 @@
 class ComposerView;
 namespace nanogui {
 class ImageStashWidget;
+class Button;
+class Split;
 class TextArea;
 }
 
@@ -42,9 +46,18 @@ public:
      * itself changed. Badges (use count, missing, modified) redraw either way. */
     void refresh();
 
-    /* Close from the title bar after this event returns, so the click that
-     * asked for it is not still walking the window. */
-    void close_soon();
+    /* Docking beside the pages: the arrow buttons at the top right ask for
+     * a side (or None, pressed again); the app makes the room and places
+     * the window, then calls set_docked. Dragging the title bar undocks;
+     * resizing a docked window asks for its room again. */
+    enum class Dock { None, Left, Right };
+    Dock docked() const { return m_dock; }
+    void set_docked(Dock side);
+    std::function<void(Dock)> on_dock;
+    std::function<void()> on_dock_resize;
+
+    bool mouse_drag_event(const nanogui::Vector2i &p, const nanogui::Vector2i &rel,
+                          int button, int modifiers) override;
 
 private:
     struct ScanState;
@@ -61,6 +74,8 @@ private:
     void show_metadata(int index);
     void apply_probe(uint64_t gen, uint32_t asset_id, const pagemade::ImageImport &imported);
     void relayout();
+    /* Fold the details pane away, or bring it back where it was. */
+    void toggle_details();
     bool add_root(const std::string &path);
     void restart_scan();
     void stop_scan();
@@ -77,6 +92,11 @@ private:
     RootList *m_roots_list = nullptr;
     nanogui::ImageStashWidget *m_stash = nullptr;
     nanogui::TextArea *m_meta = nullptr;
+    nanogui::Split *m_split = nullptr;    // grid above, details below
+    nanogui::Button *m_dock_left = nullptr, *m_dock_right = nullptr;
+    nanogui::Button *m_clean = nullptr;
+    Dock m_dock = Dock::None;
+    float m_details_at = 0.72f;           // divider to restore the details to
 
     std::vector<std::string> m_roots;
     std::vector<std::string> m_library_files;

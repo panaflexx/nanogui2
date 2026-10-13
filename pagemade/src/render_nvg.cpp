@@ -149,12 +149,21 @@ void draw_stroke(NVGcontext *ctx, const DrawStroke &s, float px) {
     }
 }
 
-/* A picture still being read: a plain tile, no cross. */
+/* A picture still being read: the placeholder box with a gray cross (the
+ * missing picture's cross is red). */
 void draw_loading_image(NVGcontext *ctx, const DrawImage &im) {
     nvgBeginPath(ctx);
     nvgRect(ctx, 0, 0, im.clip_w, im.clip_h);
     nvgFillColor(ctx, nvgRGB(236, 236, 236));
     nvgFill(ctx);
+    nvgStrokeColor(ctx, nvgRGB(170, 170, 170));
+    nvgStrokeWidth(ctx, 1.f);
+    nvgBeginPath(ctx);
+    nvgMoveTo(ctx, 0, 0);
+    nvgLineTo(ctx, im.clip_w, im.clip_h);
+    nvgMoveTo(ctx, im.clip_w, 0);
+    nvgLineTo(ctx, 0, im.clip_h);
+    nvgStroke(ctx);
 }
 
 void draw_missing_image(NVGcontext *ctx, const DrawImage &im) {

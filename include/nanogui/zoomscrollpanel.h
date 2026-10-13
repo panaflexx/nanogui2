@@ -104,6 +104,16 @@ public:
     bool zoom_enabled() const { return m_zoom_enabled; }
     void set_zoom_enabled(bool e) { m_zoom_enabled = e; }
 
+    /**
+     * The child is an endless canvas (a pasteboard): every point of the
+     * viewport but the scrollbars reaches it -- clicks, motion, drags, drops
+     * and find_widget -- not only those inside its own rectangle, which may
+     * be smaller than the view when zoomed out. Its focus ring then outlines
+     * the viewport.
+     */
+    void set_child_fills_view(bool on) { m_child_fills_view = on; }
+    bool child_fills_view() const { return m_child_fills_view; }
+
     /// Pan offset in panel-local pixels (negative values move the child up/left).
     Vector2d pan_offset() const { return m_pan_offset; }
     void set_pan_offset(const Vector2d& p) { m_pan_offset = p; clamp_state(); }
@@ -173,6 +183,11 @@ protected:
     double    m_zoom_max;
     double    m_zoom_wheel_step;   ///< Multiplicative factor per wheel tick when zooming.
     bool      m_zoom_enabled;
+    bool      m_child_fills_view = false;
+    /// Does the child take this point (child space)?  See set_child_fills_view.
+    bool child_takes(const Widget* child, const Vector2i& cp) const {
+        return m_child_fills_view || child->contains(cp);
+    }
     bool      m_reflow_on_zoom = true;
 
     bool      m_scrolling_x;

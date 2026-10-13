@@ -57,6 +57,7 @@
 #include "composerview.h"
 #include "dialogs.h"
 #include "image_assets.h"
+#include "ruler.h"
 #include "docfile.h"
 #include "default_fonts.h"
 #include "font_menu_ui.h"
@@ -342,7 +343,7 @@ public:
         m_snap_btn->set_flags(Button::ToggleButton);
         m_snap_btn->set_pushed(true);
         m_snap_btn->set_tooltip("Snap to guides");
-        m_snap_btn->set_change_callback([this](bool on) { m_view->set_snap(on); });
+        m_snap_btn->set_change_callback([this](bool on) { set_snap(on); });
 
         m_undo_btn = new Button(toolbar, "", FA_UNDO);
         m_redo_btn = new Button(toolbar, "", FA_REDO);
@@ -465,13 +466,18 @@ public:
         PageDoc doc = sample_document();
         build_palette(window, doc);
 
-        m_scroll = new ZoomScrollPanel(window, ZoomScrollPanel::ScrollTypes::Both);
+        /* The pages, with the rulers along the top and left (View > Rulers) */
+        m_rulers = new RulerFrame(window);
+        m_rulers->set_height_flex(SizeMode::Expanding);
+        m_rulers->on_layout = [this] { place_docked_assets(); };   // follows window resizes
+        root_flex->set_flex_item(m_rulers, FlexLayout::FlexItem(1.0f));
+        m_scroll = new ZoomScrollPanel(m_rulers, ZoomScrollPanel::ScrollTypes::Both);
         m_scroll->set_zoom_range(0.1, 16.0);
         m_scroll->set_zoom_enabled(true);
-        m_scroll->set_height_flex(SizeMode::Expanding);
-        root_flex->set_flex_item(m_scroll, FlexLayout::FlexItem(1.0f));
+        m_scroll->set_child_fills_view(true);   // the pasteboard is clickable wherever it shows
 
         m_view = new ComposerView(m_scroll, &m_fonts, &m_hyphenator);
+        m_rulers->set_content(m_scroll, m_view);
         m_view->set_image_store(&m_images);
         m_view->on_recompose = [this] { update_status(); };
         m_view->on_tool_change = [this](ComposerView::Tool t) {
@@ -482,16 +488,18 @@ public:
         m_view->on_page_change = [this] { update_status(); };
         m_view->on_document_change = [this] {
             update_title();
-            if (m_assets)
+            if (m_assets && m_assets->visible())   // a hidden one catches up when shown
                 m_assets->refresh();
         };
         m_view->on_live_change = [this] {
-            if (m_assets)
+            if (m_assets && m_assets->visible())
                 redraw();                // the asset badges show what is live
         };
-        /* Files dropped on a page are read off the UI thread, then placed.
-         * A run of files steps down the page so they don't stack exactly. */
-        m_view->on_drop_files = [this](const std::vector<std::string> &paths, size_t page, Point at) {
+        /* Files dropped on a page are placed at once as stand-ins and read
+         * off the UI thread. A run of files steps down the page so they
+         * don't stack exactly; the size hint is the first file's. */
+        m_view->on_drop_files = [this](const std::vector<std::string> &paths, size_t page, Point at,
+                                       Vector2i px_hint) {
             for (size_t i = 0; i < paths.size(); ++i) {
                 Point where = at;
                 where.x += 12.f * (float) i;
@@ -503,7 +511,7 @@ public:
                         show_alert(this, "The picture couldn't be placed.", error);
                     else
                         set_note("placed " + name);
-                });
+                }, i == 0 ? px_hint : Vector2i(0, 0));
             }
         };
 
@@ -751,6 +759,29 @@ public:
          * Shortcuts follow InDesign's where it has them. Line and frame
          * breaks are typed in the text (Shift+Return, Ctrl+Return); their
          * items only name the key, so the key does not insert twice. */
+        /* View: rulers and ruler guides (PageMaker's Ctrl+R, Ctrl+J, Ctrl+U) */
+        Dropdown *view = m_menubar->add_menu("View");
+        m_rulers_item = add_cmd(view, "Rulers", {{SYSTEM_COMMAND_MOD, GLFW_KEY_R}}, [this] {
+            m_rulers->set_rulers_shown(!m_rulers->rulers_shown());
+            m_rulers_item->set_icon(m_rulers->rulers_shown() ? FA_CHECK : 0);
+        });
+        m_rulers_item->set_icon(FA_CHECK);
+        m_guides_item = add_cmd(view, "Guides", {{SYSTEM_COMMAND_MOD, GLFW_KEY_J}}, [this] {
+            m_view->set_show_guides(!m_view->show_guides());
+            m_guides_item->set_icon(m_view->show_guides() ? FA_CHECK : 0);
+        });
+        m_guides_item->set_icon(FA_CHECK);
+        m_snap_item = add_cmd(view, "Snap to Guides", {{SYSTEM_COMMAND_MOD, GLFW_KEY_U}},
+                              [this] { set_snap(!m_view->snap()); });
+        m_snap_item->set_icon(FA_CHECK);
+        m_lock_guides_item = add_cmd(view, "Lock Guides", {}, [this] {
+            m_view->set_lock_guides(!m_view->lock_guides());
+            m_lock_guides_item->set_icon(m_view->lock_guides() ? FA_CHECK : 0);
+        });
+        new Separator(view->popup());
+        add_cmd(view, "Clear Page Guides", {}, [this] { m_view->clear_guides(false); });
+        add_cmd(view, "Clear All-Pages Guides", {}, [this] { m_view->clear_guides(true); });
+
         Dropdown *type = m_menubar->add_menu("Type");
         m_smart_quotes = add_cmd(type, "Smart Quotes", {}, [this] {
             m_view->set_smart_quotes(!m_view->smart_quotes());
@@ -1234,21 +1265,82 @@ public:
         });
     }
 
+    /* The Image Assets window is made once and only hidden when closed, so
+     * its folders, library and thumbnails are all there when it reopens. */
     void show_image_assets() {
         if (!m_assets) {
             m_assets = new ImageAssetsPanel(this, m_view, &m_images);
             m_assets->set_close_callback([this] {
-                ImageAssetsPanel *panel = m_assets;
-                m_assets = nullptr;
-                if (panel)
-                    panel->close_soon();
+                if (m_assets) {
+                    m_assets->set_visible(false);
+                    m_rulers->set_side_insets(0, 0);   // a docked one gives its room back
+                    redraw();
+                }
             });
+            m_assets->on_dock = [this](ImageAssetsPanel::Dock side) { dock_assets(side); };
+            m_assets->on_dock_resize = [this] { apply_assets_dock(); };
             m_assets->center();
         } else {
+            m_assets->set_visible(true);
             move_window_to_front(m_assets);
+            apply_assets_dock();         // reopened docked: take the room again
         }
-        m_assets->refresh();
+        m_assets->refresh();             // catch up on changes made while hidden
         m_assets->request_focus();
+    }
+
+    /* ---- Docking the Image Assets window beside the pages ----------- *
+     * Docked, the window fills a strip the full height of the page area on
+     * one side; the rulers and pages give it that room. Undocked, it goes
+     * back to the size it had floating, where it is. */
+    void dock_assets(ImageAssetsPanel::Dock side) {
+        using Dock = ImageAssetsPanel::Dock;
+        if (!m_assets)
+            return;
+        const Dock was = m_assets->docked();
+        if (was == Dock::None && side != Dock::None)
+            m_assets_float_size = m_assets->size();
+        m_assets->set_docked(side);
+        if (side != Dock::None) {
+            apply_assets_dock();
+            return;
+        }
+        m_rulers->set_side_insets(0, 0);
+        if (was != Dock::None && m_assets_float_size.x() > 0) {
+            m_assets->set_size(m_assets_float_size);
+            if (NVGcontext *ctx = nvg_context())
+                m_assets->perform_layout(ctx);
+        }
+        redraw();
+    }
+
+    /* The room for a docked window (its width, within reason), then the
+     * window in it */
+    void apply_assets_dock() {
+        using Dock = ImageAssetsPanel::Dock;
+        if (!m_assets || !m_assets->visible() || m_assets->docked() == Dock::None)
+            return;
+        m_assets_dock_w = std::clamp(m_assets->width(), 200, std::max(200, m_rulers->width() / 2));
+        const bool left = m_assets->docked() == Dock::Left;
+        m_rulers->set_side_insets(left ? m_assets_dock_w : 0, left ? 0 : m_assets_dock_w);
+        place_docked_assets();
+    }
+
+    void place_docked_assets() {
+        using Dock = ImageAssetsPanel::Dock;
+        if (!m_assets || !m_assets->visible() || m_assets->docked() == Dock::None)
+            return;
+        const Vector2i a = m_rulers->absolute_position(), s = m_rulers->size();
+        const bool left = m_assets->docked() == Dock::Left;
+        const Vector2i pos = left ? a : Vector2i(a.x() + s.x() - m_assets_dock_w, a.y());
+        const Vector2i size(m_assets_dock_w, s.y());
+        if (pos == m_assets->position() && size == m_assets->size())
+            return;
+        m_assets->set_position(pos);
+        m_assets->set_size(size);
+        if (NVGcontext *ctx = nvg_context())
+            m_assets->perform_layout(ctx);
+        redraw();
     }
 
     void type_specs() {
@@ -1780,6 +1872,8 @@ public:
     void set_snap(bool on) {
         m_view->set_snap(on);
         m_snap_btn->set_pushed(on);
+        if (m_snap_item)
+            m_snap_item->set_icon(on ? FA_CHECK : 0);
     }
     Button *baselines_box() { return m_baselines; }
     Button *loose_box() { return m_loose; }
@@ -1791,6 +1885,9 @@ private:
     Hyphenator      m_hyphenator;
     MenuBar         *m_menubar = nullptr;
     ZoomScrollPanel *m_scroll = nullptr;
+    RulerFrame      *m_rulers = nullptr;
+    MenuItem        *m_rulers_item = nullptr, *m_guides_item = nullptr, *m_snap_item = nullptr;
+    MenuItem        *m_lock_guides_item = nullptr;
     ComposerView    *m_view = nullptr;
     PageIconStrip   *m_pages = nullptr;
     Dropdown        *m_zoom_menu = nullptr;
@@ -1821,6 +1918,8 @@ private:
     Button          *m_specs = nullptr;
     TypeSpecsPanel  *m_type_panel = nullptr;
     ImageAssetsPanel *m_assets = nullptr;
+    Vector2i         m_assets_float_size{0, 0};   // its size before it docked
+    int              m_assets_dock_w = 0;
     FloatSpin       *m_size = nullptr, *m_leading = nullptr, *m_baseline = nullptr;
     FloatSpin       *m_spacing = nullptr;
     MenuItem        *m_remove_page = nullptr, *m_move_earlier = nullptr, *m_move_later = nullptr;

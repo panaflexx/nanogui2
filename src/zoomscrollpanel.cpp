@@ -275,6 +275,8 @@ Widget* ZoomScrollPanel::find_widget(const Vector2i& p) {
         // cp is in child's logical (0,0) space; delegate to child's subtree
         if (Widget* hit = child->find_widget(cp))
             return hit;
+        if (m_child_fills_view && !over_vbar(p) && !over_hbar(p))
+            return child;
     }
     return contains(p) ? this : nullptr;
 }
@@ -286,6 +288,8 @@ const Widget* ZoomScrollPanel::find_widget(const Vector2i& p) const {
         Vector2i cp = to_child(p);
         if (const Widget* hit = child->find_widget(cp))
             return hit;
+        if (m_child_fills_view && !over_vbar(p) && !over_hbar(p))
+            return child;
     }
     return contains(p) ? this : nullptr;
 }
@@ -376,7 +380,7 @@ bool ZoomScrollPanel::mouse_button_event(const Vector2i& p, int button, bool dow
     if (!m_children.empty()) {
         Widget* child = m_children[0];
         Vector2i cp = to_child(p);
-        if (child->visible() && child->contains(cp))
+        if (child->visible() && child_takes(child, cp))
             return child->mouse_button_event(cp, button, down, modifiers);
     }
     return false;
@@ -390,8 +394,8 @@ bool ZoomScrollPanel::mouse_motion_event(const Vector2i& p, const Vector2i& rel,
     Vector2i cp  = to_child(p);
     Vector2i crel = delta_to_child(rel);
 
-    bool contained = child->contains(cp);
-    bool prev_contained = child->contains(cp - crel);
+    bool contained = child_takes(child, cp);
+    bool prev_contained = child_takes(child, cp - crel);
     if (contained || prev_contained)
         return child->mouse_motion_event(cp, crel, button, modifiers);
     return false;
@@ -403,7 +407,7 @@ bool ZoomScrollPanel::drag_motion_event(const Vector2i& p, DragEvent& e) {
         return false;
     Widget* child = m_children[0];
     Vector2i cp = to_child(p);
-    return child->visible() && child->contains(cp) && child->drag_motion_event(cp, e);
+    return child->visible() && child_takes(child, cp) && child->drag_motion_event(cp, e);
 }
 
 bool ZoomScrollPanel::drag_drop_event(const Vector2i& p, DragEvent& e) {
@@ -411,7 +415,7 @@ bool ZoomScrollPanel::drag_drop_event(const Vector2i& p, DragEvent& e) {
         return false;
     Widget* child = m_children[0];
     Vector2i cp = to_child(p);
-    return child->visible() && child->contains(cp) && child->drag_drop_event(cp, e);
+    return child->visible() && child_takes(child, cp) && child->drag_drop_event(cp, e);
 }
 
 bool ZoomScrollPanel::mouse_drag_event(const Vector2i& p, const Vector2i& rel,

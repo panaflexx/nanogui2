@@ -307,11 +307,8 @@ void ImageStashWidget::clear() {
     m_total_height = 0.0f;
     m_layout_dirty = true;
     m_laid_out_height = -1;
-
-    for (auto &kv : m_thumb_cache)
-        stbi_image_free(kv.second.pixels);
-    m_thumb_cache.clear();
-    m_cache_lru.clear();
+    /* The thumbnail cache stays: entries added back with the same key take
+       their thumbnails from it instead of reading the files again */
 
     release_high_res();
     m_fullscreen = -1;
@@ -616,20 +613,34 @@ bool ImageStashWidget::add_to_atlas(int index, unsigned char *pixels, int w, int
     return false;
 }
 
-void ImageStashWidget::cache_put(int index, unsigned char *pixels, int w, int h) {
+const ImageStashWidget::CachedThumb *ImageStashWidget::cached(int entry) const {
+    const std::string key = cache_key(m_entries[entry]);
+    if (key.empty())
+        return nullptr;
+    auto it = m_thumb_cache.find(key);
+    return it == m_thumb_cache.end() ? nullptr : &it->second;
+}
+
+void ImageStashWidget::cache_put(int entry, const CachedThumb &thumb) {
     /* Takes ownership of pixels (stbi_image_free'd on eviction/destruction). */
-    auto it = m_thumb_cache.find(index);
-    if (it != m_thumb_cache.end()) {
-        stbi_image_free(it->second.pixels);
-        it->second = { pixels, w, h };
-        m_cache_lru.erase(std::find(m_cache_lru.begin(), m_cache_lru.end(), index));
-    } else {
-        m_thumb_cache[index] = { pixels, w, h };
+    const std::string key = cache_key(m_entries[entry]);
+    if (key.empty()) {
+        stbi_image_free(thumb.pixels);
+        return;
     }
-    m_cache_lru.push_front(index);
+    auto it = m_thumb_cache.find(key);
+    if (it != m_thumb_cache.end()) {
+        if (it->second.pixels != thumb.pixels)
+            stbi_image_free(it->second.pixels);
+        it->second = thumb;
+        m_cache_lru.erase(std::find(m_cache_lru.begin(), m_cache_lru.end(), key));
+    } else {
+        m_thumb_cache[key] = thumb;
+    }
+    m_cache_lru.push_front(key);
 
     while (m_thumb_cache.size() > kCacheEntries) {
-        int victim = m_cache_lru.back();
+        std::string victim = m_cache_lru.back();
         m_cache_lru.pop_back();
         auto vit = m_thumb_cache.find(victim);
         if (vit != m_thumb_cache.end()) {
@@ -661,19 +672,8 @@ void ImageStashWidget::reset_atlas() {
         int e = m_items[i].entry;
         if (e < 0)
             continue;
-        auto it = m_thumb_cache.find(e);
-        if (it == m_thumb_cache.end())
-            continue;
-        CachedThumb &ct = it->second;
-        std::string key = "img_" + std::to_string(e);
-        if (add_to_atlas(e, ct.pixels, ct.w, ct.h)) {
-            IMGimage *tmp = imgsGet(m_stash, key.c_str());
-            if (tmp) {
-                m_slots[e].atlas_x = tmp->atlasX;
-                m_slots[e].atlas_y = tmp->atlasY;
-                imgsDeleteImage(tmp);
-            }
-        }
+        if (const CachedThumb *ct = cached(e))
+            materialize(e, *ct);
     }
 
     /* Upload the rebuilt atlas now so no stale texture is ever shown */
@@ -696,44 +696,70 @@ void ImageStashWidget::flush_pending(NVGcontext *ctx) {
             m_redraw = true;
             continue;
         }
-        if (!add_to_atlas(p.index, p.pixels, p.thumb_w, p.thumb_h)) {
+        CachedThumb thumb;
+        thumb.pixels = p.pixels;
+        thumb.w = p.thumb_w;
+        thumb.h = p.thumb_h;
+        thumb.orig_w = p.orig_w;
+        thumb.orig_h = p.orig_h;
+        thumb.file_size = p.file_size;
+        if (!materialize(p.index, thumb)) {
             /* Atlas is at its cap and full: evict everything and retry.
                The visible window will be re-materialized on demand. */
             reset_atlas();
-            if (!add_to_atlas(p.index, p.pixels, p.thumb_w, p.thumb_h)) {
+            if (!materialize(p.index, thumb)) {
                 std::cerr << "ImageStashWidget: cannot fit thumbnail "
                           << m_entries[p.index].name << std::endl;
                 stbi_image_free(p.pixels);
                 continue;
             }
         }
+        m_slots[p.index].requested = false;
 
-        std::string key = "img_" + std::to_string(p.index);
-        IMGimage *tmp = imgsGet(m_stash, key.c_str());
-        Slot &slot = m_slots[p.index];
-        if (tmp) {
-            slot.atlas_x = tmp->atlasX;
-            slot.atlas_y = tmp->atlasY;
-            imgsDeleteImage(tmp);
-        }
-        slot.requested = false;
-
-        Entry &e = m_entries[p.index];
-        e.orig_width  = p.orig_w;
-        e.orig_height = p.orig_h;
-        e.thumb_width  = p.thumb_w;
-        e.thumb_height = p.thumb_h;
-        if (p.file_size)
-            e.file_size = p.file_size;
-
-        /* Keep the pixels in the CPU cache (takes ownership) so a later
-           atlas reset can restore visible thumbnails without disk reads */
-        cache_put(p.index, p.pixels, p.thumb_w, p.thumb_h);
+        /* Keep the pixels in the CPU cache (takes ownership) so an atlas
+           reset or a rebuilt grid restores thumbnails without disk reads */
+        cache_put(p.index, thumb);
         m_redraw = true;
     }
 }
 
+bool ImageStashWidget::materialize(int e, const CachedThumb &thumb) {
+    if (!add_to_atlas(e, thumb.pixels, thumb.w, thumb.h))
+        return false;
+    std::string key = "img_" + std::to_string(e);
+    if (IMGimage *tmp = imgsGet(m_stash, key.c_str())) {
+        m_slots[e].atlas_x = tmp->atlasX;
+        m_slots[e].atlas_y = tmp->atlasY;
+        imgsDeleteImage(tmp);
+    }
+    Entry &entry = m_entries[e];
+    entry.orig_width   = thumb.orig_w;
+    entry.orig_height  = thumb.orig_h;
+    entry.thumb_width  = thumb.w;
+    entry.thumb_height = thumb.h;
+    if (thumb.file_size)
+        entry.file_size = thumb.file_size;
+    m_redraw = true;
+    return true;
+}
+
 void ImageStashWidget::ensure_items_visible(int first, int last) {
+    /* Thumbnails still in the cache (a grid rebuilt by clear(), an atlas
+       reset) go straight back into the atlas, without a read */
+    for (int i = first; i <= last; ++i) {
+        int e = m_items[i].entry;
+        if (e < 0 || m_slots[e].atlas_x >= 0 || m_slots[e].requested)
+            continue;
+        const CachedThumb *ct = cached(e);
+        if (!ct)
+            continue;
+        if (!materialize(e, *ct)) {
+            reset_atlas();               // full: restores the window from the cache
+            break;
+        }
+        cache_put(e, *ct);               // most recently used
+    }
+
     /* Request thumbnails for items in [first, last], first visible first. */
     pthread_mutex_lock(&m_mutex);
 
@@ -983,11 +1009,24 @@ bool ImageStashWidget::mouse_button_event(const Vector2i &p, int button, bool do
     if (button != GLFW_MOUSE_BUTTON_LEFT)
         return Widget::mouse_button_event(p, button, down, modifiers);
     if (!down) {
+        /* A click (no drag) on the open preview closes it */
+        if (m_press_closes && m_fullscreen != -1 && m_entering)
+            close_fullscreen();
         m_press_entry = -1;
+        m_press_closes = false;
         return true;
     }
     if (m_fullscreen != -1) {
-        close_fullscreen();
+        /* Close on release instead, so a press on the photo can drag it out */
+        m_press_pos = p - m_pos;
+        m_press_closes = true;
+        m_press_entry = -1;
+        float x, y, w, h;
+        fullscreen_rect(m_fullscreen, m_highres_image ? m_highres_w : 0,
+                        m_highres_image ? m_highres_h : 0, x, y, w, h);
+        if (m_entering && m_press_pos.x() >= x && m_press_pos.x() < x + w &&
+            m_press_pos.y() >= y && m_press_pos.y() < y + h)
+            m_press_entry = m_fullscreen;
         return true;
     }
 
@@ -1018,14 +1057,16 @@ bool ImageStashWidget::mouse_button_event(const Vector2i &p, int button, bool do
 
 bool ImageStashWidget::mouse_drag_event(const Vector2i &p, const Vector2i &rel, int button,
                                         int modifiers) {
-    if (m_press_entry < 0 || m_fullscreen != -1 || m_drag_actions == DropNone ||
+    if (m_press_entry < 0 || m_drag_actions == DropNone ||
         !(button & (1 << GLFW_MOUSE_BUTTON_LEFT)))
         return Widget::mouse_drag_event(p, rel, button, modifiers);
-    /* A few pixels of travel turn the press into a drag */
+    /* A few pixels of travel turn the press into a drag (of the grid cell,
+       or of the open preview, which then stays open) */
     Vector2i d = (p - m_pos) - m_press_pos;
     if (d.x() * d.x() + d.y() * d.y() >= 16) {
         int entry = m_press_entry;
         m_press_entry = -1;
+        m_press_closes = false;
         m_last_click_entry = -1;
         begin_drag(entry, m_press_pos);
     }
@@ -1048,20 +1089,26 @@ void ImageStashWidget::begin_drag(int entry, const Vector2i &content_p) {
 
     DragPreview preview;
     preview.label = e.label.empty() ? e.name : e.label;
-    auto it = m_thumb_cache.find(entry);
+    const CachedThumb *thumb = cached(entry);
     int item = entry < (int) m_item_of_entry.size() ? m_item_of_entry[entry] : -1;
-    if (it != m_thumb_cache.end() && item >= 0) {
-        const CachedThumb &ct = it->second;
+    if (thumb && item >= 0) {
+        const CachedThumb &ct = *thumb;
         preview.w = ct.w;
         preview.h = ct.h;
         preview.rgba.assign(ct.pixels, ct.pixels + (size_t) ct.w * ct.h * 4);
+        /* Hold the thumbnail where the press grabbed the cell or preview */
         float sx0, sy0, sw, sh, x, y, w, h;
-        thumb_source(entry, 0.0f, sx0, sy0, sw, sh);
-        cell_rect(item, sw, sh, x, y, w, h);
-        float k = ct.w / w;             /* view -> thumbnail pixels */
+        if (entry == m_fullscreen) {
+            fullscreen_rect(entry, m_highres_image ? m_highres_w : 0,
+                            m_highres_image ? m_highres_h : 0, x, y, w, h);
+        } else {
+            thumb_source(entry, 0.0f, sx0, sy0, sw, sh);
+            cell_rect(item, sw, sh, x, y, w, h);
+        }
+        float kx = ct.w / w, ky = ct.h / h;   /* view -> thumbnail pixels */
         preview.hotspot = Vector2i(
-            (int) std::min(std::max((content_p.x() - x) * k, 0.0f), (float) ct.w),
-            (int) std::min(std::max((content_p.y() - y) * k, 0.0f), (float) ct.h));
+            (int) std::min(std::max((content_p.x() - x) * kx, 0.0f), (float) ct.w),
+            (int) std::min(std::max((content_p.y() - y) * ky, 0.0f), (float) ct.h));
     }
     screen()->start_drag(this, std::move(data), std::move(preview), m_drag_actions);
 }
@@ -1074,6 +1121,11 @@ bool ImageStashWidget::drag_motion_event(const Vector2i &, DragEvent &e) {
         set_needs_redraw();
     }
     return accept;
+}
+
+void ImageStashWidget::drag_finished(DropAction) {
+    m_press_entry = -1;                 /* the release went to the drop target */
+    m_press_closes = false;
 }
 
 void ImageStashWidget::drag_leave_event() {

@@ -298,6 +298,20 @@ void write_paint(JsonOut &j, const Paint &p) {
     j.end_object();
 }
 
+/* Ruler guides: [{"axis": "x" | "y", "at": points}]; "x" is a vertical line. */
+void write_guides(JsonOut &j, const char *key, const std::vector<Guide> &guides) {
+    if (guides.empty())
+        return;
+    j.key(key).begin_array();
+    for (const Guide &g : guides) {
+        j.begin_object();
+        j.key("axis").value(g.vertical ? "x" : "y");
+        j.key("at").value(g.pos);
+        j.end_object();
+    }
+    j.end_array();
+}
+
 void write_item(JsonOut &j, const Item &it) {
     j.begin_object();
     j.key("id").value(it.id);
@@ -635,6 +649,7 @@ std::string make_json(const PageDoc &doc, const SaveOptions &opts, const std::ve
     for (const Page &p : doc.pages) {
         j.begin_object();
         if (p.hidden) j.key("hidden").value(true);
+        write_guides(j, "guides", p.guides);
         j.key("items").begin_array();
         for (const Item &it : p.items)
             write_item(j, it);
@@ -642,6 +657,7 @@ std::string make_json(const PageDoc &doc, const SaveOptions &opts, const std::ve
         j.end_object();
     }
     j.end_array();
+    write_guides(j, "guides", doc.guides);
 
     j.key("next_id").value(doc.next_id);
     j.key("next_asset").value(doc.next_asset);
@@ -806,6 +822,20 @@ Paint read_paint(const DictValue *o, Paint p) {
 }
 
 /* False for item types this version doesn't know (they're skipped). */
+std::vector<Guide> read_guides(const DictValue *a) {
+    std::vector<Guide> out;
+    for (size_t i = 0; i < count(a); ++i) {
+        std::string axis;
+        double at_ = 0;
+        get(at(a, i), "axis", axis);
+        if ((axis != "x" && axis != "y") || !number(field(at(a, i), "at"), at_) ||
+            !std::isfinite(at_))
+            continue;                    // unknown or broken: dropped
+        out.push_back({axis == "x", (float) at_});
+    }
+    return out;
+}
+
 bool read_item(const DictValue *o, Item &it) {
     get(o, "id", it.id);
     get(o, "w", it.w);
@@ -1174,6 +1204,7 @@ OpenResult open_document(const std::string &path, const FontLibrary &installed,
     for (size_t i = 0; i < count(pages); ++i) {
         Page page;
         get(at(pages, i), "hidden", page.hidden);
+        page.guides = read_guides(field(at(pages, i), "guides"));
         const DictValue *items = field(at(pages, i), "items");
         for (size_t k = 0; k < count(items); ++k) {
             Item it;
@@ -1186,6 +1217,7 @@ OpenResult open_document(const std::string &path, const FontLibrary &installed,
     }
     if (unknown)
         r.warnings.push_back(std::to_string(unknown) + " items of kinds this version doesn't know were left out");
+    d.guides = read_guides(field(root, "guides"));
     get(root, "next_id", d.next_id);
     get(root, "next_asset", d.next_asset);
 
