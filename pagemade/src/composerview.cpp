@@ -856,6 +856,28 @@ bool ComposerView::mouse_button_event(const Vector2i &p, int button, bool down, 
             end_placement(button == GLFW_MOUSE_BUTTON_1);
         return true;
     }
+    if (button == GLFW_MOUSE_BUTTON_2) {
+        /* The right-click menu: on what is under the pointer */
+        if (!down || !on_context_menu)
+            return true;
+        if (m_point_page != m_page)
+            show_page(m_point_page);
+        const Point at = page_point_from_screen(screen()->mouse_pos());
+        m_context_pt = at;
+        if (!editing()) {
+            const Hit hit = hit_test(at, m_page);
+            if (!hit.item)
+                m_sel.clear();
+            else if (!is_selected(hit.item))
+                m_sel = with_groups({hit.item});
+            selection_changed();
+            if (screen())
+                screen()->redraw();
+        }
+        request_focus();
+        on_context_menu(screen()->mouse_pos());
+        return true;
+    }
     if (button != GLFW_MOUSE_BUTTON_1)
         return Widget::mouse_button_event(p, button, down, modifiers);
     if (!down && m_guide_drag.active) {
@@ -2175,6 +2197,261 @@ size_t ComposerView::layer_item_count(LayerId id) const {
     return n;
 }
 
+/* ---- Clipboard ------------------------------------------------------- */
+
+bool ComposerView::can_copy() const {
+    return editing() ? has_selection() : !m_sel.empty();
+}
+
+bool ComposerView::can_paste() const {
+    if (editing()) {
+        GLFWwindow *win = screen() ? screen()->glfw_window() : nullptr;
+        const char *cb = win ? glfwGetClipboardString(win) : nullptr;
+        return cb && *cb;
+    }
+    return !m_clip.items.empty();
+}
+
+void ComposerView::edit_copy() {
+    if (editing()) {
+        text_clipboard(GLFW_KEY_C);
+        return;
+    }
+    const std::vector<ItemId> ids = with_groups(m_sel);
+    size_t page = 0;
+    if (ids.empty() || !m_doc.find_item(ids.front(), &page))
+        return;
+    m_clip = ItemClip();
+    m_clip.page = page;
+    std::vector<StoryId> stories;
+    auto copied = [&](ItemId id) { return std::find(ids.begin(), ids.end(), id) != ids.end(); };
+    for (const Item &it : m_doc.pages[page].items) {
+        if (!copied(it.id))
+            continue;
+        m_clip.items.push_back(it);
+        m_clip.bounds.add(item_bounds(it));
+        if (const StoryEntry *se = m_doc.story_of(it.id))
+            if (std::find(stories.begin(), stories.end(), se->id) == stories.end())
+                stories.push_back(se->id);
+        if (const PlacedImage *im = it.image())
+            if (const ImageAsset *a = m_doc.find_image(im->asset)) {
+                bool have = false;
+                for (const ImageAsset &k : m_clip.assets)
+                    have = have || k.id == a->id;
+                if (!have)
+                    m_clip.assets.push_back(*a);
+            }
+    }
+    /* Each story with only its copied blocks threaded, in reading order */
+    for (StoryId sid : stories) {
+        StoryEntry e = *m_doc.find_story(sid);
+        std::vector<ItemId> thread;
+        for (ItemId f : e.thread)
+            if (copied(f))
+                thread.push_back(f);
+        e.thread = std::move(thread);
+        m_clip.stories.push_back(std::move(e));
+    }
+}
+
+void ComposerView::edit_cut() {
+    if (editing()) {
+        text_clipboard(GLFW_KEY_X);
+        return;
+    }
+    if (m_sel.empty())
+        return;
+    edit_copy();
+    m_sel = with_groups(m_sel);
+    delete_selection_items();            // its own undo step
+}
+
+void ComposerView::edit_paste(const Point *at) {
+    if (editing()) {
+        text_clipboard(GLFW_KEY_V);
+        return;
+    }
+    if (m_clip.items.empty() || !check_active_layer())
+        return;
+    push_undo();
+    /* At the point asked for; else a step down and right of the originals
+     * (further with each paste), or where they were on another page */
+    float dx = 0.f, dy = 0.f;
+    if (at) {
+        dx = at->x - m_clip.bounds.x0;
+        dy = at->y - m_clip.bounds.y0;
+    } else if (m_clip.page == m_page) {
+        dx = dy = 12.f * (float) ++m_clip.pastes;
+    }
+    for (const ImageAsset &a : m_clip.assets)
+        if (!m_doc.find_image(a.id))
+            m_doc.add_image(a);          // pasted into another publication
+    std::map<ItemId, ItemId> new_id;
+    std::map<uint32_t, uint32_t> new_group;
+    m_sel.clear();
+    for (const Item &o : m_clip.items) {
+        Item it = o;
+        it.layer = 0;                    // the active layer
+        if (it.group) {
+            auto g = new_group.find(o.group);
+            if (g == new_group.end())
+                g = new_group.emplace(o.group, m_doc.next_id++).first;
+            it.group = g->second;
+        }
+        it.xf = Transform::translate(dx, dy) * it.xf;
+        const ItemId id = m_doc.add_item(m_page, it);
+        new_id[o.id] = id;
+        m_sel.push_back(id);
+    }
+    for (const StoryEntry &e : m_clip.stories) {
+        const StoryId sid = m_doc.add_story(e.story);
+        if (StoryEntry *ne = m_doc.find_story(sid))
+            for (ItemId f : e.thread)
+                if (new_id.count(f))
+                    ne->thread.push_back(new_id[f]);
+    }
+    recompose();
+    selection_changed();
+    if (on_document_change)
+        on_document_change();
+    if (screen())
+        screen()->redraw();
+}
+
+/* ---- Align -------------------------------------------------------------- */
+
+namespace {
+
+/* The selection as units that move together: a whole group, or one item. */
+struct AlignUnit {
+    Bounds bounds;
+    std::vector<ItemId> ids;
+};
+
+} // namespace
+
+static std::vector<AlignUnit> align_units(const PageDoc &doc, const std::vector<ItemId> &sel,
+                                          const std::function<Bounds(const Item &)> &bounds_of) {
+    std::vector<AlignUnit> units;
+    std::map<uint32_t, size_t> group_unit;
+    for (ItemId id : sel) {
+        const Item *it = doc.find_item(id);
+        if (!it)
+            continue;
+        size_t u;
+        if (it->group && group_unit.count(it->group)) {
+            u = group_unit[it->group];
+        } else {
+            u = units.size();
+            units.emplace_back();
+            if (it->group)
+                group_unit[it->group] = u;
+        }
+        units[u].bounds.add(bounds_of(*it));
+        units[u].ids.push_back(id);
+    }
+    return units;
+}
+
+bool ComposerView::can_align() const {
+    if (editing())
+        return false;
+    return align_units(m_doc, m_sel, [this](const Item &it) { return item_bounds(it); }).size() >= 2;
+}
+
+void ComposerView::align_selection(AlignTo how) {
+    const std::vector<AlignUnit> units =
+        align_units(m_doc, with_groups(m_sel), [this](const Item &it) { return item_bounds(it); });
+    if (units.size() < 2)
+        return;
+    Bounds all;
+    for (const AlignUnit &u : units)
+        all.add(u.bounds);
+    push_undo();
+    for (const AlignUnit &u : units) {
+        const Bounds &b = u.bounds;
+        float dx = 0.f, dy = 0.f;
+        switch (how) {
+        case AlignTo::Left:   dx = all.x0 - b.x0; break;
+        case AlignTo::Right:  dx = all.x1 - b.x1; break;
+        case AlignTo::Center: dx = (all.x0 + all.x1 - b.x0 - b.x1) * 0.5f; break;
+        case AlignTo::Top:    dy = all.y0 - b.y0; break;
+        case AlignTo::Bottom: dy = all.y1 - b.y1; break;
+        case AlignTo::Middle: dy = (all.y0 + all.y1 - b.y0 - b.y1) * 0.5f; break;
+        }
+        for (ItemId id : u.ids)
+            if (Item *it = m_doc.find_item(id))
+                it->xf = Transform::translate(dx, dy) * it->xf;
+    }
+    selection_changed();
+    if (screen())
+        screen()->redraw();
+}
+
+/* ---- Pictures ------------------------------------------------------------ */
+
+/* The file a picture is read from: the store's path, else its source URI. */
+static std::string picture_path(const PageDoc &doc, const ImageStore *images, uint32_t asset) {
+    std::string path = images ? images->path_of(asset) : std::string();
+    if (path.empty())
+        if (const ImageAsset *a = doc.find_image(asset))
+            file_path_from_uri(a->source, path);
+    return path;
+}
+
+bool ComposerView::can_reload_pictures() const {
+    if (editing())
+        return false;
+    for (ItemId id : m_sel)
+        if (const Item *it = m_doc.find_item(id))
+            if (const PlacedImage *im = it->image())
+                if (!picture_path(m_doc, m_images, im->asset).empty())
+                    return true;
+    return false;
+}
+
+void ComposerView::reload_pictures() {
+    if (!m_images)
+        return;
+    std::vector<uint32_t> assets;
+    for (ItemId id : m_sel)
+        if (const Item *it = m_doc.find_item(id))
+            if (const PlacedImage *im = it->image())
+                if (std::find(assets.begin(), assets.end(), im->asset) == assets.end())
+                    assets.push_back(im->asset);
+    int done = 0;
+    std::string failed;
+    for (uint32_t id : assets) {
+        const std::string path = picture_path(m_doc, m_images, id);
+        if (path.empty())
+            continue;
+        ImageImport imported = read_image_import(path);
+        ImageMetadata meta;
+        std::string err;
+        if (!imported.ok || !m_images->add(id, std::move(imported.bytes), &meta, &err)) {
+            failed = path;
+            continue;
+        }
+        m_images->set_path(id, path);
+        if (ImageAsset *a = m_doc.find_image(id)) {
+            a->meta = meta;
+            a->source_size = imported.stamp.size;
+            a->source_mtime = imported.stamp.mtime;
+            a->hash = imported.stamp.hash;
+        }
+        m_load_want.erase(id);           // the screen asks for it afresh
+        m_load_failed.erase(id);
+        ++done;
+    }
+    if (on_note)
+        on_note(!failed.empty() ? "couldn't read " + failed
+                : done == 1 ? "reloaded the picture" : "reloaded " + std::to_string(done) + " pictures");
+    if (done)
+        bump_version();                  // the stamps changed: the file needs saving
+    if (screen())
+        screen()->redraw();
+}
+
 bool ComposerView::can_group() const {
     if (m_sel.size() < 2)
         return false;
@@ -2529,6 +2806,35 @@ void ComposerView::toggle_style(int key) {
 
 /* ---- Keyboard ------------------------------------------------------------ */
 
+void ComposerView::text_clipboard(int key) {
+    Story *s = edit_story();
+    GLFWwindow *win = screen() ? screen()->glfw_window() : nullptr;
+    if (!s)
+        return;
+    switch (key) {
+        case GLFW_KEY_C:
+            if (has_selection() && win) {
+                std::string t = copy_text(*s, m_anchor, m_caret);
+                glfwSetClipboardString(win, t.c_str());
+            }
+            break;
+        case GLFW_KEY_X:
+            if (has_selection() && win) {
+                will_edit(false);        // cut is its own step
+                std::string t = copy_text(*s, m_anchor, m_caret);
+                glfwSetClipboardString(win, t.c_str());
+                delete_selection();
+            }
+            break;
+        case GLFW_KEY_V:
+            if (win)
+                if (const char *cb = glfwGetClipboardString(win))
+                    insert_string(cb, false);   // paste is its own step
+            break;
+    default: break;
+    }
+}
+
 bool ComposerView::keyboard_event(int key, int, int action, int modifiers) {
     if (m_placing) {
         if (key == GLFW_KEY_ESCAPE) {
@@ -2539,6 +2845,15 @@ bool ComposerView::keyboard_event(int key, int, int action, int modifiers) {
         return false;
     }
     bool cmd = (modifiers & SYSTEM_COMMAND_MOD) != 0;
+    if (!editing() && cmd && (key == GLFW_KEY_C || key == GLFW_KEY_X || key == GLFW_KEY_V)) {
+        /* Items to and from the item clipboard */
+        if (action == GLFW_PRESS) {
+            if (key == GLFW_KEY_C) edit_copy();
+            else if (key == GLFW_KEY_X) edit_cut();
+            else edit_paste();
+        }
+        return true;
+    }
     if (!editing()) {
         /* Item tools: Delete, arrow-key nudges, PageMaker's Arrange keys. */
         if (m_tool == Tool::Text || m_sel.empty())
@@ -2594,6 +2909,10 @@ bool ComposerView::keyboard_event(int key, int, int action, int modifiers) {
         default:
             return false;                // app-level zoom shortcuts etc.
         }
+        if (key == GLFW_KEY_C || key == GLFW_KEY_X || key == GLFW_KEY_V) {
+            text_clipboard(key);
+            return true;
+        }
         Story *s = edit_story();
         GLFWwindow *win = screen() ? screen()->glfw_window() : nullptr;
         switch (key) {
@@ -2602,25 +2921,6 @@ bool ComposerView::keyboard_event(int key, int, int action, int modifiers) {
             m_caret = story_end(*s);
             m_burst_open = false;
             if (screen()) screen()->redraw();
-            return true;
-        case GLFW_KEY_C:
-            if (has_selection() && win) {
-                std::string t = copy_text(*s, m_anchor, m_caret);
-                glfwSetClipboardString(win, t.c_str());
-            }
-            return true;
-        case GLFW_KEY_X:
-            if (has_selection() && win) {
-                will_edit(false);        // cut is its own step
-                std::string t = copy_text(*s, m_anchor, m_caret);
-                glfwSetClipboardString(win, t.c_str());
-                delete_selection();
-            }
-            return true;
-        case GLFW_KEY_V:
-            if (win)
-                if (const char *cb = glfwGetClipboardString(win))
-                    insert_string(cb, false);   // paste is its own step
             return true;
         case GLFW_KEY_B: case GLFW_KEY_I:
             toggle_style(key);

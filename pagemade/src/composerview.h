@@ -236,6 +236,42 @@ public:
     /* How many items a layer holds, on all pages. */
     size_t layer_item_count(pagemade::LayerId id) const;
 
+    /* ---- Right-click menu ------------------------------------------- *
+     * A right-click first selects what is under the pointer (its whole
+     * group), or clears the selection over empty space, then asks the app
+     * for a menu at `screen_pos`. While text is being edited the selection
+     * stays as it is, and text_context() is true. */
+    std::function<void(const nanogui::Vector2i &screen_pos)> on_context_menu;
+    bool text_context() const { return editing(); }
+    /* The page point the menu was asked for (Paste puts things there). */
+    pagemade::Point context_point() const { return m_context_pt; }
+
+    /* ---- Clipboard ------------------------------------------------- *
+     * While editing text these work on the text (and the system
+     * clipboard). Otherwise on items: copies keep their text, pictures,
+     * groups and the threading among them, and paste onto the current
+     * page's active layer, selected. `at` puts the copies' top-left there;
+     * without it they land a little below and right of the originals. */
+    void edit_cut();
+    void edit_copy();
+    /* Delete the selected items (Remove), one undo step. */
+    void remove_selection() { delete_selection_items(); }
+    void edit_paste(const pagemade::Point *at = nullptr);
+    bool can_copy() const;
+    bool can_paste() const;
+
+    /* ---- Align (the selection's items and groups, each as a unit) --- */
+    enum class AlignTo { Left, Center, Right, Top, Middle, Bottom };
+    /* Two or more units: items, or whole groups. */
+    bool can_align() const;
+    void align_selection(AlignTo how);
+
+    /* ---- Pictures -------------------------------------------------- */
+    /* Some selected picture has a file to read again. */
+    bool can_reload_pictures() const;
+    /* Read the selected pictures' files again (changed on disk). */
+    void reload_pictures();
+
     /* ---- Groups (Element > Group / Ungroup) ------------------------- */
     /* Two or more items on one page, not already all one group. */
     bool can_group() const;
@@ -539,6 +575,19 @@ private:
         float w = 0, h = 0;              // the stand-in frame's size
     };
     pagemade::ItemId m_last_caption = 0; // set by place_frame
+    pagemade::Point m_context_pt;         // where the last right-click was
+    /* Items copied (Cut, Copy): their stories with only the copied blocks
+     * threaded, the pictures they show, and where they were. */
+    struct ItemClip {
+        std::vector<pagemade::Item> items;           // stacking order
+        std::vector<pagemade::StoryEntry> stories;   // threads name copied ids
+        std::vector<pagemade::ImageAsset> assets;
+        pagemade::Bounds bounds;
+        size_t page = 0;
+        int pastes = 0;                              // each Ctrl+V steps further
+    };
+    ItemClip m_clip;
+    void text_clipboard(int key);         // Cut, Copy or Paste of edited text
     bool m_last_column = false;          // ... and the column it fitted, if any
     float m_last_col_x = 0, m_last_col_w = 0;
     void finish_probe(uint32_t id, const pagemade::ImageImport &imported,

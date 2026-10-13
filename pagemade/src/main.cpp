@@ -34,7 +34,8 @@
  *            [--save file.pagemade ...] [--save-embedded file.pagemade ...]
  *            [--dialog save|changes|new] [--blank-pages n] [--page-view one|spread|stack]
  *            [--print-title] [--caption-pictures] [--fit-columns]
- *            [--ui-click x,y ...] [--ui-drag x0,y0:x1,y1 ...] [--ui-scroll x,y:dy ...]
+ *            [--ui-click x,y ...] [--ui-rclick x,y ...] [--ui-drag x0,y0:x1,y1 ...]
+ *            [--ui-scroll x,y:dy ...]
  *
  * --at is a page point (points from the page's top-left) to center on.
  * --select picks a text block by story and thread index ("1,0").
@@ -336,6 +337,7 @@ public:
         auto *root_flex = new FlexLayout(FlexDirection::Column, JustifyContent::FlexStart,
                                          AlignItems::Stretch, 0, 0);
         RootWindow *window = new RootWindow(this, root_flex);
+        m_root_window = window;
         build_menus(window);
 
         Widget *toolbar = new Widget(window);
@@ -524,6 +526,7 @@ public:
                 m_layers->refresh();     // Move Selection Here follows the selection
         };
         m_view->on_note = [this](const std::string &note) { set_note(note); };
+        m_view->on_context_menu = [this](const Vector2i &at) { show_context_menu(at); };
         m_view->on_page_change = [this] { update_status(); };
         m_view->on_document_change = [this] {
             if (m_layers && m_layers->visible())
@@ -795,6 +798,12 @@ public:
         add_cmd(edit, "Redo", {{SYSTEM_COMMAND_MOD | GLFW_MOD_SHIFT, GLFW_KEY_Z},
                                {SYSTEM_COMMAND_MOD, GLFW_KEY_Y}},
                 [this] { m_view->redo(); });
+        new Separator(edit->popup());
+        /* Text while editing it, items otherwise. The page view takes the
+         * keys first; these items name them and serve a menu click. */
+        add_cmd(edit, "Cut", {{SYSTEM_COMMAND_MOD, GLFW_KEY_X}}, [this] { m_view->edit_cut(); });
+        add_cmd(edit, "Copy", {{SYSTEM_COMMAND_MOD, GLFW_KEY_C}}, [this] { m_view->edit_copy(); });
+        add_cmd(edit, "Paste", {{SYSTEM_COMMAND_MOD, GLFW_KEY_V}}, [this] { m_view->edit_paste(); });
 
         /* Type: typographer's quotes, and the characters a keyboard lacks.
          * Shortcuts follow InDesign's where it has them. Line and frame
@@ -1342,6 +1351,105 @@ public:
         }
         m_assets->refresh();             // catch up on changes made while hidden
         m_assets->request_focus();
+    }
+
+    /* ---- The page's right-click menu --------------------------------- *
+     * Built for what was clicked: text being edited gets Cut, Copy, Paste;
+     * items get those and Remove, Group or Ungroup, Align (two or more
+     * items or groups), Arrange, Reload Picture and the layers to move to;
+     * empty space gets Paste. */
+    void show_context_menu(const Vector2i &at) {
+        if (!m_root_window)
+            return;
+        if (!m_context_popup)
+            m_context_popup = new PopupMenu(this, m_root_window, nullptr, false);
+        m_context_popup->set_visible(false);
+        while (m_context_popup->child_count() > 0)
+            m_context_popup->remove_child_at(m_context_popup->child_count() - 1);
+
+        const int C = SYSTEM_COMMAND_MOD, S = GLFW_MOD_SHIFT;
+        bool any = false, need_sep = false;
+        auto item = [&](const std::string &caption, int icon, bool enabled,
+                        std::vector<Shortcut> keys, std::function<void()> fn) {
+            if (need_sep && any)
+                new Separator(m_context_popup);
+            need_sep = false;
+            if (keys.empty())
+                keys = {{0, 0}};
+            auto *mi = new MenuItem(m_context_popup, caption, icon, keys);
+            mi->set_enabled(enabled);
+            /* After the menu has closed: the command may rebuild it */
+            mi->set_callback([this, fn] {
+                m_context_popup->set_visible(false);
+                async([fn] { fn(); });
+            });
+            any = true;
+        };
+        auto section = [&] { need_sep = true; };
+
+        ComposerView *v = m_view;
+        const Point here = v->context_point();
+        if (v->text_context()) {
+            item("Cut", FA_CUT, v->can_copy(), {{C, GLFW_KEY_X}}, [v] { v->edit_cut(); });
+            item("Copy", FA_COPY, v->can_copy(), {{C, GLFW_KEY_C}}, [v] { v->edit_copy(); });
+            item("Paste", FA_PASTE, v->can_paste(), {{C, GLFW_KEY_V}}, [v] { v->edit_paste(); });
+        } else if (v->selection().empty()) {
+            item("Paste Here", FA_PASTE, v->can_paste(), {}, [v, here] { v->edit_paste(&here); });
+        } else {
+            item("Cut", FA_CUT, true, {{C, GLFW_KEY_X}}, [v] { v->edit_cut(); });
+            item("Copy", FA_COPY, true, {{C, GLFW_KEY_C}}, [v] { v->edit_copy(); });
+            item("Paste Here", FA_PASTE, v->can_paste(), {}, [v, here] { v->edit_paste(&here); });
+            item("Remove", FA_TRASH_ALT, true, {}, [v] { v->remove_selection(); });
+            section();
+            if (v->can_group())
+                item("Group", FA_OBJECT_GROUP, true, {{C, GLFW_KEY_G}}, [v] { v->group_selection(); });
+            if (v->can_ungroup())
+                item("Ungroup", FA_OBJECT_UNGROUP, true, {{C | S, GLFW_KEY_G}},
+                     [v] { v->ungroup_selection(); });
+            if (v->can_align()) {
+                section();
+                using A = ComposerView::AlignTo;
+                item("Align Left", FA_ALIGN_LEFT, true, {}, [v] { v->align_selection(A::Left); });
+                item("Align Center", FA_ALIGN_CENTER, true, {}, [v] { v->align_selection(A::Center); });
+                item("Align Right", FA_ALIGN_RIGHT, true, {}, [v] { v->align_selection(A::Right); });
+                item("Align Top", FA_ARROW_UP, true, {}, [v] { v->align_selection(A::Top); });
+                item("Align Middle", FA_ARROWS_ALT_V, true, {}, [v] { v->align_selection(A::Middle); });
+                item("Align Bottom", FA_ARROW_DOWN, true, {}, [v] { v->align_selection(A::Bottom); });
+            }
+            section();
+            item("Bring to Front", 0, true, {{C, GLFW_KEY_F}},
+                 [v] { v->arrange(ComposerView::Stack::Front); });
+            item("Send to Back", 0, true, {}, [v] { v->arrange(ComposerView::Stack::Back); });
+            if (v->can_reload_pictures()) {
+                section();
+                item("Reload Picture", FA_SYNC_ALT, true, {}, [v] { v->reload_pictures(); });
+            }
+            if (v->layers().size() > 1) {
+                section();
+                for (const Layer &l : v->layers())
+                    if (l.visible && !l.locked) {
+                        const LayerId id = l.id;
+                        item("Move to " + l.name, FA_LAYER_GROUP, true, {},
+                             [v, id] { v->move_selection_to_layer(id); });
+                    }
+            }
+        }
+        if (!any)
+            return;
+
+        NVGcontext *ctx = nvg_context();
+        const Vector2i pref = m_context_popup->preferred_size(ctx);
+        m_context_popup->set_size(pref);
+        m_context_popup->perform_layout(ctx);
+        Vector2i pos = at;
+        pos.x() = std::min(pos.x(), std::max(0, width() - pref.x()));
+        if (pos.y() + pref.y() > height())
+            pos.y() = std::max(0, pos.y() - pref.y());
+        m_context_popup->set_position(pos);
+        m_context_popup->set_visible(true);
+        set_popup_visible(m_context_popup);
+        m_context_popup->request_focus();
+        redraw();
     }
 
     /* The Layers window, like Image Assets: made once, hidden when closed. */
@@ -2056,6 +2164,8 @@ private:
     TypeSpecsPanel  *m_type_panel = nullptr;
     ImageAssetsPanel *m_assets = nullptr;
     LayersPanel      *m_layers = nullptr;
+    Window           *m_root_window = nullptr;
+    PopupMenu        *m_context_popup = nullptr;   // the page's right-click menu
     /* Docked tool windows: the size each had floating, and the width it
      * has docked. The Type panel's dock is kept across closing it. */
     std::map<DockableWindow *, Vector2i> m_float_size;
@@ -2084,7 +2194,7 @@ static bool parse_pair(const char *s, float &a, float &b) {
 /* A headless input action, replayed through Screen's GLFW callbacks. */
 struct Action {
     enum Kind { Drag, Click, Type, Key, Tool, Fill, Stroke, Save, SaveEmbedded,
-                UiClick, UiDrag, UiScroll } kind;
+                UiClick, UiRightClick, UiDrag, UiScroll } kind;
     std::array<float, 4> d{};
     std::string text;
     int key = 0, mods = 0;
@@ -2167,6 +2277,11 @@ int main(int argc, char **argv) {
         }
         else if (a == "--ui-click" && i + 1 < argc && parse_pair(argv[i + 1], act.d[0], act.d[1])) {
             act.kind = Action::UiClick;
+            actions.push_back(act);
+            ++i;
+        }
+        else if (a == "--ui-rclick" && i + 1 < argc && parse_pair(argv[i + 1], act.d[0], act.d[1])) {
+            act.kind = Action::UiRightClick;
             actions.push_back(act);
             ++i;
         }
@@ -2267,6 +2382,11 @@ int main(int argc, char **argv) {
                 app->cursor_pos_callback_event(act.d[0], act.d[1]);
                 app->mouse_button_callback_event(GLFW_MOUSE_BUTTON_1, GLFW_PRESS, 0);
                 app->mouse_button_callback_event(GLFW_MOUSE_BUTTON_1, GLFW_RELEASE, 0);
+                break;
+            case Action::UiRightClick:
+                app->cursor_pos_callback_event(act.d[0], act.d[1]);
+                app->mouse_button_callback_event(GLFW_MOUSE_BUTTON_2, GLFW_PRESS, 0);
+                app->mouse_button_callback_event(GLFW_MOUSE_BUTTON_2, GLFW_RELEASE, 0);
                 break;
             case Action::UiDrag: {
                 /* Press, move in steps (a window resize follows each), release */
