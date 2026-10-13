@@ -7,6 +7,7 @@
  * it does in the rest of the toolkit. The source buffer is never rewritten.
  */
 #include "image.h"
+#include "image_color.h"
 #include "page.h"
 #include "uri.h"
 
@@ -14,8 +15,12 @@
 
 #include <stb_image.h>
 #include <miniz.h>
+#ifdef PAGEMADE_HAVE_HEIF
+#include <libheif/heif.h>
+#endif
 
 #include <algorithm>
+#include <cctype>
 #include <cmath>
 #include <cstdio>
 #include <cstring>
@@ -490,6 +495,225 @@ public:
     }
 };
 
+/* ---- HEIF (HEIC, AVIF) -------------------------------------------------- */
+
+#ifdef PAGEMADE_HAVE_HEIF
+
+/* The ftyp box's major brand: "heic", "avif", or "heif" for the generic
+ * image brands. Empty when the file isn't HEIF. */
+std::string heif_brand(const uint8_t *d, size_t n) {
+    if (n < 16 || std::memcmp(d + 4, "ftyp", 4) != 0)
+        return {};
+    const size_t box = std::min((size_t) be32(d), n);
+    auto has = [&](const char *b) {
+        if (std::memcmp(d + 8, b, 4) == 0)
+            return true;
+        for (size_t p = 16; p + 4 <= box; p += 4)    // compatible brands
+            if (std::memcmp(d + p, b, 4) == 0)
+                return true;
+        return false;
+    };
+    for (const char *b : {"heic", "heix", "heim", "heis", "hevc", "hevx"})
+        if (has(b))
+            return "heic";
+    for (const char *b : {"avif", "avis"})
+        if (has(b))
+            return "avif";
+    if (has("mif1") || has("msf1"))
+        return "heif";
+    return {};
+}
+
+/* One open file: context and primary image. Frees both on scope exit. */
+struct HeifFile {
+    heif_context *ctx = nullptr;
+    heif_image_handle *handle = nullptr;
+    ~HeifFile() {
+        if (handle) heif_image_handle_release(handle);
+        if (ctx) heif_context_free(ctx);
+    }
+    bool open(const uint8_t *data, size_t n, std::string *error) {
+        static const bool init = (heif_init(nullptr), true);
+        (void) init;
+        ctx = heif_context_alloc();
+        heif_error e = ctx ? heif_context_read_from_memory_without_copy(ctx, data, n, nullptr)
+                           : heif_error{heif_error_Memory_allocation_error, heif_suberror_Unspecified, ""};
+        if (e.code == heif_error_Ok)
+            e = heif_context_get_primary_image_handle(ctx, &handle);
+        if (e.code != heif_error_Ok) {
+            if (error) *error = e.message && *e.message ? e.message : "couldn't read the HEIF file";
+            return false;
+        }
+        return true;
+    }
+};
+
+/* Transfer characteristics (H.273) the profile writer can express. The
+ * BT.709 family and anything unusual are shown with the sRGB curve, as
+ * browsers do for still images. */
+Transfer nclx_transfer(int tc) {
+    switch (tc) {
+    case 4: return Transfer::Gamma22;
+    case 5: return Transfer::Gamma28;
+    case 8: return Transfer::Linear;
+    default: return Transfer::SRGB;
+    }
+}
+
+/* An ICC profile when the file has one (iPhones write Display P3), even
+ * if an nclx box is listed too; otherwise one built from the nclx numbers. */
+std::vector<uint8_t> heif_profile(heif_image_handle *h) {
+    std::vector<uint8_t> icc(heif_image_handle_get_raw_color_profile_size(h));
+    if (!icc.empty()) {
+        if (heif_image_handle_get_raw_color_profile(h, icc.data()).code == heif_error_Ok)
+            return icc;
+        icc.clear();
+    }
+    heif_color_profile_nclx *nclx = nullptr;
+    if (heif_image_handle_get_nclx_color_profile(h, &nclx).code != heif_error_Ok || !nclx)
+        return icc;
+    const float r[2] = {nclx->color_primary_red_x, nclx->color_primary_red_y};
+    const float g[2] = {nclx->color_primary_green_x, nclx->color_primary_green_y};
+    const float b[2] = {nclx->color_primary_blue_x, nclx->color_primary_blue_y};
+    const float w[2] = {nclx->color_primary_white_x, nclx->color_primary_white_y};
+    const char *name = nclx->color_primaries == heif_color_primaries_SMPTE_EG_432_1 ? "Display P3"
+                     : nclx->color_primaries == heif_color_primaries_ITU_R_BT_2020_2_and_2100_0
+                       ? "BT.2020" : "HEIF nclx";
+    icc = icc_from_primaries(r, g, b, w, nclx_transfer(nclx->transfer_characteristics), name);
+    heif_nclx_color_profile_free(nclx);
+    return icc;
+}
+
+class HeifDecoder : public ImageDecoder {
+public:
+    const char *id() const override { return "heif"; }
+    bool sniff(const uint8_t *data, size_t n) const override { return !heif_brand(data, n).empty(); }
+
+    /* libheif applies the rotation and mirroring boxes itself, so sizes
+     * are upright and the EXIF orientation (which repeats them) is not
+     * used again. */
+    bool probe(const uint8_t *data, size_t n, ImageMetadata *meta, std::string *error) const override {
+        HeifFile f;
+        if (!f.open(data, n, error))
+            return false;
+        ImageMetadata m;
+        m.format = heif_brand(data, n);
+        m.stored_width_px = heif_image_handle_get_width(f.handle);
+        m.stored_height_px = heif_image_handle_get_height(f.handle);
+        if (m.stored_width_px <= 0 || m.stored_height_px <= 0) {
+            if (error) *error = "HEIF image has no size";
+            return false;
+        }
+        const int bits = heif_image_handle_get_luma_bits_per_pixel(f.handle);
+        m.bit_depth = bits > 0 ? bits : 8;
+        m.alpha = heif_image_handle_has_alpha_channel(f.handle) != 0;
+        m.model = ColorModel::RGB;
+        m.channels = m.alpha ? 4 : 3;
+        m.icc = heif_profile(f.handle);
+
+        heif_item_id exif_id = 0;
+        if (heif_image_handle_get_list_of_metadata_block_IDs(f.handle, "Exif", &exif_id, 1) == 1) {
+            std::vector<uint8_t> exif(heif_image_handle_get_metadata_size(f.handle, exif_id));
+            /* Four bytes give the offset of the TIFF header past them. */
+            if (exif.size() > 4 &&
+                heif_image_handle_get_metadata(f.handle, exif_id, exif.data()).code == heif_error_Ok) {
+                const size_t skip = 4 + (size_t) be32(exif.data());
+                if (skip < exif.size()) {
+                    int ignored = 1;
+                    read_tiff_ifd0(exif.data() + skip, exif.size() - skip, ignored, m.ppi_x, m.ppi_y);
+                    read_exif_tags(exif.data() + skip, exif.size() - skip, m.exif);
+                }
+            }
+        }
+        m.orientation = 1;
+        apply_orientation_size(m);
+        *meta = std::move(m);
+        return true;
+    }
+
+    bool decode(const uint8_t *data, size_t n, DecodedImage *out, std::string *error) const override {
+        ImageMetadata meta;
+        if (!probe(data, n, &meta, error))
+            return false;
+        HeifFile f;
+        if (!f.open(data, n, error))
+            return false;
+        return decode_handle(f.handle, std::move(meta), out, error);
+    }
+
+    /* Phones store a small preview (about 320 px) beside the photo. When it
+     * is big enough, decoding it instead of 12 megapixels makes a folder of
+     * HEICs browsable. Its own profile wins; most share the photo's. */
+    bool decode_preview(const uint8_t *data, size_t n, int long_edge, DecodedImage *out,
+                        std::string *error) const override {
+        if (long_edge > 0) {
+            HeifFile f;
+            if (!f.open(data, n, error))
+                return false;
+            const int count = heif_image_handle_get_number_of_thumbnails(f.handle);
+            std::vector<heif_item_id> ids((size_t) std::max(count, 0));
+            if (count > 0)
+                heif_image_handle_get_list_of_thumbnail_IDs(f.handle, ids.data(), count);
+            for (heif_item_id id : ids) {
+                heif_image_handle *thumb = nullptr;
+                if (heif_image_handle_get_thumbnail(f.handle, id, &thumb).code != heif_error_Ok)
+                    continue;
+                const int edge = std::max(heif_image_handle_get_width(thumb),
+                                          heif_image_handle_get_height(thumb));
+                if (edge >= long_edge) {
+                    ImageMetadata meta;
+                    meta.format = heif_brand(data, n);
+                    meta.model = ColorModel::RGB;
+                    meta.channels = 3;
+                    meta.icc = heif_profile(thumb);
+                    if (meta.icc.empty())
+                        meta.icc = heif_profile(f.handle);
+                    const bool ok = decode_handle(thumb, std::move(meta), out, nullptr);
+                    heif_image_handle_release(thumb);
+                    if (ok)
+                        return true;
+                    continue;
+                }
+                heif_image_handle_release(thumb);
+            }
+        }
+        return decode(data, n, out, error);
+    }
+
+private:
+    static bool decode_handle(heif_image_handle *handle, ImageMetadata meta, DecodedImage *out,
+                              std::string *error) {
+        heif_image *img = nullptr;
+        heif_error e = heif_decode_image(handle, &img, heif_colorspace_RGB,
+                                         heif_chroma_interleaved_RGBA, nullptr);
+        if (e.code != heif_error_Ok || !img) {
+            if (error) *error = e.message && *e.message ? e.message : "couldn't decode the HEIF image";
+            return false;
+        }
+        int stride = 0;
+        const uint8_t *px = heif_image_get_plane_readonly(img, heif_channel_interleaved, &stride);
+        const int w = heif_image_get_width(img, heif_channel_interleaved);
+        const int h = heif_image_get_height(img, heif_channel_interleaved);
+        if (!px || w <= 0 || h <= 0 || stride < w * 4) {
+            heif_image_release(img);
+            if (error) *error = "HEIF image has no pixels";
+            return false;
+        }
+        out->width = w;
+        out->height = h;
+        out->rgba.resize((size_t) w * (size_t) h * 4);
+        for (int y = 0; y < h; ++y)
+            std::memcpy(out->rgba.data() + (size_t) y * w * 4, px + (size_t) y * stride, (size_t) w * 4);
+        heif_image_release(img);
+        meta.width_px = meta.stored_width_px = w;
+        meta.height_px = meta.stored_height_px = h;
+        out->meta = std::move(meta);
+        return true;
+    }
+};
+
+#endif // PAGEMADE_HAVE_HEIF
+
 /* Where a stored-image unit point (u right, v up, first row at v = 1)
  * lands in the upright rectangle, as fractions of that rectangle. */
 void oriented_uv(int orient, float u, float v, float &ox, float &oy) {
@@ -545,8 +769,12 @@ bool read_file(const std::string &path, std::vector<uint8_t> *out, std::string *
 bool make_display(const uint8_t *data, size_t n, int long_edge,
                   std::vector<uint8_t> *rgba, int *w, int *h, std::string *error) {
     DecodedImage full;
-    if (!data || !image_loader().decode(data, n, &full, error))
+    if (!data || !image_loader().decode_preview(data, n, long_edge, &full, error))
         return false;
+    /* The screen is sRGB; a wider profile (a phone's Display P3) is
+     * converted for display only. */
+    if (full.meta.model == ColorModel::RGB && !full.meta.icc.empty())
+        icc_to_srgb(full.meta.icc, full.rgba.data(), (size_t) full.width * (size_t) full.height);
     int longest = std::max(full.width, full.height);
     int dw = full.width, dh = full.height;
     if (long_edge > 0 && longest > long_edge) {
@@ -614,8 +842,7 @@ bool ImageLoader::probe(const uint8_t *data, size_t n, ImageMetadata *meta, std:
     const ImageDecoder *d = match(data, n);
     if (!d) {
         if (error)
-            *error = "no picture decoder accepted this file. PNG and JPEG are built in; "
-                     "TIFF, HEIC and others register the same way";
+            *error = "no picture decoder accepted this file";
         return false;
     }
     return d->probe(data, n, meta, error);
@@ -625,16 +852,49 @@ bool ImageLoader::decode(const uint8_t *data, size_t n, DecodedImage *out, std::
     const ImageDecoder *d = match(data, n);
     if (!d) {
         if (error)
-            *error = "no picture decoder accepted this file. PNG and JPEG are built in; "
-                     "TIFF, HEIC and others register the same way";
+            *error = "no picture decoder accepted this file";
         return false;
     }
     return d->decode(data, n, out, error);
 }
 
+bool ImageLoader::decode_preview(const uint8_t *data, size_t n, int long_edge,
+                                 DecodedImage *out, std::string *error) const {
+    const ImageDecoder *d = match(data, n);
+    if (!d) {
+        if (error)
+            *error = "no picture decoder accepted this file";
+        return false;
+    }
+    return d->decode_preview(data, n, long_edge, out, error);
+}
+
 void register_builtin_decoders(ImageLoader &loader) {
     loader.add(std::make_unique<PngDecoder>());
     loader.add(std::make_unique<JpegDecoder>());
+#ifdef PAGEMADE_HAVE_HEIF
+    loader.add(std::make_unique<HeifDecoder>());
+#endif
+}
+
+bool image_extension_supported(const std::string &ext) {
+    std::string e = ext;
+    for (char &c : e)
+        c = (char) std::tolower((unsigned char) c);
+    if (!e.empty() && e[0] == '.')
+        e.erase(0, 1);
+    for (const auto &t : image_file_types())
+        if (t.first == e)
+            return true;
+    return false;
+}
+
+std::vector<std::pair<std::string, std::string>> image_file_types() {
+    return {{"png", "PNG"}, {"jpg", "JPEG"}, {"jpeg", "JPEG"},
+#ifdef PAGEMADE_HAVE_HEIF
+            {"heic", "HEIC"}, {"heif", "HEIF"}, {"avif", "AVIF"},
+#endif
+    };
 }
 
 ImageLoader &image_loader() {

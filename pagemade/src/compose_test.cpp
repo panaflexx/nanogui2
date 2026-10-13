@@ -13,12 +13,16 @@
 #include "drawlist.h"
 #include "geometry.h"
 #include "image.h"
+#include "image_color.h"
 #include "page.h"
 #include "pdf.h"
 #include "docfile.h"
 #include "uri.h"
 #include "nanovg_exif.h"
 #include "bg_worker.h"
+#ifdef PAGEMADE_HAVE_HEIF
+#include <libheif/heif.h>
+#endif
 
 #include <miniz.h>
 
@@ -2282,6 +2286,191 @@ static void test_background_worker() {
     CHECK(ran == std::vector<int>({2, 3}), "the newest job per key ran, in order");
 }
 
+static bool near_px(const uint8_t *p, int r, int g, int b, int tol) {
+    return std::abs(p[0] - r) <= tol && std::abs(p[1] - g) <= tol && std::abs(p[2] - b) <= tol;
+}
+
+static const float kP3Red[2] = {0.680f, 0.320f}, kP3Green[2] = {0.265f, 0.690f},
+                   kP3Blue[2] = {0.150f, 0.060f}, kD65[2] = {0.3127f, 0.3290f};
+
+#ifdef PAGEMADE_HAVE_HEIF
+/* A solid w x h AVIF (lossless AV1; there is no HEVC encoder to count on),
+ * tagged with `icc`, or with P3 nclx numbers when `icc` is empty. Empty
+ * when no AV1 encoder is installed. */
+static std::vector<uint8_t> make_avif(int w, int h, uint8_t r, uint8_t g, uint8_t b,
+                                      const std::vector<uint8_t> &icc, int thumb = 0) {
+    std::vector<uint8_t> out;
+    heif_init(nullptr);
+    heif_context *ctx = heif_context_alloc();
+    heif_encoder *enc = nullptr;
+    if (heif_context_get_encoder_for_format(ctx, heif_compression_AV1, &enc).code != heif_error_Ok) {
+        heif_context_free(ctx);
+        return out;
+    }
+    heif_encoder_set_lossless(enc, 1);
+    heif_encoder_set_parameter_string(enc, "chroma", "444");
+    heif_image *img = nullptr;
+    heif_image_create(w, h, heif_colorspace_RGB, heif_chroma_interleaved_RGB, &img);
+    heif_image_add_plane(img, heif_channel_interleaved, w, h, 8);
+    int stride = 0;
+    uint8_t *px = heif_image_get_plane(img, heif_channel_interleaved, &stride);
+    for (int y = 0; y < h; ++y)
+        for (int x = 0; x < w; ++x) {
+            uint8_t *q = px + y * stride + x * 3;
+            q[0] = r; q[1] = g; q[2] = b;
+        }
+    if (!icc.empty()) {
+        heif_image_set_raw_color_profile(img, "prof", icc.data(), icc.size());
+    } else {
+        heif_color_profile_nclx *n = heif_nclx_color_profile_alloc();
+        n->color_primaries = heif_color_primaries_SMPTE_EG_432_1;
+        n->transfer_characteristics = heif_transfer_characteristic_IEC_61966_2_1;
+        n->matrix_coefficients = heif_matrix_coefficients_RGB_GBR;
+        n->full_range_flag = 1;
+        heif_image_set_nclx_color_profile(img, n);
+        heif_nclx_color_profile_free(n);
+    }
+    heif_image_handle *handle = nullptr;
+    if (heif_context_encode_image(ctx, img, enc, nullptr, &handle).code == heif_error_Ok) {
+        if (thumb > 0) {
+            heif_image_handle *th = nullptr;
+            heif_context_encode_thumbnail(ctx, img, handle, enc, nullptr, thumb, &th);
+            if (th)
+                heif_image_handle_release(th);
+        }
+        heif_image_handle_release(handle);
+        heif_writer writer;
+        writer.writer_api_version = 1;
+        writer.write = [](heif_context *, const void *data, size_t size, void *user) {
+            auto *v = static_cast<std::vector<uint8_t> *>(user);
+            v->insert(v->end(), (const uint8_t *) data, (const uint8_t *) data + size);
+            return heif_error{heif_error_Ok, heif_suberror_Unspecified, ""};
+        };
+        heif_context_write(ctx, &writer, &out);
+    }
+    heif_image_release(img);
+    heif_encoder_release(enc);
+    heif_context_free(ctx);
+    return out;
+}
+#endif
+
+static void test_image_color(const FontLibrary &fonts) {
+    (void) fonts;
+    /* Display P3 from its xy numbers comes out as Apple's profile does. */
+    std::vector<uint8_t> p3 = icc_from_primaries(kP3Red, kP3Green, kP3Blue, kD65,
+                                                 Transfer::SRGB, "Display P3");
+    CHECK(icc_is_rgb(p3), "the P3 profile is an RGB ICC profile");
+    CHECK(icc_needs_conversion(p3), "P3 differs from sRGB on screen");
+    const float sr[2] = {0.64f, 0.33f}, sg[2] = {0.30f, 0.60f}, sb[2] = {0.15f, 0.06f};
+    CHECK(icc_from_primaries(sr, sg, sb, kD65, Transfer::SRGB, "sRGB").empty(),
+          "sRGB numbers need no profile");
+
+    /* lcms2 (transicc, relative colorimetric) gives 214.9 92.6 30.9. */
+    uint8_t px[12] = {200, 100, 50, 128,  255, 0, 0, 255,  128, 128, 128, 255};
+    icc_to_srgb(p3, px, 3);
+    CHECK(near_px(px, 215, 93, 31, 1) && px[3] == 128, "P3 to sRGB (%d %d %d), alpha kept",
+          px[0], px[1], px[2]);
+    CHECK(near_px(px + 4, 255, 0, 0, 0), "P3 red clips to sRGB red");
+    CHECK(near_px(px + 8, 128, 128, 128, 1), "gray stays gray");
+
+    std::vector<uint8_t> cmyk = p3;
+    std::memcpy(cmyk.data() + 16, "CMYK", 4);
+    uint8_t same[4] = {200, 100, 50, 255};
+    icc_to_srgb(cmyk, same, 1);
+    CHECK(!icc_is_rgb(cmyk) && near_px(same, 200, 100, 50, 0), "a CMYK profile is left alone");
+    uint8_t junk_px[4] = {200, 100, 50, 255};
+    icc_to_srgb(std::vector<uint8_t>(40, 7), junk_px, 1);
+    CHECK(near_px(junk_px, 200, 100, 50, 0), "a broken profile is left alone");
+
+    std::string jpeg;
+    std::vector<uint8_t> flat(16 * 8 * 4, 200);
+    CHECK(encode_jpeg(flat.data(), 16, 8, 90, &jpeg) && jpeg.size() > 100 &&
+          (uint8_t) jpeg[0] == 0xFF && (uint8_t) jpeg[1] == 0xD8, "encode_jpeg writes a JPEG");
+
+#ifdef PAGEMADE_HAVE_HEIF
+    CHECK(image_extension_supported(".HEIC") && image_extension_supported("avif"),
+          "HEIC and AVIF are offered");
+    std::vector<uint8_t> avif = make_avif(64, 32, 200, 100, 50, p3);
+    if (avif.empty()) {
+        std::printf("  heif: no AV1 encoder, skipping the HEIF file tests\n");
+        return;
+    }
+    ImageMetadata meta;
+    std::string err;
+    CHECK(image_loader().probe(avif.data(), avif.size(), &meta, &err), "probe avif: %s", err.c_str());
+    CHECK(meta.format == "avif" && meta.width_px == 64 && meta.height_px == 32 &&
+          meta.model == ColorModel::RGB && meta.orientation == 1, "avif %s %dx%d",
+          meta.format.c_str(), meta.width_px, meta.height_px);
+    CHECK(meta.icc == p3, "the ICC profile is read from the file");
+    DecodedImage full;
+    CHECK(image_loader().decode(avif.data(), avif.size(), &full, &err), "decode avif: %s", err.c_str());
+    CHECK(full.width == 64 && full.height == 32 && near_px(full.rgba.data(), 200, 100, 50, 2),
+          "decode keeps the file's own P3 samples (%d %d %d)",
+          full.rgba[0], full.rgba[1], full.rgba[2]);
+    std::vector<uint8_t> shown;
+    int dw = 0, dh = 0;
+    CHECK(make_display(avif.data(), avif.size(), 0, &shown, &dw, &dh, &err) && dw == 64,
+          "display view of avif");
+    CHECK(near_px(shown.data(), 215, 93, 31, 2), "the screen gets sRGB (%d %d %d)",
+          shown[0], shown[1], shown[2]);
+
+    std::vector<uint8_t> nclx = make_avif(16, 16, 200, 100, 50, {});
+    CHECK(image_loader().probe(nclx.data(), nclx.size(), &meta, &err), "probe nclx avif: %s", err.c_str());
+    CHECK(icc_needs_conversion(meta.icc), "P3 nclx numbers become a profile");
+    CHECK(make_display(nclx.data(), nclx.size(), 0, &shown, &dw, &dh, &err) &&
+          near_px(shown.data(), 215, 93, 31, 2), "nclx P3 is shown as sRGB (%d %d %d)",
+          shown[0], shown[1], shown[2]);
+
+    /* libheif turns the picture upright (irot/imir) while decoding, so the
+     * probed size must be the decoded one and EXIF orientation is unused.
+     * (libheif 1.17's AV1 encoder doesn't write irot, so a rotated file
+     * can't be made here.) */
+    CHECK(image_loader().probe(avif.data(), avif.size(), &meta, &err) &&
+          meta.width_px == full.width && meta.height_px == full.height && meta.orientation == 1,
+          "probe size is the upright decoded size");
+
+    /* Thumbnails come from the embedded preview when it is big enough. */
+    std::vector<uint8_t> with_thumb = make_avif(256, 128, 200, 100, 50, p3, 64);
+    CHECK(make_display(with_thumb.data(), with_thumb.size(), 48, &shown, &dw, &dh, &err) &&
+          std::max(dw, dh) == 48 && near_px(shown.data(), 215, 93, 31, 3),
+          "a small view from the preview (%dx%d)", dw, dh);
+    DecodedImage view;
+    CHECK(image_loader().decode_preview(with_thumb.data(), with_thumb.size(), 48, &view, &err) &&
+          view.width == 64 && view.height == 32, "the 64 px preview is decoded, not the photo (%dx%d)",
+          view.width, view.height);
+    CHECK(image_loader().decode_preview(with_thumb.data(), with_thumb.size(), 100, &view, &err) &&
+          view.width == 256, "a bigger view decodes the photo (%d)", view.width);
+
+    /* PDF: re-encoded as JPEG, tagged with the profile, written once. */
+    ImageStore store;
+    PageDoc doc;
+    for (int i = 0; i < 2; ++i) {
+        const uint32_t id = store.take_id();
+        CHECK(store.add(id, avif, &meta, &err), "store avif: %s", err.c_str());
+        ImageAsset asset;
+        asset.id = id; asset.name = "photo.avif"; asset.meta = meta;
+        doc.add_image(std::move(asset));
+        Item it;
+        it.xf = Transform::translate(80.f * i, 0); it.w = 64; it.h = 32;
+        it.content = PlacedImage{id, 0, 0, 64, 32};
+        doc.add_item(0, it);
+    }
+    const std::string pdf_path = "/tmp/pagemade-heif.pdf";
+    std::vector<Composition> comps;
+    CHECK(export_pdf(pdf_path, doc, comps, &store), "export avif");
+    std::string plain = pdf_plain(read_bin(pdf_path));
+    CHECK(plain.find("/DCTDecode") != std::string::npos, "HEIF goes into the PDF as JPEG");
+    CHECK(plain.find("/ColorSpace [/ICCBased") != std::string::npos, "with its ICC profile");
+    size_t profiles = 0;
+    for (size_t at = plain.find("/N 3 /Alternate /DeviceRGB"); at != std::string::npos;
+         at = plain.find("/N 3 /Alternate /DeviceRGB", at + 1))
+        ++profiles;
+    CHECK(profiles == 1, "one profile shared by both pictures (%zu)", profiles);
+    CHECK(pdf_has_number(plain, "/Width ", 64), "full-resolution width");
+#endif
+}
+
 static void test_images(const FontLibrary &fonts) {
     CHECK(std::fabs(image_print_points(300, 300) - 72.f) < 0.01f, "300 px at 300 ppi is 72 pt");
     CHECK(std::fabs(image_print_points(100, 0) - 100.f) < 0.01f, "unspecified resolution is 72 ppi");
@@ -2995,6 +3184,7 @@ int main(int argc, char **argv) {
     test_drawlist(fonts);
     test_docfile(fonts);
     test_images(fonts);
+    test_image_color(fonts);
     test_background_worker();
     test_caps(fonts);
     test_type_file(fonts);

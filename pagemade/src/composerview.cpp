@@ -2132,7 +2132,8 @@ void ComposerView::move_caret_key(int key, int modifiers) {
         return;
     bool extend = (modifiers & GLFW_MOD_SHIFT) != 0;
     bool cmd = (modifiers & SYSTEM_COMMAND_MOD) != 0;
-    bool word = (modifiers & GLFW_MOD_ALT) != 0;
+    /* Option on the Mac, Ctrl elsewhere; either works on both. */
+    bool word = (modifiers & (GLFW_MOD_ALT | GLFW_MOD_CONTROL)) != 0;
     TextPos p = m_caret;
 
     switch (key) {
@@ -2270,7 +2271,11 @@ bool ComposerView::keyboard_event(int key, int, int action, int modifiers) {
         }
         return false;
     }
-    if (cmd) {
+    /* Cmd/Ctrl with the arrows, Home and End is caret movement (by word,
+     * to the story's ends), handled with the plain navigation keys. */
+    const bool nav = key == GLFW_KEY_LEFT || key == GLFW_KEY_RIGHT ||
+                     key == GLFW_KEY_HOME || key == GLFW_KEY_END;
+    if (cmd && !nav) {
         switch (key) {
         case GLFW_KEY_A: case GLFW_KEY_C: case GLFW_KEY_X:
         case GLFW_KEY_V: case GLFW_KEY_B: case GLFW_KEY_I:

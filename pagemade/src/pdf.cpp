@@ -7,6 +7,7 @@
 #include "composer/utf8.h"
 #include "drawlist.h"
 #include "image.h"
+#include "image_color.h"
 #include "page.h"
 
 #include <hb.h>
@@ -82,6 +83,7 @@ std::optional<std::string> flate(const std::string &in) {
 struct Writer {
     std::vector<std::string> objects;
     bool ok = true;
+    std::map<std::string, int> icc_objects;   // profile bytes -> stream, written once
 
     int add(std::string body) {
         objects.push_back(std::move(body));
@@ -377,10 +379,33 @@ void emit_glyphs(std::string &s, const GlyphRun &r, const Color &color, int res,
     }
 }
 
+/* The color space for RGB samples: the picture's own profile when it has
+ * one (a phone's Display P3), so the viewer maps the gamut; otherwise
+ * DeviceRGB, which viewers take as sRGB. */
+std::string rgb_space(Writer &w, const std::vector<uint8_t> &icc) {
+    if (!icc_is_rgb(icc))
+        return "/DeviceRGB";
+    const std::string bytes(icc.begin(), icc.end());
+    auto it = w.icc_objects.find(bytes);
+    if (it == w.icc_objects.end())
+        it = w.icc_objects.emplace(bytes, w.add_stream("/N 3 /Alternate /DeviceRGB", bytes)).first;
+    return "[/ICCBased " + std::to_string(it->second) + " 0 R]";
+}
+
+/* HEIC and AVIF photos go into the PDF as JPEG: a viewer can't read the
+ * originals, and lossless samples of a 12-megapixel photo run to tens of
+ * megabytes. */
+const int kPhotoJpegQuality = 92;
+
+bool reencode_as_jpeg(const std::string &format) {
+    return format == "heic" || format == "heif" || format == "avif";
+}
+
 /* One XObject for the picture's source. JPEG keeps its DCT stream and its
- * stored (unrotated) pixel size; the page stream turns it upright. Anything
- * else is decoded upright at full resolution and Flate-encoded — still the
- * source samples, not the screen proxy. 0 when there is nothing to embed. */
+ * stored (unrotated) pixel size; the page stream turns it upright. HEIF is
+ * decoded upright at full resolution and re-encoded as JPEG. Anything else
+ * is decoded the same way and Flate-encoded — still the source samples,
+ * not the screen proxy. 0 when there is nothing to embed. */
 struct PdfPicture {
     int obj = 0;
     bool upright = false;               // pixels already oriented (not a raw JPEG)
@@ -395,13 +420,13 @@ PdfPicture embed_picture(Writer &w, const ImageStore::Entry &e) {
     const bool jpeg = m.format == "jpeg" ||
                       (e.size() >= 3 && src[0] == 0xFF && src[1] == 0xD8 && src[2] == 0xFF);
     if (jpeg && m.stored_width_px > 0 && m.stored_height_px > 0) {
-        const char *cs = (m.model == ColorModel::Gray || m.channels == 1) ? "DeviceGray"
-                       : (m.model == ColorModel::CMYK || m.channels == 4) ? "DeviceCMYK"
-                       : "DeviceRGB";
+        const std::string cs = (m.model == ColorModel::Gray || m.channels == 1) ? "/DeviceGray"
+                             : (m.model == ColorModel::CMYK || m.channels == 4) ? "/DeviceCMYK"
+                             : rgb_space(w, m.icc);
         int bits = m.bit_depth == 12 ? 12 : 8;
         std::string dict = "/Type /XObject /Subtype /Image /Width " +
                            std::to_string(m.stored_width_px) + " /Height " +
-                           std::to_string(m.stored_height_px) + " /ColorSpace /" + cs +
+                           std::to_string(m.stored_height_px) + " /ColorSpace " + cs +
                            " /BitsPerComponent " + std::to_string(bits) +
                            " /Interpolate true /Filter /DCTDecode";
         out.obj = w.add_raw_stream(dict, std::string((const char *) e.data(), e.size()));
@@ -419,6 +444,19 @@ PdfPicture embed_picture(Writer &w, const ImageStore::Entry &e) {
     for (size_t i = 0; i < n; ++i)
         if (full.rgba[i * 4 + 3] != 255) { alpha = true; break; }
     const bool gray = full.meta.model == ColorModel::Gray && !alpha;
+    if (reencode_as_jpeg(full.meta.format) && !alpha) {
+        std::string jpeg;
+        if (encode_jpeg(full.rgba.data(), full.width, full.height, kPhotoJpegQuality, &jpeg)) {
+            out.obj = w.add_raw_stream(
+                "/Type /XObject /Subtype /Image /Width " + std::to_string(full.width) +
+                    " /Height " + std::to_string(full.height) + " /ColorSpace " +
+                    rgb_space(w, full.meta.icc) +
+                    " /BitsPerComponent 8 /Interpolate true /Filter /DCTDecode",
+                jpeg);
+            out.upright = true;
+            return out;
+        }
+    }
     std::string samples(n * (gray ? 1 : 3), '\0');
     std::string mask;
     if (alpha)
@@ -436,8 +474,8 @@ PdfPicture embed_picture(Writer &w, const ImageStore::Entry &e) {
             mask[i] = (char) p[3];
     }
     std::string dict = "/Type /XObject /Subtype /Image /Width " + std::to_string(full.width) +
-                       " /Height " + std::to_string(full.height) + " /ColorSpace /" +
-                       std::string(gray ? "DeviceGray" : "DeviceRGB") +
+                       " /Height " + std::to_string(full.height) + " /ColorSpace " +
+                       (gray ? std::string("/DeviceGray") : rgb_space(w, full.meta.icc)) +
                        " /BitsPerComponent 8 /Interpolate true";
     if (alpha) {
         int sm = w.add_stream("/Type /XObject /Subtype /Image /Width " + std::to_string(full.width) +

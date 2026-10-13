@@ -35,8 +35,8 @@ namespace pagemade {
 /* What every decoder reports. Pixel sizes are the file's; width_px and
  * height_px are after EXIF orientation, which is the size placement uses.
  * ppi is 0 when the file doesn't say — placement then treats one pixel as
- * one point. icc is the raw profile, kept for a later color-managed export
- * and not applied on screen. */
+ * one point. icc is the raw profile: the display view converts an RGB one
+ * to sRGB, and PDF export attaches it to the picture. */
 enum class ColorModel { Unknown, Gray, RGB, CMYK };
 
 struct ImageMetadata {
@@ -136,6 +136,14 @@ public:
                        std::string *error) const = 0;
     virtual bool decode(const uint8_t *data, size_t n, DecodedImage *out,
                         std::string *error) const = 0;
+    /* An upright view with a long edge of at least `long_edge` (0 = full
+     * size), for thumbnails. A format with embedded previews (HEIC) can
+     * skip the full decode; the default decodes everything. */
+    virtual bool decode_preview(const uint8_t *data, size_t n, int long_edge,
+                                DecodedImage *out, std::string *error) const {
+        (void) long_edge;
+        return decode(data, n, out, error);
+    }
 };
 
 class ImageLoader {
@@ -144,15 +152,23 @@ public:
     const ImageDecoder *match(const uint8_t *data, size_t n) const;
     bool probe(const uint8_t *data, size_t n, ImageMetadata *meta, std::string *error) const;
     bool decode(const uint8_t *data, size_t n, DecodedImage *out, std::string *error) const;
+    bool decode_preview(const uint8_t *data, size_t n, int long_edge, DecodedImage *out,
+                        std::string *error) const;
 
 private:
     std::vector<std::unique_ptr<ImageDecoder>> m_decoders;
 };
 
-/* PNG and JPEG. Further formats call add() on their own loader, or on
- * image_loader() at startup. */
+/* PNG and JPEG, and HEIF (HEIC, AVIF) when built with libheif. Further
+ * formats call add() on their own loader, or on image_loader() at startup. */
 void register_builtin_decoders(ImageLoader &loader);
 ImageLoader &image_loader();
+
+/* File types the loader can open, as (extension, label) for file dialogs.
+ * HEIC, HEIF and AVIF are there when the build found libheif. */
+std::vector<std::pair<std::string, std::string>> image_file_types();
+/* `ext` with or without the dot, any case. */
+bool image_extension_supported(const std::string &ext);
 
 /* The session's picture bytes, keyed by ImageAsset::id.
  * Ids come from take_id() and only move forward, including across undo:

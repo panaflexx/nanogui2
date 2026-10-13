@@ -63,10 +63,7 @@ struct ProbeBox {
 };
 
 bool is_image_file(const std::filesystem::path &p) {
-    std::string ext = p.extension().string();
-    for (char &c : ext)
-        c = (char) std::tolower((unsigned char) c);
-    return ext == ".png" || ext == ".jpg" || ext == ".jpeg";
+    return image_extension_supported(p.extension().string());
 }
 
 std::string leaf_name(const std::string &path) {
@@ -226,11 +223,19 @@ std::string ask_folder(const std::string &initial) {
 #endif
 }
 
+/* The document's bytes for a placed picture, else the file itself, so
+ * folder entries go through the same decoders (HEIC) and color conversion
+ * as placed pictures. Null lets the stash try the file with stb. */
 unsigned char *load_asset_pixels(ImageStore *images, const ImageStashWidget::Entry &entry,
                                  int max_edge, int *w, int *h) {
-    if (!images || entry.user_id == 0)
-        return nullptr;
-    ImageStore::Bytes bytes = images->source_of(entry.user_id);
+    ImageStore::Bytes bytes;
+    if (images && entry.user_id != 0)
+        bytes = images->source_of(entry.user_id);
+    if ((!bytes || bytes->empty()) && !entry.path.empty()) {
+        auto read = std::make_shared<std::vector<uint8_t>>();
+        if (read_file(entry.path, read.get(), nullptr))
+            bytes = read;
+    }
     if (!bytes || bytes->empty())
         return nullptr;
     std::vector<uint8_t> rgba;
@@ -416,7 +421,7 @@ ImageAssetsPanel::ImageAssetsPanel(Widget *parent, ComposerView *view, ImageStor
     add_images->set_callback([this] {
         std::vector<std::string> paths;
         try {
-            paths = file_dialog({{"png", "PNG"}, {"jpg", "JPEG"}, {"jpeg", "JPEG"}},
+            paths = file_dialog(image_file_types(),
                                 false, true, initial_folder());
         } catch (const std::exception &ex) {
             if (screen())

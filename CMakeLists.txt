@@ -963,6 +963,13 @@ if (NANOGUI_BUILD_EXAMPLES)
       message(STATUS "pagemade: harfbuzz-subset not found, PDF export needs it.")
     endif()
 
+    # HEIC and AVIF pictures (phone photos). Optional: without it pagemade
+    # opens PNG and JPEG only.
+    pkg_check_modules(LIBHEIF libheif)
+    if (NOT LIBHEIF_FOUND)
+      message(STATUS "pagemade: libheif not found, HEIC/AVIF pictures disabled.")
+    endif()
+
     add_executable(pagemade_app
         pagemade/src/main.cpp
         pagemade/src/composerview.cpp
@@ -978,6 +985,7 @@ if (NANOGUI_BUILD_EXAMPLES)
         pagemade/src/uri.cpp
         pagemade/src/docfile.cpp
         pagemade/src/image.cpp
+        pagemade/src/image_color.cpp
         pagemade/src/dialogs.cpp
         pagemade/src/image_assets.cpp
         pagemade/src/ruler.cpp
@@ -995,6 +1003,7 @@ if (NANOGUI_BUILD_EXAMPLES)
         pagemade/src/uri.cpp
         pagemade/src/docfile.cpp
         pagemade/src/image.cpp
+        pagemade/src/image_color.cpp
         pagemade/src/image_stb.cpp
         pagemade/src/sample.cpp)
     foreach(_t pagemade_app pagemade_compose_test)
@@ -1006,6 +1015,12 @@ if (NANOGUI_BUILD_EXAMPLES)
       target_compile_definitions(${_t} PRIVATE
           PAGEMADE_RESOURCE_DIR="${CMAKE_CURRENT_SOURCE_DIR}/resources"
           PAGEMADE_DATA_DIR="${CMAKE_CURRENT_SOURCE_DIR}/pagemade/resources")
+      if (LIBHEIF_FOUND)
+        target_compile_definitions(${_t} PRIVATE PAGEMADE_HAVE_HEIF=1)
+        target_include_directories(${_t} PRIVATE ${LIBHEIF_INCLUDE_DIRS})
+        target_link_directories(${_t} PRIVATE ${LIBHEIF_LIBRARY_DIRS})
+        target_link_libraries(${_t} ${LIBHEIF_LIBRARIES})
+      endif()
     endforeach()
     target_link_libraries(pagemade_app pagemade_composer nanogui miniz
         ${HARFBUZZ_SUBSET_LIBRARIES} ${NANOGUI_LIBS})

@@ -43,6 +43,7 @@ struct Item {
     unsigned index = 0;
     int weight = 400;
     bool italic = false;
+    bool ranged = false;   // fontconfig's whole-variable-font entry
 };
 
 std::string field_key(const Item &it) { return it.family + "\n" + it.style; }
@@ -86,7 +87,11 @@ void register_system_fonts(FontLibrary &lib) {
         it.path = f[2];
         it.index = (unsigned) std::strtoul(f[3].c_str(), nullptr, 10);
         int slant = (int) std::strtol(f[5].c_str(), nullptr, 10);
-        it.weight = css_weight((int) std::strtol(f[4].c_str(), nullptr, 10));
+        /* A variable font is listed once per named instance and once more
+         * with its weight range ("[80 205]") and no style. That extra entry
+         * is the default instance; it must not displace the real Regular. */
+        it.ranged = !f[4].empty() && f[4][0] == '[';
+        it.weight = it.ranged ? 400 : css_weight((int) std::strtol(f[4].c_str(), nullptr, 10));
         it.italic = slant >= 100 || it.style.find("Italic") != std::string::npos ||
                     it.style.find("Oblique") != std::string::npos;
         items.push_back(std::move(it));
@@ -104,7 +109,8 @@ void register_system_fonts(FontLibrary &lib) {
         if (a.family != b.family) return a.family < b.family;
         if (a.weight != b.weight) return a.weight < b.weight;
         if (a.italic != b.italic) return !a.italic && b.italic;
-        return a.style < b.style;
+        if (a.style != b.style) return a.style < b.style;
+        return !a.ranged && b.ranged;
     });
 
     std::string prev;

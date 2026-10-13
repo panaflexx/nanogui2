@@ -640,7 +640,7 @@ public:
     void place_dialog() {
         const std::string folder = m_doc_path.empty()
             ? std::string() : std::filesystem::path(m_doc_path).parent_path().string();
-        auto paths = file_dialog({{"png", "PNG"}, {"jpg", "JPEG"}, {"jpeg", "JPEG"}},
+        auto paths = file_dialog(image_file_types(),
                                  false, false, folder);
         if (paths.empty() || paths[0].empty())
             return;
