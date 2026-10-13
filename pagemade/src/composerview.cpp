@@ -263,6 +263,7 @@ void ComposerView::restore_snapshot() {
     m_sel.erase(std::remove_if(m_sel.begin(), m_sel.end(),
                                [&](ItemId id) { return !m_doc.find_item(id); }),
                 m_sel.end());
+    drop_uneditable();                   // nor ones on a layer hidden or locked since
     size_t home = SIZE_MAX;
     bool one_page = !m_sel.empty();
     for (ItemId id : m_sel) {
@@ -708,6 +709,8 @@ void ComposerView::draw_ruler_guides(NVGcontext *ctx, float px, size_t page) {
 /* ---- Hit testing (each item in its own space) ---------------------------- */
 
 bool ComposerView::hits_item(const Item &it, const Point &pt) const {
+    if (!m_doc.item_editable(it))
+        return false;                    // hidden or locked layer
     const Point l = it.xf.inverse().apply(pt);
     const float tol = kPickPx / (zoom() * item_scale(it.xf));
     const bool inside = l.x >= 0 && l.x <= it.w && l.y >= 0 && l.y <= it.h;
@@ -876,7 +879,8 @@ bool ComposerView::mouse_button_event(const Vector2i &p, int button, bool down, 
             if (!m_marquee_add)
                 m_sel.clear();
             for (const Item &it : items())
-                if (box.contains(item_bounds(it)) && !is_selected(it.id))
+                if (box.contains(item_bounds(it)) && !is_selected(it.id) &&
+                    m_doc.item_editable(it))
                     m_sel.push_back(it.id);
             m_sel = with_groups(m_sel);  // a group comes whole
             m_marquee = false;
@@ -1316,7 +1320,19 @@ bool ComposerView::focus_event(bool focused) {
 
 /* ---- Drawing tools ------------------------------------------------------- */
 
+bool ComposerView::check_active_layer() {
+    if (m_doc.active_layer_editable())
+        return true;
+    const Layer *l = m_doc.find_layer(m_doc.active_layer);
+    if (on_note)
+        on_note("Layer \"" + (l ? l->name : std::string()) + "\" is " +
+                (l && !l->visible ? "hidden" : "locked") + ": choose another layer to add to");
+    return false;
+}
+
 void ComposerView::begin_creation(const Point &pt) {
+    if (!check_active_layer())
+        return;
     m_creation_saved = m_doc;            // the undo step, once something is drawn
     m_creation_version = m_version;
     const Point p = snap_point(pt);
@@ -2038,6 +2054,127 @@ void ComposerView::delete_selection_items() {
         screen()->redraw();
 }
 
+/* ---- Layers ---------------------------------------------------------- */
+
+void ComposerView::drop_uneditable() {
+    m_sel.erase(std::remove_if(m_sel.begin(), m_sel.end(), [&](ItemId id) {
+                    const Item *it = m_doc.find_item(id);
+                    return !it || !m_doc.item_editable(*it);
+                }),
+                m_sel.end());
+    if (const StoryEntry *se = m_edit_story ? m_doc.find_story(m_edit_story) : nullptr) {
+        bool any = false;
+        for (ItemId f : se->thread)
+            if (const Item *it = m_doc.find_item(f))
+                any = any || m_doc.item_editable(*it);
+        if (!any)
+            m_edit_story = 0;
+    }
+}
+
+void ComposerView::set_active_layer(LayerId id) {
+    if (!m_doc.find_layer(id) || m_doc.active_layer == id)
+        return;
+    m_doc.active_layer = id;
+    if (on_document_change)
+        on_document_change();
+}
+
+bool ComposerView::add_layer(const std::string &name) {
+    if (m_doc.layers.size() >= kMaxLayers)
+        return false;
+    push_undo();
+    m_doc.add_layer(name);
+    if (on_document_change)
+        on_document_change();
+    return true;
+}
+
+void ComposerView::remove_layer(LayerId id) {
+    if (!m_doc.find_layer(id) || m_doc.layers.size() <= 1)
+        return;
+    push_undo();
+    m_doc.remove_layer(id);
+    drop_uneditable();
+    selection_changed();
+    if (on_document_change)
+        on_document_change();
+    if (screen())
+        screen()->redraw();
+}
+
+void ComposerView::move_layer(LayerId id, int dir) {
+    const size_t i = m_doc.layer_index(id);
+    if (i == SIZE_MAX || (dir < 0 && i == 0) || (dir > 0 && i + 1 >= m_doc.layers.size()))
+        return;
+    push_undo();
+    m_doc.move_layer(id, dir);
+    if (on_document_change)
+        on_document_change();
+    if (screen())
+        screen()->redraw();
+}
+
+void ComposerView::rename_layer(LayerId id, const std::string &name) {
+    Layer *l = m_doc.find_layer(id);
+    if (!l || name.empty() || l->name == name)
+        return;
+    push_undo();
+    m_doc.find_layer(id)->name = name;
+    if (on_document_change)
+        on_document_change();
+}
+
+void ComposerView::set_layer_visible(LayerId id, bool visible) {
+    Layer *l = m_doc.find_layer(id);
+    if (!l || l->visible == visible)
+        return;
+    push_undo();
+    m_doc.find_layer(id)->visible = visible;
+    drop_uneditable();
+    selection_changed();
+    if (on_document_change)
+        on_document_change();
+    if (screen())
+        screen()->redraw();
+}
+
+void ComposerView::set_layer_locked(LayerId id, bool locked) {
+    Layer *l = m_doc.find_layer(id);
+    if (!l || l->locked == locked)
+        return;
+    push_undo();
+    m_doc.find_layer(id)->locked = locked;
+    drop_uneditable();
+    selection_changed();
+    if (on_document_change)
+        on_document_change();
+    if (screen())
+        screen()->redraw();
+}
+
+void ComposerView::move_selection_to_layer(LayerId id) {
+    const Layer *l = m_doc.find_layer(id);
+    if (!l || m_sel.empty())
+        return;
+    push_undo();
+    m_doc.set_items_layer(with_groups(m_sel), id);
+    drop_uneditable();                   // onto a hidden or locked layer: gone from view
+    selection_changed();
+    if (on_document_change)
+        on_document_change();
+    if (screen())
+        screen()->redraw();
+}
+
+size_t ComposerView::layer_item_count(LayerId id) const {
+    size_t n = 0;
+    for (const Page &p : m_doc.pages)
+        for (const Item &it : p.items)
+            n += m_doc.layer_of(it) == id;
+    return n;
+}
+
 bool ComposerView::can_group() const {
     if (m_sel.size() < 2)
         return false;
@@ -2150,6 +2287,7 @@ void ComposerView::insert_page(bool after) {
     push_undo();
     size_t at = std::min(m_page + (after ? 1 : 0), m_doc.pages.size());
     m_page = m_doc.insert_page(at);
+    recompose();                         // page numbers after it move up
     page_changed();
     if (m_page_view == PageView::Stack && screen())
         screen()->perform_layout();
@@ -2187,6 +2325,7 @@ void ComposerView::move_page_to(size_t index, bool record_undo) {
         push_undo();
     m_doc.move_page(m_page, index);
     m_page = index;
+    recompose();                         // page numbers follow the new order
     if (on_page_change)
         on_page_change();
     if (screen())
@@ -2801,6 +2940,7 @@ void ComposerView::adopt_moved_items() {
     }
     if (!moved)
         return;
+    recompose();                         // a page number moved with its block
     if (m_drag_target) {
         size_t pg = m_page;
         if (m_doc.find_item(m_drag_target, &pg) && pg != m_page) {
@@ -2847,7 +2987,7 @@ void ComposerView::draw_chrome(NVGcontext *ctx, float px, size_t page,
     const std::vector<Item> &page_items =
         page < m_doc.pages.size() ? static_cast<const std::vector<Item> &>(m_doc.pages[page].items) : none;
     for (const Item &it : page_items) {
-        if (!keep_item(which, only, it.id))
+        if (!keep_item(which, only, it.id) || !m_doc.item_visible(it))
             continue;
         const bool selected = is_selected(it.id);
         nvgSave(ctx);
@@ -3143,6 +3283,10 @@ bool ComposerView::commit_import(uint32_t id, const std::string &path, ImageImpo
 }
 
 bool ComposerView::place_image_file(const std::string &path, std::string *error) {
+    if (!m_doc.active_layer_editable()) {
+        if (error) *error = "the active layer is hidden or locked";
+        return false;
+    }
     if (!m_images) {
         if (error) *error = "pictures aren't available";
         return false;
@@ -3156,6 +3300,10 @@ bool ComposerView::place_image_file(const std::string &path, std::string *error)
 void ComposerView::place_image_file(const std::string &path, size_t page, const Point *at,
                                     std::function<void(const std::string &error)> done,
                                     Vector2i px_hint) {
+    if (!check_active_layer()) {
+        if (done) done(std::string());   // said already, in the status bar
+        return;
+    }
     if (!m_images) {
         if (done) done("pictures aren't available");
         return;
@@ -3322,7 +3470,7 @@ void ComposerView::remove_unused_images() {
 }
 
 void ComposerView::place_image(uint32_t asset) {
-    if (!m_images)
+    if (!m_images || !check_active_layer())
         return;
     const ImageStore::Entry *e = m_images->find(asset);
     if (!e)
@@ -3347,7 +3495,7 @@ void ComposerView::place_image(uint32_t asset, const Point &at) {
 
 void ComposerView::place_image_at(uint32_t asset, size_t page, const Point &at) {
     const ImageAsset *a = m_doc.find_image(asset);
-    if (!a || page >= m_doc.pages.size())
+    if (!a || page >= m_doc.pages.size() || !check_active_layer())
         return;
     const ImageMetadata meta = a->meta;
     push_undo();
@@ -3704,7 +3852,7 @@ void ComposerView::draw(NVGcontext *ctx) {
                       [&](const DrawImage &im) { return texture_for(ctx, im, px); });
             if (sl.index < m_doc.pages.size())
                 for (const Item &it : m_doc.pages[sl.index].items)
-                    if (it.is_text() && keep_item(hand, only, it.id))
+                    if (it.is_text() && keep_item(hand, only, it.id) && m_doc.item_visible(it))
                         draw_text_overlays(ctx, it, px);
             if (!only)
                 draw_ruler_guides(ctx, px, sl.index);

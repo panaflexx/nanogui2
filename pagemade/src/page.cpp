@@ -438,8 +438,16 @@ StoryEntry *PageDoc::story_of(ItemId frame, size_t *thread_index) {
 std::vector<Frame> PageDoc::thread_frames(const StoryEntry &s) const {
     std::vector<Frame> out;
     for (ItemId id : s.thread) {
-        const Item *it = find_item(id);
-        out.push_back(it ? Frame{0, 0, it->w, it->h} : Frame{});
+        size_t pg = 0;
+        const Item *it = find_item(id, &pg);
+        Frame f;
+        if (it) {
+            f.w = it->w;
+            f.h = it->h;
+            f.page = (int) pg + 1;
+            f.pages = (int) pages.size();
+        }
+        out.push_back(f);
     }
     return out;
 }
@@ -508,6 +516,7 @@ bool PageDoc::transfer_item(ItemId id, size_t page) {
             Item moved = std::move(items[i]);
             items.erase(items.begin() + (long) i);
             pages[page].items.push_back(std::move(moved));
+            sort_by_layer();             // the top of its own layer there
             return true;
         }
     }
@@ -518,8 +527,158 @@ ItemId PageDoc::add_item(size_t page, Item item) {
     if (page >= pages.size())
         pages.resize(page + 1);
     item.id = next_id++;
-    pages[page].items.push_back(std::move(item));
-    return pages[page].items.back().id;
+    if (!find_layer(item.layer))
+        item.layer = find_layer(active_layer) ? active_layer : layer_of(item);
+    /* On top of its own layer: after the last item at or below it */
+    std::vector<Item> &items = pages[page].items;
+    const size_t li = layer_index(item.layer);
+    size_t at = 0;
+    for (size_t i = 0; i < items.size(); ++i)
+        if (layer_index(layer_of(items[i])) <= li)
+            at = i + 1;
+    const ItemId id = item.id;
+    items.insert(items.begin() + (long) at, std::move(item));
+    return id;
+}
+
+/* ---- Layers -------------------------------------------------------------- */
+
+const Layer *PageDoc::find_layer(LayerId id) const {
+    for (const Layer &l : layers)
+        if (l.id == id)
+            return &l;
+    return nullptr;
+}
+
+Layer *PageDoc::find_layer(LayerId id) {
+    for (Layer &l : layers)
+        if (l.id == id)
+            return &l;
+    return nullptr;
+}
+
+size_t PageDoc::layer_index(LayerId id) const {
+    for (size_t i = 0; i < layers.size(); ++i)
+        if (layers[i].id == id)
+            return i;
+    return SIZE_MAX;
+}
+
+LayerId PageDoc::layer_of(const Item &it) const {
+    if (find_layer(it.layer))
+        return it.layer;
+    return layers.empty() ? 0 : layers.front().id;
+}
+
+bool PageDoc::item_visible(const Item &it) const {
+    const Layer *l = find_layer(layer_of(it));
+    return !l || l->visible;
+}
+
+bool PageDoc::item_editable(const Item &it) const {
+    const Layer *l = find_layer(layer_of(it));
+    return !l || (l->visible && !l->locked);
+}
+
+bool PageDoc::active_layer_editable() const {
+    const Layer *l = find_layer(active_layer);
+    return !l || (l->visible && !l->locked);
+}
+
+LayerId PageDoc::add_layer(const std::string &name) {
+    if (layers.size() >= kMaxLayers)
+        return 0;
+    Layer l;
+    l.id = next_layer++;
+    l.name = name;
+    const size_t at = layer_index(active_layer);
+    layers.insert(at == SIZE_MAX ? layers.end() : layers.begin() + (long) at + 1, l);
+    active_layer = l.id;
+    return l.id;
+}
+
+bool PageDoc::remove_layer(LayerId id) {
+    const size_t i = layer_index(id);
+    if (i == SIZE_MAX || layers.size() <= 1)
+        return false;
+    const LayerId to = layers[i > 0 ? i - 1 : 1].id;
+    /* The items go to the top of the layer below (the bottom of the one
+     * above), keeping their order */
+    for (Page &p : pages)
+        for (Item &it : p.items)
+            if (layer_of(it) == id)
+                it.layer = to;
+    layers.erase(layers.begin() + (long) i);
+    if (active_layer == id)
+        active_layer = to;
+    sort_by_layer();
+    return true;
+}
+
+void PageDoc::move_layer(LayerId id, int dir) {
+    const size_t i = layer_index(id);
+    if (i == SIZE_MAX || dir == 0)
+        return;
+    const size_t j = dir > 0 ? i + 1 : i - 1;
+    if (dir < 0 && i == 0)
+        return;
+    if (j >= layers.size())
+        return;
+    std::swap(layers[i], layers[j]);
+    sort_by_layer();
+}
+
+void PageDoc::set_items_layer(const std::vector<ItemId> &ids, LayerId layer) {
+    if (!find_layer(layer))
+        return;
+    for (Page &p : pages) {
+        /* The moved items go on top of their new layer, in their order */
+        std::vector<Item> moved, rest;
+        for (Item &it : p.items) {
+            if (std::find(ids.begin(), ids.end(), it.id) != ids.end()) {
+                it.layer = layer;
+                moved.push_back(std::move(it));
+            } else {
+                rest.push_back(std::move(it));
+            }
+        }
+        if (moved.empty())
+            continue;
+        rest.insert(rest.end(), std::make_move_iterator(moved.begin()),
+                    std::make_move_iterator(moved.end()));
+        p.items = std::move(rest);
+    }
+    sort_by_layer();
+}
+
+void PageDoc::sort_by_layer() {
+    for (Page &p : pages)
+        std::stable_sort(p.items.begin(), p.items.end(), [&](const Item &a, const Item &b) {
+            return layer_index(layer_of(a)) < layer_index(layer_of(b));
+        });
+}
+
+void PageDoc::tidy_layers() {
+    /* Drop repeated ids and anything past the limit */
+    std::vector<Layer> keep;
+    for (const Layer &l : layers) {
+        bool dup = l.id == 0;
+        for (const Layer &k : keep)
+            dup = dup || k.id == l.id;
+        if (!dup && keep.size() < kMaxLayers)
+            keep.push_back(l);
+    }
+    layers = std::move(keep);
+    if (layers.empty())
+        layers.push_back(Layer{1, "Default"});
+    for (const Layer &l : layers)
+        next_layer = std::max(next_layer, l.id + 1);
+    if (!find_layer(active_layer))
+        active_layer = layers.back().id;
+    for (Page &p : pages)
+        for (Item &it : p.items)
+            it.layer = layer_of(it);
+    sort_by_layer();
 }
 
 StoryId PageDoc::add_story(Story story) {
@@ -588,6 +747,7 @@ void PageDoc::bring_to_front(ItemId id) {
         if (it != p.items.end())
             std::rotate(it, it + 1, p.items.end());
     }
+    sort_by_layer();                     // the front of its layer
 }
 
 void PageDoc::send_to_back(ItemId id) {
@@ -597,6 +757,7 @@ void PageDoc::send_to_back(ItemId id) {
         if (it != p.items.end())
             std::rotate(p.items.begin(), it, it + 1);
     }
+    sort_by_layer();                     // the back of its layer
 }
 
 void PageDoc::restack(const std::vector<ItemId> &ids, int dir) {
@@ -620,6 +781,7 @@ void PageDoc::restack(const std::vector<ItemId> &ids, int dir) {
                     std::swap(p.items[i], p.items[i - 1]);
         }
     }
+    sort_by_layer();                     // a step never leaves the layer
 }
 
 std::vector<ItemId> PageDoc::group_members(ItemId id) const {
@@ -676,8 +838,13 @@ uint32_t PageDoc::group_items(const std::vector<ItemId> &ids) {
                 insert_at = rest.size();
         }
     }
+    /* One group, one layer: the topmost member's */
+    const LayerId layer = layer_of(grouped.back());
+    for (Item &it : grouped)
+        it.layer = layer;
     rest.insert(rest.begin() + (long) insert_at, grouped.begin(), grouped.end());
     items = std::move(rest);
+    sort_by_layer();
     return gid;
 }
 

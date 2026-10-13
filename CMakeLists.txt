@@ -989,6 +989,7 @@ if (NANOGUI_BUILD_EXAMPLES)
         pagemade/src/dialogs.cpp
         pagemade/src/image_assets.cpp
         pagemade/src/dock_window.cpp
+        pagemade/src/layers_panel.cpp
         pagemade/src/ruler.cpp
         pagemade/src/paragraph_panel.cpp
         pagemade/src/sample.cpp)

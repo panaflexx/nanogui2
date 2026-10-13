@@ -116,6 +116,12 @@ public:
         m_buf = hb_buffer_create();
     }
     ~Shaper() { hb_buffer_destroy(m_buf); }
+
+    /* The page the text being shaped lands on, for the page markers. */
+    void set_page(int page, int pages) {
+        m_page = page;
+        m_pages = pages;
+    }
     Shaper(const Shaper &) = delete;
     Shaper &operator=(const Shaper &) = delete;
 
@@ -183,6 +189,17 @@ public:
                 sc = sm;
             if (i < scale_at.size())
                 scale_at[i] = sc;
+            /* A page marker becomes its digits, all on the marker's byte,
+             * so the caret steps over the number as one character */
+            if (is_page_marker(cp)) {
+                const int v = cp == kPageNumberChar ? m_page : m_pages;
+                cps.clear();
+                if (v > 0)
+                    for (char c : std::to_string(v))
+                        cps.push_back((uint32_t) c);
+                else
+                    cps.push_back('#');
+            }
             for (uint32_t o : cps)
                 hb_buffer_add(m_buf, o, (unsigned) i);
             i += n;
@@ -260,6 +277,7 @@ private:
     std::vector<uint32_t> m_start;
     std::vector<const Font *> m_font;
     hb_buffer_t *m_buf = nullptr;
+    int m_page = 0, m_pages = 0;
 };
 
 /* ---- Layout of one line's glyphs ---------------------------------------- */
@@ -1074,6 +1092,10 @@ Composition compose(const Story &story, const std::vector<Frame> &frames,
         const Paragraph &para = story.paragraphs[pi];
         const ParaStyle &st = para.style;
         Shaper sh(para, fonts);
+        if (!frames.empty()) {
+            const Frame &pf = frames[std::min(fi, frames.size() - 1)];
+            sh.set_page(pf.page, pf.pages);
+        }
         Breaker br(sh, para, hyphenator);
 
         if ((plan.next_frame || st.start_new_frame) && !at_frame_top)
@@ -1226,6 +1248,7 @@ Composition compose(const Story &story, const std::vector<Frame> &frames,
                     return false;
                 }
                 const Frame &f = frames[fi];
+                sh.set_page(f.page, f.pages);    // markers show this frame's page
                 ComposedLine line;
                 line.frame = fi;
                 line.para = pi;

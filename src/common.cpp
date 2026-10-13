@@ -255,6 +255,16 @@ void async(const std::function<void()> &func) {
     m_async_functions.push_back(func);
 }
 
+void process_async() {
+    std::vector<std::function<void()>> funcs;
+    {
+        std::lock_guard<std::mutex> guard(m_async_mutex);
+        funcs.swap(m_async_functions);
+    }
+    for (auto &f : funcs)
+        f();
+}
+
 void leave() {
     mainloop_active = false;
 }

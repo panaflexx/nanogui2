@@ -257,6 +257,12 @@ extern NANOGUI_EXPORT bool active();
  */
 extern NANOGUI_EXPORT void async(const std::function<void()> &func);
 
+/**
+ * \brief Run the functions queued with \ref async now, outside the main
+ * loop (a headless driver that never enters \ref mainloop).
+ */
+extern NANOGUI_EXPORT void process_async();
+
 extern NANOGUI_EXPORT std::vector<Widget *> g_widgets_to_cleanup;
 extern NANOGUI_EXPORT std::mutex g_widgets_to_cleanup_mutex;
 

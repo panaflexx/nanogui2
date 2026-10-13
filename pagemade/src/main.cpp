@@ -58,6 +58,7 @@
 #include "composerview.h"
 #include "dialogs.h"
 #include "image_assets.h"
+#include "layers_panel.h"
 #include "ruler.h"
 #include "docfile.h"
 #include "default_fonts.h"
@@ -516,9 +517,17 @@ public:
             sync_tool_buttons(t);
             show_type_palette(t == ComposerView::Tool::Text);
         };
-        m_view->on_selection_change = [this] { sync_palette(); update_status(); };
+        m_view->on_selection_change = [this] {
+            sync_palette();
+            update_status();
+            if (m_layers && m_layers->visible())
+                m_layers->refresh();     // Move Selection Here follows the selection
+        };
+        m_view->on_note = [this](const std::string &note) { set_note(note); };
         m_view->on_page_change = [this] { update_status(); };
         m_view->on_document_change = [this] {
+            if (m_layers && m_layers->visible())
+                m_layers->refresh();
             update_title();
             if (m_assets && m_assets->visible())   // a hidden one catches up when shown
                 m_assets->refresh();
@@ -841,6 +850,10 @@ public:
             {"Section \u00A7", "\u00A7", {}},
             {"Paragraph \u00B6", "\u00B6", {}},
             {"Degree \u00B0", "\u00B0", {}},
+            /* Markers that show the page's number, or how many pages there
+             * are, wherever the text lands */
+            {"Page Number", "\uE000", {{C | A, GLFW_KEY_P}}},
+            {"Page Count", "\uE001", {}},
         };
         for (const Special &sp : specials) {
             const std::string text = sp.text;
@@ -896,6 +909,7 @@ public:
                 });
         new Separator(element->popup());
         add_cmd(element, "Image Assets...", {}, [this] { show_image_assets(); });
+        add_cmd(element, "Layers...", {}, [this] { show_layers(); });
         m_caption_item = add_cmd(element, "Caption Placed Pictures", {}, [this] {
             m_view->set_caption_pictures(!m_view->caption_pictures());
             m_caption_item->set_icon(m_view->caption_pictures() ? FA_CHECK : 0);
@@ -1330,6 +1344,30 @@ public:
         m_assets->request_focus();
     }
 
+    /* The Layers window, like Image Assets: made once, hidden when closed. */
+    void show_layers() {
+        if (!m_layers) {
+            m_layers = new LayersPanel(this, m_view);
+            m_layers->set_close_callback([this] {
+                if (m_layers) {
+                    m_layers->set_visible(false);
+                    apply_docks();
+                    redraw();
+                }
+            });
+            m_layers->on_dock = [this](DockableWindow::Dock side) { dock_window(m_layers, side); };
+            m_layers->on_dock_resize = [this] { apply_docks(); };
+            m_layers->fit_height(240);
+            m_layers->center();
+        } else {
+            m_layers->set_visible(true);
+            move_window_to_front(m_layers);
+            apply_docks();
+        }
+        m_layers->refresh();
+        m_layers->request_focus();
+    }
+
     /* ---- Docking tool windows beside the pages ---------------------- *
      * A docked window fills a strip the full height of the page area on
      * one side; the rulers and pages give it that room. Two on one side sit
@@ -1337,7 +1375,8 @@ public:
      * goes back to the size it had floating, where it is. */
     std::vector<DockableWindow *> docked_windows() const {
         std::vector<DockableWindow *> out;
-        for (DockableWindow *w : {(DockableWindow *) m_assets, (DockableWindow *) m_type_panel})
+        for (DockableWindow *w : {(DockableWindow *) m_assets, (DockableWindow *) m_layers,
+                                  (DockableWindow *) m_type_panel})
             if (w && w->visible() && w->docked() != DockableWindow::Dock::None)
                 out.push_back(w);
         return out;
@@ -2016,6 +2055,7 @@ private:
     Button          *m_specs = nullptr;
     TypeSpecsPanel  *m_type_panel = nullptr;
     ImageAssetsPanel *m_assets = nullptr;
+    LayersPanel      *m_layers = nullptr;
     /* Docked tool windows: the size each had floating, and the width it
      * has docked. The Type panel's dock is kept across closing it. */
     std::map<DockableWindow *, Vector2i> m_float_size;
@@ -2212,7 +2252,8 @@ int main(int argc, char **argv) {
             app->set_snap(false);
 
         for (const Action &act : actions) {
-            app->do_widget_cleanup();    // as the main loop does between events
+            nanogui::process_async();    // as the main loop does between events
+            app->do_widget_cleanup();
             app->perform_layout();
             app->draw_all();
             switch (act.kind) {
@@ -2279,6 +2320,7 @@ int main(int argc, char **argv) {
                         pdf.c_str());
 
         if (!shot.empty()) {
+            nanogui::process_async();    // what the last action queued
             for (int k = 0; k < 2; ++k) { app->perform_layout(); app->draw_all(); }
             bool ok = app->save_png(shot);
             std::printf("screenshot %s %s\n", ok ? "saved" : "FAILED", shot.c_str());

@@ -35,9 +35,11 @@ namespace pagemade {
 
 class Hyphenator;
 
-/* A text block's rectangle in page points (y down). */
+/* A text block's rectangle in page points (y down), and the page it is on
+ * (1-based) out of `pages`, for the page markers. 0 shows them as "#". */
 struct Frame {
     float x = 0, y = 0, w = 0, h = 0;
+    int page = 0, pages = 0;
 };
 
 struct PlacedGlyph {

@@ -315,6 +315,7 @@ void write_guides(JsonOut &j, const char *key, const std::vector<Guide> &guides)
 void write_item(JsonOut &j, const Item &it) {
     j.begin_object();
     j.key("id").value(it.id);
+    j.key("layer").value(it.layer);
     if (it.group)
         j.key("group").value(it.group);
     j.key("w").value(it.w);
@@ -544,6 +545,18 @@ std::string make_json(const PageDoc &doc, const SaveOptions &opts, const std::ve
     j.key("gutter").value(s.gutter);
     j.key("facing").value(s.facing);
     j.end_object();
+
+    j.key("layers").begin_array();
+    for (const Layer &l : doc.layers) {
+        j.begin_object();
+        j.key("id").value(l.id);
+        j.key("name").value(l.name);
+        if (!l.visible) j.key("visible").value(false);
+        if (l.locked) j.key("locked").value(true);
+        j.end_object();
+    }
+    j.end_array();
+    j.key("active_layer").value(doc.active_layer);
 
     j.key("swatches").begin_array();
     for (const Swatch &sw : doc.swatches) {
@@ -840,6 +853,7 @@ std::vector<Guide> read_guides(const DictValue *a) {
 
 bool read_item(const DictValue *o, Item &it) {
     get(o, "id", it.id);
+    get(o, "layer", it.layer);
     get(o, "group", it.group);
     get(o, "w", it.w);
     get(o, "h", it.h);
@@ -915,6 +929,7 @@ void repair(PageDoc &d, std::vector<std::string> &warnings) {
         warnings.push_back(std::to_string(dropped) + " items with missing or repeated ids were dropped");
     for (ItemId id : ids)
         max_id = std::max(max_id, id);
+    d.tidy_layers();
     d.tidy_groups();
     for (const Page &p : d.pages)
         for (const Item &it : p.items)
@@ -1125,6 +1140,20 @@ OpenResult open_document(const std::string &path, const FontLibrary &installed,
     d.setup.columns = std::max(1, d.setup.columns);
     get(setup, "gutter", d.setup.gutter);
     get(setup, "facing", d.setup.facing);
+
+    /* A file from before layers has everything on one Default layer */
+    if (const DictValue *ls = field(root, "layers")) {
+        d.layers.clear();
+        for (size_t i = 0; i < count(ls); ++i) {
+            Layer l;
+            get(at(ls, i), "id", l.id);
+            get(at(ls, i), "name", l.name);
+            get(at(ls, i), "visible", l.visible);
+            get(at(ls, i), "locked", l.locked);
+            d.layers.push_back(l);
+        }
+    }
+    get(root, "active_layer", d.active_layer);
 
     if (const DictValue *sw = field(root, "swatches")) {
         d.swatches.clear();

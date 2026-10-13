@@ -160,9 +160,10 @@ void collect_unicodes(const PageDoc &doc, const std::vector<Composition> &comps,
             /* Glyphs on a hidden page are not drawn, so they are not embedded. */
             if (l.frame < doc.stories[si].thread.size()) {
                 size_t pg = 0;
-                if (doc.find_item(doc.stories[si].thread[l.frame], &pg) &&
-                    pg < doc.pages.size() && doc.pages[pg].hidden)
-                    continue;
+                const Item *frame = doc.find_item(doc.stories[si].thread[l.frame], &pg);
+                if (frame && ((pg < doc.pages.size() && doc.pages[pg].hidden) ||
+                              !doc.item_visible(*frame)))
+                    continue;            // nor on a hidden layer
             }
             const std::string text = paragraph_text(story.paragraphs[l.para]);
             for (size_t ri = 0; ri < l.runs.size(); ++ri) {
@@ -178,6 +179,22 @@ void collect_unicodes(const PageDoc &doc, const std::vector<Composition> &comps,
                     pf.gids.insert(g.gid);
                     if (pf.unicode.count(g.gid) || (g.flags & PlacedGlyph::Inserted))
                         continue;
+                    /* A page marker's glyphs are the digits it shows: map each
+                     * to its digit, not to the marker in the text */
+                    if (g.cluster < text.size()) {
+                        size_t at = g.cluster;
+                        if (is_page_marker(utf8_decode(text, at))) {
+                            for (char c : std::string("0123456789#")) {
+                                hb_codepoint_t gid = 0;
+                                if (hb_font_get_nominal_glyph(r.font->hb(), (hb_codepoint_t) c, &gid) &&
+                                    gid == g.gid) {
+                                    pf.unicode[g.gid] = std::string(1, c);
+                                    break;
+                                }
+                            }
+                            continue;
+                        }
+                    }
                     /* A ligature's cluster is its first character. The end is
                      * the next glyph on the line, including a later run: the
                      * last glyph of a run has no neighbor inside the run, and

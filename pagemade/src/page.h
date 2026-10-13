@@ -38,6 +38,7 @@ namespace pagemade {
 
 using ItemId = uint32_t;     // 0 = none
 using StoryId = uint32_t;
+using LayerId = uint32_t;    // 0 = none
 
 struct Point {
     float x = 0, y = 0;
@@ -166,8 +167,22 @@ PlacedImage scale_placement(PlacedImage im, float old_w, float old_h, float new_
  * picture stays put on the page. */
 PlacedImage crop_placement(PlacedImage im, float left, float top);
 
+/* A layer of the publication, on every page. Layers stack bottom to top;
+ * within one, items keep their own stacking order. A hidden layer is not
+ * drawn, printed or exported; a locked one is drawn but its items can't be
+ * selected or edited. */
+constexpr size_t kMaxLayers = 8;
+
+struct Layer {
+    LayerId     id = 0;
+    std::string name;
+    bool        visible = true;
+    bool        locked = false;
+};
+
 struct Item {
     ItemId    id = 0;
+    LayerId   layer = 0;         // 0 or unknown: the bottom layer
     /* Items on one page with the same nonzero group select, move and
      * stack together (a picture and its caption). Groups don't nest. */
     uint32_t  group = 0;
@@ -307,8 +322,39 @@ struct PageDoc {
     std::vector<CharStyleDef> char_styles = default_char_styles();
     std::vector<ImageAsset> images;        // the publication's pictures
     std::vector<Guide>      guides;        // ruler guides on every page
+    std::vector<Layer>      layers{Layer{1, "Default"}};   // bottom to top
+    LayerId                 active_layer = 1;              // new items go here
     uint32_t                next_id = 1;   // shared by items and stories
     uint32_t                next_asset = 1;
+    LayerId                 next_layer = 2;
+
+    /* ---- Layers ---- */
+    const Layer *find_layer(LayerId id) const;
+    Layer       *find_layer(LayerId id);
+    size_t layer_index(LayerId id) const;                // SIZE_MAX if none
+    /* The item's layer, or the bottom one when it names none. */
+    LayerId layer_of(const Item &it) const;
+    bool item_visible(const Item &it) const;
+    /* Visible and unlocked: it can be selected and edited. */
+    bool item_editable(const Item &it) const;
+    /* New items can go on the active layer (visible and unlocked). */
+    bool active_layer_editable() const;
+    /* A new layer above the active one, made active. 0 when there are
+     * kMaxLayers already. */
+    LayerId add_layer(const std::string &name);
+    /* Its items go to the layer below it (above, for the bottom one). False
+     * for the only layer. */
+    bool remove_layer(LayerId id);
+    /* One step up (dir > 0) or down. */
+    void move_layer(LayerId id, int dir);
+    /* Put items on a layer, at the top of it. */
+    void set_items_layer(const std::vector<ItemId> &ids, LayerId layer);
+    /* Each page's items in layer order, keeping the order within a layer.
+     * Every edit that moves items between layers keeps this. */
+    void sort_by_layer();
+    /* At least one layer, a valid active one, and every item on a real layer
+     * (an opened file). */
+    void tidy_layers();
 
     const Swatch *find_swatch(SwatchId id) const;
     const StyleDef *find_style(const std::string &name) const;

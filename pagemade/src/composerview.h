@@ -218,6 +218,24 @@ public:
     enum class Stack { Forward, Backward, Front, Back };
     void arrange(Stack how);
 
+    /* ---- Layers (the Layers panel) ----------------------------------- *
+     * Every change is one undo step except choosing the active layer.
+     * Hiding or locking a layer drops its items from the selection. */
+    const std::vector<pagemade::Layer> &layers() const { return m_doc.layers; }
+    pagemade::LayerId active_layer() const { return m_doc.active_layer; }
+    void set_active_layer(pagemade::LayerId id);
+    /* False at kMaxLayers. */
+    bool add_layer(const std::string &name);
+    void remove_layer(pagemade::LayerId id);
+    void move_layer(pagemade::LayerId id, int dir);
+    void rename_layer(pagemade::LayerId id, const std::string &name);
+    void set_layer_visible(pagemade::LayerId id, bool visible);
+    void set_layer_locked(pagemade::LayerId id, bool locked);
+    /* The selected items onto a layer (whole groups go together). */
+    void move_selection_to_layer(pagemade::LayerId id);
+    /* How many items a layer holds, on all pages. */
+    size_t layer_item_count(pagemade::LayerId id) const;
+
     /* ---- Groups (Element > Group / Ungroup) ------------------------- */
     /* Two or more items on one page, not already all one group. */
     bool can_group() const;
@@ -333,6 +351,8 @@ public:
     void mark_clean();                 // the document was just saved
     /* Called whenever the document changes, is saved or is replaced. */
     std::function<void()> on_document_change;
+    /* A short message for the status bar (a refused edit). */
+    std::function<void(const std::string &)> on_note;
 
     /* Top-left of the arrangement in view units; the rest is pasteboard. */
     nanogui::Vector2f page_origin() const;
@@ -394,6 +414,11 @@ private:
     }
     void page_changed();               // clear the selection and tell the shell
     bool is_selected(pagemade::ItemId id) const;
+    /* Items on a hidden or locked layer leave the selection; a story with
+     * no editable block stops being edited. */
+    void drop_uneditable();
+    /* New items can go on the active layer; otherwise says why (on_note). */
+    bool check_active_layer();
     /* `ids` and everything grouped with them, without repeats. */
     std::vector<pagemade::ItemId> with_groups(const std::vector<pagemade::ItemId> &ids) const;
     void selection_changed();

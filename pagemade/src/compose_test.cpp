@@ -2521,6 +2521,141 @@ static void test_groups(const FontLibrary &fonts) {
     CHECK(doc.find_item(b)->group == 0, "a group left with one item ends");
 }
 
+static void test_page_markers(const FontLibrary &fonts) {
+    PageDoc doc = new_publication(PageSetup(), 3);
+    const std::string marked = std::string("Page ") + "\xEE\x80\x80" + " of " + "\xEE\x80\x81";
+    auto story_on = [&](size_t page, const std::string &text) {
+        Paragraph p;
+        p.runs.push_back({CharStyle(), text});
+        Story s;
+        s.paragraphs.push_back(p);
+        const StoryId sid = doc.add_story(s);
+        doc.add_text_frame(page, sid, 300, 100, Transform::translate(72, 72));
+        return sid;
+    };
+    /* Ids, not pointers: adding a story can move the others */
+    const StoryId with_id = story_on(1, marked);
+    const StoryId plain_id = story_on(1, "Page 2 of 3");
+    const StoryEntry *with = doc.find_story(with_id);
+    const StoryEntry *plain = doc.find_story(plain_id);
+    Composition a = compose(with->story, doc.thread_frames(*with), fonts);
+    Composition b = compose(plain->story, doc.thread_frames(*plain), fonts);
+    auto gids = [](const Composition &c) {
+        std::vector<uint32_t> out;
+        for (const ComposedLine &l : c.lines)
+            for (const GlyphRun &r : l.runs)
+                for (const PlacedGlyph &g : r.glyphs)
+                    out.push_back(g.gid);
+        return out;
+    };
+    CHECK(!a.lines.empty() && gids(a) == gids(b), "markers on page 2 of 3 read \"Page 2 of 3\"");
+    CHECK(!a.lines.empty() && a.lines[0].byte_end == marked.size(),
+          "the line still covers the markers' bytes");
+    /* Both digits of a marker sit on its one character */
+    uint32_t marker_at = 5, glyphs_on_marker = 0;
+    for (const GlyphRun &r : a.lines[0].runs)
+        for (const PlacedGlyph &g : r.glyphs)
+            glyphs_on_marker += g.cluster == marker_at;
+    CHECK(glyphs_on_marker == 1, "page 2 is one glyph on the marker (%u)", glyphs_on_marker);
+
+    Composition none = compose(with->story, {Frame{0, 0, 300, 100}}, fonts);
+    Composition hashes = compose(plain->story, {Frame{0, 0, 300, 100}}, fonts);
+    Paragraph hp;
+    hp.runs.push_back({CharStyle(), "Page # of #"});
+    Story hs;
+    hs.paragraphs.push_back(hp);
+    CHECK(gids(none) == gids(compose(hs, {Frame{0, 0, 300, 100}}, fonts)),
+          "without a page the markers show #");
+    (void) hashes;
+
+    const std::string pdf_path = "/tmp/pagemade-markers.pdf";
+    std::vector<Composition> comps;
+    for (const StoryEntry &se : doc.stories)
+        comps.push_back(compose(se.story, doc.thread_frames(se), fonts));
+    CHECK(export_pdf(pdf_path, doc, comps, nullptr), "export markers");
+    if (FILE *pipe = popen(("pdftotext -f 2 -l 2 " + pdf_path + " - 2>/dev/null").c_str(), "r")) {
+        std::string out;
+        char buf[256];
+        while (std::fgets(buf, sizeof buf, pipe))
+            out += buf;
+        if (pclose(pipe) == 0)
+            CHECK(out.find("Page 2 of 3") != std::string::npos &&
+                  out.find("\xEE\x80") == std::string::npos,
+                  "the PDF copies as digits: %s", out.c_str());
+        else
+            std::printf("  markers: pdftotext not available, skipped\n");
+    }
+}
+
+static void test_layers(const FontLibrary &fonts) {
+    PageDoc doc = new_publication(PageSetup(), 1);
+    CHECK(doc.layers.size() == 1 && doc.active_layer == doc.layers[0].id, "one Default layer");
+    const LayerId base = doc.layers[0].id;
+    auto box = [&](float x) {
+        Item it;
+        it.w = 10; it.h = 10;
+        it.xf = Transform::translate(x, 0);
+        it.content = Shape();
+        return doc.add_item(0, it);
+    };
+    auto order = [&] {
+        std::vector<ItemId> o;
+        for (const Item &it : doc.pages[0].items)
+            o.push_back(it.id);
+        return o;
+    };
+    const ItemId a = box(0);
+    const LayerId top = doc.add_layer("Top");
+    CHECK(top && doc.active_layer == top && doc.layers.back().id == top, "a new layer goes above, active");
+    const ItemId b = box(20);
+    doc.active_layer = base;
+    const ItemId c = box(40);                // added last, on the lower layer
+    CHECK(order() == (std::vector<ItemId>{a, c, b}), "a lower layer's item stays below");
+    doc.bring_to_front(a);
+    CHECK(order() == (std::vector<ItemId>{c, a, b}), "Bring to Front stays within the layer");
+    doc.move_layer(top, -1);
+    CHECK(order() == (std::vector<ItemId>{b, c, a}), "moving a layer down moves its items");
+    doc.move_layer(top, 1);
+
+    for (int i = 0; i < 10; ++i)
+        doc.add_layer("More");
+    CHECK(doc.layers.size() == kMaxLayers, "at most 8 layers (%zu)", doc.layers.size());
+
+    doc.find_layer(top)->visible = false;
+    DrawList list = build_page(doc, 0, {});
+    CHECK(list.size() == 2 && !doc.item_editable(*doc.find_item(b)), "a hidden layer isn't drawn");
+    doc.find_layer(top)->visible = true;
+    doc.find_layer(base)->locked = true;
+    CHECK(!doc.item_editable(*doc.find_item(a)) && doc.item_visible(*doc.find_item(a)),
+          "a locked layer is drawn but not editable");
+    doc.find_layer(base)->locked = false;
+
+    doc.set_items_layer({c}, top);
+    CHECK(doc.find_item(c)->layer == top && order().back() == c, "moved items go on top of the layer");
+
+    const std::string path = "/tmp/pagemade-layers.pagemade";
+    doc.find_layer(top)->locked = true;
+    doc.active_layer = top;
+    std::string err;
+    CHECK(save_document(doc, fonts, path, SaveOptions{false}, &err), "save layers: %s", err.c_str());
+    OpenResult back = open_document(path, fonts);
+    CHECK(back.ok && back.doc.layers.size() == doc.layers.size() && back.doc.active_layer == top &&
+          back.doc.find_layer(top)->locked && back.doc.find_item(c)->layer == top,
+          "layers survive saving");
+
+    /* The extra layers went in above the active Default, so Top is last */
+    const LayerId below = doc.layers[doc.layer_index(top) - 1].id;
+    CHECK(doc.remove_layer(top), "a layer can be deleted");
+    CHECK(doc.find_item(b)->layer == below && doc.find_item(c)->layer == below &&
+          order() == (std::vector<ItemId>{a, b, c}), "its items go on top of the layer below");
+
+    doc.find_layer(base)->locked = false;
+    const LayerId other = doc.layers.back().id;
+    doc.set_items_layer({b}, other);
+    doc.group_items({a, b});
+    CHECK(doc.find_item(a)->layer == doc.find_item(b)->layer, "a group is on one layer");
+}
+
 static void test_images(const FontLibrary &fonts) {
     CHECK(std::fabs(image_print_points(300, 300) - 72.f) < 0.01f, "300 px at 300 ppi is 72 pt");
     CHECK(std::fabs(image_print_points(100, 0) - 100.f) < 0.01f, "unspecified resolution is 72 ppi");
@@ -3235,6 +3370,8 @@ int main(int argc, char **argv) {
     test_docfile(fonts);
     test_images(fonts);
     test_groups(fonts);
+    test_page_markers(fonts);
+    test_layers(fonts);
     test_image_color(fonts);
     test_background_worker();
     test_caps(fonts);

@@ -24,8 +24,8 @@ DrawList build_page(const PageDoc &doc, size_t page, const std::vector<Compositi
     if (page >= doc.pages.size())
         return out;
     for (const Item &it : doc.pages[page].items) {
-        if (!keep_item(which, only, it.id))
-            continue;
+        if (!keep_item(which, only, it.id) || !doc.item_visible(it))
+            continue;                    // a hidden layer is neither shown nor printed
         if (const Shape *sh = it.shape()) {
             const Path path = shape_path(it);
             if (!sh->fill.none() && sh->kind != Shape::Kind::Line)

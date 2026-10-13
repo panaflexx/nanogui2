@@ -149,6 +149,11 @@ constexpr int   kMaxDropLines = 12, kMaxDropChars = 10;
 constexpr float kMinDropScale = 25.f, kMaxDropScale = 400.f;
 constexpr int   kMaxKeepLines = 9;     // widows and orphans
 constexpr uint32_t kFrameBreak = 0x0C; // ends the line and the text block
+/* Page markers (Private Use Area). The text keeps the marker; composing
+ * sets the number of the page the line lands on, or the page count. */
+constexpr uint32_t kPageNumberChar = 0xE000;
+constexpr uint32_t kPageCountChar = 0xE001;
+inline bool is_page_marker(uint32_t cp) { return cp == kPageNumberChar || cp == kPageCountChar; }
 
 struct Run {
     CharStyle   style;
