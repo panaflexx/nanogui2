@@ -16,6 +16,7 @@
 
 #include <nanogui/window.h>
 
+#include "dock_window.h"
 #include "page.h"
 
 #include <functional>
@@ -110,10 +111,13 @@ struct CharStyle;
 
 /* Floating Type panel: the same character fields as PageMaker's Type
  * Specifications, with a preview. It is not modal — the page stays live,
- * and the panel can be dragged by its title bar. Apply writes the edited
- * fields onto the current selection; closing drops unapplied edits.
- * `apply` receives the style the panel was loaded from and the edited one. */
-class TypeSpecsPanel : public nanogui::Window {
+ * and the panel can be dragged by its title bar or docked beside the pages.
+ * It resizes down to 150 px wide: narrower, the fields stack under their
+ * labels, and a docked panel scrolls. Floating, its height fits the fields.
+ * Apply writes the edited fields onto the current selection; closing drops
+ * unapplied edits. `apply` receives the style the panel was loaded from and
+ * the edited one. */
+class TypeSpecsPanel : public DockableWindow {
 public:
     TypeSpecsPanel(nanogui::Screen *screen, pagemade::FontLibrary &fonts,
                    pagemade::FontMenuModel &fonts_menu,
@@ -129,10 +133,18 @@ public:
 
     bool mouse_button_event(const nanogui::Vector2i &p, int button, bool down,
                             int modifiers) override;
+    bool mouse_drag_event(const nanogui::Vector2i &p, const nanogui::Vector2i &rel,
+                          int button, int modifiers) override;
+    void perform_layout(NVGcontext *ctx) override;
+
+    /* Floating: keep the width, fit the height to the fields. Docked: lay
+     * out in the size the app gave it. */
+    void relayout();
 
 private:
     struct State;
     std::shared_ptr<State> m_state;
     std::function<void()> m_refresh;
-    void relayout();
+    /* Arrange the fields for a width (wide, two columns, or stacked). */
+    void fit_width();
 };

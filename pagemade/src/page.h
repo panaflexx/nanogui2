@@ -168,6 +168,9 @@ PlacedImage crop_placement(PlacedImage im, float left, float top);
 
 struct Item {
     ItemId    id = 0;
+    /* Items on one page with the same nonzero group select, move and
+     * stack together (a picture and its caption). Groups don't nest. */
+    uint32_t  group = 0;
     float     w = 0, h = 0;
     Transform xf;                // item space -> page
     std::variant<TextFrame, Shape, PlacedImage> content;
@@ -367,6 +370,19 @@ struct PageDoc {
     /* One step up (dir > 0, toward the front) or down. Items in `ids` keep
      * their order, so a group moves together. */
     void    restack(const std::vector<ItemId> &ids, int dir);
+
+    /* The item and everything grouped with it, in stacking order; just
+     * the item when it isn't grouped; empty when it's missing. */
+    std::vector<ItemId> group_members(ItemId id) const;
+    /* Group the items (two or more, on one page; groups they were in are
+     * merged). They become adjacent in the stack where the topmost one
+     * was, keeping their order. Returns the group, or 0 when they can't
+     * be grouped. */
+    uint32_t group_items(const std::vector<ItemId> &ids);
+    /* Take the items' whole groups apart. */
+    void     ungroup_items(const std::vector<ItemId> &ids);
+    /* Clear groups left with one member, or split across pages. */
+    void     tidy_groups();
 
     /* Insert a blank page at `index` (clamped to the end). */
     size_t  insert_page(size_t index);

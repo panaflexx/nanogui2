@@ -2471,6 +2471,56 @@ static void test_image_color(const FontLibrary &fonts) {
 #endif
 }
 
+static void test_groups(const FontLibrary &fonts) {
+    PageDoc doc = new_publication(PageSetup(), 2);
+    auto box = [&](size_t page, float x) {
+        Item it;
+        it.w = 20; it.h = 20;
+        it.xf = Transform::translate(x, 0);
+        it.content = Shape();
+        return doc.add_item(page, it);
+    };
+    const ItemId a = box(0, 0), b = box(0, 30), c = box(0, 60), d = box(0, 90), other = box(1, 0);
+    CHECK(doc.group_members(a) == std::vector<ItemId>{a}, "an ungrouped item is its own group");
+    CHECK(doc.group_items({a}) == 0, "one item can't be grouped");
+    CHECK(doc.group_items({a, other}) == 0, "items on two pages can't be grouped");
+
+    const uint32_t g = doc.group_items({a, c});
+    CHECK(g != 0, "two items group");
+    CHECK(doc.group_members(c) == (std::vector<ItemId>{a, c}), "members in stacking order");
+    /* a and c are pulled together where c (the topmost) was: b, a, c, d */
+    std::vector<ItemId> order;
+    for (const Item &it : doc.pages[0].items)
+        order.push_back(it.id);
+    CHECK(order == (std::vector<ItemId>{b, a, c, d}), "the group is adjacent in the stack");
+
+    const uint32_t g2 = doc.group_items({c, d});
+    CHECK(g2 != 0 && g2 != g && doc.group_members(a).size() == 3,
+          "grouping a member with another item takes in its whole group");
+
+    const std::string path = "/tmp/pagemade-groups.pagemade";
+    std::string err;
+    CHECK(save_document(doc, fonts, path, SaveOptions{false}, &err), "save groups: %s", err.c_str());
+    OpenResult back = open_document(path, fonts);
+    CHECK(back.ok && back.doc.group_members(d).size() == 3, "groups survive saving");
+    if (back.ok) {
+        const uint32_t g3 = back.doc.group_items({b, other});
+        CHECK(g3 == 0, "still one page per group after opening");
+        Item *ib = back.doc.find_item(b);
+        Item *ia = back.doc.find_item(a);
+        CHECK(ia && ib && back.doc.next_id > ia->group, "new ids come after saved groups");
+    }
+
+    doc.ungroup_items({a});
+    CHECK(doc.group_members(c).size() == 1 && doc.find_item(d)->group == 0,
+          "ungroup takes the whole group apart");
+
+    doc.group_items({a, b});
+    doc.remove_item(a);
+    doc.tidy_groups();
+    CHECK(doc.find_item(b)->group == 0, "a group left with one item ends");
+}
+
 static void test_images(const FontLibrary &fonts) {
     CHECK(std::fabs(image_print_points(300, 300) - 72.f) < 0.01f, "300 px at 300 ppi is 72 pt");
     CHECK(std::fabs(image_print_points(100, 0) - 100.f) < 0.01f, "unspecified resolution is 72 ppi");
@@ -3184,6 +3234,7 @@ int main(int argc, char **argv) {
     test_drawlist(fonts);
     test_docfile(fonts);
     test_images(fonts);
+    test_groups(fonts);
     test_image_color(fonts);
     test_background_worker();
     test_caps(fonts);

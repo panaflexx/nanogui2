@@ -11,6 +11,7 @@
 #include <GLFW/glfw3.h>
 
 #include <algorithm>
+#include <map>
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
@@ -169,8 +170,17 @@ void ComposerView::set_document(PageDoc doc) {
 void ComposerView::select(ItemId id) {
     m_sel.clear();
     if (id && m_doc.find_item(id))
-        m_sel.push_back(id);
+        m_sel = with_groups({id});
     selection_changed();
+}
+
+std::vector<ItemId> ComposerView::with_groups(const std::vector<ItemId> &ids) const {
+    std::vector<ItemId> out;
+    for (ItemId id : ids)
+        for (ItemId m : m_doc.group_members(id))
+            if (std::find(out.begin(), out.end(), m) == out.end())
+                out.push_back(m);
+    return out;
 }
 
 void ComposerView::select_frame(size_t story, size_t frame) {
@@ -731,8 +741,45 @@ bool ComposerView::hits_item(const Item &it, const Point &pt) const {
     return false;
 }
 
+std::map<uint32_t, Bounds> ComposerView::selected_groups(size_t page) const {
+    std::map<uint32_t, Bounds> out;
+    if (page >= m_doc.pages.size())
+        return out;
+    std::map<uint32_t, bool> whole;
+    for (const Item &it : m_doc.pages[page].items) {
+        if (!it.group)
+            continue;
+        const bool sel = is_selected(it.id);
+        auto w = whole.find(it.group);
+        whole[it.group] = (w == whole.end() ? true : w->second) && sel;
+        out[it.group].add(item_bounds(it));
+    }
+    for (const auto &w : whole)
+        if (!w.second)
+            out.erase(w.first);
+    return out;
+}
+
 ComposerView::Hit ComposerView::hit_test(const Point &pt, size_t page) const {
     const float px = 1.f / zoom();
+
+    /* A selected group resizes from the corners of its box */
+    {
+        const float hs = kHandlePx * px;
+        for (const auto &g : selected_groups(page)) {
+            const Bounds &b = g.second;
+            auto near = [&](float x, float y) {
+                return std::fabs(pt.x - x) <= hs && std::fabs(pt.y - y) <= hs;
+            };
+            Handle h = near(b.x0, b.y0) ? Handle::TopLeft : near(b.x1, b.y0) ? Handle::TopRight
+                     : near(b.x0, b.y1) ? Handle::BottomLeft : near(b.x1, b.y1) ? Handle::BottomRight
+                     : Handle::None;
+            if (h != Handle::None)
+                for (const Item &it : m_doc.pages[page].items)
+                    if (it.group == g.first)
+                        return {it.id, h, g.first};
+        }
+    }
 
     for (auto id = m_sel.rbegin(); id != m_sel.rend(); ++id) {
         const Item *it = m_doc.find_item(*id);
@@ -745,7 +792,9 @@ ComposerView::Hit ComposerView::hit_test(const Point &pt, size_t page) const {
             return std::fabs(l.x - x) <= hs && std::fabs(l.y - y) <= hs;
         };
         Hit hit{*id, Handle::None};
-        if (is_line(*it)) {
+        if (it->group) {
+            /* Its group's box has the corners */
+        } else if (is_line(*it)) {
             if (near(0, 0))            { hit.handle = Handle::TopLeft;     return hit; }
             if (near(it->w, it->h))    { hit.handle = Handle::BottomRight; return hit; }
         } else {
@@ -829,6 +878,7 @@ bool ComposerView::mouse_button_event(const Vector2i &p, int button, bool down, 
             for (const Item &it : items())
                 if (box.contains(item_bounds(it)) && !is_selected(it.id))
                     m_sel.push_back(it.id);
+            m_sel = with_groups(m_sel);  // a group comes whole
             m_marquee = false;
             selection_changed();
             if (screen())
@@ -922,6 +972,7 @@ bool ComposerView::mouse_button_event(const Vector2i &p, int button, bool down, 
     m_gesture_saved = false;             // a new drag, not yet snapshotted
     m_drag = Handle::None;
     m_drag_target = 0;
+    m_drag_group = 0;
 
     if (m_tool == Tool::Line || m_tool == Tool::Rect || m_tool == Tool::Ellipse ||
         m_tool == Tool::Polygon) {
@@ -949,7 +1000,7 @@ bool ComposerView::mouse_button_event(const Vector2i &p, int button, bool down, 
     }
     if (m_tool == Tool::Rotate) {
         if (hit.item && !is_selected(hit.item))
-            m_sel = {hit.item};
+            m_sel = with_groups({hit.item});
         else if (!hit.item)
             m_sel.clear();
         m_rotating = hit.item != 0;
@@ -961,18 +1012,24 @@ bool ComposerView::mouse_button_event(const Vector2i &p, int button, bool down, 
         m_marquee_add = shift;
         m_marquee_end = pt;
     } else if (hit.handle != Handle::Move) {
-        m_drag = hit.handle;             // a handle of a selected item
+        m_drag = hit.handle;             // a handle of a selected item (or group)
         m_drag_target = hit.item;
+        m_drag_group = hit.group;
     } else if (shift) {
-        if (is_selected(hit.item))
-            m_sel.erase(std::find(m_sel.begin(), m_sel.end(), hit.item));
-        else {
-            m_sel.push_back(hit.item);
+        /* Shift-click adds or takes away the item's whole group */
+        const std::vector<ItemId> members = m_doc.group_members(hit.item);
+        if (is_selected(hit.item)) {
+            for (ItemId m : members)
+                m_sel.erase(std::remove(m_sel.begin(), m_sel.end(), m), m_sel.end());
+        } else {
+            for (ItemId m : members)
+                if (!is_selected(m))
+                    m_sel.push_back(m);
             m_drag = Handle::Move;
         }
     } else {
         if (!is_selected(hit.item))
-            m_sel = {hit.item};
+            m_sel = with_groups({hit.item});
         m_drag = Handle::Move;
     }
 
@@ -1069,6 +1126,11 @@ bool ComposerView::mouse_drag_event(const Vector2i &p, const Vector2i &, int, in
         return true;                     // nor does moving
     }
 
+    if (m_drag_group) {
+        resize_group(d, modifiers);
+        return true;
+    }
+
     /* Resize one item in its own space: snap the dragged handle, move edges
      * of (0, 0)-(w, h), then fold the new origin into the transform. */
     auto orig = std::find_if(m_drag_items.begin(), m_drag_items.end(),
@@ -1124,6 +1186,61 @@ bool ComposerView::mouse_drag_event(const Vector2i &p, const Vector2i &, int, in
         recompose();
     selection_changed();
     return true;
+}
+
+/* The group's box, as it was at the press, goes from its fixed corner to
+ * the dragged one. Every member's origin moves with the box; its width and
+ * height scale by how much the box stretched along the item's own axes,
+ * so a turned item keeps its angle. Pictures scale with their frames and
+ * text reflows in its new frame (the type keeps its size). As with a
+ * picture, the box keeps its proportions unless Ctrl is held. */
+void ComposerView::resize_group(Point d, int modifiers) {
+    Bounds b;
+    for (const Item &o : m_drag_items)
+        if (o.group == m_drag_group)
+            b.add(item_bounds(o));
+    if (b.empty() || b.x1 - b.x0 <= 0.f || b.y1 - b.y0 <= 0.f)
+        return;
+    const bool left = m_drag == Handle::TopLeft || m_drag == Handle::BottomLeft;
+    const bool top = m_drag == Handle::TopLeft || m_drag == Handle::TopRight;
+    const Point c0{left ? b.x0 : b.x1, top ? b.y0 : b.y1};
+    const Point c1 = snap_point({c0.x + d.x, c0.y + d.y});
+    const float w0 = b.x1 - b.x0, h0 = b.y1 - b.y0;
+    float sx = (left ? b.x1 - std::min(c1.x, b.x1 - kMinBlock)
+                     : std::max(c1.x, b.x0 + kMinBlock) - b.x0) / w0;
+    float sy = (top ? b.y1 - std::min(c1.y, b.y1 - kMinBlock)
+                    : std::max(c1.y, b.y0 + kMinBlock) - b.y0) / h0;
+    if (!key_held(modifiers, GLFW_MOD_CONTROL, GLFW_KEY_LEFT_CONTROL, GLFW_KEY_RIGHT_CONTROL))
+        sx = sy = std::max(sx, sy);
+    /* The fixed corner stays put */
+    const float nx0 = left ? b.x1 - w0 * sx : b.x0;
+    const float ny0 = top ? b.y1 - h0 * sy : b.y0;
+    auto map = [&](Point p) { return Point{nx0 + (p.x - b.x0) * sx, ny0 + (p.y - b.y0) * sy}; };
+    auto stretch = [&](Point v) {
+        const float len = std::hypot(v.x, v.y);
+        return len > 0.f ? std::hypot(v.x * sx, v.y * sy) / len : 1.f;
+    };
+
+    bool text = false;
+    for (const Item &o : m_drag_items) {
+        if (o.group != m_drag_group)
+            continue;
+        Item *it = m_doc.find_item(o.id);
+        if (!it)
+            continue;
+        it->w = o.w * stretch(o.xf.apply_vector({1.f, 0.f}));
+        it->h = o.h * stretch(o.xf.apply_vector({0.f, 1.f}));
+        const Point origin = map(o.xf.apply({0.f, 0.f}));
+        it->xf = o.xf;
+        it->xf.e = origin.x;
+        it->xf.f = origin.y;
+        if (const PlacedImage *im = o.image())
+            it->content = scale_placement(*im, o.w, o.h, it->w, it->h);
+        text = text || it->is_text();
+    }
+    if (text)
+        recompose();
+    selection_changed();
 }
 
 bool ComposerView::mouse_motion_event(const Vector2i &p, const Vector2i &rel, int button,
@@ -1913,9 +2030,61 @@ void ComposerView::delete_selection_items() {
     push_undo();
     for (ItemId id : m_sel)
         m_doc.remove_item(id);
+    m_doc.tidy_groups();                 // a group left with one item ends
     m_sel.clear();
     recompose();
     selection_changed();
+    if (screen())
+        screen()->redraw();
+}
+
+bool ComposerView::can_group() const {
+    if (m_sel.size() < 2)
+        return false;
+    size_t page = SIZE_MAX;
+    uint32_t group = 0;
+    bool one_group = true;
+    for (ItemId id : m_sel) {
+        size_t pg = 0;
+        const Item *it = m_doc.find_item(id, &pg);
+        if (!it)
+            return false;
+        if (page == SIZE_MAX) {
+            page = pg;
+            group = it->group;
+        } else if (pg != page) {
+            return false;
+        }
+        one_group = one_group && it->group != 0 && it->group == group;
+    }
+    return !one_group;
+}
+
+bool ComposerView::can_ungroup() const {
+    for (ItemId id : m_sel)
+        if (const Item *it = m_doc.find_item(id))
+            if (it->group)
+                return true;
+    return false;
+}
+
+void ComposerView::group_selection() {
+    if (!can_group())
+        return;
+    push_undo();
+    m_doc.group_items(m_sel);
+    m_sel = with_groups(m_sel);
+    selection_changed();
+    if (screen())
+        screen()->redraw();
+}
+
+void ComposerView::ungroup_selection() {
+    if (!can_ungroup())
+        return;
+    push_undo();
+    m_doc.ungroup_items(m_sel);
+    selection_changed();                 // the items stay selected, now apart
     if (screen())
         screen()->redraw();
 }
@@ -2582,13 +2751,19 @@ void ComposerView::adopt_moved_items() {
     std::vector<ItemId> ids;
     for (const Item &o : m_drag_items)
         ids.push_back(o.id);
+    /* A group changes page as one, by where its middle landed */
+    std::map<uint32_t, Bounds> group_bounds;
+    for (ItemId id : ids)
+        if (const Item *it = m_doc.find_item(id))
+            if (it->group)
+                group_bounds[it->group].add(item_bounds(*it));
     bool moved = false;
     for (ItemId id : ids) {
         size_t src = 0;
         Item *it = m_doc.find_item(id, &src);
         if (!it)
             continue;
-        const Bounds b = item_bounds(*it);
+        const Bounds b = it->group ? group_bounds[it->group] : item_bounds(*it);
         if (b.empty())
             continue;
         float sx = 0.f, sy = 0.f;
@@ -2706,7 +2881,7 @@ void ComposerView::draw_chrome(NVGcontext *ctx, float px, size_t page,
                 tab(it.w * 0.5f, it.h, last ? (overset ? Overset : Empty) : Plus);
         }
 
-        if (selected) {
+        if (selected && !it.group) {   // a group's corners are on its box
             const float hs = kHandlePx * lpx;
             nvgBeginPath(ctx);
             std::vector<Point> corners;
@@ -2720,6 +2895,25 @@ void ComposerView::draw_chrome(NVGcontext *ctx, float px, size_t page,
             nvgFill(ctx);
         }
         nvgRestore(ctx);
+    }
+
+    /* A selected group: its box, with the corner handles that resize it */
+    if (!only) {
+        for (const auto &g : selected_groups(page)) {
+            const Bounds &b = g.second;
+            nvgBeginPath(ctx);
+            nvgRect(ctx, b.x0, b.y0, b.x1 - b.x0, b.y1 - b.y0);
+            nvgStrokeWidth(ctx, px);
+            nvgStrokeColor(ctx, nvgRGBA(60, 120, 255, 170));
+            nvgStroke(ctx);
+            const float hs = kHandlePx * px;
+            nvgBeginPath(ctx);
+            for (const Point &c : {Point{b.x0, b.y0}, Point{b.x1, b.y0},
+                                   Point{b.x0, b.y1}, Point{b.x1, b.y1}})
+                nvgRect(ctx, c.x - hs * 0.5f, c.y - hs * 0.5f, hs, hs);
+            nvgFillColor(ctx, nvgRGB(0, 0, 0));
+            nvgFill(ctx);
+        }
     }
 
     if (!only && m_marquee && page == m_page) {
@@ -2771,6 +2965,24 @@ void ComposerView::place_frame(uint32_t asset, const ImageMetadata &meta,
     it.h = ph;
     it.xf = at ? Transform::translate(at->x, at->y)
                : Transform::translate(left, m_doc.setup.margin_top);
+    m_last_column = false;
+    if (m_fit_columns && pw > 0.f) {
+        /* The column under the drop, as wide as it, and kept on the page
+         * with its caption: moved up rather than past the bottom margin */
+        const PageSetup &ps = m_doc.setup;
+        float col_x, col_w, x;
+        column_at(page, at ? &at->x : nullptr, col_x, col_w);
+        fit_column(page, col_x, col_w, ph / pw, x, pw, ph);
+        const float top = ps.margin_top;
+        const float lowest = ps.height - ps.margin_bottom - ph - caption_depth();
+        const float y = std::max(top, std::min(at ? at->y : top, lowest));
+        it.w = pw;
+        it.h = ph;
+        it.xf = Transform::translate(x, y);
+        m_last_column = true;
+        m_last_col_x = col_x;
+        m_last_col_w = col_w;
+    }
     PlacedImage im;
     im.asset = asset;
     im.x = 0;
@@ -2779,9 +2991,16 @@ void ComposerView::place_frame(uint32_t asset, const ImageMetadata &meta,
     im.h = ph;
     it.content = im;
     const ItemId id = m_doc.add_item(page, it);
+    m_last_caption = 0;
+    if (const Item *placed = m_doc.find_item(id))
+        m_last_caption = add_caption(page, *placed);
+    if (m_last_caption) {
+        m_doc.group_items({id, m_last_caption});   // they move as one
+        recompose();
+    }
     if (page != m_page)
         show_page(page);
-    m_sel = {id};
+    m_sel = with_groups({id});
     m_edit_story = 0;
     if (m_tool != Tool::Pointer)
         set_tool(Tool::Pointer);
@@ -2789,6 +3008,94 @@ void ComposerView::place_frame(uint32_t asset, const ImageMetadata &meta,
         selection_changed();
     if (screen())
         screen()->redraw();
+}
+
+/* The space between a picture and its caption, points. */
+static constexpr float kCaptionGap = 4.f;
+
+float ComposerView::caption_depth() const {
+    if (!m_caption_pictures)
+        return 0.f;
+    float lead = 12.f;
+    if (const StyleDef *def = m_doc.find_style("Caption"))
+        lead = def->type.leading > 0.f ? def->type.leading : def->type.size * 1.2f;
+    return kCaptionGap + std::ceil(lead * 2.f + 2.f);
+}
+
+void ComposerView::column_at(size_t page, const float *x, float &col_x, float &col_w) const {
+    const PageSetup &s = m_doc.setup;
+    float left = 0.f, right = 0.f;
+    page_side_margins(s, page, left, right);
+    const int n = std::max(1, s.columns);
+    const float live = std::max(1.f, s.width - left - right);
+    const float gutter = n > 1 ? std::min(s.gutter, live / (float) (n - 1) * 0.5f) : 0.f;
+    col_w = std::max(1.f, (live - gutter * (float) (n - 1)) / (float) n);
+    int i = 0;
+    if (x) {
+        /* The column whose middle is nearest: a gutter or margin drop
+         * goes to the column beside it */
+        float best = INFINITY;
+        for (int k = 0; k < n; ++k) {
+            const float mid = left + (float) k * (col_w + gutter) + col_w * 0.5f;
+            if (std::fabs(*x - mid) < best) {
+                best = std::fabs(*x - mid);
+                i = k;
+            }
+        }
+    }
+    col_x = left + (float) i * (col_w + gutter);
+}
+
+void ComposerView::fit_column(size_t, float col_x, float col_w, float aspect,
+                              float &x, float &w, float &h) const {
+    const PageSetup &s = m_doc.setup;
+    const float live_h = std::max(36.f, s.height - s.margin_top - s.margin_bottom - caption_depth());
+    w = col_w;
+    h = col_w * aspect;
+    if (h > live_h) {
+        h = live_h;
+        w = aspect > 0.f ? h / aspect : col_w;
+    }
+    x = col_x + (col_w - w) * 0.5f;
+}
+
+ItemId ComposerView::add_caption(size_t page, const Item &picture) {
+    const PlacedImage *im = picture.image();
+    if (!m_caption_pictures || !im || page >= m_doc.pages.size())
+        return 0;
+    /* The file name without its extension: something to type over. */
+    std::string text = "Caption";
+    if (const ImageAsset *a = m_doc.find_image(im->asset)) {
+        text = a->name;
+        const size_t dot = text.find_last_of('.');
+        if (dot != std::string::npos && dot > 0)
+            text.erase(dot);
+        if (text.empty())
+            text = "Caption";
+    }
+    Paragraph para;
+    para.style.name = "Caption";
+    para.runs.push_back(Run{m_default_type, text});
+    float lead = 12.f;
+    if (const StyleDef *def = m_doc.find_style("Caption")) {
+        pagemade::apply_style(para, *def, m_doc.char_styles);
+        lead = def->type.leading > 0.f ? def->type.leading : def->type.size * 1.2f;
+    }
+    Story story;
+    story.paragraphs.push_back(std::move(para));
+    const StoryId sid = m_doc.add_story(std::move(story));
+    /* Two lines deep, the picture's width, just under it (in the
+     * picture's own space, so a turned picture's caption turns with it) */
+    return m_doc.add_text_frame(page, sid, picture.w, std::ceil(lead * 2.f + 2.f),
+                                picture.xf * Transform::translate(0.f, picture.h + kCaptionGap));
+}
+
+void ComposerView::fit_caption(ItemId caption, const Item &picture) {
+    Item *c = caption ? m_doc.find_item(caption) : nullptr;
+    if (!c || !c->is_text())
+        return;
+    c->w = picture.w;
+    c->xf = picture.xf * Transform::translate(0.f, picture.h + kCaptionGap);
 }
 
 namespace {
@@ -2874,6 +3181,10 @@ void ComposerView::place_image_file(const std::string &path, size_t page, const 
     m_doc.add_image(std::move(asset));
     place_frame(id, guess, page, at);
     Probing probing;
+    probing.caption = m_last_caption;
+    probing.column = m_last_column;
+    probing.col_x = m_last_col_x;
+    probing.col_w = m_last_col_w;
     if (!m_sel.empty())
         if (const Item *it = m_doc.find_item(m_sel.front())) {
             probing.item = it->id;
@@ -2933,9 +3244,18 @@ void ComposerView::finish_probe(uint32_t id, const ImageImport &imported,
         std::fabs(it->w - probing.w) < 1e-3f && std::fabs(it->h - probing.h) < 1e-3f) {
         float w, h;
         frame_size(imported.meta, page, w, h);
+        if (probing.column && w > 0.f) {
+            /* Still the column's width, at the picture's real proportions */
+            float x;
+            fit_column(page, probing.col_x, probing.col_w, h / w, x, w, h);
+            it->xf.e = x;
+        }
         it->content = scale_placement(*it->image(), it->w, it->h, w, h);
         it->w = w;
         it->h = h;
+        fit_caption(probing.caption, *it);
+        if (probing.caption)
+            recompose();
         selection_changed();
     }
     m_load_want.erase(id);               // ask again at the real size

@@ -12,12 +12,13 @@
  * asks for the page size, facing pages, margins and columns. The toolbar holds the toolbox
  * (pointer, crop, rotate, text, line, rectangle, ellipse, polygon), snap to
  * guides, undo/redo (Ctrl+Z / Ctrl+Shift+Z), a zoom dropdown, the ¶ button
- * for the Paragraph panel (style, alignment, spacing, indents), and K/L/B/V
- * toggles for kerning, ligatures, baselines and loose/tight lines. Below it,
+ * for the Paragraph panel (style, alignment, spacing, indents), T for the
+ * Type panel, A for the Character panel, and K/L/B/V toggles for kerning,
+ * ligatures, baselines and loose/tight lines. Below it,
  * the control palette
  * switches between the object view (position, size, angle, fill and
  * stroke; with nothing selected, the defaults for new shapes) and the
- * type view (font, size, style, leading and baseline). Type on that palette,
+ * type view (font, size, style, leading and baseline). T on the toolbar,
  * and Element > Type Specs…, open the Type panel: weight, style, caps and
  * the other character attributes. Apply writes them onto the selection.
  * PageMaker's zoom shortcuts: Ctrl/Cmd + 0 fit, 5 50%, 7 75%, 1 actual
@@ -32,8 +33,8 @@
  *            [--key [mod+]name ...] [--open file.pagemade] [--place picture.png]
  *            [--save file.pagemade ...] [--save-embedded file.pagemade ...]
  *            [--dialog save|changes|new] [--blank-pages n] [--page-view one|spread|stack]
- *            [--print-title]
- *            [--ui-click x,y ...] [--ui-scroll x,y:dy ...]
+ *            [--print-title] [--caption-pictures] [--fit-columns]
+ *            [--ui-click x,y ...] [--ui-drag x0,y0:x1,y1 ...] [--ui-scroll x,y:dy ...]
  *
  * --at is a page point (points from the page's top-left) to center on.
  * --select picks a text block by story and thread index ("1,0").
@@ -42,7 +43,7 @@
  * --key (enter, backspace, left, ..., a-z; mods shift/ctrl/alt) exercise
  * the text tool the same way. --tool picks a tool, and --fill / --stroke
  * set the selection's paint as the control palette would (style: solid,
- * dashed, dotted, dashdot). --ui-click and --ui-scroll act on the window
+ * dashed, dotted, dashdot). --ui-click, --ui-drag and --ui-scroll act on the window
  * itself, in window pixels (the palettes, menus, dialogs). All of these run
  * in the order given.
  */
@@ -74,6 +75,7 @@
 #include <array>
 #include <cmath>
 #include <filesystem>
+#include <map>
 #include <cctype>
 #include <cstdio>
 #include <cstdlib>
@@ -91,6 +93,29 @@
 
 using namespace nanogui;
 using namespace pagemade;
+
+/* A button whose caption is set in bold italic. Button always draws its
+ * caption in sans-bold, so this one draws its own. */
+class ItalicButton : public Button {
+public:
+    ItalicButton(Widget *parent, const std::string &caption)
+        : Button(parent, ""), m_text(caption) {}
+
+    void draw(NVGcontext *ctx) override {
+        Button::draw(ctx);
+        const int size = m_font_size == -1 ? m_theme->m_button_font_size : m_font_size;
+        nvgFontSize(ctx, (float) size);
+        nvgFontFace(ctx, "sans-bolditalic");
+        nvgTextAlign(ctx, NVG_ALIGN_CENTER | NVG_ALIGN_MIDDLE);
+        nvgFillColor(ctx, m_enabled ? m_theme->m_text_color : m_theme->m_disabled_text_color);
+        const float down = m_pushed ? 1.f : 0.f;
+        nvgText(ctx, m_pos.x() + m_size.x() * 0.5f, m_pos.y() + m_size.y() * 0.5f + down,
+                m_text.c_str(), nullptr);
+    }
+
+private:
+    std::string m_text;
+};
 
 /* PageMaker's page icons: a row of little pages at the bottom of the
  * window. Click turns to that page; drag rearranges them. A hidden page
@@ -404,6 +429,13 @@ public:
          * until they clip. Fixed, it fits the panel. */
         para_popup->set_resizable(false);
 
+        /* T opens the Type Specifications dialog (also Element > Type Specs…). */
+        m_specs = new ItalicButton(toolbar, "T");
+        m_specs->set_font_size(18);
+        m_specs->set_fixed_size(Vector2i(32, 28));
+        m_specs->set_tooltip("Type specifications (Ctrl+T)");
+        m_specs->set_callback([this] { type_specs(); });
+
         /* The Character panel: character styles, text color and tint. */
         m_char_btn = new PopupButton(toolbar, "A");
         m_char_btn->set_side(Popup::Bottom);
@@ -469,7 +501,7 @@ public:
         /* The pages, with the rulers along the top and left (View > Rulers) */
         m_rulers = new RulerFrame(window);
         m_rulers->set_height_flex(SizeMode::Expanding);
-        m_rulers->on_layout = [this] { place_docked_assets(); };   // follows window resizes
+        m_rulers->on_layout = [this] { place_docked(); };   // follows window resizes
         root_flex->set_flex_item(m_rulers, FlexLayout::FlexItem(1.0f));
         m_scroll = new ZoomScrollPanel(m_rulers, ZoomScrollPanel::ScrollTypes::Both);
         m_scroll->set_zoom_range(0.1, 16.0);
@@ -848,6 +880,11 @@ public:
                              {SYSTEM_COMMAND_MOD | GLFW_MOD_SHIFT, GLFW_KEY_LEFT_BRACKET}},
                             [this] { m_view->arrange(ComposerView::Stack::Back); });
         new Separator(element->popup());
+        m_group = add_cmd(element, "Group", {{SYSTEM_COMMAND_MOD, GLFW_KEY_G}},
+                          [this] { m_view->group_selection(); });
+        m_ungroup = add_cmd(element, "Ungroup", {{SYSTEM_COMMAND_MOD | GLFW_MOD_SHIFT, GLFW_KEY_G}},
+                            [this] { m_view->ungroup_selection(); });
+        new Separator(element->popup());
         add_cmd(element, "Type Specs...", {{SYSTEM_COMMAND_MOD, GLFW_KEY_T}},
                 [this] { type_specs(); });
         add_cmd(element, "Paragraph...", {{SYSTEM_COMMAND_MOD, GLFW_KEY_M}},
@@ -859,6 +896,14 @@ public:
                 });
         new Separator(element->popup());
         add_cmd(element, "Image Assets...", {}, [this] { show_image_assets(); });
+        m_caption_item = add_cmd(element, "Caption Placed Pictures", {}, [this] {
+            m_view->set_caption_pictures(!m_view->caption_pictures());
+            m_caption_item->set_icon(m_view->caption_pictures() ? FA_CHECK : 0);
+        });
+        m_columns_item = add_cmd(element, "Fit Placed Pictures to Columns", {}, [this] {
+            m_view->set_fit_to_columns(!m_view->fit_to_columns());
+            m_columns_item->set_icon(m_view->fit_to_columns() ? FA_CHECK : 0);
+        });
         add_cmd(element, "Remove Unused", {}, [this] { m_view->remove_unused_images(); });
     }
 
@@ -1128,10 +1173,6 @@ public:
             return true;
         });
 
-        m_specs = new Button(type, "Type");
-        m_specs->set_fixed_size(Vector2i(64, 26));
-        m_specs->set_tooltip("Type specifications");
-        m_specs->set_callback([this] { type_specs(); });
     }
 
     void pick_font(const std::string &fam) {
@@ -1273,74 +1314,99 @@ public:
             m_assets->set_close_callback([this] {
                 if (m_assets) {
                     m_assets->set_visible(false);
-                    m_rulers->set_side_insets(0, 0);   // a docked one gives its room back
+                    apply_docks();               // a docked one gives its room back
                     redraw();
                 }
             });
-            m_assets->on_dock = [this](ImageAssetsPanel::Dock side) { dock_assets(side); };
-            m_assets->on_dock_resize = [this] { apply_assets_dock(); };
+            m_assets->on_dock = [this](DockableWindow::Dock side) { dock_window(m_assets, side); };
+            m_assets->on_dock_resize = [this] { apply_docks(); };
             m_assets->center();
         } else {
             m_assets->set_visible(true);
             move_window_to_front(m_assets);
-            apply_assets_dock();         // reopened docked: take the room again
+            apply_docks();               // reopened docked: take the room again
         }
         m_assets->refresh();             // catch up on changes made while hidden
         m_assets->request_focus();
     }
 
-    /* ---- Docking the Image Assets window beside the pages ----------- *
-     * Docked, the window fills a strip the full height of the page area on
-     * one side; the rulers and pages give it that room. Undocked, it goes
-     * back to the size it had floating, where it is. */
-    void dock_assets(ImageAssetsPanel::Dock side) {
-        using Dock = ImageAssetsPanel::Dock;
-        if (!m_assets)
+    /* ---- Docking tool windows beside the pages ---------------------- *
+     * A docked window fills a strip the full height of the page area on
+     * one side; the rulers and pages give it that room. Two on one side sit
+     * next to each other, Image Assets nearest the edge. Undocked, a window
+     * goes back to the size it had floating, where it is. */
+    std::vector<DockableWindow *> docked_windows() const {
+        std::vector<DockableWindow *> out;
+        for (DockableWindow *w : {(DockableWindow *) m_assets, (DockableWindow *) m_type_panel})
+            if (w && w->visible() && w->docked() != DockableWindow::Dock::None)
+                out.push_back(w);
+        return out;
+    }
+
+    void dock_window(DockableWindow *w, DockableWindow::Dock side) {
+        using Dock = DockableWindow::Dock;
+        if (!w)
             return;
-        const Dock was = m_assets->docked();
+        const Dock was = w->docked();
         if (was == Dock::None && side != Dock::None)
-            m_assets_float_size = m_assets->size();
-        m_assets->set_docked(side);
-        if (side != Dock::None) {
-            apply_assets_dock();
-            return;
+            m_float_size[w] = w->size();
+        w->set_docked(side);
+        if (side == Dock::None && was != Dock::None) {
+            auto it = m_float_size.find(w);
+            if (it != m_float_size.end() && it->second.x() > 0) {
+                w->set_size(it->second);
+                if (NVGcontext *ctx = nvg_context())
+                    w->perform_layout(ctx);
+            }
         }
-        m_rulers->set_side_insets(0, 0);
-        if (was != Dock::None && m_assets_float_size.x() > 0) {
-            m_assets->set_size(m_assets_float_size);
-            if (NVGcontext *ctx = nvg_context())
-                m_assets->perform_layout(ctx);
-        }
+        apply_docks();
         redraw();
     }
 
-    /* The room for a docked window (its width, within reason), then the
-     * window in it */
-    void apply_assets_dock() {
-        using Dock = ImageAssetsPanel::Dock;
-        if (!m_assets || !m_assets->visible() || m_assets->docked() == Dock::None)
-            return;
-        m_assets_dock_w = std::clamp(m_assets->width(), 200, std::max(200, m_rulers->width() / 2));
-        const bool left = m_assets->docked() == Dock::Left;
-        m_rulers->set_side_insets(left ? m_assets_dock_w : 0, left ? 0 : m_assets_dock_w);
-        place_docked_assets();
+    /* The room for each docked window (its width, within reason), then
+     * the windows in it */
+    void apply_docks() {
+        using Dock = DockableWindow::Dock;
+        const int cap = m_rulers->width() / 2;
+        int left = 0, right = 0;
+        m_dock_w.clear();
+        for (DockableWindow *w : docked_windows()) {
+            const int floor = std::max(150, w->min_size().x());
+            const int dw = std::clamp(w->width(), floor, std::max(floor, cap));
+            m_dock_w[w] = dw;
+            (w->docked() == Dock::Left ? left : right) += dw;
+        }
+        m_rulers->set_side_insets(left, right);
+        place_docked();
     }
 
-    void place_docked_assets() {
-        using Dock = ImageAssetsPanel::Dock;
-        if (!m_assets || !m_assets->visible() || m_assets->docked() == Dock::None)
-            return;
+    void place_docked() {
+        using Dock = DockableWindow::Dock;
         const Vector2i a = m_rulers->absolute_position(), s = m_rulers->size();
-        const bool left = m_assets->docked() == Dock::Left;
-        const Vector2i pos = left ? a : Vector2i(a.x() + s.x() - m_assets_dock_w, a.y());
-        const Vector2i size(m_assets_dock_w, s.y());
-        if (pos == m_assets->position() && size == m_assets->size())
-            return;
-        m_assets->set_position(pos);
-        m_assets->set_size(size);
-        if (NVGcontext *ctx = nvg_context())
-            m_assets->perform_layout(ctx);
-        redraw();
+        int left = 0, right = 0;
+        bool moved = false;
+        for (DockableWindow *w : docked_windows()) {
+            auto it = m_dock_w.find(w);
+            const int dw = it != m_dock_w.end() ? it->second : w->width();
+            Vector2i pos;
+            if (w->docked() == Dock::Left) {
+                pos = Vector2i(a.x() + left, a.y());
+                left += dw;
+            } else {
+                right += dw;
+                pos = Vector2i(a.x() + s.x() - right, a.y());
+            }
+            const Vector2i size(dw, s.y());
+            if (pos == w->position() && size == w->size())
+                continue;
+            w->set_position(pos);
+            w->set_size(size);
+            if (NVGcontext *ctx = nvg_context())
+                w->perform_layout(ctx);
+            moved = true;
+        }
+        if (moved)
+            redraw();
     }
 
     void type_specs() {
@@ -1352,15 +1418,44 @@ public:
                                               [this](const CharStyle &before, const CharStyle &after) {
                 apply_type_specs(before, after);
             });
-            m_type_panel->set_close_callback([this] { m_type_panel = nullptr; });
+            m_type_panel->on_dock = [this](DockableWindow::Dock side) {
+                dock_window(m_type_panel, side);
+            };
+            m_type_panel->on_dock_resize = [this] { apply_docks(); };
+            /* The panel is disposed when closed. Its dock side and width
+             * are kept, so it reopens where it was. */
+            m_type_panel->set_close_callback([this] {
+                if (!m_type_panel)
+                    return;
+                m_type_dock = m_type_panel->docked();
+                m_type_dock_w = m_type_panel->width();
+                auto it = m_float_size.find(m_type_panel);
+                m_type_float_size = it != m_float_size.end() ? it->second : m_type_panel->size();
+                m_float_size.erase(m_type_panel);
+                m_dock_w.erase(m_type_panel);
+                m_type_panel = nullptr;
+                apply_docks();
+                redraw();
+            });
         } else {
             move_window_to_front(m_type_panel);
         }
         m_type_panel->load(style_from(t), type_is_mixed(t),
                            document_font_families(m_view->document()));
         m_type_panel->set_apply_enabled(true);
-        if (m_type_panel->size() == Vector2i(0, 0))
+        if (m_type_panel->size() == Vector2i(0, 0)) {
+            if (m_type_float_size.x() > 0) {
+                m_type_panel->set_size(m_type_float_size);
+                m_type_panel->relayout();
+            }
             m_type_panel->center();
+            if (m_type_dock != DockableWindow::Dock::None) {
+                m_float_size[m_type_panel] = m_type_panel->size();
+                m_type_panel->set_size(Vector2i(m_type_dock_w, m_type_panel->height()));
+                m_type_panel->set_docked(m_type_dock);
+                apply_docks();
+            }
+        }
         m_type_panel->request_focus();
     }
 
@@ -1663,6 +1758,8 @@ public:
             m_forward->set_enabled(can);
             m_backward->set_enabled(can);
             m_to_back->set_enabled(can);
+            m_group->set_enabled(m_view->can_group());
+            m_ungroup->set_enabled(m_view->can_ungroup());
         }
         sync_zoom_menu();
         m_undo_btn->set_enabled(m_view->can_undo());
@@ -1913,18 +2010,25 @@ private:
     ParagraphPanel  *m_para_panel = nullptr;
     PopupButton     *m_char_btn = nullptr;
     MenuItem        *m_smart_quotes = nullptr;
+    MenuItem        *m_caption_item = nullptr, *m_columns_item = nullptr;
     CharacterPanel  *m_char_panel = nullptr;
     Dropdown        *m_font = nullptr, *m_face = nullptr;
     Button          *m_specs = nullptr;
     TypeSpecsPanel  *m_type_panel = nullptr;
     ImageAssetsPanel *m_assets = nullptr;
-    Vector2i         m_assets_float_size{0, 0};   // its size before it docked
-    int              m_assets_dock_w = 0;
+    /* Docked tool windows: the size each had floating, and the width it
+     * has docked. The Type panel's dock is kept across closing it. */
+    std::map<DockableWindow *, Vector2i> m_float_size;
+    std::map<DockableWindow *, int> m_dock_w;
+    DockableWindow::Dock m_type_dock = DockableWindow::Dock::None;
+    int              m_type_dock_w = 0;
+    Vector2i         m_type_float_size{0, 0};
     FloatSpin       *m_size = nullptr, *m_leading = nullptr, *m_baseline = nullptr;
     FloatSpin       *m_spacing = nullptr;
     MenuItem        *m_remove_page = nullptr, *m_move_earlier = nullptr, *m_move_later = nullptr;
     MenuItem        *m_hide_page = nullptr;
     MenuItem        *m_to_front = nullptr, *m_forward = nullptr, *m_backward = nullptr, *m_to_back = nullptr;
+    MenuItem        *m_group = nullptr, *m_ungroup = nullptr;
     Label           *m_status = nullptr;
     std::string     m_note;
     std::string     m_doc_path;          // empty: Untitled
@@ -1940,7 +2044,7 @@ static bool parse_pair(const char *s, float &a, float &b) {
 /* A headless input action, replayed through Screen's GLFW callbacks. */
 struct Action {
     enum Kind { Drag, Click, Type, Key, Tool, Fill, Stroke, Save, SaveEmbedded,
-                UiClick, UiScroll } kind;
+                UiClick, UiDrag, UiScroll } kind;
     std::array<float, 4> d{};
     std::string text;
     int key = 0, mods = 0;
@@ -1990,6 +2094,7 @@ int main(int argc, char **argv) {
     double zoom = 0;
     float at_x = -1, at_y = -1, sel_a = -1, sel_b = -1;
     bool baselines = false, loose = false, no_kern = false, no_snap = false;
+    bool caption_pictures = false, fit_columns = false;
     int blank_pages = 0;
     std::string page_view;
     std::vector<Action> actions;
@@ -2025,6 +2130,12 @@ int main(int argc, char **argv) {
             actions.push_back(act);
             ++i;
         }
+        else if (a == "--ui-drag" && i + 1 < argc &&
+                 std::sscanf(argv[i + 1], "%f,%f:%f,%f", &act.d[0], &act.d[1], &act.d[2], &act.d[3]) == 4) {
+            act.kind = Action::UiDrag;
+            actions.push_back(act);
+            ++i;
+        }
         else if (a == "--ui-scroll" && i + 1 < argc &&
                  std::sscanf(argv[i + 1], "%f,%f:%f", &act.d[0], &act.d[1], &act.d[2]) == 3) {
             act.kind = Action::UiScroll;
@@ -2053,6 +2164,8 @@ int main(int argc, char **argv) {
         else if (a == "--loose") loose = true;
         else if (a == "--no-kerning") no_kern = true;
         else if (a == "--no-snap") no_snap = true;
+        else if (a == "--caption-pictures") caption_pictures = true;
+        else if (a == "--fit-columns") fit_columns = true;
     }
 
     nanogui::init();
@@ -2063,6 +2176,10 @@ int main(int argc, char **argv) {
         for (int k = 0; k < 3; ++k) { app->perform_layout(); app->draw_all(); }
         if (!open_path.empty() && !app->open_path(open_path))
             std::printf("open FAILED %s\n", open_path.c_str());
+        if (caption_pictures)
+            app->view()->set_caption_pictures(true);
+        if (fit_columns)
+            app->view()->set_fit_to_columns(true);
         if (!place_path.empty()) {
             std::string error;
             if (app->view()->place_image_file(place_path, &error))
@@ -2110,6 +2227,19 @@ int main(int argc, char **argv) {
                 app->mouse_button_callback_event(GLFW_MOUSE_BUTTON_1, GLFW_PRESS, 0);
                 app->mouse_button_callback_event(GLFW_MOUSE_BUTTON_1, GLFW_RELEASE, 0);
                 break;
+            case Action::UiDrag: {
+                /* Press, move in steps (a window resize follows each), release */
+                app->cursor_pos_callback_event(act.d[0], act.d[1]);
+                app->mouse_button_callback_event(GLFW_MOUSE_BUTTON_1, GLFW_PRESS, 0);
+                const int steps = 10;
+                for (int k = 1; k <= steps; ++k) {
+                    const double t = (double) k / steps;
+                    app->cursor_pos_callback_event(act.d[0] + (act.d[2] - act.d[0]) * t,
+                                                   act.d[1] + (act.d[3] - act.d[1]) * t);
+                }
+                app->mouse_button_callback_event(GLFW_MOUSE_BUTTON_1, GLFW_RELEASE, 0);
+                break;
+            }
             case Action::UiScroll:
                 app->cursor_pos_callback_event(act.d[0], act.d[1]);
                 app->scroll_callback_event(0, act.d[2]);

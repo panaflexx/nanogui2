@@ -121,6 +121,18 @@ public:
     bool smart_quotes() const { return m_smart_quotes; }
     void set_smart_quotes(bool on) { m_smart_quotes = on; }
 
+    /* Element > Caption Placed Pictures: a placed picture (dropped, or
+     * File > Place) gets a text block below it in the Caption style,
+     * holding the file name. Part of the placement's undo step. */
+    bool caption_pictures() const { return m_caption_pictures; }
+    void set_caption_pictures(bool on) { m_caption_pictures = on; }
+
+    /* Element > Fit Placed Pictures to Columns: a placed picture takes the
+     * width of the column it was dropped in (the first column for File >
+     * Place), keeping its proportions; its caption takes the same width. */
+    bool fit_to_columns() const { return m_fit_columns; }
+    void set_fit_to_columns(bool on) { m_fit_columns = on; }
+
     /* Picture bytes live outside the document (undo snapshots stay small).
      * The view does not own the store. */
     void set_image_store(pagemade::ImageStore *images);
@@ -205,6 +217,14 @@ public:
     /* ---- Arrange ---------------------------------------------------- */
     enum class Stack { Forward, Backward, Front, Back };
     void arrange(Stack how);
+
+    /* ---- Groups (Element > Group / Ungroup) ------------------------- */
+    /* Two or more items on one page, not already all one group. */
+    bool can_group() const;
+    /* Some selected item is grouped. */
+    bool can_ungroup() const;
+    void group_selection();
+    void ungroup_selection();
 
     /* ---- Control palette ------------------------------------------- */
     /* X/Y are the item's origin (its box's top-left corner, turned with
@@ -343,7 +363,12 @@ private:
     struct Hit {
         pagemade::ItemId item = 0;
         Handle handle = Handle::None;
+        uint32_t group = 0;              // a corner of this selected group's box
     };
+    /* Page bounds of each group whose members are all selected, on `page`. */
+    std::map<uint32_t, pagemade::Bounds> selected_groups(size_t page) const;
+    /* Scale a group's members with its box, a corner dragged by `d`. */
+    void resize_group(pagemade::Point d, int modifiers);
 
     /* Event points arrive rounded to whole points and, during drags, without
      * the panel's zoom applied. Both go through this instead, from the
@@ -369,6 +394,8 @@ private:
     }
     void page_changed();               // clear the selection and tell the shell
     bool is_selected(pagemade::ItemId id) const;
+    /* `ids` and everything grouped with them, without repeats. */
+    std::vector<pagemade::ItemId> with_groups(const std::vector<pagemade::ItemId> &ids) const;
     void selection_changed();
     pagemade::Bounds selection_bounds() const;
     /* The composition of the story threading text frame `id`, and the
@@ -451,6 +478,22 @@ private:
      * top-left at `at` on `page`. */
     void place_frame(uint32_t asset, const pagemade::ImageMetadata &meta,
                      size_t page, const pagemade::Point *at = nullptr);
+    /* The caption block under `picture` (on `page`), or 0 when captions
+     * are off. Its story is one Caption paragraph of the picture's name. */
+    pagemade::ItemId add_caption(size_t page, const pagemade::Item &picture);
+    /* The depth a new caption takes below its picture (gap included), or 0
+     * when captions are off. */
+    float caption_depth() const;
+    /* A column of `page`: its left edge and width. `x` picks the column it
+     * falls in (the nearest one from a gutter or margin); null, the first. */
+    void column_at(size_t page, const float *x, float &col_x, float &col_w) const;
+    /* A picture of `aspect` (height over width) fitted to a column: as wide
+     * as the column, or narrower and centered when that would be taller
+     * than the page's live area. */
+    void fit_column(size_t page, float col_x, float col_w, float aspect,
+                    float &x, float &w, float &h) const;
+    /* Keep a caption under its picture after the picture's frame changed size. */
+    void fit_caption(pagemade::ItemId caption, const pagemade::Item &picture);
     /* Store the bytes (or a link), stamp the asset, one undo step, and
      * optionally place it. */
     bool commit_import(uint32_t id, const std::string &path, pagemade::ImageImport imported,
@@ -465,8 +508,14 @@ private:
     /* A file placed before its header was read (place_image_file) */
     struct Probing {
         pagemade::ItemId item = 0;
+        pagemade::ItemId caption = 0;    // its caption, which follows the resize
+        bool column = false;             // fitted to the column at col_x, col_w
+        float col_x = 0, col_w = 0;
         float w = 0, h = 0;              // the stand-in frame's size
     };
+    pagemade::ItemId m_last_caption = 0; // set by place_frame
+    bool m_last_column = false;          // ... and the column it fitted, if any
+    float m_last_col_x = 0, m_last_col_w = 0;
     void finish_probe(uint32_t id, const pagemade::ImageImport &imported,
                       const std::function<void(const std::string &)> &done);
     void finish_display(uint32_t id, const std::string &path, LoadResult &r);
@@ -513,6 +562,8 @@ private:
     bool delete_selection();              // true when something was erased
     void insert_string(const std::string &utf8, bool burst);
     bool m_smart_quotes = true;
+    bool m_caption_pictures = false;
+    bool m_fit_columns = false;
     void move_caret_key(int key, int modifiers);
     void toggle_style(int key);           // B -> bold, I -> italic
 
@@ -538,6 +589,7 @@ private:
     std::vector<pagemade::ItemId> m_sel;
     Handle m_drag = Handle::None;         // what the current drag does
     pagemade::ItemId m_drag_target = 0;   // the item whose handle is dragged
+    uint32_t m_drag_group = 0;            // ... or the group whose box corner is
     bool m_rotating = false;              // rotate-tool drag in progress
     bool m_marquee = false;               // marquee drag in progress
     bool m_marquee_add = false;           // Shift: add to the selection

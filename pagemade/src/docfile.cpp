@@ -315,6 +315,8 @@ void write_guides(JsonOut &j, const char *key, const std::vector<Guide> &guides)
 void write_item(JsonOut &j, const Item &it) {
     j.begin_object();
     j.key("id").value(it.id);
+    if (it.group)
+        j.key("group").value(it.group);
     j.key("w").value(it.w);
     j.key("h").value(it.h);
     j.key("xf").numbers({it.xf.a, it.xf.b, it.xf.c, it.xf.d, it.xf.e, it.xf.f});
@@ -838,6 +840,7 @@ std::vector<Guide> read_guides(const DictValue *a) {
 
 bool read_item(const DictValue *o, Item &it) {
     get(o, "id", it.id);
+    get(o, "group", it.group);
     get(o, "w", it.w);
     get(o, "h", it.h);
     float xf[6] = {1, 0, 0, 1, 0, 0};
@@ -912,6 +915,10 @@ void repair(PageDoc &d, std::vector<std::string> &warnings) {
         warnings.push_back(std::to_string(dropped) + " items with missing or repeated ids were dropped");
     for (ItemId id : ids)
         max_id = std::max(max_id, id);
+    d.tidy_groups();
+    for (const Page &p : d.pages)
+        for (const Item &it : p.items)
+            max_id = std::max(max_id, it.group);  // new groups take ids past these
 
     std::set<ItemId> threaded;
     std::set<StoryId> story_ids;

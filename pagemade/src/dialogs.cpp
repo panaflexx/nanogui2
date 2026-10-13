@@ -16,6 +16,7 @@
 #include <nanogui/menu.h>
 #include <nanogui/layout.h>
 #include <nanogui/screen.h>
+#include <nanogui/scrollpanel.h>
 #include <nanogui/textbox.h>
 #include <nanovg.h>
 #include <GLFW/glfw3.h>
@@ -586,6 +587,10 @@ using pagemade::PlacedGlyph;
 using pagemade::font_menu_query_edit;
 using pagemade::refill_font_menu;
 
+/* The sample sentence in the edited style. It wraps to the box and is set
+ * as large as fits (up to about 34 px), so a narrow panel shows a few lines
+ * of readable type instead of one shrunken line. Leading is always auto:
+ * the box shows the face, not the line spacing. */
 class TypePreview : public Widget {
 public:
     TypePreview(Widget *parent, FontLibrary *fonts) : Widget(parent), m_fonts(fonts) {}
@@ -604,55 +609,70 @@ public:
         nvgStrokeColor(ctx, nvgRGB(186, 186, 186));
         nvgStrokeWidth(ctx, 1.f);
         nvgStroke(ctx);
-        if (m_dirty && m_fonts) {
-            m_runs.clear();
-            pagemade::Story story;
-            pagemade::Paragraph para;
-            CharStyle show = m_style;
-            if (!(show.size > 0.f))
-                show.size = 12.f;
-            para.runs.push_back({show, "The quick brown fox jumps over the lazy dog."});
-            story.paragraphs.push_back(para);
-            pagemade::Composition comp = pagemade::compose(
-                story, {{0, 0, 8000, 800}}, *m_fonts, nullptr);
-            if (!comp.lines.empty())
-                m_runs = comp.lines.front().runs;
-            m_dirty = false;
-        }
-        float minx = 0, maxx = 0, base = 0;
-        bool any = false;
-        for (const GlyphRun &r : m_runs)
-            for (const PlacedGlyph &g : r.glyphs) {
-                if (g.flags & PlacedGlyph::Invisible)
-                    continue;
-                const float right = g.x + std::max(0.f, g.adv);
-                if (!any) { minx = g.x; maxx = right; base = g.y; any = true; }
-                else { minx = std::min(minx, g.x); maxx = std::max(maxx, right); }
-            }
-        if (!any)
+        if ((m_dirty || m_laid_for != m_size) && m_fonts)
+            lay_out();
+        if (m_lines.empty())
             return;
-        /* Grow the line until it fills the box, and stop at about 34pt so a
-         * display size doesn't overflow the preview. */
-        const float avail = std::max(1.f, (float) m_size.x() - 20.f);
-        float sc = avail / std::max(1.f, maxx - minx);
-        const float vis = m_style.size * sc;
-        if (vis > 34.f)
-            sc *= 34.f / vis;
+        const float block = m_bottom - m_top;
         nvgSave(ctx);
         nvgIntersectScissor(ctx, (float) m_pos.x() + 1.f, (float) m_pos.y() + 1.f,
                             (float) m_size.x() - 2.f, (float) m_size.y() - 2.f);
-        nvgTranslate(ctx, (float) m_pos.x() + 10.f - minx * sc,
-                     (float) m_pos.y() + (float) m_size.y() * 0.68f - base * sc);
-        nvgScale(ctx, sc, sc);
-        for (const GlyphRun &r : m_runs)
-            pagemade::draw_glyph_run(ctx, r);
+        nvgTranslate(ctx, (float) m_pos.x() + kPadX,
+                     (float) m_pos.y() + ((float) m_size.y() - block * m_scale) * 0.5f -
+                         m_top * m_scale);
+        nvgScale(ctx, m_scale, m_scale);
+        for (const pagemade::ComposedLine &l : m_lines)
+            for (const GlyphRun &r : l.runs)
+                pagemade::draw_glyph_run(ctx, r);
         nvgRestore(ctx);
     }
 
 private:
+    static constexpr float kPadX = 10.f, kPadY = 8.f;
+    static constexpr float kLargest = 34.f, kSmallest = 9.f;   // visual size, px
+
+    /* The largest visual size whose wrapped lines fit the box. */
+    void lay_out() {
+        m_dirty = false;
+        m_laid_for = m_size;
+        m_lines.clear();
+        CharStyle show = m_style;
+        if (!(show.size > 0.f))
+            show.size = 12.f;
+        show.leading = 0.f;
+        const float avail_w = std::max(1.f, (float) m_size.x() - 2.f * kPadX);
+        const float avail_h = std::max(1.f, (float) m_size.y() - 2.f * kPadY);
+        for (float px = kLargest; px >= kSmallest; px -= 1.f) {
+            const float sc = px / show.size;
+            pagemade::Story story;
+            pagemade::Paragraph para;
+            para.style.align = pagemade::Align::Center;
+            para.runs.push_back({show, "The quick brown fox jumps over the lazy dog."});
+            story.paragraphs.push_back(para);
+            pagemade::Composition comp =
+                pagemade::compose(story, {{0, 0, avail_w / sc, 1e5f}}, *m_fonts, nullptr);
+            if (comp.lines.empty())
+                return;
+            const float top = comp.lines.front().top;
+            const float bottom = comp.lines.back().top + comp.lines.back().leading;
+            bool fits = !comp.overset && (bottom - top) * sc <= avail_h;
+            for (const pagemade::ComposedLine &l : comp.lines)
+                fits = fits && !l.tight;             // no word wider than the box
+            if (fits || px - 1.f < kSmallest) {
+                m_lines = std::move(comp.lines);
+                m_scale = sc;
+                m_top = top;
+                m_bottom = bottom;
+                return;
+            }
+        }
+    }
+
     FontLibrary *m_fonts = nullptr;
     CharStyle m_style;
-    std::vector<GlyphRun> m_runs;
+    std::vector<pagemade::ComposedLine> m_lines;
+    float m_scale = 1.f, m_top = 0.f, m_bottom = 0.f;
+    Vector2i m_laid_for{0, 0};
     bool m_dirty = true;
 };
 
@@ -684,6 +704,11 @@ struct TypeSpecsPanel::State {
     CheckBox *underline = nullptr, *strike = nullptr, *kerning = nullptr, *ligatures = nullptr;
     CheckBox *no_break = nullptr;
     Button *apply_btn = nullptr;
+    /* The parts that rearrange with the width (fit_width). */
+    ScrollPanel *scroll = nullptr;
+    Widget *form = nullptr, *grid = nullptr, *ws = nullptr, *pair = nullptr;
+    Widget *checks = nullptr, *actions = nullptr;
+    int arranged_for = -1;                // inner width last arranged for
     std::function<void(const CharStyle &, const CharStyle &)> apply;
     std::vector<std::string> document, slants;
     std::string query;
@@ -692,21 +717,32 @@ struct TypeSpecsPanel::State {
     bool family_unset = false;
 };
 
+/* The Type window's margin and the gap above the Apply row. */
+static const int kTypeMargin = 14, kTypeSpacing = 10;
+
 TypeSpecsPanel::TypeSpecsPanel(Screen *screen, FontLibrary &fonts, FontMenuModel &fonts_menu,
                                std::function<void(const CharStyle &, const CharStyle &)> apply)
-    : Window(screen, "Type", false) {
+    : DockableWindow(screen, "Type", true) {
     auto st = std::make_shared<State>();
     m_state = st;
     st->fonts = &fonts;
     st->fonts_menu = &fonts_menu;
     st->apply = std::move(apply);
 
-    /* A palette, not a dialog: no dimmer, no traffic lights, no resize grip.
-       The title bar is the drag handle. The X lives in the button panel. */
+    /* A palette, not a dialog: no dimmer, no traffic lights. The title bar
+       is the drag handle; the dock arrows and the X live in the button panel.
+       The fields scroll inside the window when it is docked short. */
     set_modal(false);
     set_traffic_lights(false);
-    set_layout(new BoxLayout(Orientation::Vertical, Alignment::Maximum, 14, 10));
-    Widget *form = new Widget(this);
+    set_min_size(Vector2i(150, 160));
+    set_layout(new BoxLayout(Orientation::Vertical, Alignment::Maximum, kTypeMargin, kTypeSpacing));
+    st->scroll = new ScrollPanel(this, ScrollPanel::ScrollTypes::Vertical);
+    /* The scroll panel stretches its child to its full width, under the
+     * scroll bar. The holder takes that; the form keeps its own width. */
+    Widget *holder = new Widget(st->scroll);
+    holder->set_layout(new BoxLayout(Orientation::Horizontal, Alignment::Minimum, 0, 0));
+    Widget *form = new Widget(holder);
+    st->form = form;
     form->set_layout(new BoxLayout(Orientation::Vertical, Alignment::Fill, 0, 8));
 
     st->hint = new Label(form,
@@ -722,9 +758,7 @@ TypeSpecsPanel::TypeSpecsPanel(Screen *screen, FontLibrary &fonts, FontMenuModel
     st->face_name->set_color(Color(110, 110, 110, 255));
 
     Widget *grid = new Widget(form);
-    auto *layout = new GridLayout(Orientation::Horizontal, 2, Alignment::Middle, 0, 8);
-    layout->set_col_alignment({Alignment::Maximum, Alignment::Fill});
-    grid->set_layout(layout);
+    st->grid = grid;
 
     auto refresh_preview = [st] {
         std::string name = st->style.family;
@@ -873,7 +907,7 @@ TypeSpecsPanel::TypeSpecsPanel(Screen *screen, FontLibrary &fonts, FontMenuModel
 
     new Label(grid, "Weight", "sans-bold");
     Widget *ws = new Widget(grid);
-    ws->set_layout(new BoxLayout(Orientation::Horizontal, Alignment::Middle, 0, 8));
+    st->ws = ws;
     st->weight = new Dropdown(ws, {"Regular"}, {}, Dropdown::ComboBox, "Regular");
     st->weight->set_min_size(Vector2i(140, 28));
     st->weight->set_max_size(Vector2i(240, 36));
@@ -945,10 +979,7 @@ TypeSpecsPanel::TypeSpecsPanel(Screen *screen, FontLibrary &fonts, FontMenuModel
     });
 
     Widget *pair = new Widget(form);
-    auto *pair_layout = new GridLayout(Orientation::Horizontal, 4, Alignment::Middle, 0, 8);
-    pair_layout->set_col_alignment(
-        {Alignment::Maximum, Alignment::Fill, Alignment::Maximum, Alignment::Fill});
-    pair->set_layout(pair_layout);
+    st->pair = pair;
     auto small_metric = [&](const char *label, float value, float step, float lo, float hi,
                             const char *tip,
                             const std::function<void(float)> &set) -> FloatBox<float> * {
@@ -986,7 +1017,7 @@ TypeSpecsPanel::TypeSpecsPanel(Screen *screen, FontLibrary &fonts, FontMenuModel
     });
 
     Widget *checks = new Widget(form);
-    checks->set_layout(new BoxLayout(Orientation::Horizontal, Alignment::Middle, 0, 16));
+    st->checks = checks;
     auto check = [&](const char *caption, const std::function<void(bool)> &set) {
         auto *box = new CheckBox(checks, caption, [set, refresh_preview](bool v) {
             set(v);
@@ -1094,6 +1125,7 @@ TypeSpecsPanel::TypeSpecsPanel(Screen *screen, FontLibrary &fonts, FontMenuModel
     };
 
     Widget *actions = new Widget(this);
+    st->actions = actions;
     actions->set_layout(new BoxLayout(Orientation::Horizontal, Alignment::Middle, 0, 0));
     st->apply_btn = new Button(actions, "Apply");
     st->apply_btn->set_fixed_size(Vector2i(88, 28));
@@ -1119,6 +1151,7 @@ TypeSpecsPanel::TypeSpecsPanel(Screen *screen, FontLibrary &fonts, FontMenuModel
                 dispose();
         });
     });
+    fit_width();
 }
 
 TypeSpecsPanel::~TypeSpecsPanel() = default;
@@ -1135,16 +1168,128 @@ void TypeSpecsPanel::set_apply_enabled(bool enabled) {
         m_state->apply_btn->set_enabled(enabled);
 }
 
+/* The widths the fields are designed for. Below kTypeWide the fields keep
+ * two columns but stack the pairs; below kTypeNarrow every field sits under
+ * its label. Inner widths, without the margins and the scroll bar. */
+static const int kTypeWide = 460, kTypeNarrow = 260, kTypeScrollBar = 12;
+
+void TypeSpecsPanel::fit_width() {
+    State &st = *m_state;
+    const int inner = width() > 0 ? width() - 2 * kTypeMargin - kTypeScrollBar : kTypeWide;
+    if (inner == st.arranged_for)
+        return;
+    st.arranged_for = inner;
+    const bool wide = inner >= kTypeWide, narrow = inner < kTypeNarrow;
+    const int full = std::max(60, inner);
+
+    st.hint->set_fixed_size(Vector2i(full, 0));
+    /* Narrower, the sample wraps onto more lines: a taller box keeps it big. */
+    st.preview->set_fixed_size(Vector2i(full, wide ? 86 : narrow ? 132 : 104));
+    st.face_name->set_fixed_size(Vector2i(full, 0));
+
+    /* Label | field in two columns, or each field under its label. */
+    auto columns = [](Widget *w, int pairs, bool stacked) {
+        if (stacked) {
+            auto *g = new GridLayout(Orientation::Horizontal, 1, Alignment::Fill, 0, 4);
+            w->set_layout(g);
+            return;
+        }
+        auto *g = new GridLayout(Orientation::Horizontal, pairs * 2, Alignment::Middle, 0, 8);
+        std::vector<Alignment> align;
+        for (int i = 0; i < pairs; ++i) {
+            align.push_back(Alignment::Maximum);
+            align.push_back(Alignment::Fill);
+        }
+        g->set_col_alignment(align);
+        w->set_layout(g);
+    };
+    columns(st.grid, 1, narrow);
+    columns(st.pair, wide ? 2 : 1, narrow);
+    /* Weight and Style share a row unless every field is stacked. */
+    st.ws->set_layout(narrow ? new BoxLayout(Orientation::Vertical, Alignment::Fill, 0, 4)
+                             : new BoxLayout(Orientation::Horizontal, Alignment::Middle, 0, 8));
+    st.checks->set_layout(wide ? new BoxLayout(Orientation::Horizontal, Alignment::Middle, 0, 16)
+                               : new BoxLayout(Orientation::Vertical, Alignment::Minimum, 0, 6));
+
+    /* Wide, the fields keep their designed sizes. Otherwise they fill what
+     * the label column leaves (a guess at the widest label, "Set width"). */
+    const int field = narrow ? full : std::max(60, inner - 80);
+    auto sized = [&](Widget *w, int design_w, int min_w, int max_w) {
+        if (wide) {
+            w->set_min_size(Vector2i(design_w ? design_w : min_w, 28));
+            w->set_max_size(Vector2i(max_w, 36));
+        } else {
+            w->set_fixed_size(Vector2i(field, 28));   // the same member as min_size
+            w->set_max_size(Vector2i(field, 36));
+        }
+    };
+    sized(st.family, 0, 220, 320);
+    sized(st.weight, 0, 140, 240);
+    sized(st.slant, 0, 100, 150);
+    if (!wide && !narrow) {
+        /* Side by side, around the "Style" label */
+        const int half = std::max(50, (field - 52) / 2);
+        st.weight->set_fixed_size(Vector2i(half, 28));
+        st.weight->set_max_size(Vector2i(half, 36));
+        st.slant->set_fixed_size(Vector2i(half, 28));
+        st.slant->set_max_size(Vector2i(half, 36));
+    }
+    sized(st.caps, 160, 160, 160);
+    sized(st.size_box, 120, 120, 120);
+    sized(st.leading, 120, 120, 120);
+    for (Widget *w : {(Widget *) st.hscale, (Widget *) st.tracking, (Widget *) st.baseline})
+        sized(w, 90, 90, 90);
+}
+
+void TypeSpecsPanel::perform_layout(NVGcontext *ctx) {
+    fit_width();
+    if (width() > 0 && height() > 0 && m_state->scroll) {
+        /* The fields take what the title, margins and Apply row leave. */
+        const int header = m_theme ? m_theme->m_window_header_height : 30;
+        const int actions = m_state->actions->preferred_size(ctx).y();
+        const int h = height() - header - 2 * kTypeMargin - kTypeSpacing - actions;
+        m_state->scroll->set_fixed_size(Vector2i(width() - 2 * kTypeMargin, std::max(40, h)));
+    }
+    DockableWindow::perform_layout(ctx);
+}
+
 void TypeSpecsPanel::relayout() {
     Screen *s = screen();
     if (!s || !s->nvg_context() || size() == Vector2i(0, 0))
         return;
     NVGcontext *ctx = s->nvg_context();
-    const Vector2i pref = preferred_size(ctx);
-    if (pref.x() > 40 && pref.y() > 40 && pref != size())
-        set_size(pref);
+    if (docked() == Dock::None) {
+        fit_width();
+        const int header = m_theme ? m_theme->m_window_header_height : 30;
+        int h = header + 2 * kTypeMargin + kTypeSpacing +
+                m_state->actions->preferred_size(ctx).y() +
+                m_state->form->preferred_size(ctx).y();
+        /* Taller than the room below it, the fields scroll; only near the
+         * bottom of the screen does it move up to keep a usable height. */
+        if (parent()) {
+            const int room = parent()->height();
+            const int below = room - 16 - position().y();
+            if (h > below && below >= 320)
+                h = below;
+            h = std::min(h, std::max(160, room - 32));
+            if (position().y() + h > room - 16)
+                set_position(Vector2i(position().x(), std::max(16, room - 16 - h)));
+        }
+        if (h != height())
+            set_size(Vector2i(width(), h));
+    }
     perform_layout(ctx);
     s->redraw();
+}
+
+bool TypeSpecsPanel::mouse_drag_event(const Vector2i &p, const Vector2i &rel, int button,
+                                      int modifiers) {
+    const int before = width();
+    const bool handled = DockableWindow::mouse_drag_event(p, rel, button, modifiers);
+    /* Floating, a new width brings the height that fits it. */
+    if (m_resize && docked() == Dock::None && width() != before)
+        relayout();
+    return handled;
 }
 
 void TypeSpecsPanel::load(const CharStyle &style, bool mixed,

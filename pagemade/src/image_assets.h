@@ -15,7 +15,7 @@
  */
 #pragma once
 
-#include <nanogui/window.h>
+#include "dock_window.h"
 
 #include "bg_worker.h"
 #include "image.h"
@@ -36,7 +36,7 @@ class Split;
 class TextArea;
 }
 
-class ImageAssetsPanel : public nanogui::Window {
+class ImageAssetsPanel : public DockableWindow {
 public:
     ImageAssetsPanel(nanogui::Widget *parent, ComposerView *view, pagemade::ImageStore *images);
     ~ImageAssetsPanel() override;
@@ -46,18 +46,7 @@ public:
      * itself changed. Badges (use count, missing, modified) redraw either way. */
     void refresh();
 
-    /* Docking beside the pages: the arrow buttons at the top right ask for
-     * a side (or None, pressed again); the app makes the room and places
-     * the window, then calls set_docked. Dragging the title bar undocks;
-     * resizing a docked window asks for its room again. */
-    enum class Dock { None, Left, Right };
-    Dock docked() const { return m_dock; }
-    void set_docked(Dock side);
-    std::function<void(Dock)> on_dock;
-    std::function<void()> on_dock_resize;
-
-    bool mouse_drag_event(const nanogui::Vector2i &p, const nanogui::Vector2i &rel,
-                          int button, int modifiers) override;
+    /* Docking beside the pages: see DockableWindow. */
 
 private:
     struct ScanState;
@@ -93,9 +82,7 @@ private:
     nanogui::ImageStashWidget *m_stash = nullptr;
     nanogui::TextArea *m_meta = nullptr;
     nanogui::Split *m_split = nullptr;    // grid above, details below
-    nanogui::Button *m_dock_left = nullptr, *m_dock_right = nullptr;
     nanogui::Button *m_clean = nullptr;
-    Dock m_dock = Dock::None;
     float m_details_at = 0.72f;           // divider to restore the details to
 
     std::vector<std::string> m_roots;

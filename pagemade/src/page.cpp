@@ -4,6 +4,7 @@
 #include "page.h"
 
 #include <algorithm>
+#include <map>
 #include <cmath>
 
 namespace pagemade {
@@ -619,6 +620,93 @@ void PageDoc::restack(const std::vector<ItemId> &ids, int dir) {
                     std::swap(p.items[i], p.items[i - 1]);
         }
     }
+}
+
+std::vector<ItemId> PageDoc::group_members(ItemId id) const {
+    size_t pg = 0;
+    const Item *it = find_item(id, &pg);
+    if (!it)
+        return {};
+    if (it->group == 0)
+        return {id};
+    std::vector<ItemId> out;
+    for (const Item &o : pages[pg].items)
+        if (o.group == it->group)
+            out.push_back(o.id);
+    return out;
+}
+
+uint32_t PageDoc::group_items(const std::vector<ItemId> &ids) {
+    /* The items and whatever they were grouped with, all on one page */
+    size_t page = SIZE_MAX;
+    std::vector<ItemId> members;
+    for (ItemId id : ids) {
+        size_t pg = 0;
+        if (!find_item(id, &pg))
+            continue;
+        if (page == SIZE_MAX)
+            page = pg;
+        else if (pg != page)
+            return 0;
+        for (ItemId m : group_members(id))
+            if (std::find(members.begin(), members.end(), m) == members.end())
+                members.push_back(m);
+    }
+    if (page == SIZE_MAX || members.size() < 2)
+        return 0;
+    const uint32_t gid = next_id++;
+    std::vector<Item> &items = pages[page].items;
+    auto in = [&](const Item &it) {
+        return std::find(members.begin(), members.end(), it.id) != members.end();
+    };
+    /* Pull the members together below the topmost one, in stacking order */
+    size_t top = 0;
+    for (size_t i = 0; i < items.size(); ++i)
+        if (in(items[i]))
+            top = i;
+    std::vector<Item> grouped, rest;
+    size_t insert_at = 0;
+    for (size_t i = 0; i < items.size(); ++i) {
+        if (in(items[i])) {
+            grouped.push_back(items[i]);
+            grouped.back().group = gid;
+        } else {
+            rest.push_back(items[i]);
+            if (i < top)
+                insert_at = rest.size();
+        }
+    }
+    rest.insert(rest.begin() + (long) insert_at, grouped.begin(), grouped.end());
+    items = std::move(rest);
+    return gid;
+}
+
+void PageDoc::ungroup_items(const std::vector<ItemId> &ids) {
+    for (ItemId id : ids)
+        for (ItemId m : group_members(id))
+            if (Item *it = find_item(m))
+                it->group = 0;
+}
+
+void PageDoc::tidy_groups() {
+    /* A group lives on one page: where it is found first */
+    std::map<uint32_t, size_t> home, count;
+    for (size_t pi = 0; pi < pages.size(); ++pi)
+        for (Item &it : pages[pi].items) {
+            if (!it.group)
+                continue;
+            auto h = home.find(it.group);
+            if (h == home.end())
+                home[it.group] = pi;
+            else if (h->second != pi)
+                it.group = 0;
+            if (it.group)
+                ++count[it.group];
+        }
+    for (Page &p : pages)
+        for (Item &it : p.items)
+            if (it.group && count[it.group] < 2)
+                it.group = 0;
 }
 
 size_t PageDoc::insert_page(size_t index) {
