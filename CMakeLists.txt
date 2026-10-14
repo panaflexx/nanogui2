@@ -1029,9 +1029,11 @@ if (NANOGUI_BUILD_EXAMPLES)
         pagemade/src/sample.cpp)
     foreach(_t pagemade_app pagemade_compose_test)
       # dict.h (the JSON reader) lives at the repository root.
-      # nanovg_exif.h and stb_image.h live with nanovgd.
+      # nanovg_exif.h and stb_image.h live with nanovgd. fscompat.h is in
+      # include/, which pagemade_compose_test doesn't get via libnanogui.
       target_include_directories(${_t} PRIVATE
           ${CMAKE_CURRENT_SOURCE_DIR}
+          ${CMAKE_CURRENT_SOURCE_DIR}/include
           ${CMAKE_CURRENT_SOURCE_DIR}/ext/nanovgd/src)
       target_compile_definitions(${_t} PRIVATE
           PAGEMADE_RESOURCE_DIR="${CMAKE_CURRENT_SOURCE_DIR}/resources"

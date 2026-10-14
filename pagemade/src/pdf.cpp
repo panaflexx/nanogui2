@@ -17,7 +17,7 @@
 #include <algorithm>
 #include <cmath>
 #include <cstdlib>
-#include <filesystem>
+#include <nanogui/fscompat.h>
 #include <ctime>
 #include <cstring>
 #include <cctype>
@@ -742,32 +742,31 @@ std::vector<PdfOutputProfile> pdf_output_profiles() {
     }
     std::vector<PdfOutputProfile> found;
     for (const std::string &dir : dirs) {
-        std::error_code ec;
-        for (auto it = std::filesystem::recursive_directory_iterator(dir, ec);
-             !ec && it != std::filesystem::recursive_directory_iterator(); it.increment(ec)) {
-            const std::filesystem::path p = it->path();
-            std::string ext = p.extension().string();
+        /* Unreadable directories are skipped silently. */
+        nanogui::fs::walk_files(dir, [&](const std::string &path) {
+            std::string ext = nanogui::fs::extension(path);
             for (char &c : ext)
                 c = (char) std::tolower((unsigned char) c);
             if (ext != ".icc" && ext != ".icm")
-                continue;
+                return true;
             /* Printing profiles only: output class, CMYK */
             std::vector<uint8_t> head(128);
-            if (FILE *f = std::fopen(p.c_str(), "rb")) {
+            if (FILE *f = std::fopen(path.c_str(), "rb")) {
                 head.resize(std::fread(head.data(), 1, head.size(), f));
                 std::fclose(f);
             }
             if (head.size() < 128 || std::memcmp(head.data() + 12, "prtr", 4) != 0 ||
                 std::memcmp(head.data() + 16, "CMYK", 4) != 0)
-                continue;
+                return true;
             std::vector<uint8_t> icc;
             std::string err, space, desc;
-            if (!read_file(p.string(), &icc, &err) || !icc_info(icc, &space, &desc))
-                continue;
-            const std::string cond = output_condition(p.string(), desc);
-            found.push_back({p.string(), (desc.empty() ? p.stem().string() : desc) + " (" + cond + ")",
+            if (!read_file(path, &icc, &err) || !icc_info(icc, &space, &desc))
+                return true;
+            const std::string cond = output_condition(path, desc);
+            found.push_back({path, (desc.empty() ? nanogui::fs::stem(path) : desc) + " (" + cond + ")",
                              cond, true});
-        }
+            return true;
+        });
     }
     std::sort(found.begin(), found.end(),
               [](const PdfOutputProfile &a, const PdfOutputProfile &b) { return a.name < b.name; });

@@ -42,7 +42,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
-#include <filesystem>
+#include <nanogui/fscompat.h>
 #include <fstream>
 #include <memory>
 #include <string>
@@ -3522,14 +3522,14 @@ static void test_font_menu() {
     CHECK(!font_menu_query_edit(query, 0x1B), "escape on an empty query closes the menu");
 
     const std::string dir = "/tmp/pagemade-font-menu-test";
-    std::filesystem::remove_all(dir);
-    std::filesystem::create_directories(dir);
+    nanogui::fs::remove_all(dir);
+    nanogui::fs::create_directories(dir);
     const std::string path = dir + "/fonts.conf";
     FontMenuModel fresh;
     CHECK(!fresh.load(path, installed), "a missing config is not a saved list");
-    CHECK(!std::filesystem::exists(path), "load does not create the file");
+    CHECK(!nanogui::fs::exists(path), "load does not create the file");
     font_menu_load_or_seed(fresh, path, installed);
-    CHECK(std::filesystem::exists(path), "the first run writes the english list");
+    CHECK(nanogui::fs::exists(path), "the first run writes the english list");
     FontMenuModel seeded;
     CHECK(seeded.load(path, installed), "the seeded file loads");
     CHECK(seeded.list().favorites == english, "seeded favorites match the english list");
@@ -3567,7 +3567,7 @@ static void test_font_menu() {
           "an empty favorites file is a choice, not a missing file");
     font_menu_load_or_seed(empty, path, installed);
     CHECK(empty.list().favorites.empty(), "seeding does not refill a file the user emptied");
-    std::filesystem::remove_all(dir);
+    nanogui::fs::remove_all(dir);
 
     const std::string config = font_menu_config_path();
     CHECK(!config.empty() && (config.find("pagemade/fonts.conf") != std::string::npos ||

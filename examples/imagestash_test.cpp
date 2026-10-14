@@ -16,10 +16,10 @@
 #include <nanogui/window.h>
 #include <nanogui/scrollpanel.h>
 #include <nanogui/imagestash.h>
+#include <nanogui/fscompat.h>
 
 #include <algorithm>
 #include <atomic>
-#include <filesystem>
 #include <iostream>
 #include <limits>
 #include <string>
@@ -29,8 +29,8 @@
 using namespace nanogui;
 
 /// True for file extensions supported by stb_image.
-static bool is_image_file(const std::filesystem::path &p) {
-    std::string ext = p.extension().string();
+static bool is_image_file(const std::string &path) {
+    std::string ext = fs::extension(path);
     std::transform(ext.begin(), ext.end(), ext.begin(),
                    [](unsigned char c) { return (char) std::tolower(c); });
     static const char *kExts[] = {
@@ -65,39 +65,25 @@ public:
 
 private:
     void run() {
-        namespace fs = std::filesystem;
+        namespace fs = nanogui::fs;
         std::vector<std::string> batch;
 
         for (const auto &root : m_roots) {
             if (m_stop) break;
-            fs::path p(root);
-            std::error_code ec;
-            if (fs::is_regular_file(p, ec)) {
-                if (is_image_file(p))
-                    batch.push_back(p.string());
-            } else if (fs::is_directory(p, ec)) {
-                fs::recursive_directory_iterator it(
-                    p, fs::directory_options::skip_permission_denied, ec), end;
-                if (ec) {
-                    std::cerr << "Cannot scan " << p << ": " << ec.message() << std::endl;
-                    continue;
-                }
-                while (it != end && !m_stop) {
-                    const fs::directory_entry entry = *it;
-                    it.increment(ec);
-                    if (ec) {
-                        std::cerr << "Scan error: " << ec.message() << std::endl;
-                        break; /* abandon this directory */
-                    }
-                    if (entry.is_regular_file(ec) && !ec && is_image_file(entry.path()))
-                        batch.push_back(entry.path().string());
-
-                    if (batch.size() >= kChunkSize) {
+            if (fs::is_regular_file(root)) {
+                if (is_image_file(root))
+                    batch.push_back(root);
+            } else if (fs::is_directory(root)) {
+                /* Unreadable directories are skipped silently. */
+                fs::walk_files(root, [&](const std::string &path) {
+                    if (is_image_file(path))
+                        batch.push_back(path);
+                    if (batch.size() >= kChunkSize)
                         flush(batch);
-                    }
-                }
+                    return !m_stop.load();
+                });
             } else {
-                std::cerr << "Skipping (not a file or directory): " << p << std::endl;
+                std::cerr << "Skipping (not a file or directory): " << root << std::endl;
             }
         }
         flush(batch);
@@ -142,7 +128,7 @@ public:
         std::vector<std::string> paths = e.data.file_paths();
         if (paths.empty())
             return false;
-        set_caption(std::filesystem::path(paths[0]).filename().string());
+        set_caption(nanogui::fs::filename(paths[0]));
         e.accept(this, DropCopy);
         return true;
     }

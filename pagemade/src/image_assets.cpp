@@ -34,7 +34,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <ctime>
-#include <filesystem>
+#include <nanogui/fscompat.h>
 #include <mutex>
 #include <utility>
 
@@ -62,12 +62,12 @@ struct ProbeBox {
     ImageAssetsPanel *panel = nullptr;
 };
 
-bool is_image_file(const std::filesystem::path &p) {
-    return image_extension_supported(p.extension().string());
+bool is_image_file(const std::string &path) {
+    return image_extension_supported(nanogui::fs::extension(path));
 }
 
 std::string leaf_name(const std::string &path) {
-    const std::string name = std::filesystem::path(path).filename().string();
+    const std::string name = nanogui::fs::filename(path);
     return name.empty() ? path : name;
 }
 
@@ -284,8 +284,7 @@ public:
         for (const std::string &path : paths) {
             Row row;
             row.path = path;
-            std::error_code ec;
-            const bool dir = std::filesystem::is_directory(path, ec);
+            const bool dir = nanogui::fs::is_directory(path);
             row.caption = dir && (path.empty() || path.back() != '/') ? path + "/" : path;
             if (!previous.empty() && path == previous)
                 next = (int) m_captions.size();
@@ -531,8 +530,7 @@ ImageAssetsPanel::ImageAssetsPanel(Widget *parent, ComposerView *view, ImageStor
     m_stash->set_drop_callback([this](const std::vector<std::string> &paths) {
         bool any = false;
         for (const std::string &path : paths) {
-            std::error_code ec;
-            if (std::filesystem::is_directory(path, ec) || is_image_file(path))
+            if (nanogui::fs::is_directory(path) || is_image_file(path))
                 any = add_root(path) || any;
         }
         if (any)
@@ -690,20 +688,18 @@ std::string ImageAssetsPanel::asset_signature() const {
 std::string ImageAssetsPanel::initial_folder() const {
     if (m_roots.empty())
         return {};
-    std::error_code ec;
-    const std::filesystem::path p(m_roots.back());
-    if (std::filesystem::is_directory(p, ec))
-        return p.string();
-    return p.parent_path().string();
+    const std::string &p = m_roots.back();
+    if (nanogui::fs::is_directory(p))
+        return p;
+    return nanogui::fs::parent_path(p);
 }
 
 bool ImageAssetsPanel::add_root(const std::string &path) {
     if (path.empty())
         return false;
-    std::error_code ec;
-    if (!std::filesystem::exists(path, ec))
+    if (!nanogui::fs::exists(path))
         return false;
-    if (!std::filesystem::is_directory(path, ec) && !is_image_file(path))
+    if (!nanogui::fs::is_directory(path) && !is_image_file(path))
         return false;
     for (const std::string &have : m_roots)
         if (have == path)
@@ -929,7 +925,7 @@ void ImageAssetsPanel::restart_scan() {
 }
 
 void ImageAssetsPanel::scan_main(const std::shared_ptr<ScanState> &state) {
-    namespace fs = std::filesystem;
+    namespace fs = nanogui::fs;
     std::vector<std::string> roots;
     {
         std::lock_guard<std::mutex> lock(state->mu);
@@ -961,23 +957,18 @@ void ImageAssetsPanel::scan_main(const std::shared_ptr<ScanState> &state) {
     for (const std::string &root : roots) {
         if (state->stop)
             break;
-        std::error_code ec;
-        const fs::path p(root);
-        if (fs::is_regular_file(p, ec)) {
-            if (is_image_file(p))
-                batch.push_back(p.string());
-        } else if (fs::is_directory(p, ec)) {
-            fs::recursive_directory_iterator it(p, fs::directory_options::skip_permission_denied, ec), end;
-            while (!ec && it != end && !state->stop) {
-                const fs::directory_entry entry = *it;
-                it.increment(ec);
-                if (ec)
-                    break;
-                if (entry.is_regular_file(ec) && !ec && is_image_file(entry.path()))
-                    batch.push_back(entry.path().string());
+        if (fs::is_regular_file(root)) {
+            if (is_image_file(root))
+                batch.push_back(root);
+        } else if (fs::is_directory(root)) {
+            /* Unreadable directories are skipped silently. */
+            fs::walk_files(root, [&](const std::string &path) {
+                if (is_image_file(path))
+                    batch.push_back(path);
                 if ((int) batch.size() >= kScanBatch)
                     flush();
-            }
+                return !state->stop;
+            });
         }
         if ((int) batch.size() >= kScanBatch)
             flush();

@@ -8,7 +8,7 @@
 #include <algorithm>
 #include <cstdlib>
 #include <fstream>
-#include <filesystem>
+#include <nanogui/fscompat.h>
 
 namespace pagemade {
 namespace {
@@ -134,9 +134,9 @@ bool FontMenuModel::save() const {
     if (m_path.empty())
         return false;
     try {
-        const std::filesystem::path file(m_path);
-        if (file.has_parent_path() && !file.parent_path().empty())
-            std::filesystem::create_directories(file.parent_path());
+        const std::string parent = nanogui::fs::parent_path(m_path);
+        if (!parent.empty())
+            nanogui::fs::create_directories(parent);
         std::ofstream out(m_path, std::ios::trunc);
         if (!out)
             return false;

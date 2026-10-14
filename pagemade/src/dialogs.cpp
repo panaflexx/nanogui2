@@ -26,11 +26,11 @@
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
-#include <filesystem>
+#include <nanogui/fscompat.h>
 #include <memory>
 
 using namespace nanogui;
-namespace fs = std::filesystem;
+namespace fs = nanogui::fs;
 
 namespace {
 
@@ -40,23 +40,21 @@ const Color kDefaultButton(56, 116, 226, 255);
 const Color kHintText(110, 110, 110, 255);
 
 std::string folder_of(const std::string &path) {
-    return fs::path(path).parent_path().string();
+    return fs::parent_path(path);
 }
 
 std::string file_name_of(const std::string &path) {
-    return fs::path(path).filename().string();
+    return fs::filename(path);
 }
 
 std::string default_folder() {
     if (const char *home = std::getenv("HOME")) {
-        fs::path docs = fs::path(home) / "Documents";
-        std::error_code ec;
-        if (fs::is_directory(docs, ec))
-            return docs.string();
+        const std::string docs = fs::join(home, "Documents");
+        if (fs::is_directory(docs))
+            return docs;
         return home;
     }
-    std::error_code ec;
-    return fs::current_path(ec).string();
+    return fs::current_path();
 }
 
 std::string ellipsize_left(const std::string &s, size_t max) {
@@ -329,9 +327,8 @@ void open_save_as(Screen *screen, const std::string &current_path, const std::st
         const std::string ext = std::string(".") + "pagemade";
         if (n.size() < ext.size() || n.compare(n.size() - ext.size(), ext.size(), ext) != 0)
             n += ext;
-        const std::string full = (fs::path(st->folder) / n).string();
-        std::error_code ec;
-        if (full != current_path && fs::exists(full, ec)) {
+        const std::string full = fs::join(st->folder, n);
+        if (full != current_path && fs::exists(full)) {
             ask_replace(screen, full, [=](bool replace) {
                 if (replace)
                     done(full, st->embed);

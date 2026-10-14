@@ -77,7 +77,7 @@
 #include <algorithm>
 #include <array>
 #include <cmath>
-#include <filesystem>
+#include <nanogui/fscompat.h>
 #include <map>
 #include <cctype>
 #include <cstdio>
@@ -565,7 +565,7 @@ public:
                 where.x += 12.f * (float) i;
                 where.y += 12.f * (float) i;
                 const std::string path = paths[i];
-                const std::string name = std::filesystem::path(path).filename().string();
+                const std::string name = nanogui::fs::filename(path);
                 m_view->place_image_file(path, page, &where, [this, name](const std::string &error) {
                     if (!error.empty())
                         show_alert(this, "The picture couldn't be placed.", error);
@@ -616,7 +616,7 @@ public:
 
     std::string doc_name() const {
         return m_doc_path.empty() ? std::string("Untitled")
-                                  : std::filesystem::path(m_doc_path).stem().string();
+                                  : nanogui::fs::stem(m_doc_path);
     }
 
     void update_title() {
@@ -689,7 +689,7 @@ public:
     void open_document_dialog() {
         close_document_then([this] {
             const std::string folder = m_doc_path.empty()
-                ? std::string() : std::filesystem::path(m_doc_path).parent_path().string();
+                ? std::string() : nanogui::fs::parent_path(m_doc_path);
             auto paths = file_dialog({{kPublicationExtension, "pagemade publication"}}, false,
                                      false, folder);
             if (!paths.empty() && !paths[0].empty())
@@ -699,13 +699,13 @@ public:
 
     void place_dialog() {
         const std::string folder = m_doc_path.empty()
-            ? std::string() : std::filesystem::path(m_doc_path).parent_path().string();
+            ? std::string() : nanogui::fs::parent_path(m_doc_path);
         auto paths = file_dialog(image_file_types(),
                                  false, false, folder);
         if (paths.empty() || paths[0].empty())
             return;
         const std::string path = paths[0];
-        const std::string name = std::filesystem::path(path).filename().string();
+        const std::string name = nanogui::fs::filename(path);
         m_view->place_image_file(path, m_view->page_index(), nullptr,
                                  [this, name](const std::string &error) {
             if (!error.empty())
@@ -720,7 +720,7 @@ public:
         /* Linked pictures are read as they come on screen, not here */
         OpenResult r = open_document(path, m_fonts, false);
         if (!r.ok) {
-            show_alert(this, "\u201C" + std::filesystem::path(path).filename().string() +
+            show_alert(this, "\u201C" + nanogui::fs::filename(path) +
                              "\u201D couldn't be opened.", r.error);
             return false;
         }
