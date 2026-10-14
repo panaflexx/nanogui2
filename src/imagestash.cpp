@@ -13,7 +13,6 @@
 
 #include <algorithm>
 #include <cstring>
-#include <filesystem>
 #include <iostream>
 
 extern "C" {
@@ -27,6 +26,13 @@ extern "C" {
 #define IMGSW_REFRESH_INTERVAL std::chrono::milliseconds(500)
 
 namespace {
+
+/* std::filesystem::path(p).filename(), without <filesystem> (macOS 10.12's
+   libc++ doesn't ship it). Handles both '/' and '\\' separators. */
+std::string imgsw__filename(const std::string &path) {
+    const size_t slash = path.find_last_of("/\\");
+    return slash == std::string::npos ? path : path.substr(slash + 1);
+}
 
 /// Load an image file, following the nvgCreateImage() pattern: read the
 /// file up front so the EXIF scan and the decoder see the same bytes.
@@ -216,7 +222,7 @@ void ImageStashWidget::add_entry(const Entry &entry) {
     PendingItem pi;
     pi.photo = entry;
     if (pi.photo.name.empty() && !pi.photo.path.empty())
-        pi.photo.name = std::filesystem::path(pi.photo.path).filename().string();
+        pi.photo.name = imgsw__filename(pi.photo.path);
     pthread_mutex_lock(&m_mutex);
     m_pending_items.push_back(std::move(pi));
     m_layout_dirty = true;
@@ -248,7 +254,7 @@ void ImageStashWidget::add_images(const std::vector<std::string> &paths) {
             continue;            /* an empty path marks a section */
         PendingItem pi;
         pi.photo.path = path;
-        pi.photo.name = std::filesystem::path(path).filename().string();
+        pi.photo.name = imgsw__filename(path);
         items.push_back(std::move(pi));
     }
 
