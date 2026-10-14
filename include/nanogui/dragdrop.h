@@ -24,8 +24,8 @@
 #pragma once
 
 #include <nanogui/vector.h>
+#include <nanogui/any.h>
 
-#include <any>
 #include <cstdint>
 #include <string>
 #include <utility>
@@ -62,7 +62,9 @@ public:
     /// "text/uri-list" for local paths (file: URIs, CRLF separated).
     static std::string uri_list(const std::vector<std::string> &paths);
 
-    std::any object;
+    /* In-process value (an asset handle, say). nanogui::any, not std::any:
+     * macOS 10.12's libc++ has no <any>. */
+    any object;
 
 private:
     std::vector<std::pair<std::string, std::string>> m_formats;
