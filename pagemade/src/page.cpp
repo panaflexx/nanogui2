@@ -108,6 +108,16 @@ std::vector<StyleDef> default_styles() {
             p.keep_with_next = p.keep_together = true;
         }, true),
         def("Caption", "Sans", 8.5f, 10.5f, [](ParaStyle &p) { p.space_before = 4; }, false, true),
+        /* A table of contents line: "Entry<Tab>page", the page number on the
+         * block's right side at any width, dots leading to it. A long entry
+         * wraps with a hanging indent. */
+        def("Contents", "Serif", 10.5f, 14, [](ParaStyle &p) {
+            p.tabs = {{0, TabAlign::Right, ".", true}};
+            p.left_indent = 12;
+            p.first_indent = -12;
+            p.space_after = 2;
+            p.hyphenate = false;
+        }),
         def("Bulleted list", "Serif", 10.5f, 13, [](ParaStyle &p) {
             p.left_indent = 18;
             p.first_indent = -18;
@@ -271,7 +281,8 @@ bool same_tabs(const std::vector<TabStop> &a, const std::vector<TabStop> &b) {
     if (a.size() != b.size())
         return false;
     for (size_t i = 0; i < a.size(); ++i)
-        if (a[i].pos != b[i].pos || a[i].align != b[i].align || a[i].leader != b[i].leader)
+        if (a[i].pos != b[i].pos || a[i].align != b[i].align || a[i].leader != b[i].leader ||
+            a[i].from_right != b[i].from_right)
             return false;
     return true;
 }

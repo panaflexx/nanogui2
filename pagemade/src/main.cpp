@@ -419,6 +419,16 @@ public:
         };
         hooks.apply_style = [this](const std::string &name) { m_view->apply_style(name); };
         hooks.delete_style = [this](const std::string &name) { m_view->delete_style(name); };
+        /* Strict loose/tight turns the highlighting (V) on as well */
+        hooks.strict = [this](bool on) {
+            m_view->set_strict_loose_tight(on);
+            if (on && !m_view->show_loose_tight()) {
+                m_view->set_show_loose_tight(true);
+                if (m_loose)
+                    m_loose->set_pushed(true);
+            }
+            redraw();
+        };
         hooks.new_style = [this] {
             const auto paras = m_view->selected_paragraphs();
             std::string name = paras.empty() ? std::string() : paras.front()->style.name;
@@ -881,6 +891,9 @@ public:
         new Separator(type->popup());
         add_cmd(type, "Line Break (Shift+Return)", {},
                 [this] { m_view->insert_at_caret("\u2028"); });
+        add_cmd(type, "Tab (Tab)", {}, [this] { m_view->insert_at_caret("\t"); });
+        add_cmd(type, "Right Indent Tab (Shift+Tab)", {},
+                [this] { m_view->insert_at_caret("\uE002"); });
         add_cmd(type, "Frame Break (Ctrl+Return)", {},
                 [this] { m_view->insert_at_caret("\x0C"); });
 

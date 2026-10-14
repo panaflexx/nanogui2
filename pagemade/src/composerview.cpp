@@ -2968,6 +2968,7 @@ bool ComposerView::keyboard_event(int key, int, int action, int modifiers) {
     switch (key) {
     case GLFW_KEY_BACKSPACE: case GLFW_KEY_DELETE:
     case GLFW_KEY_ENTER: case GLFW_KEY_KP_ENTER:
+    case GLFW_KEY_TAB:
     case GLFW_KEY_LEFT: case GLFW_KEY_RIGHT:
     case GLFW_KEY_UP: case GLFW_KEY_DOWN:
     case GLFW_KEY_HOME: case GLFW_KEY_END:
@@ -3010,6 +3011,12 @@ bool ComposerView::keyboard_event(int key, int, int action, int modifiers) {
                 after_edit();
             }
         }
+        return true;
+    case GLFW_KEY_TAB:
+        /* A tab; Shift+Tab a right-indent tab (to the right indent) */
+        will_edit(true);
+        delete_selection();
+        insert_string((modifiers & GLFW_MOD_SHIFT) ? "\xEE\x80\x82" : "\t", true);
         return true;
     case GLFW_KEY_ENTER:
     case GLFW_KEY_KP_ENTER:
@@ -3129,11 +3136,13 @@ void ComposerView::draw_text_overlays(NVGcontext *ctx, const Item &it, float px)
     const float lpx = px / item_scale(it.xf);
 
     for (const ComposedLine &l : c->lines) {
-        if (l.frame != ti || !m_show_loose_tight || !(l.loose || l.tight))
+        const bool loose = m_strict_loose_tight ? l.word_loose : l.loose;
+        const bool tight = m_strict_loose_tight ? l.word_tight : l.tight;
+        if (l.frame != ti || !m_show_loose_tight || !(loose || tight))
             continue;
         nvgBeginPath(ctx);
         nvgRect(ctx, l.left, l.top, l.width, l.leading);
-        nvgFillColor(ctx, l.tight ? nvgRGBA(255, 90, 90, 80) : nvgRGBA(255, 200, 0, 80));
+        nvgFillColor(ctx, tight ? nvgRGBA(255, 90, 90, 80) : nvgRGBA(255, 200, 0, 80));
         nvgFill(ctx);
     }
     if (m_show_baselines) {

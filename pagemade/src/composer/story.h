@@ -66,9 +66,13 @@ inline bool is_justified(Align a) {
 enum class TabAlign { Left, Center, Right, Decimal };
 
 struct TabStop {
-    float       pos = 0.f;       // from the text block's left edge
+    float       pos = 0.f;       // from the text block's left edge (or its right indent)
     TabAlign    align = TabAlign::Left;
     std::string leader;          // fill character(s), e.g. "." or "_"; empty = none
+    /* Measured leftward from the right indent instead: the stop stays the
+     * same distance from the block's right side as the block is resized
+     * (a table of contents' page numbers at 0). */
+    bool        from_right = false;
 };
 
 /* Bullets and numbering. */
@@ -154,6 +158,9 @@ constexpr uint32_t kFrameBreak = 0x0C; // ends the line and the text block
 constexpr uint32_t kPageNumberChar = 0xE000;
 constexpr uint32_t kPageCountChar = 0xE001;
 inline bool is_page_marker(uint32_t cp) { return cp == kPageNumberChar || cp == kPageCountChar; }
+/* A right-indent tab (Shift+Tab): jumps to the right indent whatever the
+ * stops, right aligned, with the leader of the paragraph's last right stop. */
+constexpr uint32_t kRightIndentTab = 0xE002;
 
 struct Run {
     CharStyle   style;

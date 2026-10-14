@@ -1,7 +1,9 @@
 /*
  * pagemade/paragraph_panel.h — the Paragraph panel the ¶ button pops open,
  * laid out after VectorStyler's: the style menu, seven alignments, line
- * spacing and extra spacing, the four indents, space before and after, and
+ * spacing and extra spacing, the spacing attributes (word and letter
+ * spacing limits, and how strictly loose lines are flagged), the four
+ * indents, space before and after, and
  * bullets and numbering, the drop cap (lines, size, characters), keep options (orphans, widows,
  * keep together, keep with next, start in the next text block),
  * with Remove (delete the style) and Add (new style from the selection)
@@ -24,7 +26,7 @@
 #include <string>
 #include <vector>
 
-namespace nanogui { class Dropdown; class Button; }
+namespace nanogui { class Dropdown; class Button; class CheckBox; }
 
 /* The icons the panel draws, in the style of its reference: stacks of
  * text lines. */
@@ -52,9 +54,13 @@ public:
         std::function<void(const std::string &)> apply_style;
         std::function<void()> new_style;
         std::function<void(const std::string &)> delete_style;
+        /* "Flag letter-spaced lines": loose/tight by word spacing alone. */
+        std::function<void(bool)> strict;
     };
 
     ParagraphPanel(nanogui::Widget *parent, Hooks hooks);
+    /* Show the strict loose/tight switch as on or off. */
+    void set_strict(bool on);
 
     /* Show these paragraphs (none disables the panel) and the document's
      * styles. */
@@ -71,6 +77,8 @@ private:
         float pagemade::ParaStyle::*member = nullptr;
         float scale = 1;                 // shown = member * scale
         float lo = 0, hi = 0;
+        /* After the value is set: keep related values in order */
+        std::function<void(pagemade::ParaStyle &)> fix;
     };
     struct IntField {
         IntSpin *box = nullptr;
@@ -84,6 +92,10 @@ private:
                    float step, const char *format, const char *units);
     void add_int_field(nanogui::Widget *grid, ParaIcon icon, const char *tip,
                        int pagemade::ParaStyle::*member, int lo, int hi, const char *units);
+    /* A field without an icon (the spacing attributes' grid) */
+    FloatSpin *add_box(nanogui::Widget *grid, const char *tip, float pagemade::ParaStyle::*member,
+                       float lo, float hi, float step, const char *format, const char *units,
+                       int width, std::function<void(pagemade::ParaStyle &)> fix);
 
     Hooks m_hooks;
     nanogui::Dropdown *m_style = nullptr;
@@ -96,6 +108,7 @@ private:
     std::vector<IntField> m_int_fields;
     pagemade::ParaStyle m_first;         // the first selected paragraph's
     nanogui::Button *m_delete = nullptr, *m_new = nullptr;
+    nanogui::CheckBox *m_strict = nullptr;
     bool m_loading = false;
 };
 

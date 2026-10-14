@@ -123,7 +123,8 @@ PageDoc sample_document() {
     side_note.italic = true; side_note.size = 9; side_note.leading = 11;
     ParaStyle side_head_ps; side_head_ps.name = "Sidebar head"; side_head_ps.space_after = 3;
     ParaStyle contents_ps;  contents_ps.name = "Contents";
-    contents_ps.tabs = {{200, TabAlign::Right, "."}};
+    /* Page numbers on the block's right side at any width */
+    contents_ps.tabs = {{0, TabAlign::Right, ".", true}};
     ParaStyle note_ps;      note_ps.name = "Sidebar note"; note_ps.space_before = 6;
 
     Story sidebar;

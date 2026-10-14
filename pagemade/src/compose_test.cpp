@@ -2836,6 +2836,100 @@ static void test_pdf_settings(const FontLibrary &fonts) {
     std::printf("  pdf: %zu output intent profiles\n", profiles.size());
 }
 
+static void test_strict_loose(const FontLibrary &fonts) {
+    /* Justified lines at a width where word spaces run out of stretch on
+     * some lines and letter spacing takes up the rest */
+    Paragraph p;
+    p.style.align = Align::Justify;
+    p.style.hyphenate = false;
+    p.runs.push_back({CharStyle(), "Justified type uses spacing attributes. Word spaces may "
+                                    "shrink or stretch; when that isn't enough, letter spacing "
+                                    "takes up the slack. Narrow measures show it best of all."});
+    Story st;
+    st.paragraphs.push_back(p);
+    bool word_only = false, any_strict = false;
+    for (float w = 90.f; w <= 200.f; w += 5.f) {
+        Composition c = compose(st, {Frame{0, 0, w, 2000}}, fonts);
+        for (const ComposedLine &l : c.lines) {
+            CHECK(!l.loose || l.word_loose, "loose implies word-loose (w %.0f)", w);
+            CHECK(!l.tight || l.word_tight, "tight implies word-tight (w %.0f)", w);
+            word_only = word_only || (l.word_loose && !l.loose);
+            any_strict = any_strict || l.word_loose;
+        }
+    }
+    CHECK(any_strict && word_only,
+          "some lines pass the word-space maximum while letter spacing absorbs the rest");
+    /* Widening the word-space maximum leaves fewer strict-loose lines */
+    st.paragraphs[0].style.word_max = 400.f;
+    size_t wide = 0, narrow = 0;
+    Composition a = compose(st, {Frame{0, 0, 120, 2000}}, fonts);
+    for (const ComposedLine &l : a.lines) wide += l.word_loose;
+    st.paragraphs[0].style.word_max = 150.f;
+    Composition b = compose(st, {Frame{0, 0, 120, 2000}}, fonts);
+    for (const ComposedLine &l : b.lines) narrow += l.word_loose;
+    CHECK(wide < narrow, "a larger word maximum flags fewer lines (%zu < %zu)", wide, narrow);
+}
+
+static void test_contents_tabs(const FontLibrary &fonts) {
+    /* The right edge of the last visible glyph on the first line */
+    auto right_end = [&](const Story &st, float w, size_t *leaders = nullptr) {
+        Composition c = compose(st, {Frame{0, 0, w, 500}}, fonts);
+        float end = 0.f;
+        size_t inserted = 0;
+        if (!c.lines.empty())
+            for (const GlyphRun &r : c.lines[0].runs)
+                for (const PlacedGlyph &g : r.glyphs) {
+                    if (g.flags & PlacedGlyph::Invisible)
+                        continue;
+                    end = std::max(end, g.x + g.adv);
+                    inserted += (g.flags & PlacedGlyph::Inserted) != 0;
+                }
+        if (leaders)
+            *leaders = inserted;
+        return end;
+    };
+    Paragraph p;
+    p.style.tabs = {{0, TabAlign::Right, ".", true}};
+    p.style.right_indent = 6;
+    p.runs.push_back({CharStyle(), "Threaded blocks\t12"});
+    Story st;
+    st.paragraphs.push_back(p);
+    size_t dots_narrow = 0, dots_wide = 0;
+    const float at200 = right_end(st, 200, &dots_narrow), at320 = right_end(st, 320, &dots_wide);
+    CHECK(std::fabs(at200 - 194.f) < 0.6f && std::fabs(at320 - 314.f) < 0.6f,
+          "a right-anchored stop puts the number at the right indent (%.1f, %.1f)", at200, at320);
+    CHECK(dots_narrow > 3 && dots_wide > dots_narrow, "the leader fills the gap (%zu, %zu dots)",
+          dots_narrow, dots_wide);
+
+    /* Shift+Tab's right-indent tab: no stops needed, the right stop's leader */
+    Paragraph q;
+    q.runs.push_back({CharStyle(), "Rotated blocks\xEE\x80\x82" "7"});
+    Story qs;
+    qs.paragraphs.push_back(q);
+    size_t none = 0;
+    const float rit = right_end(qs, 250, &none);
+    CHECK(std::fabs(rit - 250.f) < 0.6f && none == 0,
+          "a right-indent tab jumps to the right indent, no leader without a stop (%.1f)", rit);
+    qs.paragraphs[0].style.tabs = {{100, TabAlign::Right, ".", false}};
+    size_t dots = 0;
+    right_end(qs, 250, &dots);
+    CHECK(dots > 3, "with a right stop it takes that stop's leader (%zu)", dots);
+
+    /* Saved and read back */
+    PageDoc doc = new_publication(PageSetup(), 1);
+    const StyleDef *contents = doc.find_style("Contents");
+    CHECK(contents && contents->para.tabs.size() == 1 && contents->para.tabs[0].from_right,
+          "new publications have a Contents style with a right-side stop");
+    const StoryId sid = doc.add_story(st);
+    doc.add_text_frame(0, sid, 200, 100, Transform::translate(72, 72));
+    std::string err;
+    const std::string path = "/tmp/pagemade-tabs.pagemade";
+    CHECK(save_document(doc, fonts, path, SaveOptions{false}, &err), "save tabs: %s", err.c_str());
+    OpenResult back = open_document(path, fonts);
+    CHECK(back.ok && back.doc.stories.back().story.paragraphs[0].style.tabs[0].from_right,
+          "from_right survives saving");
+}
+
 static void test_images(const FontLibrary &fonts) {
     CHECK(std::fabs(image_print_points(300, 300) - 72.f) < 0.01f, "300 px at 300 ppi is 72 pt");
     CHECK(std::fabs(image_print_points(100, 0) - 100.f) < 0.01f, "unspecified resolution is 72 ppi");
@@ -3554,6 +3648,8 @@ int main(int argc, char **argv) {
     test_layers(fonts);
     test_document_setup(fonts);
     test_pdf_settings(fonts);
+    test_strict_loose(fonts);
+    test_contents_tabs(fonts);
     test_image_color(fonts);
     test_background_worker();
     test_caps(fonts);

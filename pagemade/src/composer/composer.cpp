@@ -56,6 +56,7 @@ struct PGlyph {
     float    dx = 0, dy = 0;     // HarfBuzz offsets, points (dy up)
     float    band = 0;           // the run's space width (letter spacing unit)
     float    scale = 1.f;        // synthetic small caps draw smaller than the run's size
+    bool     right_tab = false;  // a right-indent tab (Kind::Tab)
 };
 
 /* Latin letters we can case without a Unicode library: ASCII, Latin-1,
@@ -241,7 +242,9 @@ public:
             g.inserted = local >= inserted_from;
             g.unsafe = hb_glyph_info_get_glyph_flags(&info[i]) & HB_GLYPH_FLAG_UNSAFE_TO_BREAK;
             g.kind = is_break(cp) ? Kind::Break : is_space(cp) ? Kind::Space
-                   : cp == '\t' ? Kind::Tab : cp == 0xAD ? Kind::SoftHyphen : Kind::Glyph;
+                   : cp == '\t' || cp == kRightIndentTab ? Kind::Tab
+                   : cp == 0xAD ? Kind::SoftHyphen : Kind::Glyph;
+            g.right_tab = cp == kRightIndentTab;
             g.adv = pos[i].x_advance * gem * hs;
             g.track = track;
             g.dx = pos[i].x_offset * gem * hs;
@@ -297,18 +300,31 @@ struct LineCtx {
     const ParaStyle   *ps;
     const std::string *text;
     float frame_x;
+    float right;             // the right indent: where right-anchored stops count from
 };
 
 /* The first tab stop past x: explicit stops, then defaults every
  * default_tab from the block's left edge. */
-TabStop next_stop(const ParaStyle &ps, float frame_x, float x) {
+TabStop next_stop(const ParaStyle &ps, float frame_x, float right, float x, bool right_tab) {
+    /* A right-indent tab: the right indent, with the last right stop's leader */
+    if (right_tab) {
+        TabStop t;
+        t.pos = right;
+        t.align = TabAlign::Right;
+        for (const TabStop &s : ps.tabs)
+            if (s.align == TabAlign::Right)
+                t.leader = s.leader;
+        return t;
+    }
+    /* The nearest stop past x, each placed from its own edge */
+    auto place = [&](const TabStop &t) { return t.from_right ? right - t.pos : frame_x + t.pos; };
     const TabStop *best = nullptr;
     for (const TabStop &t : ps.tabs)
-        if (frame_x + t.pos > x + kEps && (!best || t.pos < best->pos))
+        if (place(t) > x + kEps && (!best || place(t) < place(*best)))
             best = &t;
     if (best) {
         TabStop t = *best;
-        t.pos += frame_x;
+        t.pos = place(*best);
         return t;
     }
     const float dt = ps.default_tab > 1 ? ps.default_tab : 36.f;
@@ -360,7 +376,7 @@ float layout(const std::vector<PGlyph> &g, size_t hang, float x0, const LineCtx 
         if (gl.kind == Kind::Tab) {
             resolve(i);
             xs[i] = x;
-            TabStop stop = next_stop(*lc.ps, lc.frame_x, x);
+            TabStop stop = next_stop(*lc.ps, lc.frame_x, lc.right, x, gl.right_tab);
             if (stop.align == TabAlign::Left) {
                 if (fills)
                     fills->push_back({i, x, stop.pos, stop.leader});
@@ -532,7 +548,7 @@ public:
         c.carry = m_carry;
         const ParaStyle &ps = m_para.style;
         const bool justify = is_justified(ps.align);
-        const LineCtx lc{&ps, &m_sh.text, frame_x};
+        const LineCtx lc{&ps, &m_sh.text, frame_x, x0 + avail};
 
         /* Accepted pieces stay flattened. A try appends, measures, then drops
          * the extra. The cached measure is the hyphen zone of the line so far. */
@@ -841,7 +857,7 @@ private:
 void place_line(Shaper &sh, const Paragraph &para, const LineCandidate &c, float frame_x,
                 bool last_line, ComposedLine &line) {
     const ParaStyle &ps = para.style;
-    const LineCtx lc{&ps, &sh.text, frame_x};
+    const LineCtx lc{&ps, &sh.text, frame_x, line.left + line.width};
     std::vector<const Piece *> ptrs;
     for (const Piece &p : c.pieces) ptrs.push_back(&p);
     std::vector<PGlyph> g;
@@ -869,6 +885,7 @@ void place_line(Shaper &sh, const Paragraph &para, const LineCandidate &c, float
         float word_r = 0, letter_r = 0;
         float diff = avail - m.natural;
         if (diff >= 0) {
+            line.word_loose = diff > m.word_stretch + kEps;
             if (m.word_stretch > 0 && diff <= m.word_stretch) {
                 word_r = diff / m.word_stretch;
             } else {
@@ -888,6 +905,7 @@ void place_line(Shaper &sh, const Paragraph &para, const LineCandidate &c, float
             }
         } else {
             float need = -diff;
+            line.word_tight = need > m.word_shrink + kEps;
             if (m.word_shrink > 0 && need <= m.word_shrink) {
                 word_r = -need / m.word_shrink;
             } else {
@@ -909,7 +927,7 @@ void place_line(Shaper &sh, const Paragraph &para, const LineCandidate &c, float
         else if (!m.has_tab && center)
             x0 += (avail - m.natural) * 0.5f;
         if (m.natural > avail + kEps)
-            line.tight = true;
+            line.tight = line.word_tight = true;
     }
 
     std::vector<TabFill> fills;

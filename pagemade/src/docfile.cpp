@@ -280,6 +280,7 @@ void write_para_style(JsonOut &j, const ParaStyle &ps) {
             j.key("pos").value(t.pos);
             if (t.align != TabAlign::Left) j.key("align").value(tab_name(t.align));
             if (!t.leader.empty()) j.key("leader").value(t.leader);
+            if (t.from_right) j.key("from_right").value(true);
             j.end_object();
         }
         j.end_array();
@@ -853,6 +854,7 @@ ParaStyle read_para_style(const DictValue *o) {
         get(at(tabs, i), "pos", t.pos);
         get(at(tabs, i), "align", a);
         get(at(tabs, i), "leader", t.leader);
+        get(at(tabs, i), "from_right", t.from_right);
         t.align = tab_from(a);
         ps.tabs.push_back(t);
     }

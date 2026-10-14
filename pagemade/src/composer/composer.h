@@ -116,6 +116,10 @@ struct ComposedLine {
     bool     hyphenated = false;   // ends with an inserted hyphen
     bool     loose = false;        // spacing went past word/letter max
     bool     tight = false;        // content overflows even at minimum spacing
+    /* Stricter: word spacing alone went past its maximum (letter spacing
+     * took up the rest), or past its minimum. */
+    bool     word_loose = false;
+    bool     word_tight = false;
     std::vector<GlyphRun> runs;
 };
 

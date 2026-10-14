@@ -85,6 +85,11 @@ public:
 
     void set_show_baselines(bool on)   { m_show_baselines = on; }
     void set_show_loose_tight(bool on) { m_show_loose_tight = on; }
+    bool show_loose_tight() const { return m_show_loose_tight; }
+    /* Strict: a line is loose or tight by its word spacing alone, before
+     * letter spacing takes up the difference. */
+    void set_strict_loose_tight(bool on) { m_strict_loose_tight = on; }
+    bool strict_loose_tight() const { return m_strict_loose_tight; }
     void set_show_guides(bool on);
     bool show_guides() const           { return m_show_guides; }
     /* Locked ruler guides stay put: the pointer tool no longer picks them
@@ -724,6 +729,7 @@ private:
 
     bool m_show_baselines = false;
     bool m_show_loose_tight = false;
+    bool m_strict_loose_tight = false;
     bool m_show_guides = true;
     GuideDrag m_guide_drag;
     bool m_lock_guides = false;

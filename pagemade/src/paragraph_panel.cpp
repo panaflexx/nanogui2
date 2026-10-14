@@ -4,6 +4,7 @@
 #include "paragraph_panel.h"
 
 #include <nanogui/button.h>
+#include <nanogui/checkbox.h>
 #include <nanogui/icons.h>
 #include <nanogui/label.h>
 #include <nanogui/layout.h>
@@ -497,6 +498,57 @@ ParagraphPanel::ParagraphPanel(Widget *parent, Hooks hooks)
     add_field(spacing, ParaIcon::ExtraSpacing, "Extra spacing, added to every line",
               &P::extra_spacing, 1.f, -72.f, 72.f, 0.5f, "%.1f", "pt");
 
+    /* Spacing attributes (PageMaker's Paragraph > Spacing): how far
+     * justified lines may stretch or squeeze word and letter spaces, as
+     * percentages. Min <= desired <= max is kept by moving the others. */
+    new Rule(this);
+    {
+        Label *head = new Label(this, "Spacing attributes", "sans-bold", 14);
+        head->set_tooltip("Justified lines stretch or squeeze word spaces between min and max, "
+                          "then letter spacing. Ragged lines use the desired values.");
+        Widget *sg = new Widget(this);
+        auto *gl = new GridLayout(Orientation::Horizontal, 4, Alignment::Middle, 0, 4);
+        gl->set_col_alignment(
+            {Alignment::Minimum, Alignment::Fill, Alignment::Fill, Alignment::Fill});
+        sg->set_layout(gl);
+        new Label(sg, "", "sans");
+        for (const char *h : {"Min", "Desired", "Max"}) {
+            Label *l = new Label(sg, h, "sans", 13);
+            l->set_color(Color(110, 110, 110, 255));
+        }
+        auto order = [](float P::*lo, float P::*mid, float P::*hi, float P::*set) {
+            return [lo, mid, hi, set](P &ps) {
+                const float v = ps.*set;
+                if (set == lo) { ps.*mid = std::max(ps.*mid, v); ps.*hi = std::max(ps.*hi, ps.*mid); }
+                if (set == mid) { ps.*lo = std::min(ps.*lo, v); ps.*hi = std::max(ps.*hi, v); }
+                if (set == hi) { ps.*mid = std::min(ps.*mid, v); ps.*lo = std::min(ps.*lo, ps.*mid); }
+            };
+        };
+        new Label(sg, "Word", "sans-bold", 14);
+        add_box(sg, "Word space minimum, percent of the font's space", &P::word_min, 0.f, 500.f,
+                5.f, "%.0f", "%", 66, order(&P::word_min, &P::word_desired, &P::word_max, &P::word_min));
+        add_box(sg, "Word space desired (ragged lines use this)", &P::word_desired, 0.f, 500.f,
+                5.f, "%.0f", "%", 66,
+                order(&P::word_min, &P::word_desired, &P::word_max, &P::word_desired));
+        add_box(sg, "Word space maximum", &P::word_max, 0.f, 500.f, 5.f, "%.0f", "%", 66,
+                order(&P::word_min, &P::word_desired, &P::word_max, &P::word_max));
+        new Label(sg, "Letter", "sans-bold", 14);
+        add_box(sg, "Letter space minimum, percent of a space added between letters",
+                &P::letter_min, -200.f, 200.f, 1.f, "%.0f", "%", 66,
+                order(&P::letter_min, &P::letter_desired, &P::letter_max, &P::letter_min));
+        add_box(sg, "Letter space desired", &P::letter_desired, -200.f, 200.f, 1.f, "%.0f", "%", 66,
+                order(&P::letter_min, &P::letter_desired, &P::letter_max, &P::letter_desired));
+        add_box(sg, "Letter space maximum", &P::letter_max, -200.f, 200.f, 1.f, "%.0f", "%", 66,
+                order(&P::letter_min, &P::letter_desired, &P::letter_max, &P::letter_max));
+        m_strict = new CheckBox(this, "Flag letter-spaced lines", [this](bool on) {
+            if (!m_loading && m_hooks.strict)
+                m_hooks.strict(on);
+        });
+        m_strict->set_tooltip("Loose/tight highlighting (V) by word spacing alone: a line is "
+                              "loose once its word spaces pass the maximum, even when letter "
+                              "spacing takes up the rest");
+    }
+
     new Rule(this);
     Widget *indents = grid();
     add_field(indents, ParaIcon::LeftIndent, "Left indent", &P::left_indent, 1.f, 0.f, 1000.f,
@@ -636,7 +688,7 @@ void ParagraphPanel::add_field(Widget *grid, ParaIcon icon, const char *tip,
     box->set_fixed_size(Vector2i(104, 28));
     box->set_tooltip(tip);
     const size_t index = m_fields.size();
-    m_fields.push_back({box, member, scale, lo, hi});
+    m_fields.push_back({box, member, scale, lo, hi, nullptr});
     box->set_blank_value([this, index] {
         const Field &f = m_fields[index];
         return m_first.*(f.member) * f.scale;
@@ -656,6 +708,49 @@ void ParagraphPanel::add_field(Widget *grid, ParaIcon icon, const char *tip,
                           f.box->spinning() ? f.box : nullptr);
         return true;
     });
+}
+
+FloatSpin *ParagraphPanel::add_box(Widget *grid, const char *tip, float ParaStyle::*member,
+                                   float lo, float hi, float step, const char *format,
+                                   const char *units, int width,
+                                   std::function<void(ParaStyle &)> fix) {
+    auto *box = new FloatSpin(grid, 0.f, step, lo, hi);
+    box->number_format(format);
+    box->set_units(units);
+    box->set_default_value("");          // left blank (mixed): no change
+    box->set_alignment(TextBox::Alignment::Right);
+    box->set_fixed_size(Vector2i(width, 28));
+    box->set_tooltip(tip);
+    const size_t index = m_fields.size();
+    m_fields.push_back({box, member, 1.f, lo, hi, std::move(fix)});
+    box->set_blank_value([this, index] { return m_first.*(m_fields[index].member); });
+    box->TextBox::set_callback([this, index](const std::string &s) {
+        const Field &f = m_fields[index];
+        char *end = nullptr;
+        const float v = std::strtof(s.c_str(), &end);
+        if (end == s.c_str())
+            return false;
+        const float value = std::clamp(v, f.lo, f.hi);
+        f.box->set_value(value);
+        const auto member = f.member;
+        const auto fix = f.fix;
+        if (m_hooks.apply)
+            m_hooks.apply([member, value, fix](ParaStyle &ps) {
+                ps.*member = value;
+                if (fix)
+                    fix(ps);
+            }, f.box->spinning() ? f.box : nullptr);
+        return true;
+    });
+    return box;
+}
+
+void ParagraphPanel::set_strict(bool on) {
+    if (m_strict && m_strict->checked() != on) {
+        m_loading = true;
+        m_strict->set_checked(on);
+        m_loading = false;
+    }
 }
 
 void ParagraphPanel::add_int_field(Widget *grid, ParaIcon icon, const char *tip,
