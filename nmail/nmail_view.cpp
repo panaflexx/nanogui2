@@ -29,6 +29,7 @@
 #include "attachment_widgets.h"
 #include "saved_email.h"
 #include "http_fetch.h"
+#include "heif_decode.h"
 
 #include <csignal>
 #include <cstdio>
@@ -801,6 +802,15 @@ private:
         int id = nvgCreateImageMem(nvg_context(), NVG_IMAGE_PREMULTIPLIED,
                                    (unsigned char *)bytes.data(),
                                    (int)bytes.size());
+        if (id <= 0) {
+            /* stb_image can't read HEIC/AVIF; decode via libheif when the
+             * build has it (NMAIL_HAVE_HEIF). */
+            std::vector<uint8_t> rgba;
+            int w = 0, h = 0;
+            if (nmail_heif_decode_rgba((const uint8_t *)bytes.data(),
+                                       bytes.size(), rgba, w, h))
+                id = nvgCreateImageRGBA(nvg_context(), w, h, 0, rgba.data());
+        }
         if (id <= 0)
             return 0;
         m_img_tex[src] = id;

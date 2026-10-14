@@ -915,6 +915,22 @@ if (NANOGUI_BUILD_EXAMPLES)
       endforeach()
     endif()
   endif()
+  # HEIC/AVIF photo attachments (phone pictures). Optional: without libheif
+  # nmail previews only the formats stb_image knows (JPEG/PNG/GIF/BMP).
+  find_package(PkgConfig QUIET)
+  if (PkgConfig_FOUND)
+    pkg_check_modules(LIBHEIF libheif)
+  endif()
+  if (LIBHEIF_FOUND)
+    foreach(_t nmail nmail_view)
+      target_compile_definitions(${_t} PRIVATE NMAIL_HAVE_HEIF=1)
+      target_include_directories(${_t} PRIVATE ${LIBHEIF_INCLUDE_DIRS})
+      target_link_directories(${_t} PRIVATE ${LIBHEIF_LIBRARY_DIRS})
+      target_link_libraries(${_t} ${LIBHEIF_LIBRARIES})
+    endforeach()
+  else()
+    message(STATUS "nmail: libheif not found, HEIC/AVIF attachment previews disabled.")
+  endif()
   # nvgCreateFont("emoji") loads resources/NotoColorEmoji.ttf from disk
   # (other faces are embedded). Keep TTFs next to the executables.
   file(GLOB _NMAIL_FONTS "${CMAKE_CURRENT_SOURCE_DIR}/resources/*.ttf")

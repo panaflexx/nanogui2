@@ -92,6 +92,7 @@
 #endif
 #include <stb_image.h>
 #include "nmail_icon.h"
+#include "heif_decode.h"
 #include "nmail_config.h"
 #include "mail_worker.h"
 #include "mail_widgets.h"
@@ -2305,6 +2306,15 @@ public:
         int id = nvgCreateImageMem(nvg_context(), NVG_IMAGE_PREMULTIPLIED,
                                    (unsigned char *)bytes.data(),
                                    (int)bytes.size());
+        if (id <= 0) {
+            /* stb_image can't read HEIC/AVIF; decode via libheif when the
+             * build has it (NMAIL_HAVE_HEIF). */
+            std::vector<uint8_t> rgba;
+            int w = 0, h = 0;
+            if (nmail_heif_decode_rgba((const uint8_t *)bytes.data(),
+                                       bytes.size(), rgba, w, h))
+                id = nvgCreateImageRGBA(nvg_context(), w, h, 0, rgba.data());
+        }
         if (id <= 0)
             return 0;
         m_img_tex[src] = id;
@@ -2321,6 +2331,14 @@ public:
         int id = nvgCreateImageThumbMem(nvg_context(), 0,
                                         (unsigned char *)bytes.data(),
                                         (int)bytes.size(), 192);
+        if (id <= 0) {
+            /* HEIC/AVIF via libheif; full-size upload, scaled at draw time. */
+            std::vector<uint8_t> rgba;
+            int w = 0, h = 0;
+            if (nmail_heif_decode_rgba((const uint8_t *)bytes.data(),
+                                       bytes.size(), rgba, w, h))
+                id = nvgCreateImageRGBA(nvg_context(), w, h, 0, rgba.data());
+        }
         if (id <= 0) return 0;
         m_img_tex[key] = id;
         return id;
@@ -2747,13 +2765,16 @@ public:
             m_view_scroll->set_scroll(keep);
     }
 
-    /* stb_image (via nvgCreateImageMem) decodes JPEG/PNG/GIF/BMP, not HEIC. */
+    /* stb_image (via nvgCreateImageMem) decodes JPEG/PNG/GIF/BMP; with
+     * libheif (NMAIL_HAVE_HEIF) HEIC/AVIF count as decodable too. */
     bool image_bytes_decodable(const std::string &data) const {
         if (data.size() < 16) return false;
         int w = 0, h = 0, n = 0;
-        return stbi_info_from_memory(
-            (const unsigned char *)data.data(), (int)data.size(),
-            &w, &h, &n) != 0;
+        if (stbi_info_from_memory(
+                (const unsigned char *)data.data(), (int)data.size(),
+                &w, &h, &n) != 0)
+            return true;
+        return nmail_heif_sniff((const uint8_t *)data.data(), data.size());
     }
 
     /* Photos that are not already shown inline in the HTML. False when

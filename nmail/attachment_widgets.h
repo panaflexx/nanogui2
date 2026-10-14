@@ -72,6 +72,9 @@ inline std::string mime_ext_guess(const std::string &mime) {
     if (mime == "image/gif")  return "gif";
     if (mime == "image/webp") return "webp";
     if (mime == "image/tiff") return "tiff";
+    if (mime == "image/heic") return "heic";
+    if (mime == "image/heif") return "heif";
+    if (mime == "image/avif") return "avif";
     if (mime == "text/plain") return "txt";
     if (mime == "text/html")  return "html";
     if (mime == "text/csv")   return "csv";
@@ -99,6 +102,9 @@ inline std::string mime_from_ext(const std::string &ext) {
     if (ext == "gif")  return "image/gif";
     if (ext == "webp") return "image/webp";
     if (ext == "tif" || ext == "tiff") return "image/tiff";
+    if (ext == "heic") return "image/heic";
+    if (ext == "heif") return "image/heif";
+    if (ext == "avif") return "image/avif";
     if (ext == "txt")  return "text/plain";
     if (ext == "html" || ext == "htm") return "text/html";
     if (ext == "csv")  return "text/csv";
@@ -201,7 +207,7 @@ inline bool attachment_is_archive(const MailAttachment &a);
 inline bool is_open_allowlisted(const std::string &ext) {
     return ext_in(ext, {
         "pdf", "txt", "rtf", "csv", "html", "htm",
-        "png", "jpg", "jpeg", "gif", "webp", "tif", "tiff", "bmp", "heic", "heif",
+        "png", "jpg", "jpeg", "gif", "webp", "tif", "tiff", "bmp", "heic", "heif", "avif",
         "doc", "docx", "xls", "xlsx", "ppt", "pptx", "odt", "ods", "odp",
         "mp3", "mp4", "wav", "aac", "m4a", "mov", "webm", "ogg",
         "json", "xml", "vcf", "ics", "svg", "pages", "numbers", "key"
@@ -215,8 +221,9 @@ inline bool attachment_is_html(const MailAttachment &a) {
     return a.mime == "text/html";
 }
 
-/* JPEG/PNG/GIF/BMP can be decoded in-pane. HEIC, TIFF, and WebP are
- * still "photos" but stb_image cannot decode them. SVG is not a photo. */
+/* JPEG/PNG/GIF/BMP decode via stb_image; HEIC/AVIF decode too when the
+ * build has libheif (NMAIL_HAVE_HEIF, heif_decode.h). TIFF and WebP are
+ * still "photos" but cannot be decoded. SVG is not a photo. */
 inline bool attachment_is_photo(const MailAttachment &a) {
     if (a.data.empty()) return false;
     if (a.mime == "image/svg+xml") return false;
@@ -225,7 +232,7 @@ inline bool attachment_is_photo(const MailAttachment &a) {
     if (a.mime.rfind("image/", 0) == 0) return true;
     return ext_in(ext, {
         "jpg", "jpeg", "png", "gif", "bmp", "tga",
-        "heic", "heif", "tif", "tiff", "webp"
+        "heic", "heif", "avif", "tif", "tiff", "webp"
     });
 }
 
@@ -343,7 +350,7 @@ inline NVGcolor att_type_color(const std::string &ext) {
         return nvgRGB(208, 108, 36);
     if (ext == "png" || ext == "jpg" || ext == "jpeg" || ext == "gif" ||
         ext == "webp" || ext == "tif" || ext == "tiff" || ext == "bmp" ||
-        ext == "heic" || ext == "heif" || ext == "svg")
+        ext == "heic" || ext == "heif" || ext == "avif" || ext == "svg")
         return nvgRGB(42, 138, 148);
     if (is_archive_ext(ext)) return nvgRGB(140, 102, 48);
     if (ext == "txt" || ext == "rtf") return nvgRGB(96, 98, 110);
