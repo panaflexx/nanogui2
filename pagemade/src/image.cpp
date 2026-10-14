@@ -762,6 +762,10 @@ bool read_file_bytes(const std::string &path, std::vector<uint8_t> *out, std::st
 
 } // namespace
 
+void resample_rgba(const uint8_t *src, int sw, int sh, int dw, int dh, std::vector<uint8_t> &dst) {
+    downsample_rgba(src, sw, sh, dw, dh, dst);
+}
+
 bool read_file(const std::string &path, std::vector<uint8_t> *out, std::string *error) {
     return read_file_bytes(path, out, error);
 }

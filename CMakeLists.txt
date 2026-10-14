@@ -986,10 +986,12 @@ if (NANOGUI_BUILD_EXAMPLES)
         pagemade/src/docfile.cpp
         pagemade/src/image.cpp
         pagemade/src/image_color.cpp
+        pagemade/src/setup_adjust.cpp
         pagemade/src/dialogs.cpp
         pagemade/src/image_assets.cpp
         pagemade/src/dock_window.cpp
         pagemade/src/layers_panel.cpp
+        pagemade/src/pdf_dialog.cpp
         pagemade/src/ruler.cpp
         pagemade/src/paragraph_panel.cpp
         pagemade/src/sample.cpp)
@@ -1006,6 +1008,7 @@ if (NANOGUI_BUILD_EXAMPLES)
         pagemade/src/docfile.cpp
         pagemade/src/image.cpp
         pagemade/src/image_color.cpp
+        pagemade/src/setup_adjust.cpp
         pagemade/src/image_stb.cpp
         pagemade/src/sample.cpp)
     foreach(_t pagemade_app pagemade_compose_test)

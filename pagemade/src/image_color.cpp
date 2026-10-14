@@ -290,15 +290,65 @@ void icc_to_srgb(const std::vector<uint8_t> &icc, uint8_t *rgba, size_t pixels) 
     }
 }
 
+static std::vector<uint8_t> build_profile(const float red[2], const float green[2],
+                                          const float blue[2], const float white[2],
+                                          Transfer transfer, const std::string &description,
+                                          bool force);
+
 std::vector<uint8_t> icc_from_primaries(const float red[2], const float green[2],
                                         const float blue[2], const float white[2],
                                         Transfer transfer, const std::string &description) {
+    return build_profile(red, green, blue, white, transfer, description, false);
+}
+
+const std::vector<uint8_t> &icc_srgb() {
+    static const std::vector<uint8_t> profile = [] {
+        const float r[2] = {0.64f, 0.33f}, g[2] = {0.30f, 0.60f}, b[2] = {0.15f, 0.06f},
+                    w[2] = {0.3127f, 0.3290f};
+        return build_profile(r, g, b, w, Transfer::SRGB, "sRGB IEC61966-2.1", true);
+    }();
+    return profile;
+}
+
+bool icc_info(const std::vector<uint8_t> &icc, std::string *space, std::string *description) {
+    if (icc.size() < 132 || be32(icc.data()) > icc.size() ||
+        std::memcmp(icc.data() + 36, "acsp", 4) != 0)
+        return false;
+    if (space)
+        space->assign((const char *) icc.data() + 16, 4);
+    if (description) {
+        description->clear();
+        size_t len = 0;
+        if (const uint8_t *t = find_tag(icc, "desc", &len)) {
+            if (std::memcmp(t, "desc", 4) == 0 && len >= 12) {
+                /* v2: ASCII count, then the text */
+                const uint32_t n = be32(t + 8);
+                if (n > 0 && 12 + (size_t) n <= len)
+                    description->assign((const char *) t + 12, strnlen((const char *) t + 12, n));
+            } else if (std::memcmp(t, "mluc", 4) == 0 && len >= 28) {
+                /* v4: the first record, UTF-16BE; keep the ASCII */
+                const uint32_t size = be32(t + 20), off = be32(t + 24);
+                for (uint32_t i = 0; i + 1 < size && off + i + 1 < len; i += 2) {
+                    const unsigned c = be16(t + off + i);
+                    if (c >= 32 && c < 127)
+                        description->push_back((char) c);
+                }
+            }
+        }
+    }
+    return true;
+}
+
+static std::vector<uint8_t> build_profile(const float red[2], const float green[2],
+                                          const float blue[2], const float white[2],
+                                          Transfer transfer, const std::string &description,
+                                          bool force) {
     double rgb_xyz[9], adapt[9], pcs[9];
     if (!primaries_matrix(red, green, blue, white, rgb_xyz))
         return {};
     bradford_to_d50(white, adapt);
     mul3(adapt, rgb_xyz, pcs);
-    if (transfer == Transfer::SRGB) {
+    if (transfer == Transfer::SRGB && !force) {
         bool same = true;
         for (int i = 0; i < 9 && same; ++i)
             same = std::fabs(pcs[i] - kSrgbD50[i]) < 0.002;

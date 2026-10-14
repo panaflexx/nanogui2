@@ -68,6 +68,7 @@
 #include "page.h"
 #include "paragraph_panel.h"
 #include "pdf.h"
+#include "pdf_dialog.h"
 #include "spinbox.h"
 
 #define STB_IMAGE_WRITE_IMPLEMENTATION
@@ -526,6 +527,11 @@ public:
                 m_layers->refresh();     // Move Selection Here follows the selection
         };
         m_view->on_note = [this](const std::string &note) { set_note(note); };
+        m_view->on_setup_change = [this] {
+            perform_layout();            // the pasteboard is a new size
+            fit_page();
+            update_status();
+        };
         m_view->on_context_menu = [this](const Vector2i &at) { show_context_menu(at); };
         m_view->on_page_change = [this] { update_status(); };
         m_view->on_document_change = [this] {
@@ -788,7 +794,11 @@ public:
         add_cmd(file, "Save As...", {{SYSTEM_COMMAND_MOD | GLFW_MOD_SHIFT, GLFW_KEY_S}},
                 [this] { save_as(); });
         new Separator(file->popup());
-        add_cmd(file, "Export PDF...", {}, [this] { export_pdf_dialog(); });
+        add_cmd(file, "Document Setup...", {{SYSTEM_COMMAND_MOD | GLFW_MOD_SHIFT, GLFW_KEY_P}},
+                [this] { document_setup(); });
+        new Separator(file->popup());
+        add_cmd(file, "PDF Settings...", {}, [this] { pdf_settings_dialog(); });
+        add_cmd(file, "Export PDF...", {{SYSTEM_COMMAND_MOD, GLFW_KEY_E}}, [this] { export_pdf_dialog(); });
         add_cmd(file, "Print...", {{SYSTEM_COMMAND_MOD, GLFW_KEY_P}}, [this] { print_document(); });
         new Separator(file->popup());
         add_cmd(file, "Quit", {{SYSTEM_COMMAND_MOD, GLFW_KEY_Q}}, [this] { quit(); });
@@ -1920,7 +1930,8 @@ public:
         update_status();
     }
 
-    bool export_pdf_to(const std::string &path) {
+    /* `settings` null: the publication's own */
+    bool export_pdf_to(const std::string &path, const PdfSettings *settings = nullptr) {
         /* Off-screen linked pictures are unloaded. Export needs the bytes,
          * or the page is drawn with a gray stand-in. */
         const PageDoc &doc = m_view->document();
@@ -1928,24 +1939,107 @@ public:
             for (const Item &it : page.items)
                 if (const PlacedImage *im = it.image())
                     m_images.load(im->asset, nullptr);
-        return export_pdf(path, doc, m_view->compositions(), &m_images);
+        return export_pdf(path, doc, m_view->compositions(), &m_images, settings);
     }
 
+    /* File > Document Setup: page size, margins, columns, bleed, and what
+     * happens to the items already placed */
+    void document_setup() {
+        const PageDoc &doc = m_view->document();
+        ask_document_setup(this, doc.setup, doc.pages.size(),
+                           [this](const PageSetup &setup, SetupAdjust how) {
+            m_view->change_setup(setup, how);
+            set_note(how == SetupAdjust::Adjust ? "document setup changed; layout adjusted"
+                     : how == SetupAdjust::Scale ? "document setup changed; layout scaled"
+                     : "document setup changed");
+        });
+    }
+
+    /* File > PDF Settings: kept with the publication, no export */
+    void pdf_settings_dialog() {
+        const PageDoc &doc = m_view->document();
+        ask_pdf_settings(this, doc.pdf, (int) doc.pages.size(), doc.setup.bleed, "OK",
+                         [this](const PdfSettings &s) { m_view->set_pdf_settings(s); });
+    }
+
+    /* File > Export PDF: the settings, the check, then where to write it */
     void export_pdf_dialog() {
-        auto paths = file_dialog({{"pdf", "PDF document"}}, true, false, "");
-        if (paths.empty() || paths[0].empty())
-            return;
-        std::string path = paths[0];
-        if (path.size() < 4 || path.compare(path.size() - 4, 4, ".pdf") != 0)
-            path += ".pdf";
-        set_note(export_pdf_to(path) ? "wrote " + path
-                                     : "PDF export FAILED: " + path);
+        const PageDoc &doc = m_view->document();
+        ask_pdf_settings(this, doc.pdf, (int) doc.pages.size(), doc.setup.bleed,
+                         "Export\u2026", [this](const PdfSettings &s) {
+            m_view->set_pdf_settings(s);
+            auto write = [this, s] {
+                auto paths = file_dialog({{"pdf", "PDF document"}}, true, false, "");
+                if (paths.empty() || paths[0].empty())
+                    return;
+                std::string path = paths[0];
+                if (path.size() < 4 || path.compare(path.size() - 4, 4, ".pdf") != 0)
+                    path += ".pdf";
+                const bool ok = export_pdf_to(path, &s);
+                set_note(ok ? "wrote " + path : "PDF export FAILED: " + path);
+                if (ok && s.open_after)
+                    open_with_desktop(path);
+            };
+            if (!s.preflight) {
+                write();
+                return;
+            }
+            const std::vector<std::string> warnings =
+                pdf_preflight(m_view->document(), m_view->compositions(), &m_images, s);
+            if (warnings.empty()) {
+                write();
+                return;
+            }
+            /* What may print badly, and the choice to go on */
+            auto *d = new ModalDialog(this, "Before Exporting");
+            Widget *body = d->body();
+            body->set_layout(new BoxLayout(Orientation::Vertical, Alignment::Minimum, 0, 6));
+            Label *intro = new Label(body, "These may not print as you expect:", "sans-bold");
+            intro->set_fixed_size(Vector2i(520, 0));
+            const size_t shown = std::min<size_t>(warnings.size(), 12);
+            for (size_t i = 0; i < shown; ++i) {
+                Label *l = new Label(body, "\u2022 " + warnings[i], "sans");
+                l->set_fixed_size(Vector2i(520, 0));
+            }
+            if (warnings.size() > shown)
+                new Label(body, "\u2026 and " + std::to_string(warnings.size() - shown) + " more",
+                          "sans");
+            d->add_button("Cancel", {}, ModalDialog::Role::Cancel);
+            d->add_button("Export Anyway", write, ModalDialog::Role::Default);
+            d->open();
+        });
+    }
+
+    /* Hand a file to the desktop's viewer (xdg-open) */
+    void open_with_desktop(const std::string &path) {
+#if !defined(_WIN32)
+        pid_t pid = fork();
+        if (pid == 0) {
+            setsid();
+            int fd = open("/dev/null", O_RDWR);
+            if (fd >= 0) { dup2(fd, 0); dup2(fd, 1); dup2(fd, 2); if (fd > 2) close(fd); }
+#if defined(__APPLE__)
+            execlp("open", "open", path.c_str(), (char *) nullptr);
+#else
+            execlp("xdg-open", "xdg-open", path.c_str(), (char *) nullptr);
+#endif
+            _exit(127);
+        }
+#else
+        (void) path;
+#endif
     }
 
     /* Print through CUPS: export, then hand the PDF to lp. */
     void print_document() {
         const std::string path = "/tmp/pagemade-print.pdf";
-        if (!export_pdf_to(path)) {
+        /* The publication's settings, without what a print shop needs:
+         * a desk printer gets every page at its trim */
+        PdfSettings print = m_view->document().pdf;
+        print.all_pages = true;
+        print.bleed = false;
+        print.crop_marks = false;
+        if (!export_pdf_to(path, &print)) {
             set_note("print failed: could not write " + path);
             return;
         }

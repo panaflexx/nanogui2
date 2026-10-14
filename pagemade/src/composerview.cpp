@@ -153,6 +153,7 @@ void ComposerView::set_document(PageDoc doc) {
     m_probing.clear();
     m_last_live.clear();
     m_doc = std::move(doc);
+    m_shown_setup = m_doc.setup;
     m_page = 0;
     m_sel.clear();
     m_edit_story = 0;
@@ -288,8 +289,37 @@ void ComposerView::restore_snapshot() {
     selection_changed();
     if (on_page_change)
         on_page_change();
+    check_setup_change();                // undoing Document Setup resizes the pasteboard
     if (screen())
         screen()->redraw();
+}
+
+void ComposerView::check_setup_change() {
+    const PageSetup &s = m_doc.setup, &o = m_shown_setup;
+    const bool changed = s.width != o.width || s.height != o.height || s.facing != o.facing ||
+                         s.bleed != o.bleed;
+    m_shown_setup = s;
+    if (!changed)
+        return;
+    if (on_setup_change)
+        on_setup_change();
+}
+
+void ComposerView::change_setup(const PageSetup &setup, SetupAdjust how) {
+    push_undo();
+    pagemade::change_setup(m_doc, setup, how);
+    recompose();
+    selection_changed();
+    check_setup_change();
+    if (on_document_change)
+        on_document_change();
+    if (screen())
+        screen()->redraw();
+}
+
+void ComposerView::set_pdf_settings(const PdfSettings &settings) {
+    m_doc.pdf = settings;
+    bump_version();                      // saved with the file: it needs saving
 }
 
 void ComposerView::undo() {
@@ -2914,7 +2944,6 @@ bool ComposerView::keyboard_event(int key, int, int action, int modifiers) {
             return true;
         }
         Story *s = edit_story();
-        GLFWwindow *win = screen() ? screen()->glfw_window() : nullptr;
         switch (key) {
         case GLFW_KEY_A:
             m_anchor = {};
@@ -3056,6 +3085,14 @@ void ComposerView::draw_page(NVGcontext *ctx, float px, size_t page) {
 
     if (!m_show_guides)
         return;
+    /* The bleed: how far past the trim pictures and fills should run */
+    if (s.bleed > 0.f) {
+        nvgBeginPath(ctx);
+        nvgRect(ctx, -s.bleed, -s.bleed, s.width + 2 * s.bleed, s.height + 2 * s.bleed);
+        nvgStrokeWidth(ctx, px);
+        nvgStrokeColor(ctx, nvgRGBA(220, 60, 60, 160));
+        nvgStroke(ctx);
+    }
     float left = 0.f, right = 0.f;
     page_side_margins(s, page, left, right);
     const float l = left, t = s.margin_top;

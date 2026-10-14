@@ -15,6 +15,7 @@
 #include "image.h"
 #include "image_color.h"
 #include "page.h"
+#include "setup_adjust.h"
 #include "pdf.h"
 #include "docfile.h"
 #include "uri.h"
@@ -2656,6 +2657,185 @@ static void test_layers(const FontLibrary &fonts) {
     CHECK(doc.find_item(a)->layer == doc.find_item(b)->layer, "a group is on one layer");
 }
 
+static std::string run_cmd(const std::string &cmd, bool *ok) {
+    std::string out;
+    *ok = false;
+    if (FILE *pipe = popen((cmd + " 2>/dev/null").c_str(), "r")) {
+        char buf[512];
+        while (std::fgets(buf, sizeof buf, pipe))
+            out += buf;
+        *ok = pclose(pipe) == 0;
+    }
+    return out;
+}
+
+static void test_document_setup(const FontLibrary &fonts) {
+    (void) fonts;
+    PageSetup letter;                       // 612 x 792, 54 margins, 2 columns, 18 gutter
+    PageDoc doc = new_publication(letter, 1);
+    /* A block filling column 2, a picture in column 1, a box on the right margin */
+    const float col = (612.f - 108.f - 18.f) / 2.f;      // 243
+    Paragraph para;
+    para.runs.push_back({CharStyle(), "Column two"});
+    Story st;
+    st.paragraphs.push_back(para);
+    const StoryId sid = doc.add_story(st);
+    const ItemId text = doc.add_text_frame(0, sid, col, 300, Transform::translate(54 + col + 18, 100));
+    Item pic;
+    pic.w = col; pic.h = col * 0.5f;
+    pic.xf = Transform::translate(54, 100);
+    pic.content = PlacedImage{1, 0, 0, col, col * 0.5f};
+    const ItemId picture = doc.add_item(0, pic);
+    Item box;
+    box.w = 20; box.h = 20;
+    box.xf = Transform::translate(612 - 54 - 20, 700);
+    box.content = Shape();
+    const ItemId edge = doc.add_item(0, box);
+    doc.guides.push_back({true, 54 + col});              // column 1's right edge
+
+    PageDoc adjusted = doc;
+    PageSetup a4 = letter;
+    a4.width = 595.28f; a4.height = 841.89f;
+    a4.margin_inside = a4.margin_outside = 36.f;
+    a4.gutter = 12.f;
+    change_setup(adjusted, a4, SetupAdjust::Adjust);
+    const float ncol = (595.28f - 72.f - 12.f) / 2.f;
+    const Item *t = adjusted.find_item(text);
+    CHECK(t && std::fabs(t->xf.e - (36 + ncol + 12)) < 0.05f && std::fabs(t->w - ncol) < 0.05f,
+          "Adjust: a block filling column 2 fills the new column 2 (x %.2f w %.2f)",
+          t ? t->xf.e : 0.f, t ? t->w : 0.f);
+    /* Between the top and bottom margins, positions stretch with the live area */
+    const float stretch = (841.89f - 108.f) / (792.f - 108.f);
+    CHECK(t && std::fabs(t->h - 300.f * stretch) < 0.05f && std::fabs(t->xf.f - (54 + 46 * stretch)) < 0.05f,
+          "Adjust: its height stretches with the live area (%.2f)", t ? t->h : 0.f);
+    const Item *p = adjusted.find_item(picture);
+    CHECK(p && std::fabs(p->w - ncol) < 0.05f && std::fabs(p->h / p->w - 0.5f) < 0.001f &&
+          std::fabs(p->image()->w - p->w) < 0.05f,
+          "Adjust: a picture fills its column and keeps its proportions");
+    const Item *e = adjusted.find_item(edge);
+    CHECK(e && std::fabs(e->xf.e + e->w - (595.28f - 36.f)) < 0.05f,
+          "Adjust: a box on the right margin stays on it (%.2f)", e ? e->xf.e + e->w : 0.f);
+    CHECK(std::fabs(adjusted.guides[0].pos - (36 + ncol)) < 0.05f, "Adjust: a ruler guide follows");
+
+    PageDoc scaled = doc;
+    PageSetup half = letter;
+    half.width = 306; half.height = 396;
+    change_setup(scaled, half, SetupAdjust::Scale);
+    CHECK(std::fabs(scaled.stories.back().story.paragraphs[0].runs[0].style.size - 6.f) < 0.01f,
+          "Scale: type scales with the page");
+    const Item *ts = scaled.find_item(text);
+    CHECK(ts && std::fabs(ts->w - col * 0.5f) < 0.05f && std::fabs(ts->xf.e - (54 + col + 18) * 0.5f) < 0.05f,
+          "Scale: blocks scale and move with it");
+
+    PageDoc left = doc;
+    change_setup(left, a4, SetupAdjust::Leave);
+    CHECK(left.find_item(text)->xf.e == doc.find_item(text)->xf.e && left.setup.width == a4.width,
+          "Leave: only the setup changes");
+}
+
+static void test_pdf_settings(const FontLibrary &fonts) {
+    PageDoc doc = new_publication(PageSetup(), 3);
+    for (size_t i = 0; i < 3; ++i) {
+        Paragraph para;
+        para.runs.push_back({CharStyle(), "Page " + std::to_string(i + 1)});
+        Story st;
+        st.paragraphs.push_back(para);
+        const StoryId sid = doc.add_story(st);
+        doc.add_text_frame(i, sid, 200, 50, Transform::translate(72, 72));
+    }
+    /* A 600 x 300 picture placed one inch wide: 600 ppi */
+    ImageStore store;
+    std::vector<uint8_t> big = make_png(600, 300, nullptr, 0, 0);
+    ImageMetadata meta;
+    std::string err;
+    const uint32_t id = store.take_id();
+    CHECK(store.add(id, big, &meta, &err), "store png: %s", err.c_str());
+    ImageAsset asset;
+    asset.id = id; asset.name = "big.png"; asset.meta = meta;
+    doc.add_image(asset);
+    Item pic;
+    pic.w = 72; pic.h = 36;
+    pic.xf = Transform::translate(72, 200);
+    pic.content = PlacedImage{id, 0, 0, 72, 36};
+    doc.add_item(0, pic);
+    doc.setup.bleed = 9.f;
+    auto comps_of = [&] {
+        std::vector<Composition> comps;
+        for (const StoryEntry &se : doc.stories)
+            comps.push_back(compose(se.story, doc.thread_frames(se), fonts));
+        return comps;
+    };
+    const std::vector<Composition> comps = comps_of();
+    const std::string path = "/tmp/pagemade-settings.pdf";
+
+    PdfSettings o;
+    o.all_pages = false;
+    o.first_page = 2;
+    o.last_page = 3;
+    o.bleed = false;
+    CHECK(export_pdf(path, doc, comps, &store, &o), "export a range");
+    std::string plain = pdf_plain(read_bin(path));
+    size_t count = 0;
+    for (size_t at = plain.find("/Type /Page "); at != std::string::npos; at = plain.find("/Type /Page ", at + 1))
+        ++count;
+    CHECK(count == 2, "pages 2-3 are two pages (%zu)", count);
+
+    o = PdfSettings();
+    o.downsample_above = 450.f;
+    o.downsample_to = 150.f;
+    o.crop_marks = true;
+    CHECK(export_pdf(path, doc, comps, &store, &o), "export downsampled, with bleed and marks");
+    plain = pdf_plain(read_bin(path));
+    CHECK(pdf_has_number(plain, "/Width ", 150) && !pdf_has_number(plain, "/Width ", 600),
+          "a 600 ppi picture is resampled to 150 ppi (150 px)");
+    /* The sheet: bleed 9, then 3 + 15 + 3 for the marks */
+    CHECK(plain.find("/TrimBox [30 30 642 822]") != std::string::npos,
+          "bleed 9 and marks: the trim sits 30 pt in");
+    CHECK(plain.find("/BleedBox [21 21 651 831]") != std::string::npos &&
+          plain.find("/MediaBox [0 0 672 852]") != std::string::npos, "the bleed and media boxes");
+
+    o = PdfSettings();
+    o.pdfx4 = true;
+    o.title = "Holiday book";
+    o.author = "R\xC3\xA9my";
+    CHECK(export_pdf(path, doc, comps, &store, &o), "export PDF/X-4");
+    const std::string raw = read_bin(path);
+    plain = pdf_plain(raw);
+    CHECK(raw.rfind("%PDF-1.6", 0) == 0, "PDF/X-4 is PDF 1.6");
+    CHECK(plain.find("/S /GTS_PDFX") != std::string::npos &&
+          plain.find("/OutputIntents") != std::string::npos, "with an output intent");
+    CHECK(plain.find("<pdfxid:GTS_PDFXVersion>PDF/X-4</pdfxid:GTS_PDFXVersion>") != std::string::npos &&
+          plain.find("/Trapped /False") != std::string::npos, "identified as PDF/X-4");
+    CHECK(plain.find("/CS0 cs") != std::string::npos && plain.find(" rg\n") == std::string::npos,
+          "every color is tagged");
+    CHECK(plain.find("/Interpolate") == std::string::npos, "no image interpolation in PDF/X");
+    CHECK(plain.find("/Title (Holiday book)") != std::string::npos &&
+          plain.find("/Author <FEFF") != std::string::npos, "title, and a non-ASCII author");
+    bool ok = false;
+    const std::string info = run_cmd("pdfinfo " + path, &ok);
+    if (ok)
+        CHECK(info.find("Pages:           3") != std::string::npos &&
+              info.find("Holiday book") != std::string::npos, "poppler reads it: %s", info.c_str());
+
+    std::vector<std::string> warn = pdf_preflight(doc, comps, &store, PdfSettings());
+    bool odd = false, low = false;
+    for (const std::string &w : warn) {
+        odd = odd || w.find("even page count") != std::string::npos;
+        low = low || w.find("ppi") != std::string::npos;
+    }
+    CHECK(odd && !low, "preflight: three pages is odd; 600 ppi is fine");
+    Item *p = &doc.pages[0].items.back();
+    p->w = 2000; p->content = PlacedImage{id, 0, 0, 2000, 1000};
+    warn = pdf_preflight(doc, comps_of(), &store, PdfSettings());
+    low = false;
+    for (const std::string &w : warn)
+        low = low || w.find("big.png is 22 ppi") != std::string::npos;
+    CHECK(low, "preflight: a picture blown up to 22 ppi is reported");
+    const std::vector<PdfOutputProfile> profiles = pdf_output_profiles();
+    CHECK(!profiles.empty() && profiles[0].path.empty(), "sRGB is always an output intent");
+    std::printf("  pdf: %zu output intent profiles\n", profiles.size());
+}
+
 static void test_images(const FontLibrary &fonts) {
     CHECK(std::fabs(image_print_points(300, 300) - 72.f) < 0.01f, "300 px at 300 ppi is 72 pt");
     CHECK(std::fabs(image_print_points(100, 0) - 100.f) < 0.01f, "unspecified resolution is 72 ppi");
@@ -3372,6 +3552,8 @@ int main(int argc, char **argv) {
     test_groups(fonts);
     test_page_markers(fonts);
     test_layers(fonts);
+    test_document_setup(fonts);
+    test_pdf_settings(fonts);
     test_image_color(fonts);
     test_background_worker();
     test_caps(fonts);

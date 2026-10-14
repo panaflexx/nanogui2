@@ -58,6 +58,7 @@
 
 #include "composer/edit.h"
 #include "drawlist.h"
+#include "setup_adjust.h"
 
 #include <atomic>
 #include <deque>
@@ -235,6 +236,16 @@ public:
     void move_selection_to_layer(pagemade::LayerId id);
     /* How many items a layer holds, on all pages. */
     size_t layer_item_count(pagemade::LayerId id) const;
+
+    /* ---- Document Setup and PDF settings ---------------------------- */
+    /* New page size, margins, columns, facing or bleed, with the placed
+     * items adjusted, scaled or left (setup_adjust.h). One undo step. */
+    void change_setup(const pagemade::PageSetup &setup, pagemade::SetupAdjust how);
+    /* How the publication exports (kept in the file; not an undo step). */
+    void set_pdf_settings(const pagemade::PdfSettings &settings);
+    /* The page size or facing pages changed (Document Setup, or undoing
+     * it): the pasteboard is a new size. */
+    std::function<void()> on_setup_change;
 
     /* ---- Right-click menu ------------------------------------------- *
      * A right-click first selects what is under the pointer (its whole
@@ -576,6 +587,8 @@ private:
     };
     pagemade::ItemId m_last_caption = 0; // set by place_frame
     pagemade::Point m_context_pt;         // where the last right-click was
+    pagemade::PageSetup m_shown_setup;    // the setup the pasteboard was laid out for
+    void check_setup_change();            // tell on_setup_change when it differs
     /* Items copied (Cut, Copy): their stories with only the copied blocks
      * threaded, the pictures they show, and where they were. */
     struct ItemClip {

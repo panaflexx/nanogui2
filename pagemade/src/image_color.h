@@ -42,6 +42,14 @@ std::vector<uint8_t> icc_from_primaries(const float red[2], const float green[2]
                                         const float blue[2], const float white[2],
                                         Transfer transfer, const std::string &description);
 
+/* An sRGB (IEC 61966-2.1) display profile, for tagging colors that have
+ * none and as PDF/X's built-in output intent. */
+const std::vector<uint8_t> &icc_srgb();
+
+/* The profile's color space ("RGB ", "CMYK", "GRAY") and description, or
+ * false when it isn't a profile. */
+bool icc_info(const std::vector<uint8_t> &icc, std::string *space, std::string *description);
+
 /* Baseline JPEG of straight RGBA (alpha dropped), quality 1..100. */
 bool encode_jpeg(const uint8_t *rgba, int width, int height, int quality, std::string *out);
 

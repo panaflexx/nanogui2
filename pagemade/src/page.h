@@ -75,6 +75,45 @@ struct PageSetup {
     int   columns = 2;
     float gutter = 18.f;
     bool  facing = false;
+    /* How far pictures and fills that run off the page should carry on
+     * past the trim, on every side (0 when nothing bleeds). The PDF can
+     * include it (PdfSettings::bleed). */
+    float bleed = 0.f;
+};
+
+/* How a PDF is written (File > Export PDF). Kept with the publication, so
+ * a book exports the same way every time. */
+struct PdfSettings {
+    std::string preset = "High quality print";
+    /* Pages: all, or first..last (1-based). Hidden pages only on request. */
+    bool  all_pages = true;
+    int   first_page = 1, last_page = 1;
+    bool  include_hidden = false;
+    /* Pictures above `downsample_above` ppi, as placed, are resampled to
+     * `downsample_to`. Automatic keeps a JPEG's own data when it isn't
+     * resampled, sends HEIC/AVIF as JPEG and other pictures lossless; Jpeg
+     * makes every opaque picture JPEG; Lossless never adds JPEG loss. */
+    bool  downsample = true;
+    float downsample_above = 450.f, downsample_to = 300.f;
+    enum class Compression { Automatic, Jpeg, Lossless };
+    Compression compression = Compression::Automatic;
+    int   jpeg_quality = 92;
+    /* Rgb: pictures keep their own profiles, other colors are device RGB.
+     * RgbTagged: every color is tagged (sRGB unless a picture has its own),
+     * as PDF/X wants. Cmyk: not yet. */
+    enum class Color { Rgb, RgbTagged, Cmyk };
+    Color color = Color::Rgb;
+    /* PDF/X-4: tagged color, an output intent, trim and bleed boxes and
+     * the identification metadata. */
+    bool  pdfx4 = false;
+    std::string output_intent;   // ICC profile file; empty is the built-in sRGB
+    bool  bleed = true;          // the Document Setup bleed, past the trim
+    bool  crop_marks = false;
+    std::string title, author, subject;
+    /* Check the publication first and list what may print badly. */
+    bool  preflight = true;
+    float min_ppi = 200.f;
+    bool  open_after = false;
 };
 
 /* How the pasteboard shows pages. A screen setting, kept out of the file. */
@@ -322,6 +361,7 @@ struct PageDoc {
     std::vector<CharStyleDef> char_styles = default_char_styles();
     std::vector<ImageAsset> images;        // the publication's pictures
     std::vector<Guide>      guides;        // ruler guides on every page
+    PdfSettings             pdf;           // how this publication exports
     std::vector<Layer>      layers{Layer{1, "Default"}};   // bottom to top
     LayerId                 active_layer = 1;              // new items go here
     uint32_t                next_id = 1;   // shared by items and stories

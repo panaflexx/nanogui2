@@ -373,6 +373,8 @@ const Paper kPapers[] = {
     {"8 \u00D7 8",  8.f * kPt,   8.f * kPt},
     {"10 \u00D7 10", 10.f * kPt, 10.f * kPt},
     {"12 \u00D7 12", 12.f * kPt, 12.f * kPt},
+    {"Square 210 mm (8.3 in)", mm_pt(210), mm_pt(210)},
+    {"Square 297 mm (11.7 in)", mm_pt(297), mm_pt(297)},
 };
 constexpr int kPaperCount = (int) (sizeof kPapers / sizeof kPapers[0]);
 
@@ -421,6 +423,7 @@ struct DocForm {
     float inside = 0.5f * kPt, outside = 0.5f * kPt;
     int columns = 1;
     float gutter = 12.f;          // 0.167 in
+    float bleed = 0.f;
     bool syncing = false;
     Dropdown *sizes = nullptr;
     FloatSpin *width_box = nullptr, *height_box = nullptr;
@@ -459,13 +462,10 @@ void use_paper(const std::shared_ptr<DocForm> &st, int index) {
 
 } // namespace
 
-void ask_new_document(Screen *screen, std::function<void(const NewDocument &)> done) {
-    auto st = std::make_shared<DocForm>();
-
-    auto *d = new ModalDialog(screen, "New Document");
-    Widget *form = d->body();
-    form->set_fixed_size(Vector2i(520, 0));
-
+/* The fields New Document and Document Setup share: size, orientation,
+ * facing pages, margins, columns and bleed, all from `st`. `count`, when
+ * given, gets a page-count field. */
+static void build_page_form(Widget *form, const std::shared_ptr<DocForm> &st, IntSpin **count) {
     Widget *size_row = form_row(form);
     form_label(size_row, "Size", 88);
     std::vector<std::string> names;
@@ -505,7 +505,6 @@ void ask_new_document(Screen *screen, std::function<void(const NewDocument &)> d
         b->set_flags(Button::RadioButton | Button::ToggleButton);
         b->set_fixed_size(Vector2i(104, 28));
     }
-    st->portrait_btn->set_pushed(true);
     st->portrait_btn->set_callback([st] {
         st->landscape = false;
         if (st->width > st->height)
@@ -522,23 +521,27 @@ void ask_new_document(Screen *screen, std::function<void(const NewDocument &)> d
     Widget *face_row = form_row(form);
     form_label(face_row, "", 88);
     CheckBox *facing = new CheckBox(face_row, "Facing Pages");
-    form_label(face_row, "Page Count", 92);
-    IntSpin *pages = new IntSpin(face_row, 1, 1, 1, 999);
-    pages->set_fixed_size(Vector2i(72, 28));
-    pages->set_callback([st](int n) { st->pages = std::max(1, n); });
+    facing->set_checked(st->facing);
+    if (count) {
+        form_label(face_row, "Page Count", 92);
+        IntSpin *pages = new IntSpin(face_row, st->pages, 1, 1, 999);
+        pages->set_fixed_size(Vector2i(72, 28));
+        pages->set_callback([st](int n) { st->pages = std::max(1, n); });
+        *count = pages;
+    }
 
     Label *margins = new Label(form, "Margin Guides", "sans-bold", 16);
     margins->set_fixed_size(Vector2i(200, 0));
     Widget *tb = form_row(form);
     form_label(tb, "Top", 88);
-    inch_box(tb, 0.5f, 0.05f, 0.f, 20.f, [st](float v) { st->top = std::max(0.f, v * kPt); });
+    inch_box(tb, st->top / kPt, 0.05f, 0.f, 20.f, [st](float v) { st->top = std::max(0.f, v * kPt); });
     form_label(tb, "Bottom", 64);
-    inch_box(tb, 0.5f, 0.05f, 0.f, 20.f, [st](float v) { st->bottom = std::max(0.f, v * kPt); });
+    inch_box(tb, st->bottom / kPt, 0.05f, 0.f, 20.f, [st](float v) { st->bottom = std::max(0.f, v * kPt); });
     Widget *lr = form_row(form);
-    st->inside_label = form_label(lr, "Left", 88);
-    inch_box(lr, 0.5f, 0.05f, 0.f, 20.f, [st](float v) { st->inside = std::max(0.f, v * kPt); });
-    st->outside_label = form_label(lr, "Right", 64);
-    inch_box(lr, 0.5f, 0.05f, 0.f, 20.f, [st](float v) { st->outside = std::max(0.f, v * kPt); });
+    st->inside_label = form_label(lr, st->facing ? "Inside" : "Left", 88);
+    inch_box(lr, st->inside / kPt, 0.05f, 0.f, 20.f, [st](float v) { st->inside = std::max(0.f, v * kPt); });
+    st->outside_label = form_label(lr, st->facing ? "Outside" : "Right", 64);
+    inch_box(lr, st->outside / kPt, 0.05f, 0.f, 20.f, [st](float v) { st->outside = std::max(0.f, v * kPt); });
     facing->set_callback([st](bool on) {
         st->facing = on;
         st->inside_label->set_caption(on ? "Inside" : "Left");
@@ -549,27 +552,108 @@ void ask_new_document(Screen *screen, std::function<void(const NewDocument &)> d
     columns->set_fixed_size(Vector2i(200, 0));
     Widget *col = form_row(form);
     form_label(col, "Columns", 88);
-    IntSpin *cols = new IntSpin(col, 1, 1, 1, 24);
+    IntSpin *cols = new IntSpin(col, st->columns, 1, 1, 24);
     cols->set_fixed_size(Vector2i(72, 28));
     cols->set_callback([st](int n) { st->columns = std::max(1, n); });
     form_label(col, "Gutter", 64);
-    inch_box(col, 12.f / kPt, 0.01f, 0.f, 5.f, [st](float v) { st->gutter = std::max(0.f, v * kPt); });
+    inch_box(col, st->gutter / kPt, 0.01f, 0.f, 5.f, [st](float v) { st->gutter = std::max(0.f, v * kPt); });
+
+    Label *bleed = new Label(form, "Bleed", "sans-bold", 16);
+    bleed->set_fixed_size(Vector2i(200, 0));
+    Widget *bl = form_row(form);
+    form_label(bl, "All sides", 88);
+    FloatSpin *bleed_box = inch_box(bl, st->bleed / kPt, 0.0625f, 0.f, 1.f,
+                                    [st](float v) { st->bleed = std::clamp(v * kPt, 0.f, 72.f); });
+    bleed_box->set_tooltip("How far pictures and fills that run off the page carry on past the "
+                           "trim. Most printers want 0.125 in (3 mm); Prodigi wants none.");
+    Label *hint = new Label(bl, "0 when nothing runs off the page", "sans", 14);
+    hint->set_color(Color(110, 110, 110, 255));
+    refresh_size(st);
+}
+
+/* The setup the fields describe */
+static pagemade::PageSetup form_setup(const DocForm &st) {
+    pagemade::PageSetup s;
+    s.width = std::max(kPt, st.width);
+    s.height = std::max(kPt, st.height);
+    s.margin_top = std::max(0.f, st.top);
+    s.margin_bottom = std::max(0.f, st.bottom);
+    s.margin_inside = std::max(0.f, st.inside);
+    s.margin_outside = std::max(0.f, st.outside);
+    s.columns = std::max(1, st.columns);
+    s.gutter = std::max(0.f, st.gutter);
+    s.facing = st.facing;
+    s.bleed = std::clamp(st.bleed, 0.f, 72.f);
+    return s;
+}
+
+void ask_new_document(Screen *screen, std::function<void(const NewDocument &)> done) {
+    auto st = std::make_shared<DocForm>();
+    auto *d = new ModalDialog(screen, "New Document");
+    Widget *form = d->body();
+    form->set_fixed_size(Vector2i(520, 0));
+    IntSpin *count = nullptr;
+    build_page_form(form, st, &count);
 
     d->add_button("Cancel", {}, ModalDialog::Role::Cancel);
     d->add_button("OK", [st, done] {
         NewDocument spec;
-        spec.setup.width = std::max(kPt, st->width);
-        spec.setup.height = std::max(kPt, st->height);
-        spec.setup.margin_top = std::max(0.f, st->top);
-        spec.setup.margin_bottom = std::max(0.f, st->bottom);
-        spec.setup.margin_inside = std::max(0.f, st->inside);
-        spec.setup.margin_outside = std::max(0.f, st->outside);
-        spec.setup.columns = std::max(1, st->columns);
-        spec.setup.gutter = std::max(0.f, st->gutter);
-        spec.setup.facing = st->facing;
+        spec.setup = form_setup(*st);
         spec.pages = std::max(1, st->pages);
         if (done)
             done(spec);
+    }, ModalDialog::Role::Default);
+    d->open();
+}
+
+void ask_document_setup(Screen *screen, const pagemade::PageSetup &current, size_t page_count,
+                        std::function<void(const pagemade::PageSetup &, pagemade::SetupAdjust)> done) {
+    auto st = std::make_shared<DocForm>();
+    st->width = current.width;
+    st->height = current.height;
+    st->landscape = current.width > current.height + 0.5f;
+    st->facing = current.facing;
+    st->pages = (int) page_count;
+    st->top = current.margin_top;
+    st->bottom = current.margin_bottom;
+    st->inside = current.margin_inside;
+    st->outside = current.margin_outside;
+    st->columns = current.columns;
+    st->gutter = current.gutter;
+    st->bleed = current.bleed;
+
+    auto *d = new ModalDialog(screen, "Document Setup");
+    Widget *form = d->body();
+    form->set_fixed_size(Vector2i(520, 0));
+    build_page_form(form, st, nullptr);
+
+    Label *items = new Label(form, "Items Already Placed", "sans-bold", 16);
+    items->set_fixed_size(Vector2i(300, 0));
+    Widget *row = form_row(form);
+    form_label(row, "Existing items", 88);
+    auto *how = new Dropdown(row, {"Adjust layout", "Scale to the new page", "Leave in place"}, {},
+                             Dropdown::ComboBox, "Adjust layout");
+    how->set_fixed_size(Vector2i(280, 28));
+    how->set_tooltip("Adjust layout: items follow the margins and columns; text reflows and "
+                     "pictures keep their proportions.\n"
+                     "Scale: everything, type included, scales with the page.\n"
+                     "Leave in place: only the guides change.");
+    auto choice = std::make_shared<int>(0);
+    how->set_selected_callback([choice](int i) { *choice = i; });
+    Label *what = new Label(form,
+                            "Adjust layout keeps blocks in their columns and on their margins. "
+                            "Scale keeps the look at a new size. Leave in place moves nothing.",
+                            "sans", 14);
+    what->set_fixed_size(Vector2i(500, 0));
+    what->set_color(Color(110, 110, 110, 255));
+
+    d->add_button("Cancel", {}, ModalDialog::Role::Cancel);
+    d->add_button("OK", [st, done, choice] {
+        using pagemade::SetupAdjust;
+        const SetupAdjust a = *choice == 1 ? SetupAdjust::Scale
+                            : *choice == 2 ? SetupAdjust::Leave : SetupAdjust::Adjust;
+        if (done)
+            done(form_setup(*st), a);
     }, ModalDialog::Role::Default);
     d->open();
 }

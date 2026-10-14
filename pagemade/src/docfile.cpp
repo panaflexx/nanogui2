@@ -544,7 +544,42 @@ std::string make_json(const PageDoc &doc, const SaveOptions &opts, const std::ve
     j.key("columns").value(s.columns);
     j.key("gutter").value(s.gutter);
     j.key("facing").value(s.facing);
+    if (s.bleed > 0.f)
+        j.key("bleed").value(s.bleed);
     j.end_object();
+
+    /* PDF export settings: only what differs from the defaults */
+    {
+        const PdfSettings &o = doc.pdf, d;
+        j.key("pdf").begin_object();
+        j.key("preset").value(o.preset);
+        if (o.all_pages != d.all_pages) j.key("all_pages").value(o.all_pages);
+        if (!o.all_pages) {
+            j.key("first_page").value(o.first_page);
+            j.key("last_page").value(o.last_page);
+        }
+        if (o.include_hidden) j.key("include_hidden").value(true);
+        j.key("downsample").value(o.downsample);
+        j.key("downsample_above").value(o.downsample_above);
+        j.key("downsample_to").value(o.downsample_to);
+        j.key("compression").value(o.compression == PdfSettings::Compression::Jpeg ? "jpeg"
+                                   : o.compression == PdfSettings::Compression::Lossless
+                                   ? "lossless" : "automatic");
+        j.key("jpeg_quality").value(o.jpeg_quality);
+        j.key("color").value(o.color == PdfSettings::Color::RgbTagged ? "rgb_tagged"
+                             : o.color == PdfSettings::Color::Cmyk ? "cmyk" : "rgb");
+        if (o.pdfx4) j.key("pdfx4").value(true);
+        if (!o.output_intent.empty()) j.key("output_intent").value(o.output_intent);
+        j.key("bleed").value(o.bleed);
+        if (o.crop_marks) j.key("crop_marks").value(true);
+        if (!o.title.empty()) j.key("title").value(o.title);
+        if (!o.author.empty()) j.key("author").value(o.author);
+        if (!o.subject.empty()) j.key("subject").value(o.subject);
+        j.key("preflight").value(o.preflight);
+        j.key("min_ppi").value(o.min_ppi);
+        if (o.open_after) j.key("open_after").value(true);
+        j.end_object();
+    }
 
     j.key("layers").begin_array();
     for (const Layer &l : doc.layers) {
@@ -1140,6 +1175,42 @@ OpenResult open_document(const std::string &path, const FontLibrary &installed,
     d.setup.columns = std::max(1, d.setup.columns);
     get(setup, "gutter", d.setup.gutter);
     get(setup, "facing", d.setup.facing);
+    get(setup, "bleed", d.setup.bleed);
+    d.setup.bleed = std::clamp(d.setup.bleed, 0.f, 72.f);
+
+    if (const DictValue *o = field(root, "pdf")) {
+        PdfSettings &ps = d.pdf;
+        std::string word;
+        get(o, "preset", ps.preset);
+        get(o, "all_pages", ps.all_pages);
+        get(o, "first_page", ps.first_page);
+        get(o, "last_page", ps.last_page);
+        get(o, "include_hidden", ps.include_hidden);
+        get(o, "downsample", ps.downsample);
+        get(o, "downsample_above", ps.downsample_above);
+        get(o, "downsample_to", ps.downsample_to);
+        word.clear();
+        get(o, "compression", word);
+        ps.compression = word == "jpeg" ? PdfSettings::Compression::Jpeg
+                       : word == "lossless" ? PdfSettings::Compression::Lossless
+                       : PdfSettings::Compression::Automatic;
+        get(o, "jpeg_quality", ps.jpeg_quality);
+        ps.jpeg_quality = std::clamp(ps.jpeg_quality, 10, 100);
+        word.clear();
+        get(o, "color", word);
+        ps.color = word == "rgb_tagged" ? PdfSettings::Color::RgbTagged
+                 : word == "cmyk" ? PdfSettings::Color::Cmyk : PdfSettings::Color::Rgb;
+        get(o, "pdfx4", ps.pdfx4);
+        get(o, "output_intent", ps.output_intent);
+        get(o, "bleed", ps.bleed);
+        get(o, "crop_marks", ps.crop_marks);
+        get(o, "title", ps.title);
+        get(o, "author", ps.author);
+        get(o, "subject", ps.subject);
+        get(o, "preflight", ps.preflight);
+        get(o, "min_ppi", ps.min_ppi);
+        get(o, "open_after", ps.open_after);
+    }
 
     /* A file from before layers has everything on one Default layer */
     if (const DictValue *ls = field(root, "layers")) {

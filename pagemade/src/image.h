@@ -74,6 +74,9 @@ void image_pdf_matrix(int orientation, float x, float y, float w, float h, float
 bool make_display(const uint8_t *data, size_t n, int long_edge,
                   std::vector<uint8_t> *rgba, int *w, int *h, std::string *error);
 
+/* RGBA resampled to dw x dh (box filter; for shrinking). */
+void resample_rgba(const uint8_t *src, int sw, int sh, int dw, int dh, std::vector<uint8_t> &dst);
+
 /* Read a whole file. */
 bool read_file(const std::string &path, std::vector<uint8_t> *out, std::string *error);
 

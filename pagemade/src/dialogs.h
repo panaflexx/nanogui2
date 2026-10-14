@@ -18,6 +18,7 @@
 
 #include "dock_window.h"
 #include "page.h"
+#include "setup_adjust.h"
 
 #include <functional>
 #include <memory>
@@ -102,6 +103,14 @@ struct NewDocument {
     int pages = 1;
 };
 void ask_new_document(nanogui::Screen *screen, std::function<void(const NewDocument &)> done);
+
+/* File > Document Setup: the same page, margin, column and bleed fields for
+ * the open publication, and what happens to the items already placed
+ * (adjust them to the new margins and columns, scale them, or leave them).
+ * `done` runs on OK with the new setup. */
+void ask_document_setup(nanogui::Screen *screen, const pagemade::PageSetup &current,
+                        size_t page_count,
+                        std::function<void(const pagemade::PageSetup &, pagemade::SetupAdjust)> done);
 
 namespace pagemade {
 class FontLibrary;
