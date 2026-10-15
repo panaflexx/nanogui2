@@ -10,12 +10,15 @@
 #include <nanogui/layout.h>
 #include <nanogui/menu.h>
 #include <nanogui/opengl.h>
+#include <nanogui/screen.h>
+#include <nanogui/textbox.h>
 #include <nanogui/theme.h>
 #include <nanovg.h>
 
 #include <algorithm>
 #include <cmath>
 #include <cstdlib>
+#include <cctype>
 
 using namespace nanogui;
 using pagemade::Align;
@@ -352,6 +355,104 @@ private:
     int m_spacing;
 };
 
+/* A TextBox that turns Enter into accept and Escape into cancel instead
+ * of committing. The keystrokes live in the box until it loses focus, so
+ * live_text() reads them while it still has the keyboard. */
+class NameBox : public TextBox {
+public:
+    using TextBox::TextBox;
+    std::function<void()> on_accept;
+    std::function<void()> on_cancel;
+    std::string live_text() const { return focused() ? m_value_temp : m_value; }
+    bool keyboard_event(int key, int scancode, int action, int modifiers) override {
+        if (action == GLFW_PRESS || action == GLFW_REPEAT) {
+            if (key == GLFW_KEY_ENTER || key == GLFW_KEY_KP_ENTER) {
+                if (on_accept)
+                    on_accept();
+                return true;
+            }
+            if (key == GLFW_KEY_ESCAPE) {
+                if (on_cancel)
+                    on_cancel();
+                return true;
+            }
+        }
+        return TextBox::keyboard_event(key, scancode, action, modifiers);
+    }
+};
+
+/* The Add row's inline replacement: a name box with cancel (X) and
+ * confirm (check) buttons. Hides itself and shows `sibling` again on
+ * either outcome; `define` gets the trimmed name, if any. */
+class StyleNameRow : public Widget {
+public:
+    StyleNameRow(Widget *parent, Widget *sibling, std::function<void(const std::string &)> define)
+        : Widget(parent), m_sibling(sibling), m_define(std::move(define)) {
+        set_layout(new BoxLayout(Orientation::Horizontal, Alignment::Middle, 0, 6));
+        m_box = new NameBox(this);
+        m_box->set_editable(true);
+        m_box->set_alignment(TextBox::Alignment::Left);
+        m_box->set_fixed_size(Vector2i(170, 28));
+        m_box->on_accept = [this] { finish(true); };
+        m_box->on_cancel = [this] { finish(false); };
+        m_cancel = new Button(this, "", FA_TIMES);
+        m_cancel->set_fixed_size(Vector2i(28, 28));
+        m_cancel->set_tooltip("Cancel (Escape)");
+        m_cancel->set_callback([this] { finish(false); });
+        m_ok = new Button(this, "", FA_CHECK);
+        m_ok->set_fixed_size(Vector2i(28, 28));
+        m_ok->set_tooltip("Add the style (Enter)");
+        m_ok->set_callback([this] { finish(true); });
+        set_visible(false);
+    }
+
+    /* Swap in over the Add row, offering `suggested`, and take the keyboard. */
+    void begin(const std::string &suggested) {
+        m_box->set_value(suggested);
+        set_visible(true);
+        if (m_sibling)
+            m_sibling->set_visible(false);
+        relayout();
+        m_box->request_focus();
+    }
+
+private:
+    void finish(bool confirm) {
+        std::string name = m_box->live_text();
+        trim(name);
+        if (Screen *s = screen())
+            s->update_focus(nullptr);
+        set_visible(false);
+        if (m_sibling)
+            m_sibling->set_visible(true);
+        relayout();
+        /* Define last: it reloads the panel, which must see the rows
+         * already swapped back. A blank name is a cancel. */
+        if (confirm && !name.empty() && m_define)
+            m_define(name);
+    }
+
+    static void trim(std::string &s) {
+        size_t a = 0;
+        while (a < s.size() && std::isspace((unsigned char) s[a]))
+            ++a;
+        size_t b = s.size();
+        while (b > a && std::isspace((unsigned char) s[b - 1]))
+            --b;
+        s = s.substr(a, b - a);
+    }
+
+    void relayout() {
+        if (Screen *s = screen())
+            s->perform_layout();
+    }
+
+    Widget *m_sibling = nullptr;
+    std::function<void(const std::string &)> m_define;
+    NameBox *m_box = nullptr;
+    Button *m_cancel = nullptr, *m_ok = nullptr;
+};
+
 } // namespace
 
 /* An icon button, lit while its setting holds for the paragraphs: one of
@@ -498,57 +599,6 @@ ParagraphPanel::ParagraphPanel(Widget *parent, Hooks hooks)
     add_field(spacing, ParaIcon::ExtraSpacing, "Extra spacing, added to every line",
               &P::extra_spacing, 1.f, -72.f, 72.f, 0.5f, "%.1f", "pt");
 
-    /* Spacing attributes (PageMaker's Paragraph > Spacing): how far
-     * justified lines may stretch or squeeze word and letter spaces, as
-     * percentages. Min <= desired <= max is kept by moving the others. */
-    new Rule(this);
-    {
-        Label *head = new Label(this, "Spacing attributes", "sans-bold", 14);
-        head->set_tooltip("Justified lines stretch or squeeze word spaces between min and max, "
-                          "then letter spacing. Ragged lines use the desired values.");
-        Widget *sg = new Widget(this);
-        auto *gl = new GridLayout(Orientation::Horizontal, 4, Alignment::Middle, 0, 4);
-        gl->set_col_alignment(
-            {Alignment::Minimum, Alignment::Fill, Alignment::Fill, Alignment::Fill});
-        sg->set_layout(gl);
-        new Label(sg, "", "sans");
-        for (const char *h : {"Min", "Desired", "Max"}) {
-            Label *l = new Label(sg, h, "sans", 13);
-            l->set_color(Color(110, 110, 110, 255));
-        }
-        auto order = [](float P::*lo, float P::*mid, float P::*hi, float P::*set) {
-            return [lo, mid, hi, set](P &ps) {
-                const float v = ps.*set;
-                if (set == lo) { ps.*mid = std::max(ps.*mid, v); ps.*hi = std::max(ps.*hi, ps.*mid); }
-                if (set == mid) { ps.*lo = std::min(ps.*lo, v); ps.*hi = std::max(ps.*hi, v); }
-                if (set == hi) { ps.*mid = std::min(ps.*mid, v); ps.*lo = std::min(ps.*lo, ps.*mid); }
-            };
-        };
-        new Label(sg, "Word", "sans-bold", 14);
-        add_box(sg, "Word space minimum, percent of the font's space", &P::word_min, 0.f, 500.f,
-                5.f, "%.0f", "%", 66, order(&P::word_min, &P::word_desired, &P::word_max, &P::word_min));
-        add_box(sg, "Word space desired (ragged lines use this)", &P::word_desired, 0.f, 500.f,
-                5.f, "%.0f", "%", 66,
-                order(&P::word_min, &P::word_desired, &P::word_max, &P::word_desired));
-        add_box(sg, "Word space maximum", &P::word_max, 0.f, 500.f, 5.f, "%.0f", "%", 66,
-                order(&P::word_min, &P::word_desired, &P::word_max, &P::word_max));
-        new Label(sg, "Letter", "sans-bold", 14);
-        add_box(sg, "Letter space minimum, percent of a space added between letters",
-                &P::letter_min, -200.f, 200.f, 1.f, "%.0f", "%", 66,
-                order(&P::letter_min, &P::letter_desired, &P::letter_max, &P::letter_min));
-        add_box(sg, "Letter space desired", &P::letter_desired, -200.f, 200.f, 1.f, "%.0f", "%", 66,
-                order(&P::letter_min, &P::letter_desired, &P::letter_max, &P::letter_desired));
-        add_box(sg, "Letter space maximum", &P::letter_max, -200.f, 200.f, 1.f, "%.0f", "%", 66,
-                order(&P::letter_min, &P::letter_desired, &P::letter_max, &P::letter_max));
-        m_strict = new CheckBox(this, "Flag letter-spaced lines", [this](bool on) {
-            if (!m_loading && m_hooks.strict)
-                m_hooks.strict(on);
-        });
-        m_strict->set_tooltip("Loose/tight highlighting (V) by word spacing alone: a line is "
-                              "loose once its word spaces pass the maximum, even when letter "
-                              "spacing takes up the rest");
-    }
-
     new Rule(this);
     Widget *indents = grid();
     add_field(indents, ParaIcon::LeftIndent, "Left indent", &P::left_indent, 1.f, 0.f, 1000.f,
@@ -658,8 +708,14 @@ ParagraphPanel::ParagraphPanel(Widget *parent, Hooks hooks)
     m_new->set_fixed_size(Vector2i(84, 28));
     m_new->set_tooltip("New style from this paragraph (an existing name redefines that style)");
     m_new->set_callback([this] {
-        if (m_hooks.new_style)
-            m_hooks.new_style();
+        /* No-op while the naming row is already up. */
+        if (m_naming && !m_naming->visible() && m_hooks.suggest_style_name)
+            static_cast<StyleNameRow *>(m_naming)->begin(m_hooks.suggest_style_name());
+    });
+    /* The naming row covers the Remove/Add row while it is up. */
+    m_naming = new StyleNameRow(this, bottom, [this](const std::string &name) {
+        if (m_hooks.define_style)
+            m_hooks.define_style(name);
     });
 }
 
@@ -710,10 +766,68 @@ void ParagraphPanel::add_field(Widget *grid, ParaIcon icon, const char *tip,
     });
 }
 
-FloatSpin *ParagraphPanel::add_box(Widget *grid, const char *tip, float ParaStyle::*member,
-                                   float lo, float hi, float step, const char *format,
-                                   const char *units, int width,
-                                   std::function<void(ParaStyle &)> fix) {
+/* ---- The spacing attributes ----------------------------------------------------- */
+
+SpacingAttrs::SpacingAttrs(Widget *parent,
+                           std::function<void(const std::function<void(ParaStyle &)> &,
+                                              const void *spin)> apply,
+                           std::function<void(bool)> strict)
+    : Widget(parent), m_apply(std::move(apply)), m_strict_hook(std::move(strict)) {
+    /* How far justified lines may stretch or squeeze word and letter
+     * spaces, as percentages. Min <= desired <= max is kept by moving
+     * the others. */
+    set_layout(new BoxLayout(Orientation::Vertical, Alignment::Fill, 0, 8));
+    Label *head = new Label(this, "Spacing attributes", "sans-bold", 14);
+    head->set_tooltip("Justified lines stretch or squeeze word spaces between min and max, "
+                      "then letter spacing. Ragged lines use the desired values.");
+    Widget *sg = new Widget(this);
+    auto *gl = new GridLayout(Orientation::Horizontal, 4, Alignment::Middle, 0, 4);
+    gl->set_col_alignment({Alignment::Minimum, Alignment::Fill, Alignment::Fill, Alignment::Fill});
+    sg->set_layout(gl);
+    new Label(sg, "", "sans");
+    for (const char *h : {"Min", "Desired", "Max"}) {
+        Label *l = new Label(sg, h, "sans", 13);
+        l->set_color(Color(110, 110, 110, 255));
+    }
+    using P = ParaStyle;
+    auto order = [](float P::*lo, float P::*mid, float P::*hi, float P::*set) {
+        return [lo, mid, hi, set](P &ps) {
+            const float v = ps.*set;
+            if (set == lo) { ps.*mid = std::max(ps.*mid, v); ps.*hi = std::max(ps.*hi, ps.*mid); }
+            if (set == mid) { ps.*lo = std::min(ps.*lo, v); ps.*hi = std::max(ps.*hi, v); }
+            if (set == hi) { ps.*mid = std::min(ps.*mid, v); ps.*lo = std::min(ps.*lo, ps.*mid); }
+        };
+    };
+    new Label(sg, "Word", "sans-bold", 14);
+    add_attr(sg, "Word space minimum, percent of the font's space", &P::word_min, 0.f, 500.f,
+             5.f, "%.0f", "%", 66,
+             order(&P::word_min, &P::word_desired, &P::word_max, &P::word_min));
+    add_attr(sg, "Word space desired (ragged lines use this)", &P::word_desired, 0.f, 500.f,
+             5.f, "%.0f", "%", 66,
+             order(&P::word_min, &P::word_desired, &P::word_max, &P::word_desired));
+    add_attr(sg, "Word space maximum", &P::word_max, 0.f, 500.f, 5.f, "%.0f", "%", 66,
+             order(&P::word_min, &P::word_desired, &P::word_max, &P::word_max));
+    new Label(sg, "Letter", "sans-bold", 14);
+    add_attr(sg, "Letter space minimum, percent of a space added between letters",
+             &P::letter_min, -200.f, 200.f, 1.f, "%.0f", "%", 66,
+             order(&P::letter_min, &P::letter_desired, &P::letter_max, &P::letter_min));
+    add_attr(sg, "Letter space desired", &P::letter_desired, -200.f, 200.f, 1.f, "%.0f", "%",
+             66, order(&P::letter_min, &P::letter_desired, &P::letter_max, &P::letter_desired));
+    add_attr(sg, "Letter space maximum", &P::letter_max, -200.f, 200.f, 1.f, "%.0f", "%", 66,
+             order(&P::letter_min, &P::letter_desired, &P::letter_max, &P::letter_max));
+    m_strict = new CheckBox(this, "Flag letter-spaced lines", [this](bool on) {
+        if (!m_loading && m_strict_hook)
+            m_strict_hook(on);
+    });
+    m_strict->set_tooltip("Loose/tight highlighting (V) by word spacing alone: a line is "
+                          "loose once its word spaces pass the maximum, even when letter "
+                          "spacing takes up the rest");
+}
+
+FloatSpin *SpacingAttrs::add_attr(Widget *grid, const char *tip, float ParaStyle::*member,
+                                  float lo, float hi, float step, const char *format,
+                                  const char *units, int width,
+                                  std::function<void(ParaStyle &)> fix) {
     auto *box = new FloatSpin(grid, 0.f, step, lo, hi);
     box->number_format(format);
     box->set_units(units);
@@ -721,11 +835,11 @@ FloatSpin *ParagraphPanel::add_box(Widget *grid, const char *tip, float ParaStyl
     box->set_alignment(TextBox::Alignment::Right);
     box->set_fixed_size(Vector2i(width, 28));
     box->set_tooltip(tip);
-    const size_t index = m_fields.size();
-    m_fields.push_back({box, member, 1.f, lo, hi, std::move(fix)});
-    box->set_blank_value([this, index] { return m_first.*(m_fields[index].member); });
+    const size_t index = m_attrs.size();
+    m_attrs.push_back({box, member, lo, hi, std::move(fix)});
+    box->set_blank_value([this, index] { return m_first.*(m_attrs[index].member); });
     box->TextBox::set_callback([this, index](const std::string &s) {
-        const Field &f = m_fields[index];
+        const AttrField &f = m_attrs[index];
         char *end = nullptr;
         const float v = std::strtof(s.c_str(), &end);
         if (end == s.c_str())
@@ -734,8 +848,8 @@ FloatSpin *ParagraphPanel::add_box(Widget *grid, const char *tip, float ParaStyl
         f.box->set_value(value);
         const auto member = f.member;
         const auto fix = f.fix;
-        if (m_hooks.apply)
-            m_hooks.apply([member, value, fix](ParaStyle &ps) {
+        if (m_apply)
+            m_apply([member, value, fix](ParaStyle &ps) {
                 ps.*member = value;
                 if (fix)
                     fix(ps);
@@ -745,12 +859,34 @@ FloatSpin *ParagraphPanel::add_box(Widget *grid, const char *tip, float ParaStyl
     return box;
 }
 
-void ParagraphPanel::set_strict(bool on) {
+void SpacingAttrs::set_strict(bool on) {
     if (m_strict && m_strict->checked() != on) {
         m_loading = true;
         m_strict->set_checked(on);
         m_loading = false;
     }
+}
+
+void SpacingAttrs::load(const std::vector<const Paragraph *> &paras) {
+    m_loading = true;
+    const bool any = !paras.empty();
+    if (any)
+        m_first = paras.front()->style;
+    for (AttrField &f : m_attrs) {
+        f.box->set_enabled(any);
+        if (f.box->focused() || f.box->spinning())
+            continue;                    // it shows what is being set
+        bool same = any;
+        for (const Paragraph *p : paras)
+            same &= p->style.*(f.member) == paras.front()->style.*(f.member);
+        if (same)
+            f.box->set_value(paras.front()->style.*(f.member));
+        else
+            f.box->TextBox::set_value("");
+    }
+    if (m_strict)
+        m_strict->set_enabled(any);
+    m_loading = false;
 }
 
 void ParagraphPanel::add_int_field(Widget *grid, ParaIcon icon, const char *tip,
@@ -969,6 +1105,9 @@ CharacterPanel::CharacterPanel(Widget *parent, Hooks hooks)
     });
 
     new Rule(this);
+    m_spacing_attrs = new SpacingAttrs(this, m_hooks.apply_spacing, m_hooks.strict);
+
+    new Rule(this);
     RightRow *bottom = new RightRow(this, 6);
     m_delete = new Button(bottom, "Remove");
     m_delete->set_fixed_size(Vector2i(84, 28));
@@ -982,8 +1121,14 @@ CharacterPanel::CharacterPanel(Widget *parent, Hooks hooks)
     m_new->set_tooltip("New character style from the selected text (an existing name "
                        "redefines that style)");
     m_new->set_callback([this] {
-        if (m_hooks.new_style)
-            m_hooks.new_style();
+        /* No-op while the naming row is already up. */
+        if (m_naming && !m_naming->visible() && m_hooks.suggest_style_name)
+            static_cast<StyleNameRow *>(m_naming)->begin(m_hooks.suggest_style_name());
+    });
+    /* The naming row covers the Remove/Add row while it is up. */
+    m_naming = new StyleNameRow(this, bottom, [this](const std::string &name) {
+        if (m_hooks.define_style)
+            m_hooks.define_style(name);
     });
 }
 
@@ -1000,7 +1145,8 @@ void CharacterPanel::draw(NVGcontext *ctx) {
 }
 
 void CharacterPanel::load(const State &st, const std::vector<pagemade::CharStyleDef> &styles,
-                          const std::vector<pagemade::Swatch> &swatches) {
+                          const std::vector<pagemade::Swatch> &swatches,
+                          const std::vector<const Paragraph *> &paras) {
     m_loading = true;
     const bool any = st.enabled;
 
@@ -1068,5 +1214,12 @@ void CharacterPanel::load(const State &st, const std::vector<pagemade::CharStyle
 
     m_delete->set_enabled(any && !m_current.empty());
     m_new->set_enabled(any);
+    if (m_spacing_attrs)
+        m_spacing_attrs->load(paras);
     m_loading = false;
+}
+
+void CharacterPanel::set_strict(bool on) {
+    if (m_spacing_attrs)
+        m_spacing_attrs->set_strict(on);
 }

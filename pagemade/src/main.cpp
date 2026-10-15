@@ -419,24 +419,12 @@ public:
         };
         hooks.apply_style = [this](const std::string &name) { m_view->apply_style(name); };
         hooks.delete_style = [this](const std::string &name) { m_view->delete_style(name); };
-        /* Strict loose/tight turns the highlighting (V) on as well */
-        hooks.strict = [this](bool on) {
-            m_view->set_strict_loose_tight(on);
-            if (on && !m_view->show_loose_tight()) {
-                m_view->set_show_loose_tight(true);
-                if (m_loose)
-                    m_loose->set_pushed(true);
-            }
-            redraw();
-        };
-        hooks.new_style = [this] {
+        hooks.suggest_style_name = [this] {
             const auto paras = m_view->selected_paragraphs();
             std::string name = paras.empty() ? std::string() : paras.front()->style.name;
-            ask_text(this, "New Paragraph Style", "Name:", name.empty() ? "New style" : name,
-                     "Made from the selected paragraph. A name already in the list "
-                     "redefines that style, and its paragraphs follow.",
-                     [this](const std::string &n) { m_view->define_style(n); });
+            return name.empty() ? std::string("New style") : name;
         };
+        hooks.define_style = [this](const std::string &n) { m_view->define_style(n); };
         m_para_panel = new ParagraphPanel(para_popup, std::move(hooks));
         /* A resizable window keeps its size as its preferred size, so the
          * popup would stay at PopupButton's 320 x 250 and squeeze the rows
@@ -470,16 +458,29 @@ public:
             m_view->apply_type([t](CharStyle &cs) { cs.tint = t; });
             m_view->set_undo_merge(nullptr);
         };
-        ch.new_style = [this] {
+        ch.apply_spacing = [this](const std::function<void(ParaStyle &)> &fn, const void *spin) {
+            m_view->set_undo_merge(spin);
+            m_view->apply_para(fn);
+            m_view->set_undo_merge(nullptr);
+        };
+        /* Strict loose/tight turns the highlighting (V) on as well */
+        ch.strict = [this](bool on) {
+            m_view->set_strict_loose_tight(on);
+            if (on && !m_view->show_loose_tight()) {
+                m_view->set_show_loose_tight(true);
+                if (m_loose)
+                    m_loose->set_pushed(true);
+            }
+            redraw();
+        };
+        ch.suggest_style_name = [this] {
             ComposerView::TypeStyle t;
             m_view->type_style(t);
             const std::string name = t.mix_char_style || t.char_style.empty() ? "New style"
                                                                                : t.char_style;
-            ask_text(this, "New Character Style", "Name:", name,
-                     "Made from the selected text: what it changes from its paragraph's "
-                     "type. A name already in the list redefines that style.",
-                     [this](const std::string &n) { m_view->define_char_style(n); });
+            return name;
         };
+        ch.define_style = [this](const std::string &n) { m_view->define_char_style(n); };
         m_char_panel = new CharacterPanel(char_popup, std::move(ch));
         char_popup->set_resizable(false);
 
@@ -1734,7 +1735,7 @@ public:
         st.mixed_tint = t.mix_tint;
         const PageDoc &doc = m_view->document();
         st.shown = doc.text_color(t.swatch, t.tint, t.rgb);
-        m_char_panel->load(st, doc.char_styles, doc.swatches);
+        m_char_panel->load(st, doc.char_styles, doc.swatches, m_view->selected_paragraphs());
     }
 
     void toggle_paragraph_panel() {

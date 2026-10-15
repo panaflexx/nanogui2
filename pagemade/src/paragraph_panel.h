@@ -1,13 +1,11 @@
 /*
  * pagemade/paragraph_panel.h — the Paragraph panel the ¶ button pops open,
  * laid out after VectorStyler's: the style menu, seven alignments, line
- * spacing and extra spacing, the spacing attributes (word and letter
- * spacing limits, and how strictly loose lines are flagged), the four
- * indents, space before and after, and
- * bullets and numbering, the drop cap (lines, size, characters), keep options (orphans, widows,
- * keep together, keep with next, start in the next text block),
- * with Remove (delete the style) and Add (new style from the selection)
- * below.
+ * spacing and extra spacing, the four indents, space before and after,
+ * bullets and numbering, the drop cap (lines, size, characters), keep options
+ * (orphans, widows, keep together, keep with next, start in the next text
+ * block), with Remove (delete the style) and Add (new style from the
+ * selection) below.
  *
  * The panel edits the selected paragraphs through Hooks and shows them
  * through load(); it owns no document state. Its number fields spin
@@ -52,15 +50,16 @@ public:
                            const void *spin)> apply;
         std::function<void(pagemade::Align)> align;
         std::function<void(const std::string &)> apply_style;
-        std::function<void()> new_style;
+        /* The name Add offers for the new style (the selection's own name,
+         * or "New style"). */
+        std::function<std::string()> suggest_style_name;
+        /* Name the selection's formatting as a style (an existing name
+         * redefines that style). */
+        std::function<void(const std::string &)> define_style;
         std::function<void(const std::string &)> delete_style;
-        /* "Flag letter-spaced lines": loose/tight by word spacing alone. */
-        std::function<void(bool)> strict;
     };
 
     ParagraphPanel(nanogui::Widget *parent, Hooks hooks);
-    /* Show the strict loose/tight switch as on or off. */
-    void set_strict(bool on);
 
     /* Show these paragraphs (none disables the panel) and the document's
      * styles. */
@@ -92,14 +91,13 @@ private:
                    float step, const char *format, const char *units);
     void add_int_field(nanogui::Widget *grid, ParaIcon icon, const char *tip,
                        int pagemade::ParaStyle::*member, int lo, int hi, const char *units);
-    /* A field without an icon (the spacing attributes' grid) */
-    FloatSpin *add_box(nanogui::Widget *grid, const char *tip, float pagemade::ParaStyle::*member,
-                       float lo, float hi, float step, const char *format, const char *units,
-                       int width, std::function<void(pagemade::ParaStyle &)> fix);
 
     Hooks m_hooks;
     nanogui::Dropdown *m_style = nullptr;
     nanogui::Dropdown *m_list = nullptr;
+    /* The naming row (a StyleNameRow, see the .cpp); it covers the
+     * Remove/Add row while it is up. */
+    nanogui::Widget *m_naming = nullptr;
     std::vector<std::string> m_style_names;
     std::string m_current_style;         // the selection's style, when it has one
     std::vector<IconButton *> m_align;
@@ -108,23 +106,72 @@ private:
     std::vector<IntField> m_int_fields;
     pagemade::ParaStyle m_first;         // the first selected paragraph's
     nanogui::Button *m_delete = nullptr, *m_new = nullptr;
+    bool m_loading = false;
+};
+
+/* The spacing attributes (PageMaker's Paragraph > Spacing), hosted by the
+ * Character panel: how far justified lines may stretch or squeeze word and
+ * letter spaces, as percentages, and the strict loose/tight switch. It edits
+ * the selected paragraphs through `apply` and reads them from load(). */
+class SpacingAttrs : public nanogui::Widget {
+public:
+    SpacingAttrs(nanogui::Widget *parent,
+                 std::function<void(const std::function<void(pagemade::ParaStyle &)> &,
+                                    const void *spin)> apply,
+                 std::function<void(bool)> strict);
+    /* Show the strict loose/tight switch as on or off. */
+    void set_strict(bool on);
+    /* Show these paragraphs (none disables the boxes). */
+    void load(const std::vector<const pagemade::Paragraph *> &paras);
+
+private:
+    struct AttrField {
+        FloatSpin *box = nullptr;
+        float pagemade::ParaStyle::*member = nullptr;
+        float lo = 0, hi = 0;
+        /* After the value is set: keep related values in order */
+        std::function<void(pagemade::ParaStyle &)> fix;
+    };
+    FloatSpin *add_attr(nanogui::Widget *grid, const char *tip,
+                        float pagemade::ParaStyle::*member, float lo, float hi, float step,
+                        const char *format, const char *units, int width,
+                        std::function<void(pagemade::ParaStyle &)> fix);
+
+    std::function<void(const std::function<void(pagemade::ParaStyle &)> &,
+                       const void *spin)> m_apply;
+    std::function<void(bool)> m_strict_hook;
+    std::vector<AttrField> m_attrs;
+    pagemade::ParaStyle m_first;         // the first selected paragraph's
     nanogui::CheckBox *m_strict = nullptr;
     bool m_loading = false;
 };
 
 /* The Character panel, popped open beside the Paragraph panel: the
- * character style menu, the text's color (a swatch) and tint, and Remove /
- * Add for styles. Like the Paragraph panel it edits through Hooks and
- * shows the selection through load(). */
+ * character style menu, the text's color (a swatch) and tint, the spacing
+ * attributes (word and letter spacing limits for justified lines, and the
+ * strict loose/tight switch), and Remove / Add for styles. It edits through
+ * Hooks and shows the selection through load(). */
 class CharacterPanel : public nanogui::Widget {
 public:
     struct Hooks {
         std::function<void(const std::string &)> apply_style;   // "" = none
-        std::function<void()> new_style;
+        /* The name Add offers for the new style (the selection's own name,
+         * or "New style"). */
+        std::function<std::string()> suggest_style_name;
+        /* Name the selected text's formatting as a style (an existing name
+         * redefines that style). */
+        std::function<void(const std::string &)> define_style;
         std::function<void(const std::string &)> delete_style;
         std::function<void(uint32_t swatch)> swatch;
         /* `spin`: the field when this is a spin step, else nullptr. */
         std::function<void(float tint, const void *spin)> tint;
+        /* Change the selected paragraphs' spacing attributes. `spin` is the
+         * field when this is a spin step (a run of them is one undo step),
+         * else nullptr. */
+        std::function<void(const std::function<void(pagemade::ParaStyle &)> &,
+                           const void *spin)> apply_spacing;
+        /* "Flag letter-spaced lines": loose/tight by word spacing alone. */
+        std::function<void(bool)> strict;
     };
     /* What the selection is set in. */
     struct State {
@@ -140,7 +187,10 @@ public:
 
     CharacterPanel(nanogui::Widget *parent, Hooks hooks);
     void load(const State &state, const std::vector<pagemade::CharStyleDef> &styles,
-              const std::vector<pagemade::Swatch> &swatches);
+              const std::vector<pagemade::Swatch> &swatches,
+              const std::vector<const pagemade::Paragraph *> &paras);
+    /* Show the strict loose/tight switch as on or off. */
+    void set_strict(bool on);
     void draw(NVGcontext *ctx) override;
 
 private:
@@ -150,10 +200,15 @@ private:
     FloatSpin *m_tint = nullptr;
     Chip *m_chip = nullptr;
     nanogui::Button *m_delete = nullptr, *m_new = nullptr;
+    /* The naming row (a StyleNameRow, see the .cpp); it covers the
+     * Remove/Add row while it is up. */
+    nanogui::Widget *m_naming = nullptr;
     std::vector<std::string> m_style_names;
     std::vector<std::string> m_color_names;
     std::vector<uint32_t> m_swatch_ids;
     std::string m_current;
     float m_first_tint = 100.f;
     bool m_loading = false;
+    /* The spacing attributes' boxes, over the selected paragraphs. */
+    SpacingAttrs *m_spacing_attrs = nullptr;
 };
