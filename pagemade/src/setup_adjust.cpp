@@ -110,12 +110,15 @@ void refit(Page &p, const std::vector<size_t> &unit, const Bounds &from, float n
         it.xf.f = ny0 + (origin.y - from.y0) * sy;
         if (const PlacedImage *im = o.image())
             it.content = scale_placement(*im, o.w, o.h, it.w, it.h);
-        if (scale_strokes)
+        if (scale_strokes) {
+            const float k = std::sqrt(sx * sy);
             if (Shape *sh = it.shape()) {
-                const float k = std::sqrt(sx * sy);
                 sh->stroke.weight *= k;
                 sh->corner_radius *= k;
             }
+            if (PlacedImage *im = it.image())
+                im->stroke.weight *= k;
+        }
     }
 }
 

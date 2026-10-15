@@ -262,8 +262,102 @@ std::vector<float> dash_pattern(LineStyle style, float w) {
     case LineStyle::Dotted:  return {0.f, std::max(1.5f, 2.f * w)};
     case LineStyle::DashDot: return {std::max(3.f, 4 * w), std::max(1.5f, 2.f * w),
                                      0.f, std::max(1.5f, 2.f * w)};
+    default:                 return {};     // compound styles are solid bands
     }
-    return {};
+}
+
+std::vector<StrokeBand> stroke_bands(LineStyle style, float weight) {
+    /* (start, width) across the weight as fractions, from the outside in */
+    struct Frac { float start, width; };
+    static const Frac dbl[] = {{0.f, .3f}, {.7f, .3f}};
+    static const Frac thick_thin[] = {{0.f, .55f}, {.8f, .2f}};
+    static const Frac thin_thick[] = {{0.f, .2f}, {.45f, .55f}};
+    static const Frac thin_thick_thin[] = {{0.f, .15f}, {.3f, .4f}, {.85f, .15f}};
+    const Frac *f = nullptr;
+    size_t n = 0;
+    switch (style) {
+    case LineStyle::Double:        f = dbl; n = 2; break;
+    case LineStyle::ThickThin:     f = thick_thin; n = 2; break;
+    case LineStyle::ThinThick:     f = thin_thick; n = 2; break;
+    case LineStyle::ThinThickThin: f = thin_thick_thin; n = 3; break;
+    default:                       return {};
+    }
+    std::vector<StrokeBand> out;
+    for (size_t i = 0; i < n; ++i)
+        out.push_back({weight * (0.5f - f[i].start - 0.5f * f[i].width), weight * f[i].width});
+    return out;
+}
+
+std::vector<Polyline> offset_polylines(const std::vector<Polyline> &lines, float d) {
+    std::vector<Polyline> out;
+    for (const Polyline &pl : lines) {
+        /* Drop repeated points, which have no direction */
+        std::vector<Point> p;
+        for (const Point &q : pl.pts)
+            if (p.empty() || std::hypot(q.x - p.back().x, q.y - p.back().y) > 1e-5f)
+                p.push_back(q);
+        if (pl.closed && p.size() > 2 &&
+            std::hypot(p.front().x - p.back().x, p.front().y - p.back().y) <= 1e-5f)
+            p.pop_back();
+        const size_t n = p.size();
+        if (n < 2)
+            continue;
+        /* (dy, -dx) is outward for a positive-area (clockwise in y-down)
+         * loop, so flip it for the other winding */
+        float side = d;
+        if (pl.closed) {
+            double area = 0;
+            for (size_t i = 0; i < n; ++i) {
+                const Point &a = p[i], &b = p[(i + 1) % n];
+                area += (double) a.x * b.y - (double) b.x * a.y;
+            }
+            if (area < 0)
+                side = -d;
+        }
+        const size_t edges = pl.closed ? n : n - 1;
+        std::vector<Point> normal(edges);
+        for (size_t i = 0; i < edges; ++i) {
+            const Point &a = p[i], &b = p[(i + 1) % n];
+            const float len = std::hypot(b.x - a.x, b.y - a.y);
+            normal[i] = {(b.y - a.y) / len, -(b.x - a.x) / len};
+        }
+        Polyline o;
+        o.closed = pl.closed;
+        for (size_t i = 0; i < n; ++i) {
+            const bool first = i == 0, last = i == n - 1;
+            if (!pl.closed && (first || last)) {
+                const Point &m = normal[first ? 0 : edges - 1];
+                o.pts.push_back({p[i].x + side * m.x, p[i].y + side * m.y});
+                continue;
+            }
+            const Point &m0 = normal[(i + edges - 1) % edges], &m1 = normal[i % edges];
+            const float dot = m0.x * m1.x + m0.y * m1.y;
+            /* Miter while it is at most 4x the offset; bevel past that */
+            if (1.f + dot > 2.f / 16.f) {
+                const float k = side / (1.f + dot);
+                o.pts.push_back({p[i].x + k * (m0.x + m1.x), p[i].y + k * (m0.y + m1.y)});
+            } else {
+                o.pts.push_back({p[i].x + side * m0.x, p[i].y + side * m0.y});
+                o.pts.push_back({p[i].x + side * m1.x, p[i].y + side * m1.y});
+            }
+        }
+        out.push_back(std::move(o));
+    }
+    return out;
+}
+
+Path polyline_path(const std::vector<Polyline> &lines) {
+    Path out;
+    for (const Polyline &pl : lines) {
+        if (pl.pts.empty())
+            continue;
+        out.push_back({PathCmd::Move, 0, 0, 0, 0, pl.pts[0].x, pl.pts[0].y});
+        for (size_t i = 1; i < pl.pts.size(); ++i)
+            out.push_back({PathCmd::Line, 0, 0, 0, 0, pl.pts[i].x, pl.pts[i].y});
+        if (pl.closed)
+            out.push_back({PathCmd::Close, 0, 0, 0, 0, pl.pts[0].x, pl.pts[0].y});
+    }
+    return out;
 }
 
 bool line_style_round_caps(LineStyle style) {

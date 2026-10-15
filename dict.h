@@ -178,7 +178,7 @@ static DictValue *dict_create_int64(int64_t n) {
 static DictValue *dict_create_string(const char *s) {
 	if (!s) return NULL;
     size_t len = strnlen(s, MAX_VALUE_LEN);
-    if (len == 0 || len >= MAX_VALUE_LEN) {
+    if (len >= MAX_VALUE_LEN) {      /* "" is a valid JSON string */
         return NULL;
     }
 
@@ -590,15 +590,26 @@ typedef struct {
     size_t pos;
     char *error_str;
     size_t error_str_len;
+    int salvage;    // on an error, keep what was parsed and close open containers
+    int damaged;    // set when salvage stopped early
+    int has_error;  // the first error is the one reported
 } DictJsonParser;
 
 // Forward declarations
 static DictValue *dict_parse_value(DictJsonParser *p);
 
 static void dict_parser_error(DictJsonParser *p, const char *msg) {
+    if (p->has_error)
+        return;
+    p->has_error = 1;
     if (p->error_str && p->error_str_len > 0) {
+        size_t line = 1, col = 1;
+        for (size_t i = 0; i < p->pos && i < p->buffer_len; i++) {
+            if (p->buffer[i] == '\n') { line++; col = 1; }
+            else col++;
+        }
         // Write error message safely with truncation
-        snprintf(p->error_str, p->error_str_len, "Error at pos %zu: %s", p->pos, msg);
+        snprintf(p->error_str, p->error_str_len, "line %zu, column %zu: %s", line, col, msg);
     }
 }
 
@@ -834,6 +845,7 @@ static DictValue *dict_parse_value(DictJsonParser *p) {
         if (!str) return NULL;
         DictValue *val = dict_create_string(str);
         free(str);
+        if (!val) dict_parser_error(p, "String too long or out of memory");
         return val;
     } else if (c == '{') {
         return dict_parse_object(p);
@@ -841,7 +853,10 @@ static DictValue *dict_parse_value(DictJsonParser *p) {
         return dict_parse_array(p);
     } else if ((c == '-') || (c >= '0' && c <= '9')) {
         double num;
-        if (!dict_parse_number(p, &num)) return NULL;
+        if (!dict_parse_number(p, &num)) {
+            dict_parser_error(p, "Invalid number");
+            return NULL;
+        }
         return dict_create_number(num);
     } else if (dict_parse_literal(p, "true")) {
         return dict_create_bool(1);
@@ -891,6 +906,10 @@ static DictValue *dict_parse_array(DictJsonParser *p) {
 
     while (1) {
         DictValue *item = dict_parse_value(p);
+        if (!item && p->salvage) {
+            p->damaged = 1;          // keep the items before the damage
+            break;
+        }
         if (!item) {
             // Cleanup all allocated items
             for (size_t i = 0; i < length; i++) {
@@ -917,11 +936,17 @@ static DictValue *dict_parse_array(DictJsonParser *p) {
             capacity = new_capacity;
         }
         items[length++] = item;
+        if (p->damaged)              // a nested container stopped early
+            break;
 
         dict_parser_skip_whitespace(p);
 
         if (!dict_parser_peek(p, &c)) {
             dict_parser_error(p, "Unexpected end of input in array");
+            if (p->salvage) {
+                p->damaged = 1;
+                break;
+            }
             for (size_t i = 0; i < length; i++) {
                 dict_destroy(items[i]);
             }
@@ -938,6 +963,10 @@ static DictValue *dict_parse_array(DictJsonParser *p) {
             break;
         } else {
             dict_parser_error(p, "Expected ',' or ']' in array");
+            if (p->salvage) {
+                p->damaged = 1;
+                break;
+            }
             for (size_t i = 0; i < length; i++) {
                 dict_destroy(items[i]);
             }
@@ -979,12 +1008,20 @@ static DictValue *dict_parse_object(DictJsonParser *p) {
 
         if (!dict_parser_peek(p, &c) || c != '"') {
             dict_parser_error(p, "Expected string quote \" in object");
+            if (p->salvage) {
+                p->damaged = 1;      // keep the keys before the damage
+                return obj;
+            }
             dict_destroy(obj);
             return NULL;
         }
 
         char *key = dict_parse_json_string(p);
         if (!key) {
+            if (p->salvage) {
+                p->damaged = 1;
+                return obj;
+            }
             dict_destroy(obj);
             return NULL;
         }
@@ -993,8 +1030,12 @@ static DictValue *dict_parse_object(DictJsonParser *p) {
 
         if (!dict_parser_consume(p, ':')) {
             free(key);
-            dict_destroy(obj);
             dict_parser_error(p, "Expected ':' after key in object");
+            if (p->salvage) {
+                p->damaged = 1;
+                return obj;
+            }
+            dict_destroy(obj);
             return NULL;
         }
 
@@ -1003,6 +1044,10 @@ static DictValue *dict_parse_object(DictJsonParser *p) {
         DictValue *value = dict_parse_value(p);
         if (!value) {
             free(key);
+            if (p->salvage) {
+                p->damaged = 1;
+                return obj;
+            }
             dict_destroy(obj);
             return NULL;
         }
@@ -1010,17 +1055,27 @@ static DictValue *dict_parse_object(DictJsonParser *p) {
         if (!dict_object_set(obj, key, value)) {
             free(key);
             dict_destroy(value);
-            dict_destroy(obj);
             dict_parser_error(p, "Failed to insert key-value pair in object");
+            if (p->salvage) {
+                p->damaged = 1;
+                return obj;
+            }
+            dict_destroy(obj);
             return NULL;
         }
         free(key);
+        if (p->damaged)              // a nested container stopped early
+            return obj;
 
         dict_parser_skip_whitespace(p);
 
         if (!dict_parser_peek(p, &c)) {
-            dict_destroy(obj);
             dict_parser_error(p, "Unexpected end of input in object");
+            if (p->salvage) {
+                p->damaged = 1;
+                return obj;
+            }
+            dict_destroy(obj);
             return NULL;
         }
         if (c == ',') {
@@ -1031,8 +1086,12 @@ static DictValue *dict_parse_object(DictJsonParser *p) {
             p->pos++;
             break;
         }
-        dict_destroy(obj);
         dict_parser_error(p, "Expected ',' or '}' in object");
+        if (p->salvage) {
+            p->damaged = 1;
+            return obj;
+        }
+        dict_destroy(obj);
         return NULL;
     }
     return obj;
@@ -1045,7 +1104,11 @@ static DictValue *dict_parse_object(DictJsonParser *p) {
 // error_str: optional output buffer for error message (can be NULL)
 // error_str_len: size of error buffer (ignored if error_str is NULL)
 // Returns allocated DictValue (caller must free with dict_destroy) or NULL on error.
-static DictValue *dict_deserialize_json(const char *buffer, size_t buffer_len, size_t content_len, char *error_str, size_t error_str_len) {
+static DictValue *dict_deserialize_json_impl(const char *buffer, size_t buffer_len, size_t content_len,
+                                             char *error_str, size_t error_str_len,
+                                             int salvage, int *damaged) {
+    if (damaged) *damaged = 0;
+    if (error_str && error_str_len > 0) error_str[0] = '\0';
     if (!buffer || content_len > buffer_len || content_len == 0) {
         if (error_str && error_str_len > 0)
             snprintf(error_str, error_str_len, "Invalid input buffer or content length");
@@ -1057,26 +1120,46 @@ static DictValue *dict_deserialize_json(const char *buffer, size_t buffer_len, s
         .buffer_len = content_len,
         .pos = 0,
         .error_str = error_str,
-        .error_str_len = error_str_len
+        .error_str_len = error_str_len,
+        .salvage = salvage,
+        .damaged = 0,
+        .has_error = 0
     };
 
     dict_parser_skip_whitespace(&parser);
     DictValue *result = dict_parse_value(&parser);
     if (!result) {
         // error_str already set in parser
+        if (damaged) *damaged = parser.has_error;
         return NULL;
     }
 
     dict_parser_skip_whitespace(&parser);
-    if (parser.pos != content_len) {
-        dict_destroy(result);
-        if (error_str && error_str_len > 0) {
-            snprintf(error_str, error_str_len, "Extra trailing data after JSON value at pos %zu", parser.pos);
+    if (!parser.damaged && parser.pos != content_len) {
+        dict_parser_error(&parser, "Extra trailing data after JSON value");
+        if (!salvage) {
+            dict_destroy(result);
+            return NULL;
         }
-        return NULL;
+        parser.damaged = 1;
     }
-
+    if (damaged) *damaged = parser.damaged;
     return result;
+}
+
+static DictValue *dict_deserialize_json(const char *buffer, size_t buffer_len, size_t content_len, char *error_str, size_t error_str_len) {
+    return dict_deserialize_json_impl(buffer, buffer_len, content_len, error_str, error_str_len, 0, NULL);
+}
+
+// Like dict_deserialize_json, but on malformed input it keeps everything
+// parsed before the first error: open arrays and objects are closed where
+// the damage starts, the value being parsed there is dropped, and *damaged
+// is set with error_str describing the first error (line and column).
+// Returns NULL only when nothing at all could be read.
+static DictValue *dict_deserialize_json_salvage(const char *buffer, size_t content_len,
+                                                char *error_str, size_t error_str_len,
+                                                int *damaged) {
+    return dict_deserialize_json_impl(buffer, content_len, content_len, error_str, error_str_len, 1, damaged);
 }
 
 // --- BSON serialization and deserialization with int64 support added ---

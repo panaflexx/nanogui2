@@ -359,22 +359,27 @@ void emit_path(std::string &s, const Path &p) {
     }
 }
 
+/* Sets fill and stroke alpha with an ExtGState when `a` is translucent.
+ * `alphas` records thousandths of alpha; the objects are created once
+ * content is known. */
+std::string emit_alpha(float a, std::map<int, float> &alphas) {
+    if (!(a < 0.9995f))
+        return {};
+    int key = (int) std::lround((double) a * 1000.0);
+    if (key < 0) key = 0;
+    if (key > 1000) key = 1000;
+    alphas[key] = key / 1000.f;
+    return "/A" + std::to_string(key) + " gs\n";
+}
+
 /* RGB, device or tagged (the page's /CS0, an sRGB ICCBased space), plus
- * an ExtGState when the color is translucent. `alphas` records thousandths
- * of alpha; the objects are created once content is known. */
+ * an ExtGState when the color is translucent. */
 std::string emit_color(const Color &c, bool stroke, std::map<int, float> &alphas,
                        bool tagged = false) {
     const std::string rgb = num(c.r) + " " + num(c.g) + " " + num(c.b);
     std::string s = tagged ? (stroke ? "/CS0 CS " + rgb + " SC\n" : "/CS0 cs " + rgb + " sc\n")
                            : rgb + (stroke ? " RG\n" : " rg\n");
-    if (c.a < 0.9995f) {
-        int key = (int) std::lround((double) c.a * 1000.0);
-        if (key < 0) key = 0;
-        if (key > 1000) key = 1000;
-        alphas[key] = key / 1000.f;
-        s += "/A" + std::to_string(key) + " gs\n";
-    }
-    return s;
+    return s + emit_alpha(c.a, alphas);
 }
 
 void emit_cm(std::string &s, const Transform &t) {
@@ -817,10 +822,14 @@ std::vector<std::string> pdf_preflight(const PageDoc &doc, const std::vector<Com
                 if ((!sh->fill.none() && f.a < 0.999f) || (!sh->stroke.none() && st.a < 0.999f))
                     transparent.insert(pi + 1);
             }
-            if (const PlacedImage *im = it.image())
+            if (const PlacedImage *im = it.image()) {
+                if (im->opacity < 99.95f ||
+                    (!im->stroke.none() && doc.resolve(im->stroke.paint).a < 0.999f))
+                    transparent.insert(pi + 1);
                 if (const ImageAsset *a = doc.find_image(im->asset))
                     if (a->meta.alpha)
                         transparent.insert(pi + 1);
+            }
         }
     if (!transparent.empty()) {
         std::string list;
@@ -979,6 +988,7 @@ bool export_pdf(const std::string &path, const PageDoc &doc,
                     image_pdf_matrix(orient, im->x, im->y, im->w, im->h, m);
                     content += num(m[0]) + " " + num(m[1]) + " " + num(m[2]) + " " +
                                num(m[3]) + " " + num(m[4]) + " " + num(m[5]) + " cm\n";
+                    content += emit_alpha(im->opacity, alphas);
                     content += "/Im" + std::to_string(im->asset) + " Do\n";
                 }
                 content += "Q\n";

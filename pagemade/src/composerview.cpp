@@ -1531,9 +1531,16 @@ void ComposerView::set_geometry(const Geometry &g) {
 
 Shape ComposerView::shape_style() const {
     for (ItemId id : m_sel)
-        if (const Item *it = m_doc.find_item(id))
+        if (const Item *it = m_doc.find_item(id)) {
             if (const Shape *sh = it->shape())
                 return *sh;
+            if (const PlacedImage *im = it->image()) {
+                Shape look = m_default_shape;
+                look.fill = {kNoPaint, im->opacity};
+                look.stroke = im->stroke;
+                return look;
+            }
+        }
     return m_default_shape;
 }
 
@@ -1545,15 +1552,32 @@ bool ComposerView::shapes_selected() const {
     return false;
 }
 
+bool ComposerView::pictures_selected() const {
+    for (ItemId id : m_sel)
+        if (const Item *it = m_doc.find_item(id))
+            if (it->image())
+                return true;
+    return false;
+}
+
 void ComposerView::apply_shape_style(const std::function<void(Shape &)> &fn) {
-    if (shapes_selected()) {
+    apply_item_style(fn, nullptr);
+}
+
+void ComposerView::apply_item_style(const std::function<void(Shape &)> &shape,
+                                    const std::function<void(PlacedImage &)> &image) {
+    const bool pictures = image && pictures_selected();
+    if (shapes_selected() || pictures) {
         push_undo();
         for (ItemId id : m_sel)
-            if (Item *it = m_doc.find_item(id))
+            if (Item *it = m_doc.find_item(id)) {
                 if (Shape *sh = it->shape())
-                    fn(*sh);
-    } else {
-        fn(m_default_shape);             // nothing selected: set the defaults
+                    shape(*sh);
+                else if (PlacedImage *im = it->image(); im && image)
+                    image(*im);
+            }
+    } else if (!pictures_selected()) {
+        shape(m_default_shape);          // nothing selected: set the defaults
     }
     selection_changed();
     if (screen())

@@ -37,7 +37,7 @@ namespace pagemade {
 
 constexpr const char *kPublicationExtension = "pagemade";
 constexpr const char *kPublicationMimeType = "application/vnd.pagemade+zip";
-constexpr int kFormatVersion = 1;
+constexpr int kFormatVersion = 2;   // 2: picture opacity and borders, compound lines
 
 struct SaveOptions {
     bool embed_assets = false;       // copy fonts and pictures into the file
@@ -61,6 +61,10 @@ struct OpenResult {
      * falls back to another face. */
     std::vector<std::string> missing_fonts;
     std::vector<std::string> warnings;
+    /* Set when document.json was damaged and only the part before the
+     * damage was read: what went wrong and what may be missing. The open
+     * still succeeds (ok) so the user gets back what survived. */
+    std::string damage;
     /* Picture bytes for the assets in `doc`. Empty when the file linked a
      * picture that could not be read; the asset record is still there. */
     ImageStore images;

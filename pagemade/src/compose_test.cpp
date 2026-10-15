@@ -1654,6 +1654,10 @@ static void check_doc(const PageDoc &a, const PageDoc &b) {
                 const PlacedImage &xi = *x.image(), &yi = *y.image();
                 CHECK(xi.asset == yi.asset && near(xi.x, yi.x) && near(xi.y, yi.y) &&
                       near(xi.w, yi.w) && near(xi.h, yi.h), "item %zu placement", i);
+                CHECK(near(xi.opacity, yi.opacity) &&
+                      xi.stroke.paint.swatch == yi.stroke.paint.swatch &&
+                      near(xi.stroke.weight, yi.stroke.weight) &&
+                      xi.stroke.style == yi.stroke.style, "item %zu picture style", i);
             }
             if (x.shape() && y.shape()) {
                 const Shape &sx = *x.shape(), &sy = *y.shape();
@@ -1914,7 +1918,7 @@ static void test_docfile(const FontLibrary &fonts) {
 
     const char *repair_json =
         "{"
-        "\"format\":\"pagemade\",\"version\":2,"
+        "\"format\":\"pagemade\",\"version\":99,"
         "\"pages\":[{\"hidden\":true,\"items\":["
         "{\"id\":5,\"type\":\"text\",\"w\":100,\"h\":40,\"xf\":[1,0,0,1,10,20]},"
         "{\"id\":5,\"type\":\"shape\",\"shape\":\"rectangle\",\"w\":10,\"h\":10,\"xf\":[1,0,0,1,0,0]},"
@@ -1974,6 +1978,47 @@ static void test_docfile(const FontLibrary &fonts) {
     CHECK(!open_document(bad, fonts).ok, "a file that isn't a zip is refused");
     CHECK(!open_document("/tmp/pagemade-does-not-exist.pagemade", fonts).ok,
           "a missing file is refused");
+
+    /* Empty strings are valid JSON (a picture placed before its format was
+     * known saved "format": "") */
+    CHECK(write_zip(bad, kPublicationMimeType,
+                    "{\"format\":\"pagemade\",\"version\":1,\"pdf\":{\"title\":\"\"},"
+                    "\"assets\":[{\"kind\":\"image\",\"id\":2,\"name\":\"a.heic\","
+                    "\"meta\":{\"format\":\"\",\"width\":108,\"height\":108}}],"
+                    "\"pages\":[{\"items\":[]}]}"),
+          "write a package with empty strings");
+    OpenResult empties = open_document(bad, fonts);
+    CHECK(empties.ok && empties.damage.empty(), "empty strings open cleanly: %s %s",
+          empties.error.c_str(), empties.damage.c_str());
+
+    /* A truncated document.json keeps what was written before the damage */
+    CHECK(write_zip(bad, kPublicationMimeType,
+                    "{\"format\":\"pagemade\",\"version\":1,"
+                    "\"stories\":[{\"id\":9,\"thread\":[5],\"paragraphs\":[{\"runs\":"
+                    "[{\"text\":\"Survives\"}]}]}],"
+                    "\"pages\":[{\"items\":["
+                    "{\"id\":5,\"type\":\"text\",\"w\":100,\"h\":40,\"xf\":[1,0,0,1,10,20]},"
+                    "{\"id\":6,\"type\":\"shape\",\"shape\":\"rectan"),
+          "write a truncated package");
+    OpenResult cut = open_document(bad, fonts);
+    CHECK(cut.ok, "a truncated document still opens: %s", cut.error.c_str());
+    CHECK(cut.damage.find("line 1, column") != std::string::npos,
+          "the damage says where: %s", cut.damage.c_str());
+    if (cut.ok) {
+        bool frame = false, text = false;
+        for (const Page &pg : cut.doc.pages)
+            for (const Item &it : pg.items)
+                frame |= it.id == 5;
+        for (const StoryEntry &se : cut.doc.stories)
+            for (const Paragraph &p : se.story.paragraphs)
+                for (const Run &r : p.runs)
+                    text |= r.text == "Survives";
+        CHECK(frame && text, "the frame and story before the damage survive");
+    }
+    CHECK(write_zip(bad, kPublicationMimeType, "{\"form"), "write a package cut at the start");
+    OpenResult early = open_document(bad, fonts);
+    CHECK(!early.ok && early.error.find("damaged") != std::string::npos,
+          "damage before anything usable is refused with a reason: %s", early.error.c_str());
 
     std::remove(linked.c_str());
     std::remove(embedded.c_str());
@@ -3283,6 +3328,139 @@ static void test_images(const FontLibrary &fonts) {
     std::remove(linked_png.c_str());
 }
 
+/* Picture opacity and borders, and the compound line styles */
+static void test_picture_style(const FontLibrary &fonts) {
+    /* Bands fill the weight from the outside in; thick-thin is thick outside */
+    float span = 0;
+    for (const StrokeBand &b : stroke_bands(LineStyle::Double, 4.f))
+        span += b.width;
+    const std::vector<StrokeBand> dbl = stroke_bands(LineStyle::Double, 4.f);
+    CHECK(dbl.size() == 2 && near(dbl[0].offset, -dbl[1].offset) && near(dbl[0].width, 1.2f) &&
+          near(dbl[0].offset + dbl[0].width / 2, 2.f), "double: two bands to the edges");
+    CHECK(span < 4.f, "a double line leaves a gap (%g)", span);
+    const std::vector<StrokeBand> tt = stroke_bands(LineStyle::ThickThin, 4.f);
+    CHECK(tt.size() == 2 && tt[0].offset > tt[1].offset && tt[0].width > tt[1].width,
+          "thick-thin: the thick band is outside");
+    const std::vector<StrokeBand> ttt = stroke_bands(LineStyle::ThinThickThin, 6.f);
+    CHECK(ttt.size() == 3 && near(ttt[1].offset, 0.f) && ttt[1].width > ttt[0].width,
+          "thin-thick-thin: the thick band is centered");
+    CHECK(stroke_bands(LineStyle::Dashed, 4.f).empty() &&
+          dash_pattern(LineStyle::Double, 4.f).empty(), "compound and dashed styles don't mix");
+
+    /* Offsetting moves a loop outward whichever way it winds */
+    for (bool reversed : {false, true}) {
+        Polyline sq;
+        sq.closed = true;
+        sq.pts = {{0, 0}, {10, 0}, {10, 10}, {0, 10}};
+        if (reversed)
+            std::reverse(sq.pts.begin(), sq.pts.end());
+        Bounds b;
+        for (const Polyline &o : offset_polylines({sq}, 1.f))
+            for (const Point &p : o.pts)
+                b.add(p);
+        CHECK(near(b.x0, -1.f) && near(b.y0, -1.f) && near(b.x1, 11.f) && near(b.y1, 11.f),
+              "offset square (%s winding) %g %g %g %g", reversed ? "reversed" : "first",
+              b.x0, b.y0, b.x1, b.y1);
+    }
+    Polyline line;
+    line.pts = {{0, 0}, {10, 0}};
+    const std::vector<Polyline> left = offset_polylines({line}, 2.f);
+    CHECK(left.size() == 1 && near(left[0].pts[0].y, -2.f) && near(left[0].pts[1].y, -2.f),
+          "an open line moves left of travel");
+
+    /* Drawing: the picture at its opacity, then its border's bands */
+    PageDoc doc;
+    Item pic;
+    pic.w = 100;
+    pic.h = 50;
+    PlacedImage im{7, 0, 0, 100, 50};
+    im.opacity = 40.f;
+    im.stroke = {{kBlack, 100.f}, 4.f, LineStyle::ThickThin};
+    pic.content = im;
+    const ItemId pid = doc.add_item(0, pic);
+    Item box;
+    box.w = box.h = 40;
+    box.xf = Transform::translate(200, 0);
+    Shape sh;
+    sh.stroke = {{kBlack, 100.f}, 3.f, LineStyle::Double};
+    box.content = sh;
+    doc.add_item(0, box);
+    const DrawList list = build_page(doc, 0, {});
+    CHECK(list.size() == 5, "picture, two border bands, two shape bands (%zu)", list.size());
+    if (list.size() == 5) {
+        const DrawImage *di = std::get_if<DrawImage>(&list[0]);
+        CHECK(di && near(di->opacity, 0.4f), "the picture is drawn at 40%%");
+        const DrawStroke *outer = std::get_if<DrawStroke>(&list[1]);
+        const DrawStroke *inner = std::get_if<DrawStroke>(&list[2]);
+        CHECK(outer && inner && near(outer->width, 2.2f) && near(inner->width, 0.8f) &&
+              outer->dash.empty(), "the border is thick, then thin");
+        if (outer) {
+            const Bounds ob = path_bounds(outer->path);
+            /* 4 pt thick-thin: the 2.2 pt band's center is 0.9 pt out, so
+             * its outer edge is the stroke's, 2 pt outside the frame */
+            CHECK(near(ob.x0, -0.9f) && near(ob.x1, 100.9f),
+                  "the thick band sits outside the frame edge (%g %g)", ob.x0, ob.x1);
+        }
+        CHECK(std::get_if<DrawStroke>(&list[3]) && std::get_if<DrawStroke>(&list[4]),
+              "a double-lined shape is two strokes");
+    }
+
+    /* The file keeps opacity, borders and the new styles */
+    const std::string path = "/tmp/pagemade-picture-style.pagemade";
+    std::string error;
+    CHECK(save_document(doc, fonts, path, {}, &error), "save styled pictures: %s", error.c_str());
+    OpenResult back = open_document(path, fonts);
+    CHECK(back.ok, "open styled pictures: %s", back.error.c_str());
+    if (back.ok) {
+        const Item *p = back.doc.find_item(pid);
+        CHECK(p && p->image() && near(p->image()->opacity, 40.f) &&
+              p->image()->stroke.style == LineStyle::ThickThin &&
+              near(p->image()->stroke.weight, 4.f), "picture opacity and border survive");
+        bool dbl_kept = false;
+        for (const Item &it : back.doc.pages[0].items)
+            if (it.shape())
+                dbl_kept |= it.shape()->stroke.style == LineStyle::Double;
+        CHECK(dbl_kept, "a double line survives");
+    }
+    std::remove(path.c_str());
+
+    /* PDF: the picture's alpha is an ExtGState set before it is painted */
+    ImageMetadata meta;
+    std::string err;
+    std::vector<uint8_t> photo = make_jpeg_rgb(8, 4, 200, 10, 10);
+    ImageStore store;
+    PageDoc pd;
+    const uint32_t id = store.take_id();
+    CHECK(store.add(id, photo, &meta, &err), "jpeg for opacity: %s", err.c_str());
+    ImageAsset asset;
+    asset.id = id;
+    asset.name = "photo.jpg";
+    asset.meta = meta;
+    pd.add_image(std::move(asset));
+    Item it;
+    it.w = 72;
+    it.h = 36;
+    PlacedImage half{id, 0, 0, 72, 36};
+    half.opacity = 50.f;
+    half.stroke = {{kBlack, 100.f}, 2.f, LineStyle::Double};
+    it.content = half;
+    pd.add_item(0, it);
+    const std::string pdf_path = "/tmp/pagemade-picture-style.pdf";
+    std::vector<Composition> comps;
+    CHECK(export_pdf(pdf_path, pd, comps, &store), "export a translucent picture");
+    const std::string plain = pdf_plain(read_bin(pdf_path));
+    const size_t gs = plain.find("/A500 gs");
+    const size_t paint = plain.find("/Im" + std::to_string(id) + " Do");
+    CHECK(gs != std::string::npos && paint != std::string::npos && gs < paint,
+          "the picture is painted at 50%% alpha");
+    CHECK(plain.find("/ca 0.5") != std::string::npos, "with a 0.5 ExtGState");
+    size_t strokes = 0;
+    for (size_t at = plain.find("\nS\n"); at != std::string::npos; at = plain.find("\nS\n", at + 1))
+        ++strokes;
+    CHECK(strokes == 2, "the double border is two stroked paths (%zu)", strokes);
+    std::remove(pdf_path.c_str());
+}
+
 static std::vector<const PlacedGlyph *> visible_glyphs(const Composition &c) {
     std::vector<const PlacedGlyph *> g;
     for (const ComposedLine &l : c.lines)
@@ -3643,6 +3821,7 @@ int main(int argc, char **argv) {
     test_drawlist(fonts);
     test_docfile(fonts);
     test_images(fonts);
+    test_picture_style(fonts);
     test_groups(fonts);
     test_page_markers(fonts);
     test_layers(fonts);

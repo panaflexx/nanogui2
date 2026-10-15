@@ -50,6 +50,7 @@ struct DrawImage {
     uint32_t  asset = 0;
     float     x = 0, y = 0, w = 0, h = 0;
     float     clip_w = 0, clip_h = 0;
+    float     opacity = 1.f;             // 0 to 1
     Transform xf;
 };
 

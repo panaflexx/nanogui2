@@ -744,6 +744,9 @@ public:
         for (const std::string &w : r.warnings)
             note += "   |   " + w;
         set_note(note);
+        if (!r.damage.empty())
+            show_alert(this, "“" + nanogui::fs::filename(path) +
+                             "” was damaged and only partly opened.", r.damage);
         return true;
     }
 
@@ -955,7 +958,7 @@ public:
 
     /* ---- Control palette ------------------------------------------- */
 
-    static constexpr float kTints[] = {100, 80, 60, 40, 30, 20, 10};
+    static constexpr float kTints[] = {100, 90, 80, 70, 60, 50, 40, 30, 20, 10};
     static constexpr float kWeights[] = {0.25f, 0.5f, 1, 2, 4, 6, 8, 12};
 
     void show_type_palette(bool type) {
@@ -1028,32 +1031,56 @@ public:
             return d;
         };
 
+        /* Pictures take the fill tint as their opacity, and the stroke as a
+         * border on the frame. Their fill color stays None. */
         new Label(bar, " Fill", "sans-bold");
         m_fill = menu(swatches, 90);
         m_fill->set_selected_callback([this](int i) {
             const SwatchId id = m_swatch_ids[i];
             m_view->apply_shape_style([id](Shape &sh) { sh.fill.swatch = id; });
         });
-        m_fill_tint = menu({"100%", "80%", "60%", "40%", "30%", "20%", "10%"}, 62);
+        std::vector<std::string> tints;
+        for (float t : kTints)
+            tints.push_back(std::to_string((int) t) + "%");
+        m_fill_tint = menu(tints, 62);
+        m_fill_tint->set_tooltip("Fill tint. For a picture, its opacity.");
         m_fill_tint->set_selected_callback([this](int i) {
             const float t = kTints[i];
-            m_view->apply_shape_style([t](Shape &sh) { sh.fill.tint = t; });
+            m_view->apply_item_style([t](Shape &sh) { sh.fill.tint = t; },
+                                     [t](PlacedImage &im) { im.opacity = t; });
         });
 
+        /* A picture starts with no border; picking a weight or style
+         * gives it a black one so the choice shows. */
+        auto border = [](PlacedImage &im) {
+            if (im.stroke.paint.none())
+                im.stroke.paint = {kBlack, 100.f};
+        };
         new Label(bar, " Stroke", "sans-bold");
         m_stroke = menu(swatches, 90);
         m_stroke->set_selected_callback([this](int i) {
             const SwatchId id = m_swatch_ids[i];
-            m_view->apply_shape_style([id](Shape &sh) { sh.stroke.paint.swatch = id; });
+            m_view->apply_item_style([id](Shape &sh) { sh.stroke.paint.swatch = id; },
+                                     [id](PlacedImage &im) { im.stroke.paint.swatch = id; });
         });
         m_weight = menu({"Hairline", "0.5 pt", "1 pt", "2 pt", "4 pt", "6 pt", "8 pt", "12 pt"}, 76);
-        m_weight->set_selected_callback([this](int i) {
+        m_weight->set_selected_callback([this, border](int i) {
             const float w = kWeights[i];
-            m_view->apply_shape_style([w](Shape &sh) { sh.stroke.weight = w; });
+            m_view->apply_item_style([w](Shape &sh) { sh.stroke.weight = w; },
+                                     [w, border](PlacedImage &im) {
+                                         im.stroke.weight = w;
+                                         border(im);
+                                     });
         });
-        m_style = menu({"Solid", "Dashed", "Dotted", "Dash-dot"}, 80);
-        m_style->set_selected_callback([this](int i) {
-            m_view->apply_shape_style([i](Shape &sh) { sh.stroke.style = (LineStyle) i; });
+        m_style = menu({"Solid", "Dashed", "Dotted", "Dash-dot", "Double", "Thick-thin",
+                        "Thin-thick", "Thin-thick-thin"}, 110);
+        m_style->set_selected_callback([this, border](int i) {
+            const LineStyle ls = (LineStyle) i;
+            m_view->apply_item_style([ls](Shape &sh) { sh.stroke.style = ls; },
+                                     [ls, border](PlacedImage &im) {
+                                         im.stroke.style = ls;
+                                         border(im);
+                                     });
         });
 
         new Label(bar, " Sides", "sans-bold");
@@ -1676,7 +1703,8 @@ public:
             return best;
         };
         m_fill->set_selected_index(swatch_index(sh.fill.swatch));
-        m_fill_tint->set_selected_index(nearest(kTints, 7, sh.fill.tint));
+        m_fill->set_enabled(m_view->shapes_selected() || !m_view->pictures_selected());
+        m_fill_tint->set_selected_index(nearest(kTints, (int) std::size(kTints), sh.fill.tint));
         m_stroke->set_selected_index(swatch_index(sh.stroke.paint.swatch));
         m_weight->set_selected_index(nearest(kWeights, 8, sh.stroke.weight));
         m_style->set_selected_index((int) sh.stroke.style);
@@ -2209,13 +2237,24 @@ public:
                 id = sw.id;
         if (what == "fill") {
             const float tint = f.size() > 1 ? (float) std::atof(f[1].c_str()) : 100.f;
-            m_view->apply_shape_style([&](Shape &sh) { sh.fill = {id, tint}; });
+            m_view->apply_item_style([&](Shape &sh) { sh.fill = {id, tint}; },
+                                     [&](PlacedImage &im) { im.opacity = tint; });
         } else {
             const float w = f.size() > 1 ? (float) std::atof(f[1].c_str()) : 1.f;
             const std::string st = f.size() > 2 ? f[2] : "solid";
-            const LineStyle ls = st == "dashed" ? LineStyle::Dashed : st == "dotted" ? LineStyle::Dotted
-                               : st == "dashdot" ? LineStyle::DashDot : LineStyle::Solid;
-            m_view->apply_shape_style([&](Shape &sh) { sh.stroke = {{id, 100.f}, w, ls}; });
+            static const std::pair<const char *, LineStyle> styles[] = {
+                {"dashed", LineStyle::Dashed},        {"dotted", LineStyle::Dotted},
+                {"dashdot", LineStyle::DashDot},      {"double", LineStyle::Double},
+                {"thickthin", LineStyle::ThickThin},  {"thinthick", LineStyle::ThinThick},
+                {"thinthickthin", LineStyle::ThinThickThin},
+            };
+            LineStyle ls = LineStyle::Solid;
+            for (const auto &s : styles)
+                if (st == s.first)
+                    ls = s.second;
+            const Stroke stroke{{id, 100.f}, w, ls};
+            m_view->apply_item_style([&](Shape &sh) { sh.stroke = stroke; },
+                                     [&](PlacedImage &im) { im.stroke = stroke; });
         }
     }
 

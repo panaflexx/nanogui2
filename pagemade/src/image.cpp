@@ -524,10 +524,91 @@ std::string heif_brand(const uint8_t *d, size_t n) {
     return {};
 }
 
+/* Calls f(type, payload, end) for each ISO BMFF box in [p, end). The
+ * payload starts past the size/type header; truncated boxes stop the walk. */
+template <typename F> void heif_boxes(uint8_t *p, uint8_t *end, F f) {
+    while (end - p >= 8) {
+        uint64_t size = be32(p);
+        size_t head = 8;
+        if (size == 1) {
+            if (end - p < 16)
+                return;
+            size = ((uint64_t) be32(p + 8) << 32) | be32(p + 12);
+            head = 16;
+        } else if (size == 0) {
+            size = (uint64_t) (end - p);
+        }
+        if (size < head || size > (uint64_t) (end - p))
+            return;
+        f(p + 4, p + head, p + size);
+        p += size;
+    }
+}
+
+/* iOS 18 photos carry an ISO 21496-1 tone map ('tmap' item, the HDR gain
+ * map), and their depth and matte layers are 'auxl' references to both the
+ * photo and the tone map. Older libheif (1.17, as on Ubuntu 24.04) doesn't
+ * count tmap as an image, so it rejects the whole file ("Non-existing depth
+ * image referenced").
+ * Retyping those references to an unknown box detaches the aux layers,
+ * which pagemade doesn't use, and leaves the photo itself intact. The box
+ * keeps its size, so no offsets move. True when anything was changed. */
+bool heif_detach_tmap_aux(std::vector<uint8_t> &file) {
+    uint8_t *meta = nullptr, *meta_end = nullptr;
+    heif_boxes(file.data(), file.data() + file.size(), [&](uint8_t *type, uint8_t *b, uint8_t *e) {
+        if (!meta && std::memcmp(type, "meta", 4) == 0 && e - b >= 4) {
+            meta = b + 4;                                // past version and flags
+            meta_end = e;
+        }
+    });
+    if (!meta)
+        return false;
+
+    std::vector<uint32_t> tmaps;
+    heif_boxes(meta, meta_end, [&](uint8_t *type, uint8_t *b, uint8_t *e) {
+        if (std::memcmp(type, "iinf", 4) != 0 || e - b < 6)
+            return;
+        heif_boxes(b + (b[0] == 0 ? 6 : 8), e, [&](uint8_t *t, uint8_t *ib, uint8_t *ie) {
+            /* infe version 2 has a 16-bit item ID, version 3 a 32-bit one */
+            if (std::memcmp(t, "infe", 4) != 0 || ie == ib || ib[0] < 2)
+                return;
+            const bool wide = ib[0] >= 3;
+            const size_t type_at = 4 + (wide ? 4 : 2) + 2;    // past ID and protection
+            if ((size_t) (ie - ib) >= type_at + 4 && std::memcmp(ib + type_at, "tmap", 4) == 0)
+                tmaps.push_back(wide ? be32(ib + 4) : be16(ib + 4));
+        });
+    });
+    if (tmaps.empty())
+        return false;
+
+    bool changed = false;
+    heif_boxes(meta, meta_end, [&](uint8_t *type, uint8_t *b, uint8_t *e) {
+        if (std::memcmp(type, "iref", 4) != 0 || e - b < 4)
+            return;
+        const size_t w = b[0] == 0 ? 2 : 4;              // item ID width
+        heif_boxes(b + 4, e, [&](uint8_t *t, uint8_t *rb, uint8_t *re) {
+            if (std::memcmp(t, "auxl", 4) != 0 || (size_t) (re - rb) < w + 2)
+                return;
+            const size_t count = be16(rb + w);
+            for (size_t i = 0; i < count && (size_t) (re - rb) >= w + 2 + (i + 1) * w; ++i) {
+                const uint8_t *id = rb + w + 2 + i * w;
+                const uint32_t to = w == 2 ? be16(id) : be32(id);
+                if (std::find(tmaps.begin(), tmaps.end(), to) != tmaps.end()) {
+                    std::memcpy(t, "xaux", 4);
+                    changed = true;
+                    break;
+                }
+            }
+        });
+    });
+    return changed;
+}
+
 /* One open file: context and primary image. Frees both on scope exit. */
 struct HeifFile {
     heif_context *ctx = nullptr;
     heif_image_handle *handle = nullptr;
+    std::vector<uint8_t> patched;      // read without copy, so it lives here
     ~HeifFile() {
         if (handle) heif_image_handle_release(handle);
         if (ctx) heif_context_free(ctx);
@@ -538,6 +619,19 @@ struct HeifFile {
         ctx = heif_context_alloc();
         heif_error e = ctx ? heif_context_read_from_memory_without_copy(ctx, data, n, nullptr)
                            : heif_error{heif_error_Memory_allocation_error, heif_suberror_Unspecified, ""};
+        if (e.code == heif_error_Invalid_input &&
+            e.subcode == heif_suberror_Nonexisting_item_referenced) {
+            patched.assign(data, data + n);
+            if (heif_detach_tmap_aux(patched)) {
+                heif_context_free(ctx);
+                ctx = heif_context_alloc();
+                e = ctx ? heif_context_read_from_memory_without_copy(ctx, patched.data(),
+                                                                     patched.size(), nullptr)
+                        : heif_error{heif_error_Memory_allocation_error, heif_suberror_Unspecified, ""};
+            } else {
+                std::vector<uint8_t>().swap(patched);
+            }
+        }
         if (e.code == heif_error_Ok)
             e = heif_context_get_primary_image_handle(ctx, &handle);
         if (e.code != heif_error_Ok) {

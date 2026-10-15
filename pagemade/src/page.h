@@ -160,7 +160,11 @@ struct Paint {
     bool none() const { return swatch == kNoPaint; }
 };
 
-enum class LineStyle { Solid, Dashed, Dotted, DashDot };
+/* PageMaker's custom lines. The compound ones (Double through ThinThickThin)
+ * are solid bands across the stroke's weight; ThickThin puts the thick band
+ * outside a closed shape (left of travel along a line). New styles go at the
+ * end: the palette menu indexes this enum. */
+enum class LineStyle { Solid, Dashed, Dotted, DashDot, Double, ThickThin, ThinThick, ThinThickThin };
 
 struct Stroke {
     Paint     paint{kBlack, 100.f};
@@ -197,6 +201,9 @@ struct Shape {
 struct PlacedImage {
     uint32_t asset = 0;
     float x = 0, y = 0, w = 0, h = 0;
+    float  opacity = 100.f;              // percent; the palette's fill tint
+    /* A border on the frame, centered on its edge. Pictures start without. */
+    Stroke stroke{{kNoPaint, 100.f}, 1.f, LineStyle::Solid};
 };
 
 /* Scale the picture with a frame resize, so the crop stays the same

@@ -305,13 +305,19 @@ public:
     };
     bool geometry(Geometry &g) const;
     void set_geometry(const Geometry &g);       // one undo step
-    /* The fill/stroke the palette shows: the first selected shape, or the
-     * defaults for new shapes when no shape is selected. */
+    /* The fill/stroke the palette shows: the first selected shape or
+     * picture, or the defaults for new shapes when neither is selected. A
+     * picture shows as no fill at its opacity (the fill tint) and its border. */
     pagemade::Shape shape_style() const;
     bool shapes_selected() const;
+    bool pictures_selected() const;
     /* Change the selected shapes (one undo step), or the defaults for new
      * shapes when none is selected, as PageMaker does. */
     void apply_shape_style(const std::function<void(pagemade::Shape &)> &fn);
+    /* The same, also changing selected pictures with `image` (one undo step
+     * for both). With neither selected, `shape` sets the shape defaults. */
+    void apply_item_style(const std::function<void(pagemade::Shape &)> &shape,
+                          const std::function<void(pagemade::PlacedImage &)> &image);
 
     /* Character attributes for the control palette's type view. With a text
      * selection, the selection; at a caret, the style about to be typed;

@@ -56,4 +56,21 @@ std::vector<Polyline> dash(const std::vector<Polyline> &lines, const std::vector
 std::vector<float> dash_pattern(LineStyle style, float weight);
 bool line_style_round_caps(LineStyle style);
 
+/* One solid band of a compound line: its center's offset from the path
+ * (positive is outside a closed shape, left of travel along an open line)
+ * and its width, in points. */
+struct StrokeBand {
+    float offset = 0, width = 0;
+};
+/* The bands of a compound style (double, thick-thin, ...) at a weight that
+ * spans all of them; empty for single-line styles. */
+std::vector<StrokeBand> stroke_bands(LineStyle style, float weight);
+
+/* Polylines moved `d` sideways: outward for closed ones (whichever way they
+ * wind), left of travel for open ones. Corners are mitered; very sharp ones
+ * are beveled instead of spiking. */
+std::vector<Polyline> offset_polylines(const std::vector<Polyline> &lines, float d);
+/* Polylines as a path of moves and lines (closed ones closed). */
+Path polyline_path(const std::vector<Polyline> &lines);
+
 } // namespace pagemade

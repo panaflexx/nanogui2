@@ -208,7 +208,8 @@ void draw_list(NVGcontext *ctx, const DrawList &list, float px,
             if (img > 0 && im->w != 0.f && im->h != 0.f) {
                 nvgBeginPath(ctx);
                 nvgRect(ctx, im->x, im->y, im->w, im->h);
-                NVGpaint paint = nvgImagePattern(ctx, im->x, im->y, im->w, im->h, 0, img, 1.f);
+                NVGpaint paint = nvgImagePattern(ctx, im->x, im->y, im->w, im->h, 0, img,
+                                                 im->opacity);
                 nvgFillPaint(ctx, paint);
                 nvgFill(ctx);
             } else if (img < 0) {

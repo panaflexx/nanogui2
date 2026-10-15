@@ -182,12 +182,19 @@ const char *line_style_name(LineStyle l) {
     case LineStyle::Dashed: return "dashed";
     case LineStyle::Dotted: return "dotted";
     case LineStyle::DashDot: return "dash-dot";
+    case LineStyle::Double: return "double";
+    case LineStyle::ThickThin: return "thick-thin";
+    case LineStyle::ThinThick: return "thin-thick";
+    case LineStyle::ThinThickThin: return "thin-thick-thin";
     }
     return "solid";
 }
 LineStyle line_style_from(const std::string &s) {
-    return s == "dashed" ? LineStyle::Dashed : s == "dotted" ? LineStyle::Dotted :
-           s == "dash-dot" ? LineStyle::DashDot : LineStyle::Solid;
+    for (LineStyle l : {LineStyle::Dashed, LineStyle::Dotted, LineStyle::DashDot, LineStyle::Double,
+                        LineStyle::ThickThin, LineStyle::ThinThick, LineStyle::ThinThickThin})
+        if (s == line_style_name(l))
+            return l;
+    return LineStyle::Solid;
 }
 
 const char *shape_name(Shape::Kind k) {
@@ -299,6 +306,15 @@ void write_paint(JsonOut &j, const Paint &p) {
     j.end_object();
 }
 
+void write_stroke(JsonOut &j, const Stroke &s) {
+    j.begin_object();
+    j.key("swatch").value(s.paint.swatch);
+    if (s.paint.tint != 100.f) j.key("tint").value(s.paint.tint);
+    j.key("weight").value(s.weight);
+    if (s.style != LineStyle::Solid) j.key("style").value(line_style_name(s.style));
+    j.end_object();
+}
+
 /* Ruler guides: [{"axis": "x" | "y", "at": points}]; "x" is a vertical line. */
 void write_guides(JsonOut &j, const char *key, const std::vector<Guide> &guides) {
     if (guides.empty())
@@ -333,18 +349,20 @@ void write_item(JsonOut &j, const Item &it) {
         }
         j.key("fill");
         write_paint(j, sh->fill);
-        j.key("stroke").begin_object();
-        j.key("swatch").value(sh->stroke.paint.swatch);
-        if (sh->stroke.paint.tint != 100.f) j.key("tint").value(sh->stroke.paint.tint);
-        j.key("weight").value(sh->stroke.weight);
-        if (sh->stroke.style != LineStyle::Solid) j.key("style").value(line_style_name(sh->stroke.style));
-        j.end_object();
+        j.key("stroke");
+        write_stroke(j, sh->stroke);
     } else if (const PlacedImage *im = it.image()) {
         j.key("type").value("image");
         j.key("asset").value(im->asset);
         /* The frame itself is the placement when the picture fills it. */
         if (im->x != 0.f || im->y != 0.f || im->w != it.w || im->h != it.h)
             j.key("image").numbers({im->x, im->y, im->w, im->h});
+        if (im->opacity != 100.f)
+            j.key("opacity").value(im->opacity);
+        if (!im->stroke.paint.none()) {
+            j.key("stroke");
+            write_stroke(j, im->stroke);
+        }
     } else {
         j.key("type").value("text");
     }
@@ -873,6 +891,17 @@ Paint read_paint(const DictValue *o, Paint p) {
     return p;
 }
 
+Stroke read_stroke(const DictValue *o, Stroke s) {
+    if (!o)
+        return s;
+    s.paint = read_paint(o, s.paint);
+    get(o, "weight", s.weight);
+    std::string style;
+    get(o, "style", style);
+    s.style = line_style_from(style);
+    return s;
+}
+
 /* False for item types this version doesn't know (they're skipped). */
 std::vector<Guide> read_guides(const DictValue *a) {
     std::vector<Guide> out;
@@ -918,6 +947,9 @@ bool read_item(const DictValue *o, Item &it) {
             im.w = it.w;
             im.h = it.h;
         }
+        get(o, "opacity", im.opacity);
+        im.opacity = std::clamp(im.opacity, 0.f, 100.f);
+        im.stroke = read_stroke(field(o, "stroke"), im.stroke);
         it.content = im;
         return true;
     }
@@ -932,13 +964,7 @@ bool read_item(const DictValue *o, Item &it) {
     sh.sides = std::max(3, sh.sides);
     get(o, "star_inset", sh.star_inset);
     sh.fill = read_paint(field(o, "fill"), Paint{});
-    if (const DictValue *st = field(o, "stroke")) {
-        sh.stroke.paint = read_paint(st, sh.stroke.paint);
-        get(st, "weight", sh.stroke.weight);
-        std::string style;
-        get(st, "style", style);
-        sh.stroke.style = line_style_from(style);
-    }
+    sh.stroke = read_stroke(field(o, "stroke"), sh.stroke);
     it.content = sh;
     return true;
 }
@@ -1138,23 +1164,36 @@ OpenResult open_document(const std::string &path, const FontLibrary &installed,
         r.error = "the package has no document.json";
         return r;
     }
+    /* A damaged document.json is read up to the damage, so the user gets
+     * back the setup, styles, stories and pages written before it. */
     char err[256] = {0};
-    DictValue *root = dict_deserialize_json(json.data(), json.size(), json.size(), err, sizeof err);
-    if (!root) {
-        r.error = std::string("document.json is damaged: ") + err;
+    int damaged = 0;
+    DictValue *root = dict_deserialize_json_salvage(json.data(), json.size(), err, sizeof err,
+                                                    &damaged);
+    if (!root || root->type != DICT_OBJECT) {
+        dict_destroy(root);
+        r.error = std::string("document.json is damaged") + (*err ? " at " : "") + err +
+                  ", and nothing in it could be read.";
         return r;
     }
     struct Freer {
         DictValue *v;
         ~Freer() { dict_destroy(v); }
     } freer{root};
+    if (damaged)
+        r.damage = std::string("document.json is damaged at ") + err +
+                   ". Everything before that point was opened; pages, items, stories or "
+                   "pictures saved after it may be missing. Check the publication, then "
+                   "use Save As to write a repaired copy.";
 
     std::string format;
     int version = 0;
     get(root, "format", format);
     get(root, "version", version);
     if (format != "pagemade") {
-        r.error = "document.json isn't a pagemade document";
+        r.error = damaged ? "document.json is damaged at " + std::string(err) +
+                                ", before anything pagemade could use."
+                          : "document.json isn't a pagemade document";
         return r;
     }
     if (version > kFormatVersion)
