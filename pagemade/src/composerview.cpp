@@ -1962,6 +1962,109 @@ void ComposerView::define_style(const std::string &name) {
         screen()->redraw();
 }
 
+/* ---- Colors palette ------------------------------------------------------ */
+
+SwatchId ComposerView::add_doc_swatch(const std::string &name, pagemade::Color rgb,
+                                     pagemade::Cmyk cmyk) {
+    if (editing())
+        will_edit(false);
+    else
+        push_undo();
+    Swatch s;
+    s.id = kRegistration;
+    for (const Swatch &have : m_doc.swatches)
+        s.id = std::max(s.id, have.id);
+    s.id += 1;
+    s.name = name;
+    s.rgb = rgb;
+    s.cmyk = cmyk;
+    m_doc.swatches.push_back(s);
+    recompose();
+    selection_changed();
+    if (screen())
+        screen()->redraw();
+    return s.id;
+}
+
+bool ComposerView::update_doc_swatch(SwatchId id, const std::string &name, pagemade::Color rgb,
+                                     pagemade::Cmyk cmyk) {
+    if (id == kNoPaint || id == kPaper || id == kBlack || id == kRegistration || name.empty())
+        return false;
+    Swatch *found = nullptr;
+    for (Swatch &s : m_doc.swatches)
+        if (s.id == id)
+            found = &s;
+    if (!found)
+        return false;
+    for (const Swatch &s : m_doc.swatches)
+        if (s.name == name && s.id != id)
+            return false;   // another swatch already answers to it
+    if (editing())
+        will_edit(false);
+    else
+        push_undo();
+    found->name = name;
+    found->rgb = rgb;
+    found->cmyk = cmyk;
+    recompose();
+    selection_changed();
+    if (screen())
+        screen()->redraw();
+    return true;
+}
+
+bool ComposerView::remove_doc_swatch(SwatchId id) {
+    if (id == kNoPaint || id == kPaper || id == kBlack || id == kRegistration)
+        return false;
+    auto it = m_doc.swatches.begin();
+    while (it != m_doc.swatches.end() && it->id != id)
+        ++it;
+    if (it == m_doc.swatches.end())
+        return false;
+    if (editing())
+        will_edit(false);
+    else
+        push_undo();
+    m_doc.swatches.erase(it);
+    /* Its users go black rather than transparent. */
+    auto blacken = [id](Paint &p) {
+        if (p.swatch == id)
+            p.swatch = kBlack;
+    };
+    auto blacken_type = [id](CharStyle &cs) {
+        if (cs.swatch == id)
+            cs.swatch = kBlack;
+    };
+    for (StoryEntry &se : m_doc.stories)
+        for (Paragraph &p : se.story.paragraphs)
+            for (Run &r : p.runs)
+                blacken_type(r.style);
+    for (StyleDef &d : m_doc.styles)
+        blacken_type(d.type);
+    for (CharStyleDef &d : m_doc.char_styles)
+        blacken_type(d.type);
+    for (Page &page : m_doc.pages)
+        for (Item &item : page.items) {
+            if (Shape *sh = item.shape()) {
+                blacken(sh->fill);
+                blacken(sh->stroke.paint);
+            } else if (PlacedImage *im = item.image()) {
+                blacken(im->stroke.paint);
+            }
+        }
+    blacken(m_default_shape.fill);
+    blacken(m_default_shape.stroke.paint);
+    if (m_default_type.swatch == id)
+        m_default_type.swatch = kBlack;
+    if (m_typing.swatch == id)
+        m_typing.swatch = kBlack;
+    recompose();
+    selection_changed();
+    if (screen())
+        screen()->redraw();
+    return true;
+}
+
 void ComposerView::delete_style(const std::string &name) {
     auto it = std::find_if(m_doc.styles.begin(), m_doc.styles.end(),
                            [&](const StyleDef &s) { return s.name == name; });

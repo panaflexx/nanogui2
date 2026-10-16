@@ -142,16 +142,29 @@ inline void page_side_margins(const PageSetup &s, size_t index, float &left, flo
 
 /* Colors palette entries. Paints refer to swatches by id, so changing a
  * swatch recolors everything that uses it. Ids 1-3 are PageMaker's built-in
- * [Paper], [Black] and [Registration]; 0 means no paint ([None]). Swatches
- * carry an RGB screen color for now; CMYK and spot inks come with PDF. */
+ * [Paper], [Black] and [Registration]; 0 means no paint ([None]). CMYK is
+ * the truth: the rgb screen color is derived from it (naive conversion),
+ * and print output will use the CMYK values. */
 using SwatchId = uint32_t;
 constexpr SwatchId kNoPaint = 0, kPaper = 1, kBlack = 2, kRegistration = 3;
+
+struct Cmyk {
+    float c = 0, m = 0, y = 0, k = 0;   // 0..100, percent
+};
 
 struct Swatch {
     SwatchId    id = 0;
     std::string name;
     Color       rgb;
+    Cmyk        cmyk;
 };
+
+/* Naive CMYK -> RGB for the screen. Inverts cmyk_to_cmyk(). */
+Color cmyk_to_rgb(const Cmyk &cmyk);
+/* Naive RGB -> CMYK: K is the min channel, the rest scaled out of it. */
+Cmyk rgb_to_cmyk(const Color &rgb);
+/* The display string: "C=100 M=0 Y=0 K=0". */
+std::string cmyk_text(const Cmyk &cmyk);
 
 /* A swatch at a tint: PageMaker's screens, from 100% toward paper white. */
 struct Paint {

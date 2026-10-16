@@ -4,6 +4,7 @@
 #include "page.h"
 
 #include <algorithm>
+#include <cstdio>
 #include <map>
 #include <cmath>
 
@@ -41,17 +42,49 @@ float Transform::rotation() const {
 
 /* ---- Swatches ----------------------------------------------------------- */
 
+Color cmyk_to_rgb(const Cmyk &cmyk) {
+    const float c = std::clamp(cmyk.c, 0.f, 100.f) * 0.01f;
+    const float m = std::clamp(cmyk.m, 0.f, 100.f) * 0.01f;
+    const float y = std::clamp(cmyk.y, 0.f, 100.f) * 0.01f;
+    const float k = std::clamp(cmyk.k, 0.f, 100.f) * 0.01f;
+    return {(1 - c) * (1 - k), (1 - m) * (1 - k), (1 - y) * (1 - k), 1};
+}
+
+Cmyk rgb_to_cmyk(const Color &rgb) {
+    const float k = 1 - std::max({rgb.r, rgb.g, rgb.b});
+    if (k >= 1 - 1e-6f)
+        return {0, 0, 0, 100};
+    const float inv = 1.f / (1 - k);
+    return {(1 - rgb.r - k) * inv * 100.f, (1 - rgb.g - k) * inv * 100.f,
+            (1 - rgb.b - k) * inv * 100.f, k * 100.f};
+}
+
+std::string cmyk_text(const Cmyk &cmyk) {
+    char buf[64];
+    std::snprintf(buf, sizeof buf, "C=%d M=%d Y=%d K=%d", (int) std::lround(cmyk.c),
+                  (int) std::lround(cmyk.m), (int) std::lround(cmyk.y), (int) std::lround(cmyk.k));
+    return buf;
+}
+
 std::vector<Swatch> default_swatches() {
+    auto process = [](SwatchId id, const char *name, float c, float m, float y, float k) {
+        Swatch s;
+        s.id = id;
+        s.name = name;
+        s.cmyk = {c, m, y, k};
+        s.rgb = cmyk_to_rgb(s.cmyk);
+        return s;
+    };
     return {
-        {kPaper,        "[Paper]",        {1, 1, 1, 1}},
-        {kBlack,        "[Black]",        {0, 0, 0, 1}},
-        {kRegistration, "[Registration]", {0, 0, 0, 1}},
-        {4, "Blue",    {0, 0, 1, 1}},
-        {5, "Cyan",    {0, 1, 1, 1}},
-        {6, "Green",   {0, 1, 0, 1}},
-        {7, "Magenta", {1, 0, 1, 1}},
-        {8, "Red",     {1, 0, 0, 1}},
-        {9, "Yellow",  {1, 1, 0, 1}},
+        {kPaper,        "[Paper]",        {1, 1, 1, 1}, {0, 0, 0, 0}},
+        {kBlack,        "[Black]",        {0, 0, 0, 1}, {0, 0, 0, 100}},
+        {kRegistration, "[Registration]", {0, 0, 0, 1}, {100, 100, 100, 100}},
+        process(4, "Blue", 100, 100, 0, 0),
+        process(5, "Cyan", 100, 0, 0, 0),
+        process(6, "Green", 100, 0, 100, 0),
+        process(7, "Magenta", 0, 100, 0, 0),
+        process(8, "Red", 0, 100, 100, 0),
+        process(9, "Yellow", 0, 0, 100, 0),
     };
 }
 
@@ -394,8 +427,13 @@ SwatchId PageDoc::add_swatch(const std::string &name, Color rgb) {
     SwatchId id = kRegistration;
     for (const Swatch &s : swatches)
         id = std::max(id, s.id);
-    swatches.push_back({id + 1, name, rgb});
-    return id + 1;
+    Swatch s;
+    s.id = id + 1;
+    s.name = name;
+    s.rgb = rgb;
+    s.cmyk = rgb_to_cmyk(rgb);
+    swatches.push_back(s);
+    return s.id;
 }
 
 /* ---- Lookups ------------------------------------------------------------ */

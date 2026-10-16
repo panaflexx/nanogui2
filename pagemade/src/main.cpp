@@ -70,6 +70,8 @@
 #include "pdf.h"
 #include "pdf_dialog.h"
 #include "spinbox.h"
+#include "swatch_library.h"
+#include "swatch_menu.h"
 
 #define STB_IMAGE_WRITE_IMPLEMENTATION
 #include "../../ext/glfw/deps/stb_image_write.h"
@@ -331,6 +333,7 @@ public:
         register_default_fonts(m_fonts);
         register_system_fonts(m_fonts);
         font_menu_load_or_seed(m_font_menu, font_menu_config_path(), m_fonts.families());
+        swatch_library_load_or_seed(m_swatch_lib, swatch_library_config_path());
         const std::string hyph = std::string(PAGEMADE_DATA_DIR) + "/hyphenation/hyph-en-us";
         if (!m_hyphenator.load(hyph + ".pat.txt", hyph + ".hyp.txt"))
             std::fprintf(stderr, "pagemade: no hyphenation patterns at %s.pat.txt\n", hyph.c_str());
@@ -511,6 +514,7 @@ public:
         });
 
         PageDoc doc = sample_document();
+        seed_swatches(doc);
         build_palette(window, doc);
 
         /* The pages, with the rulers along the top and left (View > Rulers) */
@@ -673,12 +677,19 @@ public:
         return true;
     }
 
+    /* New publications start with the global Colors palette. Ids that
+     * clash and names the document already has are left alone, so every
+     * reference keeps resolving to the same color. */
+    void seed_swatches(PageDoc &doc) { swatch_library_seed(doc, m_swatch_lib); }
+
     void new_document() {
         close_document_then([this] {
             ask_new_document(this, [this](const NewDocument &spec) {
                 m_fonts.clear_document_fonts();
                 m_images.clear();
-                m_view->set_document(new_publication(spec.setup, spec.pages));
+                PageDoc doc = new_publication(spec.setup, spec.pages);
+                seed_swatches(doc);
+                m_view->set_document(std::move(doc));
                 m_doc_path.clear();
                 m_embed_assets = false;
                 after_document_switch();
@@ -784,6 +795,122 @@ public:
                 d->add_item({n, ""}, 0, {}, {}, true);
             d->set_selected_index(0);
         }
+        if (m_colors && !m_colors->popup()->visible())
+            refill_colors();
+    }
+
+    /* The Colors dropdown lists the publication's swatches. Picking one
+     * paints the selection: fill for shapes, ink for text, border for
+     * pictures; with nothing selected it sets the defaults for new
+     * shapes and text. */
+    void refill_colors() {
+        if (!m_colors || !m_view)
+            return;
+        SwatchMenuView view;
+        view.swatches = m_view->document().swatches;
+        view.current = current_paint();
+        refill_swatch_menu(
+            m_colors, view, [this](SwatchId id) { pick_color(id); },
+            [this](SwatchId id) { edit_color(id); }, [this] { add_color(); });
+    }
+
+    /* The paint picking a swatch would change, for the check mark. */
+    SwatchId current_paint() {
+        if (m_view->shapes_selected())
+            return m_view->shape_style().fill.swatch;
+        ComposerView::TypeStyle t;
+        if (m_view->editing() || !m_view->selected_paragraphs().empty()) {
+            if (m_view->type_style(t))
+                return t.swatch;
+        }
+        return kNoPaint;
+    }
+
+    void pick_color(SwatchId id) {
+        if (!m_view || !m_view->document().find_swatch(id))
+            return;
+        /* Text at the caret first; then shapes take fill and pictures a
+         * border (their fill tint is opacity); text frames take ink; with
+         * nothing selected both defaults follow, as PageMaker does. */
+        if (m_view->editing() || (!m_view->shapes_selected() &&
+                                  !m_view->pictures_selected() &&
+                                  !m_view->selected_paragraphs().empty())) {
+            m_view->apply_type([id](CharStyle &cs) { cs.swatch = id; });
+            return;
+        }
+        if (m_view->pictures_selected() && !m_view->shapes_selected()) {
+            m_view->apply_item_style(
+                [](Shape &) {}, [id](PlacedImage &im) { im.stroke.paint.swatch = id; });
+            return;
+        }
+        if (m_view->shapes_selected()) {
+            m_view->apply_shape_style([id](Shape &sh) { sh.fill.swatch = id; });
+            return;
+        }
+        m_view->apply_item_style([id](Shape &sh) { sh.fill.swatch = id; }, nullptr);
+        m_view->apply_type([id](CharStyle &cs) { cs.swatch = id; });
+    }
+
+    void edit_color(SwatchId id) {
+        const Swatch *sw = m_view->document().find_swatch(id);
+        if (!sw)
+            return;
+        /* Close the menu first; the editor is modal. */
+        if (m_colors)
+            m_colors->set_pushed(false);
+        const bool locked = sw->id == kPaper || sw->id == kBlack || sw->id == kRegistration;
+        SwatchEdit initial;
+        initial.name = sw->name;
+        initial.cmyk = sw->cmyk;
+        initial.in_library = swatch_library_find(m_swatch_lib, sw->name) != nullptr;
+        async([this, initial, locked, id] {
+            ask_swatch(
+                this, initial, locked,
+                [this, id](const std::string &name, const Cmyk &cmyk) {
+                    if (m_view->update_doc_swatch(id, name, cmyk_to_rgb(cmyk), cmyk))
+                        after_swatch_change();
+                },
+                locked ? std::function<void()>()
+                       : std::function<void()>([this, id] {
+                             if (m_view->remove_doc_swatch(id))
+                                 after_swatch_change();
+                         }),
+                [this](const std::string &name, const Cmyk &cmyk) {
+                    if (swatch_library_upsert(m_swatch_lib, swatch_library_config_path(),
+                                              m_view->document().swatches, name, cmyk))
+                        refill_colors();
+                });
+        });
+    }
+
+    void add_color() {
+        if (m_colors)
+            m_colors->set_pushed(false);
+        SwatchEdit initial;
+        initial.name = "New color";
+        async([this, initial] {
+            ask_swatch(
+                this, initial, false,
+                [this](const std::string &name, const Cmyk &cmyk) {
+                    m_view->add_doc_swatch(name, cmyk_to_rgb(cmyk), cmyk);
+                    after_swatch_change();
+                },
+                {},
+                [this](const std::string &name, const Cmyk &cmyk) {
+                    swatch_library_upsert(m_swatch_lib, swatch_library_config_path(),
+                                          m_view->document().swatches, name, cmyk);
+                    refill_colors();
+                });
+        });
+    }
+
+    /* A swatch changed: every menu follows the table, then the palette
+     * re-reads the selection. */
+    void after_swatch_change() {
+        m_swatch_ids.clear();   // force rebuild_swatch_menus past its guard
+        rebuild_swatch_menus();
+        refill_colors();
+        sync_palette();
     }
 
     /* ---- Menus (PageMaker: File, Edit, Layout, Element) ------------- */
@@ -1181,6 +1308,15 @@ public:
                 cs.italic = f.italic;
             });
         });
+
+        /* The Colors palette, no label: the button shows the current paint
+         * (chip plus name). Picking a row paints the selection; the pencil
+         * mark edits, "+" adds. */
+        m_colors = new ColorDropdown(type);
+        m_colors->set_min_size(Vector2i(120, 30));
+        m_colors->set_max_size(Vector2i(220, 40));
+        m_colors->set_tooltip("Colors: paint the selection, add and edit swatches");
+        m_colors->set_open_callback([this] { refill_colors(); });
 
         m_leading = type_number("Leading", "pt", 84, 1.f, 0.f, 1300.f);
         m_leading->set_tooltip("Line height. Auto (or 0) is proportional leading.");
@@ -1768,6 +1904,8 @@ public:
         const bool ok = m_view->type_style(t);
         m_font->set_enabled(ok);
         m_face->set_enabled(ok);
+        if (m_colors)
+            m_colors->set_enabled(ok);
         m_size->set_enabled(ok);
         m_leading->set_enabled(ok);
         m_baseline->set_enabled(ok);
@@ -1775,6 +1913,14 @@ public:
             m_specs->set_enabled(ok);
         if (m_type_panel)
             m_type_panel->set_apply_enabled(ok);
+        /* The Colors button follows the current paint without opening. */
+        if (m_colors && (!m_colors->popup() || !m_colors->popup()->visible())) {
+            const SwatchId paint = current_paint();
+            if (const Swatch *sw = m_view->document().find_swatch(paint))
+                m_colors->set_swatch(sw->name, sw->rgb);
+            else
+                m_colors->clear_swatch();
+        }
         if (!ok)
             return;
         m_syncing_type = true;
@@ -2295,6 +2441,8 @@ private:
     Widget          *m_object_box = nullptr, *m_type_box = nullptr;
     bool            m_type_mode = false;
     FontMenuModel   m_font_menu;
+    SwatchLibrary   m_swatch_lib;
+    ColorDropdown   *m_colors = nullptr;
     std::string     m_font_query;
     bool            m_applying_font = false;
     std::vector<FaceDesc> m_styles;

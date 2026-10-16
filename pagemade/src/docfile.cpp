@@ -618,6 +618,7 @@ std::string make_json(const PageDoc &doc, const SaveOptions &opts, const std::ve
         j.key("id").value(sw.id);
         j.key("name").value(sw.name);
         write_color(j, "rgb", sw.rgb);
+        j.key("cmyk").numbers({sw.cmyk.c, sw.cmyk.m, sw.cmyk.y, sw.cmyk.k});
         j.end_object();
     }
     j.end_array();
@@ -1274,6 +1275,12 @@ OpenResult open_document(const std::string &path, const FontLibrary &installed,
             get(at(sw, i), "id", s.id);
             get(at(sw, i), "name", s.name);
             get(at(sw, i), "rgb", s.rgb);
+            /* CMYK is the truth; older files carry rgb only. */
+            float cmyk[4] = {0, 0, 0, 0};
+            if (floats(at(sw, i), "cmyk", cmyk, 4) >= 4)
+                s.cmyk = {cmyk[0], cmyk[1], cmyk[2], cmyk[3]};
+            else
+                s.cmyk = rgb_to_cmyk(s.rgb);
             if (s.id != kNoPaint && !d.find_swatch(s.id))
                 d.swatches.push_back(s);
         }

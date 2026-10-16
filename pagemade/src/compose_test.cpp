@@ -16,6 +16,7 @@
 #include "image_color.h"
 #include "page.h"
 #include "setup_adjust.h"
+#include "swatch_library.h"
 #include "pdf.h"
 #include "docfile.h"
 #include "uri.h"
@@ -37,6 +38,7 @@
 #include <cmath>
 #include <condition_variable>
 #include <mutex>
+#include <set>
 #include <thread>
 #include <cstdint>
 #include <cstdio>
@@ -1610,6 +1612,8 @@ static void check_doc(const PageDoc &a, const PageDoc &b) {
         CHECK(a.swatches[i].id == b.swatches[i].id && a.swatches[i].name == b.swatches[i].name,
               "swatch %zu", i);
         check_color(a.swatches[i].rgb, b.swatches[i].rgb, "swatch");
+        const Cmyk &x = a.swatches[i].cmyk, &y = b.swatches[i].cmyk;
+        CHECK(x.c == y.c && x.m == y.m && x.y == y.y && x.k == y.k, "swatch cmyk %zu", i);
     }
     CHECK(a.char_styles.size() == b.char_styles.size(), "character styles %zu vs %zu",
           a.char_styles.size(), b.char_styles.size());
@@ -3753,6 +3757,122 @@ static void test_font_menu() {
           "config path %s", config.c_str());
 }
 
+static bool near_cmyk(const Cmyk &c, float cyan, float mag, float yel, float blk) {
+    return std::fabs(c.c - cyan) < 0.5f && std::fabs(c.m - mag) < 0.5f &&
+           std::fabs(c.y - yel) < 0.5f && std::fabs(c.k - blk) < 0.5f;
+}
+
+static void test_swatch_library() {
+    /* CMYK is the truth; RGB follows naively. */
+    CHECK(near_color(cmyk_to_rgb({100, 0, 0, 0}), 0, 1, 1, 1), "cyan");
+    CHECK(near_color(cmyk_to_rgb({0, 0, 0, 100}), 0, 0, 0, 1), "black is all key");
+    CHECK(near_color(cmyk_to_rgb({0, 0, 0, 0}), 1, 1, 1, 1), "paper is white");
+    CHECK(near_cmyk(rgb_to_cmyk({1, 0, 0, 1}), 0, 100, 100, 0), "red inverts");
+    CHECK(near_cmyk(rgb_to_cmyk({0, 0, 0, 1}), 0, 0, 0, 100), "black is key only");
+    CHECK(near_color(cmyk_to_rgb(rgb_to_cmyk({0.8f, 0.6f, 0.2f, 1})), 0.8f, 0.6f, 0.2f, 1),
+          "screen colors round-trip (cmyk with key does not: one rgb, many cmyks)");
+    CHECK(cmyk_text({100, 0, 0, 0}) == "C=100 M=0 Y=0 K=0", "the menu tag");
+
+    /* The defaults carry both definitions now. */
+    PageDoc doc;
+    const Swatch *red = nullptr;
+    for (const Swatch &s : doc.swatches)
+        if (s.name == "Red")
+            red = &s;
+    CHECK(red && near_cmyk(red->cmyk, 0, 100, 100, 0), "Red knows its CMYK");
+    const Swatch *reg = doc.find_swatch(kRegistration);
+    CHECK(reg && near_cmyk(reg->cmyk, 100, 100, 100, 100), "registration is all plates");
+    const SwatchId ochre = doc.add_swatch("Ochre", {0.8f, 0.6f, 0.2f, 1});
+    CHECK(near_cmyk(doc.find_swatch(ochre)->cmyk, 0, 25, 75, 20), "added colors derive CMYK");
+
+    /* The file round-trips, seeding, and the editing rules. */
+    const std::string dir = "/tmp/pagemade-swatch-test";
+    nanogui::fs::remove_all(dir);
+    nanogui::fs::create_directories(dir);
+    const std::string path = dir + "/colors.conf";
+    SwatchLibrary fresh;
+    CHECK(!swatch_library_load(fresh, path), "a missing config is not a palette");
+    swatch_library_load_or_seed(fresh, path);
+    CHECK(nanogui::fs::exists(path) && !fresh.custom.empty(), "the first run seeds a starter set");
+    SwatchLibrary seeded;
+    CHECK(swatch_library_load(seeded, path), "the seeded file loads");
+    CHECK(seeded.custom.size() == fresh.custom.size(), "the seed round-trips");
+    CHECK(swatch_library_find(seeded, "Cyan") != nullptr, "Cyan is in the starter set");
+
+    {
+        std::ofstream out(path, std::ios::trunc);
+        out << "# comment\n\n";
+        out << "color \"Deep Teal\" 100 20 40 10\n";
+        out << "color Deep Teal 0 0 0 0\n";
+        out << "color \"Bad\" 100 0\n";
+        out << "color \"Out\" 200 -10 0 0\n";
+        out << "unknown junk\n";
+    }
+    SwatchLibrary round;
+    CHECK(swatch_library_load(round, path), "a hand-written config loads");
+    CHECK(round.custom.size() == 2, "duplicates and short lines drop out (%zu)",
+          round.custom.size());
+    CHECK(round.custom[0].name == "Deep Teal" &&
+              near_cmyk(round.custom[0].cmyk, 100, 20, 40, 10),
+          "quoted names keep spaces");
+    CHECK(near_cmyk(round.custom[1].cmyk, 100, 0, 0, 0), "values clamp to 0..100");
+
+    SwatchId teal = 0;
+    CHECK(swatch_library_add(round, path, doc.swatches, "Teal", {100, 0, 40, 0}, &teal) &&
+              teal > kRegistration,
+          "added colors get fresh ids (%u)", teal);
+    CHECK(!swatch_library_add(round, path, doc.swatches, "Teal", {0, 0, 0, 0}, nullptr),
+          "duplicate names are refused");
+    CHECK(!swatch_library_add(round, path, doc.swatches, "", {0, 0, 0, 0}, nullptr),
+          "empty names are refused");
+    CHECK(swatch_library_set(round, path, teal, "Teal Dark", {100, 0, 40, 20}),
+          "rename and recolor");
+    CHECK(!swatch_library_set(round, path, kBlack, "Black", {0, 0, 0, 100}),
+          "built-ins stay locked");
+    CHECK(!swatch_library_set(round, path, teal, "Deep Teal", {0, 0, 0, 0}),
+          "renames cannot collide");
+    CHECK(swatch_library_remove(round, path, teal), "custom colors delete");
+    CHECK(!swatch_library_remove(round, path, kPaper), "built-ins do not delete");
+    CHECK(!swatch_library_remove(round, path, 999999), "missing ids do nothing");
+    SwatchLibrary reloaded;
+    CHECK(swatch_library_load(reloaded, path) &&
+              swatch_library_find(reloaded, "Teal Dark") == nullptr &&
+              swatch_library_find(reloaded, "Deep Teal") != nullptr,
+          "edits persist");
+    CHECK(swatch_library_upsert(reloaded, path, doc.swatches, "Deep Teal", {50, 50, 50, 50}) &&
+              near_cmyk(swatch_library_find(reloaded, "Deep Teal")->cmyk, 50, 50, 50, 50),
+          "the globe recolors by name");
+    CHECK(swatch_library_upsert(reloaded, path, doc.swatches, "Fresh", {1, 2, 3, 4}) &&
+              swatch_library_find(reloaded, "Fresh") != nullptr,
+          "the globe adds by name");
+
+    /* Seeding never moves a document's own colors. */
+    PageDoc blank;
+    swatch_library_seed(blank, reloaded);
+    const Swatch *accent_red = nullptr;
+    for (const Swatch &s : blank.swatches)
+        if (s.id == 8)
+            accent_red = &s;
+    CHECK(accent_red && accent_red->name == "Red" && near_cmyk(accent_red->cmyk, 0, 100, 100, 0),
+          "id 8 stays Red for the Accent style");
+    std::set<SwatchId> ids;
+    bool unique = true;
+    for (const Swatch &s : blank.swatches)
+        unique &= ids.insert(s.id).second;
+    CHECK(unique, "seeded tables keep unique ids");
+    bool seeded_teal = false;
+    for (const Swatch &s : blank.swatches)
+        seeded_teal |= s.name == "Deep Teal";
+    CHECK(seeded_teal, "library colors join new documents");
+    nanogui::fs::remove_all(dir);
+
+    const std::string config_path = swatch_library_config_path();
+    CHECK(!config_path.empty() &&
+              (config_path.find("pagemade/colors.conf") != std::string::npos ||
+               config_path == "pagemade-colors.conf"),
+          "config path %s", config_path.c_str());
+}
+
 static void test_system_fonts() {
     FontLibrary lib;
     register_default_fonts(lib);
@@ -3834,6 +3954,7 @@ int main(int argc, char **argv) {
     test_caps(fonts);
     test_type_file(fonts);
     test_font_menu();
+    test_swatch_library();
     test_system_fonts();
     if (verbose)
         dump_sample(fonts);

@@ -318,6 +318,16 @@ public:
      * for both). With neither selected, `shape` sets the shape defaults. */
     void apply_item_style(const std::function<void(pagemade::Shape &)> &shape,
                           const std::function<void(pagemade::PlacedImage &)> &image);
+    /* The Colors palette (PageDoc::swatches), each one undo step.
+     * add_doc_swatch appends a swatch and returns its id. update_doc_swatch
+     * renames and recolors one in place: everything painted with it follows.
+     * remove_doc_swatch drops a custom swatch and repaints its users black;
+     * built-ins are refused. */
+    pagemade::SwatchId add_doc_swatch(const std::string &name, pagemade::Color rgb,
+                                      pagemade::Cmyk cmyk);
+    bool update_doc_swatch(pagemade::SwatchId id, const std::string &name,
+                           pagemade::Color rgb, pagemade::Cmyk cmyk);
+    bool remove_doc_swatch(pagemade::SwatchId id);
 
     /* Character attributes for the control palette's type view. With a text
      * selection, the selection; at a caret, the style about to be typed;

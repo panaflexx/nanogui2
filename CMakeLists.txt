@@ -1010,6 +1010,8 @@ if (NANOGUI_BUILD_EXAMPLES)
         pagemade/src/pdf_dialog.cpp
         pagemade/src/ruler.cpp
         pagemade/src/paragraph_panel.cpp
+        pagemade/src/swatch_library.cpp
+        pagemade/src/swatch_menu.cpp
         pagemade/src/sample.cpp)
     add_executable(pagemade_compose_test
         pagemade/src/compose_test.cpp
@@ -1026,6 +1028,7 @@ if (NANOGUI_BUILD_EXAMPLES)
         pagemade/src/image_color.cpp
         pagemade/src/setup_adjust.cpp
         pagemade/src/image_stb.cpp
+        pagemade/src/swatch_library.cpp
         pagemade/src/sample.cpp)
     foreach(_t pagemade_app pagemade_compose_test)
       # dict.h (the JSON reader) lives at the repository root.
