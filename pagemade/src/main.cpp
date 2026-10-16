@@ -875,10 +875,9 @@ public:
                              if (m_view->remove_doc_swatch(id))
                                  after_swatch_change();
                          }),
-                [this](const std::string &name, const Cmyk &cmyk) {
-                    if (swatch_library_upsert(m_swatch_lib, swatch_library_config_path(),
-                                              m_view->document().swatches, name, cmyk))
-                        refill_colors();
+                [this, old_name = initial.name](const std::string &name, const Cmyk &cmyk,
+                                                bool global) {
+                    set_library_swatch(old_name, name, cmyk, global);
                 });
         });
     }
@@ -896,12 +895,27 @@ public:
                     after_swatch_change();
                 },
                 {},
-                [this](const std::string &name, const Cmyk &cmyk) {
-                    swatch_library_upsert(m_swatch_lib, swatch_library_config_path(),
-                                          m_view->document().swatches, name, cmyk);
-                    refill_colors();
+                [this](const std::string &name, const Cmyk &cmyk, bool global) {
+                    set_library_swatch(name, name, cmyk, global);
                 });
         });
+    }
+
+    /* The swatch editor's globe on Save: on adds or recolors `name` in
+     * colors.conf; off removes the entry the dialog opened with. */
+    void set_library_swatch(const std::string &old_name, const std::string &name,
+                            const Cmyk &cmyk, bool global) {
+        const std::string path = swatch_library_config_path();
+        bool changed;
+        if (global) {
+            changed = swatch_library_upsert(m_swatch_lib, path, m_view->document().swatches,
+                                            name, cmyk);
+        } else {
+            const Swatch *sw = swatch_library_find(m_swatch_lib, old_name);
+            changed = sw && swatch_library_remove(m_swatch_lib, path, sw->id);
+        }
+        if (changed)
+            refill_colors();
     }
 
     /* A swatch changed: every menu follows the table, then the palette

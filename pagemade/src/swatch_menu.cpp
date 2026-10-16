@@ -322,6 +322,40 @@ void refill_swatch_menu(Dropdown *menu, const SwatchMenuView &view,
 
 namespace {
 
+/* Deep red for an engaged lock or globe; black when off. */
+const nanogui::Color kToggleOn(150, 20, 20, 255);
+const nanogui::Color kToggleOff(0, 0, 0, 255);
+
+/* Mark a subtree's retained draw lists stale. Quiet setters (set_value,
+ * set_caption, set_color) do not, so a cached parent keeps the old bake. */
+void dirty_tree(Widget *w) {
+    w->propagate_cache_dirty();
+    for (Widget *child : w->children())
+        dirty_tree(child);
+}
+
+/* A slider that also steps one unit per wheel notch. */
+class WheelSlider : public Slider {
+public:
+    using Slider::Slider;
+    bool scroll_event(const Vector2i &, const Vector2f &rel) override {
+        if (!m_enabled)
+            return false;
+        const float step = rel.y() != 0.f ? rel.y() : rel.x();
+        if (step == 0.f)
+            return false;
+        const float old_value = m_value;
+        m_value = std::clamp(m_value + (step > 0.f ? 1.f : -1.f), m_range.first, m_range.second);
+        if (m_value != old_value) {
+            if (m_callback)
+                m_callback(m_value);
+            if (m_final_callback)
+                m_final_callback(m_value);
+        }
+        return true;
+    }
+};
+
 /* Three or four labeled sliders with numeric boxes, kept in lockstep with
  * the wheel through set_all(). CMYK is the truth; RGB converts both ways. */
 class ColorSliders : public Widget {
@@ -332,7 +366,7 @@ public:
         const int n = cmyk ? 4 : 3;
         for (int i = 0; i < n; ++i) {
             new Label(this, names[i], "sans-bold");
-            auto *slider = new Slider(this);
+            auto *slider = new WheelSlider(this);
             slider->set_range({0.f, cmyk ? 100.f : 255.f});
             slider->set_fixed_size(Vector2i(150, 20));
             auto *box = new IntBox<int>(this, 0);
@@ -418,8 +452,7 @@ public:
     explicit Preview(Widget *parent) : Widget(parent) { set_fixed_size(Vector2i(64, 28)); }
     void set_color(const pagemade::Color &color) {
         m_color = color;
-        if (screen())
-            screen()->redraw();
+        propagate_cache_dirty();
     }
     void draw(NVGcontext *ctx) override {
         nvgBeginPath(ctx);
@@ -448,7 +481,7 @@ std::string hex_text(const pagemade::Color &rgb) {
 void ask_swatch(Screen *screen, const SwatchEdit &initial, bool locked,
                 std::function<void(const std::string &, const Cmyk &)> save,
                 std::function<void()> remove,
-                std::function<void(const std::string &, const Cmyk &)> to_library) {
+                std::function<void(const std::string &, const Cmyk &, bool)> to_library) {
     auto *d = new ModalDialog(screen, initial.name.empty() ? "New Color" : "Edit Color");
     struct State {
         std::string name;
@@ -456,13 +489,15 @@ void ask_swatch(Screen *screen, const SwatchEdit &initial, bool locked,
         bool cmyk_mode = true;
         bool syncing = false;
         bool dialog_locked = false;
+        bool global = false;
     };
     auto st = std::make_shared<State>();
     st->name = initial.name;
     st->cmyk = initial.cmyk;
     st->dialog_locked = locked;
+    st->global = initial.in_library;
 
-    /* Name row with the lock top-right. */
+    /* Name row with the lock and globe top-right. */
     Widget *top = new Widget(d->body());
     top->set_layout(new BoxLayout(Orientation::Horizontal, Alignment::Middle, 0, 10));
     new Label(top, "Name:", "sans-bold");
@@ -474,11 +509,23 @@ void ask_swatch(Screen *screen, const SwatchEdit &initial, bool locked,
         st->name = v;
         return true;
     });
+    /* Both stay enabled so the icon keeps its color (a disabled button
+     * draws gray); built-ins just ignore the clicks. */
     Button *lock = new Button(top, "", locked ? FA_LOCK : FA_UNLOCK);
     lock->set_fixed_size(Vector2i(28, 28));
+    lock->set_text_color(locked ? kToggleOn : kToggleOff);
     lock->set_tooltip(locked ? "Locked: built-in colors cannot change"
                              : "Lock against editing");
-    lock->set_enabled(!locked);
+    Button *globe = new Button(top, "", FA_GLOBE);
+    globe->set_fixed_size(Vector2i(28, 28));
+    auto show_globe = [globe, st, locked] {
+        globe->set_text_color(st->global ? kToggleOn : kToggleOff);
+        globe->set_tooltip(locked      ? "Built-in colors are always available"
+                           : st->global ? "In the global colors (click to remove on Save)"
+                                        : "Add to the global colors on Save");
+        globe->propagate_cache_dirty();
+    };
+    show_globe();
 
     /* Wheel beside the sliders. */
     Widget *mid = new Widget(d->body());
@@ -500,16 +547,11 @@ void ask_swatch(Screen *screen, const SwatchEdit &initial, bool locked,
         rgb_sliders->set_sliders_enabled(false);
     }
 
-    /* Hex readout, preview, and the globe. */
+    /* Hex readout and preview. */
     Widget *foot = new Widget(right);
     foot->set_layout(new BoxLayout(Orientation::Horizontal, Alignment::Middle, 0, 10));
     Label *hex = new Label(foot, "", "sans", 15);
     Preview *preview = new Preview(foot);
-    Button *globe = new Button(foot, "", FA_GLOBE);
-    globe->set_fixed_size(Vector2i(28, 28));
-    globe->set_tooltip(initial.in_library ? "Already in the global colors"
-                                          : "Save to the global colors");
-    globe->set_enabled(!initial.in_library && !locked);
 
     /* Push the truth into every control. set_all and set_color are quiet;
      * only user drags call back. */
@@ -521,6 +563,7 @@ void ask_swatch(Screen *screen, const SwatchEdit &initial, bool locked,
         wheel->set_color(to_nvg(rgb));
         hex->set_caption(hex_text(rgb));
         preview->set_color(rgb);
+        dirty_tree(mid);
         st->syncing = false;
     };
     cmyk_sliders->set_on_change([=] {
@@ -549,39 +592,42 @@ void ask_swatch(Screen *screen, const SwatchEdit &initial, bool locked,
         if (Screen *s = screen)
             s->perform_layout();
     });
-    if (to_library)
-        globe->set_callback([st, to_library, globe, name_box] {
-            /* The Save button commits text boxes; the globe is not one, so
-             * commit a focused name box before reading it. */
-            if (name_box->focused())
-                name_box->focus_event(false);
-            const std::string name = trim_name(st->name);
-            if (name.empty())
-                return;
-            to_library(name, st->cmyk);
-            globe->set_tooltip("Already in the global colors");
-            globe->set_enabled(false);
-        });
+    /* A plain on/off: the library follows it when the dialog saves. */
+    globe->set_callback([st, locked, show_globe] {
+        if (locked)
+            return;
+        st->global = !st->global;
+        show_globe();
+    });
     lock->set_callback([=]() mutable {
+        if (locked)
+            return;
         st->dialog_locked = !st->dialog_locked;
         const bool off = st->dialog_locked;
         lock->set_icon(off ? FA_LOCK : FA_UNLOCK);
+        lock->set_text_color(off ? kToggleOn : kToggleOff);
+        lock->propagate_cache_dirty();
         name_box->set_editable(!off);
         wheel->set_enabled(!off);
         mode->set_enabled(!off);
         cmyk_sliders->set_sliders_enabled(!off);
         rgb_sliders->set_sliders_enabled(!off);
-        globe->set_enabled(!off);
+        dirty_tree(d);
     });
     refresh();
 
     d->add_button("Cancel", {}, ModalDialog::Role::Cancel);
     if (remove)
         d->add_button("Delete", [remove] { remove(); });
-    d->add_button("Save", [st, save] {
+    d->add_button("Save", [st, save, to_library, locked, in_library = initial.in_library] {
         const std::string name = trim_name(st->name);
-        if (!name.empty() && save)
+        if (name.empty())
+            return;
+        if (save)
             save(name, st->cmyk);
+        /* On: add or recolor in the library. Turned off: drop it. */
+        if (to_library && !locked && (st->global || in_library))
+            to_library(name, st->cmyk, st->global);
     }, ModalDialog::Role::Default);
     d->open();
 }

@@ -10,7 +10,8 @@
  * The editor is a ModalDialog: name, a lock toggle top-right, a color
  * wheel, RGB or CMYK sliders (a mode menu switches), a hex readout and a
  * preview chip. CMYK is the truth; the sliders convert both ways. The
- * globe button copies the swatch into the global colors.conf library.
+ * globe beside the lock is an on/off for membership in the global
+ * colors.conf library, applied when the dialog saves.
  * Custom swatches also offer Delete.
  */
 #pragma once
@@ -71,11 +72,13 @@ struct SwatchEdit {
 /* The swatch editor dialog. `initial` is the swatch as it stands; `save`
  * gets the edited name and CMYK (Rename/recolor in one undo step at the
  * call site). `remove` deletes a custom swatch (null for built-ins, which
- * stay locked). `to_library` copies it into colors.conf. `locked` opens
+ * stay locked). `to_library` runs on Save with the globe state: true adds
+ * or recolors the swatch in colors.conf, false removes it (only called
+ * when the state is on or the swatch was already there). `locked` opens
  * read-only: built-ins are always locked. */
 void ask_swatch(nanogui::Screen *screen, const SwatchEdit &initial, bool locked,
                 std::function<void(const std::string &, const Cmyk &)> save,
                 std::function<void()> remove,
-                std::function<void(const std::string &, const Cmyk &)> to_library);
+                std::function<void(const std::string &, const Cmyk &, bool)> to_library);
 
 } // namespace pagemade
