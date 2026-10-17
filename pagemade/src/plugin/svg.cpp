@@ -1,10 +1,13 @@
 /*
  * pagemade/plugin/svg.cpp — the SVG decoder.
  *
- * Linked into pagemade, not loaded from disk. The first slice draws solid
- * fills and strokes: a gradient is painted as its middle stop, a clip is
- * omitted and the shape is drawn whole, and text is skipped. Each of those
- * is named once on the scene so Place can say what it left out. Path arcs
+ * Linked into pagemade, not loaded from disk. It draws solid and gradient
+ * fills and strokes; text is skipped. A gradient keeps its stops and its
+ * geometry in the graphic's box, and an href lends it the stops and
+ * attributes it leaves out. clip-path naming a <clipPath> becomes a clip on the shapes it
+ * covers; a clip this slice cannot read (a basic shape, <use> or text in
+ * the clip) is left out and the shapes are drawn whole. Each of those is
+ * named once on the scene so Place can say what it left out. Path arcs
  * become cubics. Coordinates are baked into the graphic's point box
  * (96 CSS px = 72 pt), y down.
  */
@@ -28,7 +31,16 @@ constexpr float kPxToPt = 72.f / 96.f;
 struct Grad {
     bool radial = false;
     std::vector<GradientStop> stops;
+    std::string href;                    // lends stops and attributes this one leaves out
+    /* x1 ... fy, gradientUnits, gradientTransform, spreadMethod, as written. */
+    std::map<std::string, std::string> attrs;
 };
+
+const char *kGradAttrs[] = {"x1", "y1", "x2", "y2", "cx", "cy", "r", "fx", "fy",
+                            "gradientUnits", "gradientTransform", "spreadMethod"};
+
+/* <clipPath> elements by id. They point into the parsed tree. */
+using ClipDefs = std::map<std::string, const XmlNode *>;
 
 struct Decl {
     std::string prop, value;
@@ -68,6 +80,9 @@ struct Style {
     float font_px = 16.f;
     std::string transform;
     std::string clip;
+    FillRule clip_rule = FillRule::NonZero;
+    /* The gradients fill and stroke name, when they name one. */
+    const Grad *fill_grad = nullptr, *stroke_grad = nullptr;
     Style() {
         fill.kind = PaintKind::Solid;
         fill.color = {0, 0, 0, 1};
@@ -910,7 +925,7 @@ const char *kPaintProps[] = {"fill",        "fill-opacity",      "fill-rule",   
                              "stroke-width", "stroke-opacity",    "stroke-linecap",    "stroke-linejoin",
                              "stroke-miterlimit", "stroke-dasharray", "stroke-dashoffset", "opacity",
                              "display",      "visibility",        "color",             "font-size",
-                             "clip-path",    "transform"};
+                             "clip-path",    "clip-rule",         "transform"};
 
 void consider(std::map<std::string, Decl> &best, const std::string &prop, const std::string &value,
               int spec, int order) {
@@ -934,10 +949,11 @@ void apply_prop(Style &st, const std::string &prop, const std::string &value, co
     if (prop == "fill" || prop == "stroke" || prop == "color") {
         std::string id;
         if (parse_url_id(value, id)) {
-            note_skip(scene, "gradients");
             auto it = grads.find(id);
             VectorPaint paint;
+            const Grad *grad = nullptr;
             if (it != grads.end() && !it->second.stops.empty()) {
+                grad = &it->second;
                 paint.kind = it->second.radial ? PaintKind::Radial : PaintKind::Linear;
                 paint.stops = it->second.stops;
                 float best = 1e9f;
@@ -952,15 +968,20 @@ void apply_prop(Style &st, const std::string &prop, const std::string &value, co
                     }
                 }
                 paint.color = paint.stops[idx].color;
+            } else if (it != grads.end()) {
+                /* No stops: the paint is none. */
             } else {
+                note_skip(scene, "gradients");
                 paint.kind = PaintKind::Solid;
                 paint.color = {0, 0, 0, 1};
             }
-            if (prop == "fill")
+            if (prop == "fill") {
                 st.fill = paint;
-            else if (prop == "stroke")
+                st.fill_grad = grad;
+            } else if (prop == "stroke") {
                 st.stroke = paint;
-            else
+                st.stroke_grad = grad;
+            } else
                 st.current = paint.color;
             return;
         }
@@ -978,10 +999,13 @@ void apply_prop(Style &st, const std::string &prop, const std::string &value, co
             paint.kind = PaintKind::Solid;
             paint.color = c;
         }
-        if (prop == "fill")
+        if (prop == "fill") {
             st.fill = paint;
-        else
+            st.fill_grad = nullptr;
+        } else {
             st.stroke = paint;
+            st.stroke_grad = nullptr;
+        }
         return;
     }
     if (prop == "fill-opacity")
@@ -992,6 +1016,8 @@ void apply_prop(Style &st, const std::string &prop, const std::string &value, co
         st.opacity = parse_opacity(value, st.opacity);
     else if (prop == "fill-rule")
         st.rule = lower(trim(value)) == "evenodd" ? FillRule::EvenOdd : FillRule::NonZero;
+    else if (prop == "clip-rule")
+        st.clip_rule = lower(trim(value)) == "evenodd" ? FillRule::EvenOdd : FillRule::NonZero;
     else if (prop == "stroke-width")
         st.stroke_width = length_user(value, st.stroke_width, true, vp, st.font_px);
     else if (prop == "stroke-linecap") {
@@ -1080,12 +1106,90 @@ PathCmd bake(const Transform &t, PathCmd c) {
     return c;
 }
 
+/* A gradient's geometry for one shape. `user` is the shape in its user
+ * space and `world` maps that to the box. A gradient with one stop, or with
+ * no length or radius, paints solid; one on a shape whose bounding box has
+ * no area paints nothing (SVG). */
+void gradient_paint(VectorPaint &p, const Grad &g, const Path &user, const Transform &world,
+                    const Viewport &vp, float font_px) {
+    auto solid = [&](const Color &c) {
+        p.kind = PaintKind::Solid;
+        p.color = c;
+        p.stops.clear();
+    };
+    if (g.stops.size() < 2) {
+        if (g.stops.empty())
+            p = VectorPaint();
+        else
+            solid(g.stops[0].color);
+        return;
+    }
+    auto attr = [&](const char *k, const char *def) {
+        auto it = g.attrs.find(k);
+        return it == g.attrs.end() ? std::string(def) : it->second;
+    };
+    const bool bbox_units = lower(trim(attr("gradientUnits", ""))) != "userspaceonuse";
+    Transform units;
+    if (bbox_units) {
+        /* The fill's own extent, not its control points. */
+        const Bounds cb = path_bounds(user);
+        const float size = cb.empty() ? 0.f : std::max(cb.x1 - cb.x0, cb.y1 - cb.y0);
+        Bounds b;
+        for (const Polyline &pl : flatten(user, std::max(size * 1e-3f, 1e-4f)))
+            for (const Point &pt : pl.pts)
+                b.add(pt);
+        if (b.empty() || !(b.x1 - b.x0 > 0.f) || !(b.y1 - b.y0 > 0.f)) {
+            p = VectorPaint();
+            return;
+        }
+        units = Transform{b.x1 - b.x0, 0, 0, b.y1 - b.y0, b.x0, b.y0};
+    }
+    /* axis: 0 x, 1 y, 2 a radius (a percentage of the view's diagonal). */
+    auto len = [&](const std::string &v, int axis) {
+        const Len L = parse_len(v);
+        if (!L.ok)
+            return 0.f;
+        if (bbox_units)
+            return L.unit == Unit::Percent ? L.n / 100.f : L.n;
+        if (L.unit == Unit::Percent && axis == 2)
+            return L.n / 100.f * std::sqrt((vp.vb_w * vp.vb_w + vp.vb_h * vp.vb_h) / 2.f);
+        return length_user(v, 0.f, axis != 1, vp, font_px);
+    };
+    const std::string spread = lower(trim(attr("spreadMethod", "pad")));
+    p.spread = spread == "reflect" ? Spread::Reflect : spread == "repeat" ? Spread::Repeat : Spread::Pad;
+    p.stops = g.stops;
+    p.focal = {0, 0};
+    Transform m;
+    if (!g.radial) {
+        const float x1 = len(attr("x1", "0%"), 0), y1 = len(attr("y1", "0%"), 1);
+        const float x2 = len(attr("x2", "100%"), 0), y2 = len(attr("y2", "0%"), 1);
+        const float dx = x2 - x1, dy = y2 - y1;
+        if (dx == 0.f && dy == 0.f) {
+            solid(g.stops.back().color);
+            return;
+        }
+        p.kind = PaintKind::Linear;
+        m = Transform{dx, dy, -dy, dx, x1, y1};
+    } else {
+        const float cx = len(attr("cx", "50%"), 0), cy = len(attr("cy", "50%"), 1);
+        const float r = len(attr("r", "50%"), 2);
+        if (!(r > 0.f)) {
+            solid(g.stops.back().color);
+            return;
+        }
+        const float fx = g.attrs.count("fx") ? len(attr("fx", ""), 0) : cx;
+        const float fy = g.attrs.count("fy") ? len(attr("fy", ""), 1) : cy;
+        p.kind = PaintKind::Radial;
+        p.focal = {(fx - cx) / r, (fy - cy) / r};
+        m = Transform{r, 0, 0, r, cx, cy};
+    }
+    p.xf = world * units * parse_transform(attr("gradientTransform", "")) * m;
+}
+
 void emit_shape(VectorScene &scene, const Path &user, const Transform &xf, const Style &st, float alpha,
-                bool fill_it) {
+                bool fill_it, const Viewport &vp) {
     if (user.empty() || !st.visible)
         return;
-    if (!trim(st.clip).empty() && lower(trim(st.clip)) != "none")
-        note_skip(scene, "clips");
     const float det = xf.a * xf.d - xf.b * xf.c;
     const float scale = std::sqrt(std::fabs(det));
     const float s = scale > 1e-8f ? scale : 1.f;
@@ -1102,13 +1206,18 @@ void emit_shape(VectorScene &scene, const Path &user, const Transform &xf, const
             c.a = 1.f;
         return c;
     };
-    if (fill_it && !st.fill.none()) {
-        shape.fill = st.fill;
-        shape.fill.color = tint(st.fill.color, st.fill_opacity);
-    }
+    auto paint = [&](VectorPaint p, const Grad *g, float extra) {
+        if (g)
+            gradient_paint(p, *g, user, xf, vp, st.font_px);
+        p.color = tint(p.color, extra);
+        for (GradientStop &stop : p.stops)
+            stop.color = tint(stop.color, extra);
+        return p;
+    };
+    if (fill_it && !st.fill.none())
+        shape.fill = paint(st.fill, st.fill_grad, st.fill_opacity);
     if (!st.stroke.none() && st.stroke_width > 0.f) {
-        shape.stroke.paint = st.stroke;
-        shape.stroke.paint.color = tint(st.stroke.color, st.stroke_opacity);
+        shape.stroke.paint = paint(st.stroke, st.stroke_grad, st.stroke_opacity);
         shape.stroke.width = st.stroke_width * s;
         shape.stroke.cap = st.cap;
         shape.stroke.join = st.join;
@@ -1128,16 +1237,28 @@ float attr_user(const XmlNode &el, const char *name, float fallback, bool horiz,
     return length_user(xml_attr_value(el, name), fallback, horiz, vp, font_px);
 }
 
-void collect(const XmlNode &el, std::vector<Rule> &rules, std::map<std::string, Grad> &grads) {
+void collect(const XmlNode &el, std::vector<Rule> &rules, std::map<std::string, Grad> &grads,
+             ClipDefs &clips) {
     if (el.text)
         return;
     if (el.local == "style")
         parse_stylesheet(xml_text(el), rules);
+    if (el.local == "clipPath") {
+        const std::string id = xml_attr_value(el, "id");
+        if (!id.empty())
+            clips[id] = &el;
+    }
     if (el.local == "linearGradient" || el.local == "radialGradient") {
         const std::string id = xml_attr_value(el, "id");
         if (!id.empty()) {
             Grad g;
             g.radial = el.local == "radialGradient";
+            parse_url_id("url(" + trim(xml_attr_value(el, "href")) + ")", g.href);
+            for (const char *a : kGradAttrs) {
+                const XmlNode::Attr *at = xml_attr(el, a);
+                if (at)
+                    g.attrs[a] = at->value;
+            }
             for (const XmlNode &c : el.children) {
                 if (c.local != "stop")
                     continue;
@@ -1168,7 +1289,32 @@ void collect(const XmlNode &el, std::vector<Rule> &rules, std::map<std::string, 
         }
     }
     for (const XmlNode &c : el.children)
-        collect(c, rules, grads);
+        collect(c, rules, grads, clips);
+}
+
+/* A gradient with no stops of its own uses those of the gradient its href
+ * names, following a chain of them. */
+void resolve_gradient_hrefs(std::map<std::string, Grad> &grads) {
+    for (auto &kv : grads) {
+        Grad &g = kv.second;
+        const Grad *from = &g;
+        for (int depth = 0; !from->href.empty() && depth < 16; ++depth) {
+            auto it = grads.find(from->href);
+            if (it == grads.end() || &it->second == &g)
+                break;
+            from = &it->second;
+            if (g.stops.empty())
+                g.stops = from->stops;
+            for (const auto &a : from->attrs)
+                g.attrs.insert(a);           // keeps the ones g already has
+        }
+        /* Offsets are clamped to 0..1 and never go back. */
+        float last = 0.f;
+        for (GradientStop &st : g.stops) {
+            st.offset = std::max(last, std::clamp(st.offset, 0.f, 1.f));
+            last = st.offset;
+        }
+    }
 }
 
 bool is_skippable(const std::string &local) {
@@ -1178,44 +1324,10 @@ bool is_skippable(const std::string &local) {
            local == "script" || local == "filter";
 }
 
-void walk(const XmlNode &el, const Transform &parent, float parent_a, const Style &inherited,
-          const Viewport &vp, const std::vector<Rule> &rules, const std::map<std::string, Grad> &grads,
-          VectorScene &scene) {
-    if (el.text || is_skippable(el.local))
-        return;
-    if (el.local == "text" || el.local == "tspan" || el.local == "textPath") {
-        note_skip(scene, "text");
-        return;
-    }
-    const Style st = compute_style(el, inherited, rules, vp, grads, scene);
-    if (!st.display)
-        return;
-    const Transform local = parse_transform(st.transform.empty() ? xml_attr_value(el, "transform") : st.transform);
-    Transform world = parent * local;
-    const float alpha = parent_a * st.opacity;
-    if (el.local == "g" || el.local == "a" || el.local == "switch") {
-        for (const XmlNode &c : el.children)
-            walk(c, world, alpha, st, vp, rules, grads, scene);
-        return;
-    }
-    if (el.local == "svg") {
-        const Viewport nested = make_viewport(el, &vp);
-        const float x = attr_user(el, "x", 0, true, vp, st.font_px);
-        const float y = attr_user(el, "y", 0, false, vp, st.font_px);
-        /* Nested view box, then the parent's map. x,y are in the parent. */
-        const Transform into = Transform::translate(x, y) *
-                               viewbox_map(nested.vb_x, nested.vb_y, nested.vb_w, nested.vb_h,
-                                           attr_user(el, "width", nested.vb_w, true, vp, st.font_px),
-                                           attr_user(el, "height", nested.vb_h, false, vp, st.font_px),
-                                           xml_attr_value(el, "preserveAspectRatio"));
-        for (const XmlNode &c : el.children)
-            walk(c, world * into, alpha, st, nested, rules, grads, scene);
-        return;
-    }
-    if (el.local == "use" || el.local == "image" || el.local == "foreignObject")
-        return;
-    Path user;
-    bool fill_it = true;
+/* The outline of a basic shape element in its user space. False when `el`
+ * is not one. A line is not filled. */
+bool shape_geometry(const XmlNode &el, const Style &st, const Viewport &vp, Path &user, bool &fill_it) {
+    fill_it = true;
     if (el.local == "path")
         user = parse_path_d(xml_attr_value(el, "d"));
     else if (el.local == "rect") {
@@ -1253,8 +1365,216 @@ void walk(const XmlNode &el, const Transform &parent, float parent_a, const Styl
     } else if (el.local == "polyline" || el.local == "polygon")
         user = parse_points(xml_attr_value(el, "points"), el.local == "polygon");
     else
+        return false;
+    return true;
+}
+
+struct Decode {
+    const Viewport *vp = nullptr;
+    const std::vector<Rule> *rules = nullptr;
+    const std::map<std::string, Grad> *grads = nullptr;
+    const ClipDefs *clips = nullptr;
+};
+
+/* The layers the <clipPath> `cp` adds, in the user space `user` (the
+ * clipped element's, after its own transform). `bbox` maps the unit square
+ * to the element's bounding box, for clipPathUnits="objectBoundingBox".
+ * A clip-path on `cp` itself adds its own layers. False when the clip
+ * cannot be read; the caller then leaves the shapes unclipped. */
+bool clip_layers(const XmlNode &cp, const Transform &user, const Transform &bbox, const Decode &dc,
+                 VectorScene &scene, ClipLayers &out, int depth) {
+    if (depth > 8)
+        return false;
+    const Viewport &vp = *dc.vp;
+    const Style cs = compute_style(cp, Style(), *dc.rules, vp, *dc.grads, scene);
+    Transform space = user;
+    if (lower(trim(xml_attr_value(cp, "clipPathUnits"))) == "objectboundingbox")
+        space = space * bbox;
+    space = space * parse_transform(cs.transform.empty() ? xml_attr_value(cp, "transform") : cs.transform);
+    std::vector<ClipPath> layer;
+    for (const XmlNode &c : cp.children) {
+        if (c.text)
+            continue;
+        const Style st = compute_style(c, cs, *dc.rules, vp, *dc.grads, scene);
+        if (!st.display || !st.visible)
+            continue;
+        Path path;
+        bool fill_it = true;
+        if (!shape_geometry(c, st, vp, path, fill_it)) {
+            if (c.local == "use" || c.local == "text")
+                return false;
+            continue;
+        }
+        if (!fill_it || path.empty())
+            continue;
+        const Transform xf =
+            space * parse_transform(st.transform.empty() ? xml_attr_value(c, "transform") : st.transform);
+        ClipPath clip;
+        clip.rule = st.clip_rule;
+        clip.path.reserve(path.size());
+        for (const PathCmd &cmd : path)
+            clip.path.push_back(bake(xf, cmd));
+        layer.push_back(std::move(clip));
+    }
+    /* An empty layer is kept: it clips everything away. */
+    out.push_back(std::move(layer));
+    std::string id;
+    if (parse_url_id(cs.clip, id)) {
+        auto it = dc.clips->find(id);
+        if (it != dc.clips->end() && !clip_layers(*it->second, user, bbox, dc, scene, out, depth + 1))
+            return false;
+    }
+    return true;
+}
+
+bool same_path(const Path &a, const Path &b) {
+    if (a.size() != b.size())
+        return false;
+    for (size_t i = 0; i < a.size(); ++i) {
+        const PathCmd &p = a[i], &q = b[i];
+        if (p.kind != q.kind || p.x != q.x || p.y != q.y || p.cx1 != q.cx1 || p.cy1 != q.cy1 ||
+            p.cx2 != q.cx2 || p.cy2 != q.cy2)
+            return false;
+    }
+    return true;
+}
+
+bool same_clip(const ClipLayers &a, const ClipLayers &b) {
+    if (a.size() != b.size())
+        return false;
+    for (size_t i = 0; i < a.size(); ++i) {
+        if (a[i].size() != b[i].size())
+            return false;
+        for (size_t j = 0; j < a[i].size(); ++j)
+            if (a[i][j].rule != b[i][j].rule || !same_path(a[i][j].path, b[i][j].path))
+                return false;
+    }
+    return true;
+}
+
+/* The shapes drawn for one element, [first, end), get the clip `value`
+ * names, in the element's user space `user`. A layer with no paths
+ * removes them. */
+void apply_clip(VectorScene &scene, size_t first, const std::string &value, const Transform &user,
+                const Decode &dc) {
+    const std::string v = lower(trim(value));
+    if (v.empty() || v == "none" || first >= scene.shapes.size())
         return;
-    emit_shape(scene, user, world, st, alpha, fill_it);
+    std::string id;
+    if (!parse_url_id(value, id)) {
+        note_skip(scene, "clips");        // a basic shape, inset() and the like
+        return;
+    }
+    auto it = dc.clips->find(id);
+    if (it == dc.clips->end())
+        return;                           // a reference to nothing does not clip
+    /* objectBoundingBox: the shapes' control-point box, back in user space. */
+    const Transform inv = user.inverse();
+    float x0 = 1e30f, y0 = 1e30f, x1 = -1e30f, y1 = -1e30f;
+    auto grow = [&](float x, float y) {
+        const Point p = inv.apply({x, y});
+        x0 = std::min(x0, p.x);
+        y0 = std::min(y0, p.y);
+        x1 = std::max(x1, p.x);
+        y1 = std::max(y1, p.y);
+    };
+    for (size_t i = first; i < scene.shapes.size(); ++i)
+        for (const PathCmd &c : scene.shapes[i].path) {
+            if (c.kind == PathCmd::Quad || c.kind == PathCmd::Cubic)
+                grow(c.cx1, c.cy1);
+            if (c.kind == PathCmd::Cubic)
+                grow(c.cx2, c.cy2);
+            if (c.kind != PathCmd::Close)
+                grow(c.x, c.y);
+        }
+    const Transform bbox = x1 >= x0 ? Transform{x1 - x0, 0, 0, y1 - y0, x0, y0} : Transform::scale(0, 0);
+    ClipLayers add;
+    if (!clip_layers(*it->second, user, bbox, dc, scene, add, 0)) {
+        note_skip(scene, "clips");
+        return;
+    }
+    for (const auto &layer : add)
+        if (layer.empty()) {
+            scene.shapes.erase(scene.shapes.begin() + (std::ptrdiff_t) first, scene.shapes.end());
+            return;
+        }
+    /* Shapes that shared a clip share the new one, and so do siblings
+     * that name the same <clipPath> in the same space: a renderer sets a
+     * clip up once for a run of shapes that share it. */
+    std::map<int, int> made;
+    for (size_t i = first; i < scene.shapes.size(); ++i) {
+        const int old = scene.shapes[i].clip;
+        auto m = made.find(old);
+        if (m == made.end()) {
+            ClipLayers layers = old >= 0 ? scene.clips[(size_t) old] : ClipLayers();
+            layers.insert(layers.end(), add.begin(), add.end());
+            int idx = -1;
+            for (size_t k = 0; k < scene.clips.size() && idx < 0; ++k)
+                if (same_clip(scene.clips[k], layers))
+                    idx = (int) k;
+            if (idx < 0) {
+                scene.clips.push_back(std::move(layers));
+                idx = (int) scene.clips.size() - 1;
+            }
+            m = made.emplace(old, idx).first;
+        }
+        scene.shapes[i].clip = m->second;
+    }
+}
+
+void walk(const XmlNode &el, const Transform &parent, float parent_a, const Style &inherited,
+          const Decode &dc, VectorScene &scene);
+
+void draw_element(const XmlNode &el, const Transform &world, float alpha, const Style &st,
+                  const Decode &dc, VectorScene &scene) {
+    const Viewport &vp = *dc.vp;
+    if (el.local == "g" || el.local == "a" || el.local == "switch") {
+        for (const XmlNode &c : el.children)
+            walk(c, world, alpha, st, dc, scene);
+        return;
+    }
+    if (el.local == "svg") {
+        const Viewport nested = make_viewport(el, &vp);
+        const float x = attr_user(el, "x", 0, true, vp, st.font_px);
+        const float y = attr_user(el, "y", 0, false, vp, st.font_px);
+        /* Nested view box, then the parent's map. x,y are in the parent. */
+        const Transform into = Transform::translate(x, y) *
+                               viewbox_map(nested.vb_x, nested.vb_y, nested.vb_w, nested.vb_h,
+                                           attr_user(el, "width", nested.vb_w, true, vp, st.font_px),
+                                           attr_user(el, "height", nested.vb_h, false, vp, st.font_px),
+                                           xml_attr_value(el, "preserveAspectRatio"));
+        Decode inner = dc;
+        inner.vp = &nested;
+        for (const XmlNode &c : el.children)
+            walk(c, world * into, alpha, st, inner, scene);
+        return;
+    }
+    if (el.local == "use" || el.local == "image" || el.local == "foreignObject")
+        return;
+    Path user;
+    bool fill_it = true;
+    if (!shape_geometry(el, st, vp, user, fill_it))
+        return;
+    emit_shape(scene, user, world, st, alpha, fill_it, vp);
+}
+
+void walk(const XmlNode &el, const Transform &parent, float parent_a, const Style &inherited,
+          const Decode &dc, VectorScene &scene) {
+    if (el.text || is_skippable(el.local))
+        return;
+    if (el.local == "text" || el.local == "tspan" || el.local == "textPath") {
+        note_skip(scene, "text");
+        return;
+    }
+    const Style st = compute_style(el, inherited, *dc.rules, *dc.vp, *dc.grads, scene);
+    if (!st.display)
+        return;
+    const Transform local = parse_transform(st.transform.empty() ? xml_attr_value(el, "transform") : st.transform);
+    const Transform world = parent * local;
+    const float alpha = parent_a * st.opacity;
+    const size_t first = scene.shapes.size();
+    draw_element(el, world, alpha, st, dc, scene);
+    apply_clip(scene, first, st.clip, world, dc);
 }
 
 bool sniff_svg(const uint8_t *data, size_t n) {
@@ -1333,8 +1653,15 @@ public:
         }
         std::vector<Rule> rules;
         std::map<std::string, Grad> grads;
-        collect(root, rules, grads);
+        ClipDefs clips;
+        collect(root, rules, grads, clips);
+        resolve_gradient_hrefs(grads);
         const Viewport vp = make_viewport(root, nullptr);
+        Decode dc;
+        dc.vp = &vp;
+        dc.rules = &rules;
+        dc.grads = &grads;
+        dc.clips = &clips;
         out->width = vp.box_w;
         out->height = vp.box_h;
         Style base;
@@ -1344,7 +1671,8 @@ public:
         const Transform world = vp.map * parse_transform(root_style.transform);
         const float alpha = root_style.opacity;
         for (const XmlNode &c : root.children)
-            walk(c, world, alpha, root_style, vp, rules, grads, *out);
+            walk(c, world, alpha, root_style, dc, *out);
+        apply_clip(*out, 0, root_style.clip, world, dc);
         return true;
     }
 };

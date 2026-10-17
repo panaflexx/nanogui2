@@ -25,6 +25,9 @@
 #include <cmath>
 #include <cstdio>
 #include <cstring>
+#include <cstdlib>
+#include <fstream>
+#include <nanogui/fscompat.h>
 #include <sys/stat.h>
 
 namespace pagemade {
@@ -1350,6 +1353,53 @@ bool ImageStore::display(uint32_t id, int long_edge, const uint8_t **rgba, int *
     if (w) *w = e.proxy_w;
     if (h) *h = e.proxy_h;
     return true;
+}
+
+std::string asset_library_config_path() {
+    if (const char *xdg = std::getenv("XDG_CONFIG_HOME"))
+        if (xdg[0])
+            return std::string(xdg) + "/pagemade/assets.conf";
+    if (const char *home = std::getenv("HOME"))
+        if (home[0])
+            return std::string(home) + "/.config/pagemade/assets.conf";
+    return "pagemade-assets.conf";
+}
+
+bool asset_library_load(std::vector<std::string> &paths, const std::string &config) {
+    paths.clear();
+    std::ifstream in(config);
+    if (!in)
+        return false;
+    std::string line;
+    while (std::getline(in, line)) {
+        if (!line.empty() && line.back() == '\r')
+            line.pop_back();
+        if (line.empty() || line[0] == '#')
+            continue;
+        if (std::find(paths.begin(), paths.end(), line) == paths.end())
+            paths.push_back(line);
+    }
+    return true;
+}
+
+bool asset_library_save(const std::vector<std::string> &paths, const std::string &config) {
+    if (config.empty())
+        return false;
+    try {
+        const std::string parent = nanogui::fs::parent_path(config);
+        if (!parent.empty())
+            nanogui::fs::create_directories(parent);
+        std::ofstream out(config, std::ios::trunc);
+        if (!out)
+            return false;
+        out << "# pagemade image assets. One folder or image file per line.\n";
+        for (const std::string &p : paths)
+            if (!p.empty() && p.find('\n') == std::string::npos)
+                out << p << "\n";
+        return (bool) out;
+    } catch (...) {
+        return false;
+    }
 }
 
 } // namespace pagemade

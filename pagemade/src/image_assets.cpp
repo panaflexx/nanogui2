@@ -417,7 +417,7 @@ ImageAssetsPanel::ImageAssetsPanel(Widget *parent, ComposerView *view, ImageStor
         for (const std::string &path : paths)
             any = add_root(path) || any;
         if (any)
-            restart_scan();
+            roots_changed();
     });
     add_folder->set_callback([this] {
         const std::string dir = ask_folder(initial_folder());
@@ -427,7 +427,7 @@ ImageAssetsPanel::ImageAssetsPanel(Widget *parent, ComposerView *view, ImageStor
                        "Drop a folder onto the picture grid.");
 #endif
         if (!dir.empty() && add_root(dir))
-            restart_scan();
+            roots_changed();
     });
     remove->set_callback([this] {
         const int sel = m_roots_list ? m_roots_list->selected() : -1;
@@ -436,7 +436,7 @@ ImageAssetsPanel::ImageAssetsPanel(Widget *parent, ComposerView *view, ImageStor
         m_roots.erase(m_roots.begin() + sel);
         if (m_roots_list)
             m_roots_list->set_paths(m_roots);
-        restart_scan();
+        roots_changed();
     });
     add_pub->set_callback([this] {
         if (!m_stash)
@@ -534,7 +534,7 @@ ImageAssetsPanel::ImageAssetsPanel(Widget *parent, ComposerView *view, ImageStor
                 any = add_root(path) || any;
         }
         if (any)
-            restart_scan();
+            roots_changed();
         return any;
     });
 
@@ -552,7 +552,17 @@ ImageAssetsPanel::ImageAssetsPanel(Widget *parent, ComposerView *view, ImageStor
     set_min_height(440);
     set_size(Vector2i(350, 780));
     m_split->set_drag_position(m_details_at);
-    rebuild();
+    /* Last session's folders and files. One that is gone (an unmounted
+     * share) stays listed, and the scan skips it, so it isn't lost. */
+    std::vector<std::string> saved;
+    if (asset_library_load(saved, asset_library_config_path()) && !saved.empty()) {
+        m_roots = std::move(saved);
+        if (m_roots_list)
+            m_roots_list->set_paths(m_roots);
+        restart_scan();
+    } else {
+        rebuild();
+    }
     if (Screen *s = screen())
         if (s->nvg_context())
             perform_layout(s->nvg_context());
@@ -905,6 +915,11 @@ void ImageAssetsPanel::stop_scan() {
     if (m_scan.joinable())
         m_scan.join();
     m_scan_state.reset();
+}
+
+void ImageAssetsPanel::roots_changed() {
+    asset_library_save(m_roots, asset_library_config_path());
+    restart_scan();
 }
 
 void ImageAssetsPanel::restart_scan() {

@@ -29,19 +29,18 @@ namespace pagemade {
 
 enum class PaintKind { None, Solid, Linear, Radial };
 
-struct GradientStop {
-    float offset = 0;
-    Color color;
-};
-
-/* A paint. A gradient keeps its stops so a later slice can draw them;
- * `color` is what this slice actually paints (the solid, or the stop
- * nearest the middle of a gradient). */
+/* A paint. For a gradient, `color` is the stop nearest the middle: the
+ * fallback where a gradient can't be drawn. The geometry is as in
+ * DrawGradient, with `xf` mapping gradient space to the graphic's box. */
 struct VectorPaint {
     PaintKind kind = PaintKind::None;
     Color color{0, 0, 0, 1};
     std::vector<GradientStop> stops;
+    Transform xf;
+    Point focal{0, 0};
+    Spread spread = Spread::Pad;
     bool none() const { return kind == PaintKind::None; }
+    bool gradient() const { return kind == PaintKind::Linear || kind == PaintKind::Radial; }
 };
 
 struct VectorStroke {
@@ -61,11 +60,14 @@ struct VectorShape {
     FillRule rule = FillRule::NonZero;
     VectorPaint fill;
     VectorStroke stroke;
+    int clip = -1;                       // index into VectorScene::clips, or -1
 };
 
 struct VectorScene {
     float width = 0, height = 0;         // the graphic's box, points
     std::vector<VectorShape> shapes;
+    /* Clip paths in the graphic's box, shared by the shapes that name them. */
+    std::vector<ClipLayers> clips;
     /* Features this slice did not draw, each named once ("gradients",
      * "clips", "text"), in the order they were first seen. */
     std::vector<std::string> skipped;

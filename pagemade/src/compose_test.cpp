@@ -3911,6 +3911,32 @@ static void test_swatch_library() {
           "config path %s", config_path.c_str());
 }
 
+/* The Image Assets library's folders and files survive a restart. */
+static void test_asset_library_config() {
+    const std::string dir = "/tmp/pagemade-assets-test";
+    nanogui::fs::remove_all(dir);
+    const std::string path = dir + "/sub/assets.conf";
+    std::vector<std::string> got{"stale"};
+    CHECK(!asset_library_load(got, path) && got.empty(), "a missing config is no library");
+    const std::vector<std::string> roots{"/mnt/share/Photo Library", "/home/me/pic one.jpg",
+                                         "//server/art"};
+    CHECK(asset_library_save(roots, path), "save makes the directory and writes");
+    CHECK(asset_library_load(got, path) && got == roots, "paths with spaces round-trip in order");
+    {
+        std::ofstream out(path, std::ios::app);
+        out << "\n# a note\n/home/me/pic one.jpg\r\n/extra\n";
+    }
+    CHECK(asset_library_load(got, path) && got.size() == 4 && got.back() == "/extra",
+          "comments, blank lines, CRLF and repeats are skipped (%zu)", got.size());
+    CHECK(asset_library_save({}, path) && asset_library_load(got, path) && got.empty(),
+          "an emptied library saves empty");
+    nanogui::fs::remove_all(dir);
+    const std::string config = asset_library_config_path();
+    CHECK(config.find("pagemade/assets.conf") != std::string::npos ||
+              config == "pagemade-assets.conf",
+          "config path %s", config.c_str());
+}
+
 static std::vector<uint8_t> bytes_of(const std::string &s) {
     return {s.begin(), s.end()};
 }
@@ -3949,7 +3975,8 @@ static std::string join_skipped(const std::vector<std::string> &skipped) {
 }
 
 /* SVG place: one graphic, solids and strokes, the frame at the margin.
- * Gradients paint their middle stop; clips and text are named and skipped. */
+ * Gradients paint their middle stop and text is named and skipped. A
+ * <clipPath> becomes a clip on the shapes; one that can't be read is named. */
 static void test_svg(const FontLibrary &fonts) {
     const std::string declared =
         "<?xml version=\"1.0\"?>\n"
@@ -4037,12 +4064,120 @@ static void test_svg(const FontLibrary &fonts) {
         check_color(scene.shapes[0].fill.color, mid, "middle gradient stop");
         CHECK(path_at(scene.shapes[0].path, PathCmd::Line, 7.5f, 0),
               "the clip does not trim the rect");
+        const int ci = scene.shapes[0].clip;
+        CHECK(ci == 0 && scene.clips.size() == 1 && scene.clips[0].size() == 1 &&
+                  scene.clips[0][0].size() == 1 &&
+                  path_at(scene.clips[0][0][0].path, PathCmd::Line, 1.5f, 0),
+              "the rect carries the 2px clip in points (clip %d)", ci);
     }
-    CHECK(join_skipped(scene.skipped) == "gradients,clips,text", "skipped %s",
-          join_skipped(scene.skipped).c_str());
-    CHECK(vector_place_note("mark.svg", scene.skipped) ==
+    if (!scene.shapes.empty()) {
+        const VectorPaint &g = scene.shapes[0].fill;
+        CHECK(g.kind == PaintKind::Linear && g.stops.size() == 3 && near(g.xf.a, 7.5f) &&
+                  near(g.xf.d, 7.5f) && near(g.xf.b, 0) && near(g.xf.e, 0),
+              "a bounding-box gradient spans the rect (%g %g %g %g)", g.xf.a, g.xf.b, g.xf.d, g.xf.e);
+    }
+    CHECK(join_skipped(scene.skipped) == "text", "skipped %s", join_skipped(scene.skipped).c_str());
+    CHECK(vector_place_note("mark.svg", {"gradients", "clips", "text"}) ==
               "placed mark.svg (gradients, clips, text skipped)",
           "the status names what was skipped");
+
+    /* A clip is in the referencing element's user space (after its own
+     * transform), a bounding-box clip scales to the element, nested clips
+     * intersect, an empty clip removes the element and a basic-shape clip
+     * is named and left out. */
+    CHECK(decode_svg(
+              "<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 100 100\" width=\"100\">"
+              "<defs><clipPath id=\"a\"><rect x=\"10\" width=\"10\" height=\"10\"/></clipPath>"
+              "<clipPath id=\"b\" clipPathUnits=\"objectBoundingBox\">"
+              "<rect width=\"0.5\" height=\"1\" clip-rule=\"evenodd\"/></clipPath>"
+              "<clipPath id=\"e\"/></defs>"
+              "<g clip-path=\"url(#a)\" transform=\"translate(20 0)\">"
+              "<rect width=\"40\" height=\"40\" clip-path=\"url(#b)\"/>"
+              "<rect y=\"50\" width=\"10\" height=\"10\"/></g>"
+              "<rect width=\"5\" height=\"5\" clip-path=\"url(#e)\"/>"
+              "<rect width=\"5\" height=\"5\" clip-path=\"circle(2px)\"/></svg>",
+              scene, err),
+          "clips: %s", err.c_str());
+    CHECK(scene.shapes.size() == 3, "the empty clip removes its rect (%zu)", scene.shapes.size());
+    if (scene.shapes.size() == 3) {
+        const VectorShape &both = scene.shapes[0], &outer = scene.shapes[1];
+        CHECK(both.clip >= 0 && outer.clip >= 0 && both.clip != outer.clip &&
+                  scene.shapes[2].clip == -1,
+              "each clipped rect has its own clip; the basic shape has none");
+        if (both.clip >= 0 && outer.clip >= 0) {
+            const ClipLayers &bl = scene.clips[(size_t) both.clip];
+            const ClipLayers &ol = scene.clips[(size_t) outer.clip];
+            CHECK(bl.size() == 2 && ol.size() == 1, "nested clips are two layers (%zu, %zu)",
+                  bl.size(), ol.size());
+            if (bl.size() == 2 && ol.size() == 1) {
+                CHECK(path_at(bl[0][0].path, PathCmd::Move, 15.f, 0) &&
+                          path_at(bl[0][0].path, PathCmd::Line, 30.f, 0) &&
+                          bl[0][0].rule == FillRule::EvenOdd,
+                      "the bounding-box clip covers the rect's left half, even-odd");
+                CHECK(path_at(bl[1][0].path, PathCmd::Move, 22.5f, 0) &&
+                          path_at(ol[0][0].path, PathCmd::Move, 22.5f, 0),
+                      "the group's clip moves with the group's transform");
+            }
+        }
+    }
+    CHECK(join_skipped(scene.skipped) == "clips", "the basic shape is named (%s)",
+          join_skipped(scene.skipped).c_str());
+
+    CHECK(decode_svg(
+              "<svg xmlns=\"http://www.w3.org/2000/svg\" xmlns:xlink=\"http://www.w3.org/1999/xlink\""
+              " viewBox=\"0 0 4 4\" width=\"4\"><defs>"
+              "<linearGradient id=\"base\"><stop offset=\"0\" stop-color=\"#000\"/>"
+              "<stop offset=\".3\" stop-color=\"#999\"/><stop offset=\"1\" stop-color=\"#fff\"/>"
+              "</linearGradient>"
+              "<linearGradient id=\"mid\" xlink:href=\"#base\"/>"
+              "<radialGradient id=\"r\" xlink:href=\"#mid\" cx=\"2\" cy=\"2\" r=\"2\"/></defs>"
+              "<rect width=\"1\" height=\"1\" fill=\"url(#r)\"/></svg>",
+              scene, err) &&
+              scene.shapes.size() == 1 && scene.shapes[0].fill.kind == PaintKind::Radial &&
+              scene.shapes[0].fill.stops.size() == 3 && near(scene.shapes[0].fill.color.r, 0.6f),
+          "a gradient takes its stops through a chain of xlink:href");
+
+    /* Gradient geometry: user-space units with a transform and a focal
+     * point, attributes lent through href, spread, opacity on the stops,
+     * and the cases that paint solid or nothing. */
+    CHECK(decode_svg(
+              "<svg xmlns=\"http://www.w3.org/2000/svg\" xmlns:xlink=\"http://www.w3.org/1999/xlink\""
+              " viewBox=\"0 0 40 40\" width=\"40\"><defs>"
+              "<radialGradient id=\"r\" gradientUnits=\"userSpaceOnUse\" cx=\"10\" cy=\"10\" r=\"5\""
+              " fx=\"12.5\" spreadMethod=\"reflect\" gradientTransform=\"translate(10 0)\">"
+              "<stop offset=\"0\" stop-color=\"#f00\" stop-opacity=\".5\"/>"
+              "<stop offset=\"1\" stop-color=\"#00f\"/></radialGradient>"
+              "<linearGradient id=\"down\" x2=\"0\" y2=\"1\"><stop offset=\"0\"/>"
+              "<stop offset=\"1\" stop-color=\"#fff\"/></linearGradient>"
+              "<linearGradient id=\"lent\" xlink:href=\"#down\"/>"
+              "<linearGradient id=\"one\"><stop stop-color=\"#0f0\"/></linearGradient>"
+              "<linearGradient id=\"empty\"/></defs>"
+              "<rect width=\"40\" height=\"40\" fill=\"url(#r)\" fill-opacity=\".5\"/>"
+              "<rect x=\"0\" y=\"20\" width=\"10\" height=\"20\" fill=\"url(#lent)\"/>"
+              "<rect width=\"4\" height=\"4\" fill=\"url(#one)\"/>"
+              "<rect width=\"4\" height=\"4\" fill=\"url(#empty)\"/>"
+              "<line x2=\"10\" stroke=\"url(#down)\"/></svg>",
+              scene, err),
+          "gradients: %s", err.c_str());
+    CHECK(scene.shapes.size() == 3, "no stops and a flat bounding box paint nothing (%zu)",
+          scene.shapes.size());
+    if (scene.shapes.size() == 3) {
+        const VectorPaint &r = scene.shapes[0].fill;
+        CHECK(r.kind == PaintKind::Radial && near(r.xf.a, 3.75f) && near(r.xf.e, 15.f) &&
+                  near(r.xf.f, 7.5f) && near(r.focal.x, 0.5f) && near(r.focal.y, 0) &&
+                  r.spread == Spread::Reflect,
+              "user-space radial: center (%g,%g), radius %g, focal %g", r.xf.e, r.xf.f, r.xf.a,
+              r.focal.x);
+        CHECK(r.stops.size() == 2 && near(r.stops[0].color.a, 0.25f) && near(r.stops[1].color.a, 0.5f),
+              "stop-opacity and fill-opacity scale the stops");
+        const VectorPaint &v = scene.shapes[1].fill;
+        CHECK(v.kind == PaintKind::Linear && near(v.xf.a, 0) && near(v.xf.b, 15.f) &&
+                  near(v.xf.c, -7.5f) && near(v.xf.f, 15.f),
+              "href lends x2/y2: top to bottom of the rect (%g %g %g %g)", v.xf.a, v.xf.b, v.xf.c,
+              v.xf.f);
+        CHECK(scene.shapes[2].fill.kind == PaintKind::Solid && near(scene.shapes[2].fill.color.g, 1.f),
+              "one stop paints solid");
+    }
 
     CHECK(decode_svg(
               "<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 4 4\" width=\"4\">"
@@ -4160,6 +4295,69 @@ static void test_svg(const FontLibrary &fonts) {
     CHECK(plain.find("f*\n") == std::string::npos && plain.find("f\n") != std::string::npos,
           "nonzero fills with f");
     CHECK(plain.find("0 0 18 18 re W n") != std::string::npos, "the nonzero frame clips too");
+
+    /* A clip path reaches the draw list in the frame's box and the PDF as W n. */
+    const std::string clipped =
+        "<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 24 24\" width=\"24\">"
+        "<clipPath id=\"c\"><circle cx=\"12\" cy=\"12\" r=\"8\"/></clipPath>"
+        "<rect width=\"24\" height=\"24\" clip-path=\"url(#c)\"/>"
+        "<rect width=\"4\" height=\"4\" clip-path=\"url(#c)\" stroke=\"red\"/></svg>";
+    PageDoc cd;
+    VectorStore cd_store;
+    CHECK(place_svg_bytes(cd, cd_store, bytes_of(clipped), "clipped.svg", "", 0, nullptr).ok,
+          "clipped place");
+    drawn = build_page(cd, 0, {}, nullptr, false, &cd_store);
+    std::vector<DrawClip> seen;
+    for (const DrawOp &op : drawn) {
+        if (const DrawFill *f = std::get_if<DrawFill>(&op))
+            seen.push_back(f->clip);
+        else if (const DrawStroke *st = std::get_if<DrawStroke>(&op))
+            seen.push_back(st->clip);
+    }
+    CHECK(seen.size() == 3 && seen[0] && seen[0] == seen[1] && seen[1] == seen[2],
+          "the fills and the stroke share one clip (%zu ops)", seen.size());
+    if (!seen.empty() && seen[0] && seen[0]->size() == 1 && (*seen[0])[0].size() == 1)
+        CHECK(path_at((*seen[0])[0][0].path, PathCmd::Move, 9.f, 3.f),
+              "the clip is in the frame's box");
+    CHECK(export_pdf(pdf_path, cd, comps, nullptr, nullptr, &cd_store), "export clipped");
+    plain = pdf_plain(read_bin(pdf_path));
+    CHECK(plain.find("h\nW n\n") != std::string::npos, "the clip path closes and clips with W n");
+
+    /* Gradients reach the draw list in the frame's box and the PDF as
+     * shading patterns; varying stop alpha is a soft mask. */
+    const std::string shaded =
+        "<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 24 24\" width=\"24\"><defs>"
+        "<linearGradient id=\"l\"><stop offset=\"0\" stop-color=\"#f00\"/>"
+        "<stop offset=\".5\" stop-color=\"#0f0\"/><stop offset=\"1\" stop-color=\"#00f\"/>"
+        "</linearGradient><radialGradient id=\"r\"><stop offset=\"0\" stop-color=\"#fff\"/>"
+        "<stop offset=\"1\" stop-color=\"#000\" stop-opacity=\"0\"/></radialGradient></defs>"
+        "<rect width=\"24\" height=\"12\" fill=\"url(#l)\"/>"
+        "<rect y=\"12\" width=\"24\" height=\"12\" fill=\"url(#r)\"/></svg>";
+    PageDoc gd;
+    VectorStore gd_store;
+    CHECK(place_svg_bytes(gd, gd_store, bytes_of(shaded), "shaded.svg", "", 0, nullptr).ok,
+          "gradient place");
+    drawn = build_page(gd, 0, {}, nullptr, false, &gd_store);
+    std::vector<const DrawFill *> gfills;
+    for (const DrawOp &op : drawn)
+        if (const DrawFill *f = std::get_if<DrawFill>(&op))
+            gfills.push_back(f);
+    CHECK(gfills.size() == 2 && gfills[0]->gradient && gfills[1]->gradient &&
+              !gfills[0]->gradient->radial && gfills[1]->gradient->radial,
+          "both fills carry their gradients");
+    if (gfills.size() == 2 && gfills[0]->gradient)
+        CHECK(near(gfills[0]->gradient->xf.a, 18.f) && near(gfills[0]->gradient->xf.e, 0),
+              "the linear gradient spans the frame (%g)", gfills[0]->gradient->xf.a);
+    CHECK(export_pdf(pdf_path, gd, comps, nullptr, nullptr, &gd_store), "export gradients");
+    plain = pdf_plain(read_bin(pdf_path));
+    CHECK(plain.find("/Pattern cs /P1 scn") != std::string::npos &&
+              plain.find("/ShadingType 2") != std::string::npos &&
+              plain.find("/ShadingType 3") != std::string::npos &&
+              plain.find("/FunctionType 3") != std::string::npos,
+          "shading patterns, a three-stop function");
+    CHECK(plain.find("/SMask") != std::string::npos && plain.find("/M2 gs") != std::string::npos &&
+              plain.find("/Sh0 sh") != std::string::npos,
+          "the fading radial gradient is soft-masked");
 
     /* A paste has no source file, so the bytes are stored even when the
      * publication otherwise links its assets. */
@@ -4293,6 +4491,7 @@ int main(int argc, char **argv) {
     test_docfile(fonts);
     test_images(fonts);
     test_svg(fonts);
+    test_asset_library_config();
     test_picture_style(fonts);
     test_groups(fonts);
     test_page_markers(fonts);

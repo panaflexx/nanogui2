@@ -66,8 +66,22 @@ struct NVGpaint {
 	NVGcolor innerColor;
 	NVGcolor outerColor;
 	int image;
+	int ramp;		// NVGrampKind; 0 for every other paint
+	int spread;		// NVGspread, ramp paints only
 };
 typedef struct NVGpaint NVGpaint;
+
+enum NVGrampKind {
+	NVG_RAMP_NONE = 0,
+	NVG_RAMP_LINEAR = 1,
+	NVG_RAMP_RADIAL = 2,
+};
+
+enum NVGspread {
+	NVG_SPREAD_PAD = 0,
+	NVG_SPREAD_REFLECT = 1,
+	NVG_SPREAD_REPEAT = 2,
+};
 
 enum NVGwinding {
 	NVG_CCW = 1,			// Winding for solid shapes
@@ -523,6 +537,18 @@ extern NVG_EXPORT NVGpaint nvgRadialGradient(NVGcontext* ctx, float cx, float cy
 extern NVG_EXPORT NVGpaint nvgImagePattern(NVGcontext* ctx, float ox, float oy, float ex, float ey,
 						 float angle, int image, float alpha);
 
+// Creates a gradient whose colors come from `ramp`, an image N x 1 (RGBA) read from t = 0 at its
+// left edge to t = 1 at its right, so a gradient can have any number of stops.
+// `xform` maps gradient space to user space; the gradient is then transformed by the current
+// transform when it is passed to nvgFillPaint() or nvgStrokePaint(), like the other gradients.
+// In gradient space a linear gradient (NVG_RAMP_LINEAR) has t = x, from (0,0) to (1,0). A radial
+// gradient (NVG_RAMP_RADIAL) has t = 1 on the unit circle at the origin and t = 0 at the focal
+// point (fx,fy), which is pulled inside the circle when it is not. `spread` says what t outside
+// 0..1 shows (NVG_SPREAD_PAD, REFLECT or REPEAT). `alpha` scales the result. A back-end without
+// ramps fills with `fallback` instead.
+extern NVG_EXPORT NVGpaint nvgRampGradient(NVGcontext* ctx, const float* xform, int kind,
+						 float fx, float fy, int spread, int ramp, float alpha, NVGcolor fallback);
+
 //
 // Scissoring
 //
@@ -543,6 +569,24 @@ extern NVG_EXPORT void nvgIntersectScissor(NVGcontext* ctx, float x, float y, fl
 
 // Reset and disables scissoring.
 extern NVG_EXPORT void nvgResetScissor(NVGcontext* ctx);
+
+//
+// Clip paths
+//
+// A clip path limits drawing to an arbitrary shape. nvgClipPath() adds the
+// current path, with the current fill rule and transform, to a pending clip;
+// several calls make a union. nvgClipEnd() intersects the pending clip with
+// the active one, or makes it the active one when there is none. Fills,
+// strokes and text then draw only inside it until nvgResetClip(). Scissoring
+// still applies on top. The clip edge is not anti-aliased.
+//
+// The clip is not part of the state stack: nvgSave()/nvgRestore() leave it
+// alone, and nvgEndFrame() drops it. A back-end without clip support draws
+// unclipped.
+
+extern NVG_EXPORT void nvgClipPath(NVGcontext* ctx);
+extern NVG_EXPORT void nvgClipEnd(NVGcontext* ctx);
+extern NVG_EXPORT void nvgResetClip(NVGcontext* ctx);
 
 //
 // Paths
@@ -768,6 +812,14 @@ struct NVGpath {
 };
 typedef struct NVGpath NVGpath;
 
+// renderClip operations. ADD passes the path's fill vertices (no fringe) and
+// bounds; END and RESET pass no paths.
+enum NVGclipOp {
+	NVG_CLIP_ADD = 0,
+	NVG_CLIP_END,
+	NVG_CLIP_RESET,
+};
+
 struct NVGparams {
 	void* userPtr;
 	int edgeAntiAlias;
@@ -782,6 +834,8 @@ struct NVGparams {
 	void (*renderFill)(void* uptr, NVGpaint* paint, NVGcompositeOperationState compositeOperation, NVGscissor* scissor, float fringe, const float* bounds, const NVGpath* paths, int npaths, int fillRule);
 	void (*renderStroke)(void* uptr, NVGpaint* paint, NVGcompositeOperationState compositeOperation, NVGscissor* scissor, float fringe, float strokeWidth, const NVGpath* paths, int npaths);
 	void (*renderTriangles)(void* uptr, NVGpaint* paint, NVGcompositeOperationState compositeOperation, NVGscissor* scissor, const NVGvertex* verts, int nverts, float fringe);
+	// Optional; NULL draws unclipped. See NVGclipOp.
+	void (*renderClip)(void* uptr, int op, const float* bounds, const NVGpath* paths, int npaths, int fillRule);
 	void (*renderDelete)(void* uptr);
 };
 typedef struct NVGparams NVGparams;

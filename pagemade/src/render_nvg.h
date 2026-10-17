@@ -31,5 +31,8 @@ void draw_glyph_run(NVGcontext *ctx, const GlyphRun &run);
 void draw_list(NVGcontext *ctx, const DrawList &list, float px,
                const std::function<int(const DrawImage &)> &texture = {});
 void apply_transform(NVGcontext *ctx, const Transform &t);
+/* Gradient fills draw from small ramp images kept per context. Call once a
+ * frame, before any draw_list in it: ramps not drawn for a while are freed. */
+void release_unused_ramps(NVGcontext *ctx);
 
 } // namespace pagemade

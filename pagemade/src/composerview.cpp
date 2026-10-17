@@ -4708,6 +4708,7 @@ void ComposerView::draw(NVGcontext *ctx) {
     arrangement(m_doc, m_page, m_page_view, slots, aw, ah);
     const Vector2f o = page_origin();
     sync_textures(ctx);
+    release_unused_ramps(ctx);
     std::vector<ItemId> lifted;
     lifted_ids(lifted);
     const std::vector<ItemId> *hand = lifted.empty() ? nullptr : &lifted;

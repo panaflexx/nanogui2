@@ -359,6 +359,24 @@ void emit_path(std::string &s, const Path &p) {
     }
 }
 
+/* A clip path: each layer narrows the clip with W n. A layer of one path
+ * keeps its rule. Several paths are joined into one nonzero clip, which is
+ * their union unless overlapping paths wind against each other. */
+void emit_clip(std::string &s, const DrawClip &clip) {
+    if (!clip)
+        return;
+    for (const auto &layer : *clip) {
+        if (layer.empty()) {
+            s += "0 0 0 0 re W n\n";
+            continue;
+        }
+        for (const ClipPath &cp : layer)
+            emit_path(s, cp.path);
+        const bool even = layer.size() == 1 && layer[0].rule == FillRule::EvenOdd;
+        s += even ? "W* n\n" : "W n\n";
+    }
+}
+
 /* Sets fill and stroke alpha with an ExtGState when `a` is translucent.
  * `alphas` records thousandths of alpha; the objects are created once
  * content is known. */
@@ -380,6 +398,101 @@ std::string emit_color(const Color &c, bool stroke, std::map<int, float> &alphas
     std::string s = tagged ? (stroke ? "/CS0 CS " + rgb + " SC\n" : "/CS0 cs " + rgb + " sc\n")
                            : rgb + (stroke ? " RG\n" : " rg\n");
     return s + emit_alpha(c.a, alphas);
+}
+
+/* Gradient paints become shading patterns (PDF patterns are placed in the
+ * page's default space, and every page has the same base matrix, so one set
+ * serves every page). Varying stop alpha becomes a soft mask. */
+struct PdfGradients {
+    Writer *w = nullptr;
+    std::string cs;                     // the shadings' color space
+    std::map<int, int> patterns;        // /Pn -> object
+    std::map<int, int> masks;           // /Mn -> ExtGState object
+    int next = 1;
+    bool soft_masks = false;
+};
+
+/* The stops as a PDF function on 0..1: colors, or alpha (gray). Before
+ * the first stop and after the last, their values; a hard stop jumps. */
+std::string stop_function(const std::vector<GradientStop> &stops, bool alpha) {
+    auto val = [&](const Color &c) {
+        return alpha ? num(c.a) : num(c.r) + " " + num(c.g) + " " + num(c.b);
+    };
+    std::vector<std::pair<float, std::string>> pts;
+    if (stops.front().offset > 0.f)
+        pts.push_back({0.f, val(stops.front().color)});
+    for (const GradientStop &st : stops)
+        pts.push_back({st.offset, val(st.color)});
+    if (stops.back().offset < 1.f)
+        pts.push_back({1.f, val(stops.back().color)});
+    struct Seg { float t1; std::string c0, c1; };
+    std::vector<Seg> segs;
+    for (size_t i = 0; i + 1 < pts.size(); ++i)
+        if (pts[i + 1].first > pts[i].first)
+            segs.push_back({pts[i + 1].first, pts[i].second, pts[i + 1].second});
+    auto exp_fn = [](const std::string &c0, const std::string &c1) {
+        return "<< /FunctionType 2 /Domain [0 1] /C0 [" + c0 + "] /C1 [" + c1 + "] /N 1 >>";
+    };
+    if (segs.empty())
+        return exp_fn(pts.back().second, pts.back().second);
+    if (segs.size() == 1)
+        return exp_fn(segs[0].c0, segs[0].c1);
+    std::string fns, bounds, encode;
+    for (size_t i = 0; i < segs.size(); ++i) {
+        fns += exp_fn(segs[i].c0, segs[i].c1) + " ";
+        if (i + 1 < segs.size())
+            bounds += num(segs[i].t1) + " ";
+        encode += "0 1 ";
+    }
+    return "<< /FunctionType 3 /Domain [0 1] /Functions [" + fns + "] /Bounds [" + bounds +
+           "] /Encode [" + encode + "] >>";
+}
+
+int shading_obj(Writer &w, const DrawGradient &g, bool alpha, const std::string &cs) {
+    const std::string coords = g.radial ? "/ShadingType 3 /Coords [" + num(g.focal.x) + " " +
+                                              num(g.focal.y) + " 0 0 0 1]"
+                                        : std::string("/ShadingType 2 /Coords [0 0 1 0]");
+    return w.add("<< " + coords + " /ColorSpace " + (alpha ? std::string("/DeviceGray") : cs) +
+                 " /Function " + stop_function(g.stops, alpha) + " /Extend [true true] >>");
+}
+
+std::string matrix(const Transform &t) {
+    return num(t.a) + " " + num(t.b) + " " + num(t.c) + " " + num(t.d) + " " + num(t.e) + " " +
+           num(t.f);
+}
+
+/* Selects `g` as the fill or stroke paint inside an op whose item matrix is
+ * `item` (already on the stack). `box_w` by `box_h` is the frame, which
+ * bounds a soft mask. Spread is drawn as pad. */
+std::string emit_gradient(PdfGradients &pg, const DrawGradient &g, const Transform &base,
+                          const Transform &item, bool stroke, float box_w, float box_h,
+                          std::map<int, float> &alphas) {
+    Writer &w = *pg.w;
+    const int sh = shading_obj(w, g, false, pg.cs);
+    const int k = pg.next++;
+    pg.patterns[k] = w.add("<< /Type /Pattern /PatternType 2 /Shading " + std::to_string(sh) +
+                           " 0 R /Matrix [" + matrix(base * item * g.xf) + "] >>");
+    const std::string name = "/P" + std::to_string(k);
+    std::string s = stroke ? "/Pattern CS " + name + " SCN\n" : "/Pattern cs " + name + " scn\n";
+    const float a0 = g.stops.front().color.a;
+    bool same = true;
+    for (const GradientStop &st : g.stops)
+        same = same && std::fabs(st.color.a - a0) < 1e-3f;
+    if (same)
+        return s + emit_alpha(a0, alphas);
+    const int ash = shading_obj(w, g, true, "");
+    const std::string bbox = box_w > 0.f && box_h > 0.f
+                                 ? "0 0 " + num(box_w) + " " + num(box_h)
+                                 : std::string("-100000 -100000 100000 100000");
+    const int form = w.add_stream(
+        "/Type /XObject /Subtype /Form /BBox [" + bbox +
+            "] /Group << /Type /Group /S /Transparency /CS /DeviceGray >> /Resources << /Shading << /Sh0 " +
+            std::to_string(ash) + " 0 R >> >>",
+        matrix(g.xf) + " cm\n/Sh0 sh\n");
+    pg.masks[k] = w.add("<< /Type /ExtGState /SMask << /Type /Mask /S /Luminosity /G " +
+                        std::to_string(form) + " 0 R >> >>");
+    pg.soft_masks = true;
+    return s + "/M" + std::to_string(k) + " gs\n";
 }
 
 void emit_cm(std::string &s, const Transform &t) {
@@ -934,6 +1047,15 @@ bool export_pdf(const std::string &path, const PageDoc &doc,
     /* Page streams first, so translucent colors can name ExtGState objects
      * before the resource dict is written into each page. */
     std::map<int, float> alphas;
+    std::string srgb_space;
+    if (tagged) {
+        const std::vector<uint8_t> &icc = icc_srgb();
+        srgb_space = rgb_space(w, std::vector<uint8_t>(icc.begin(), icc.end()), true);
+    }
+    PdfGradients grads;
+    grads.w = &w;
+    grads.cs = tagged ? srgb_space : std::string("/DeviceRGB");
+    const Transform base{1, 0, 0, -1, off, H + off};
     std::vector<std::string> contents_src;
     contents_src.reserve(pages.size());
     for (size_t i = 0; i < pages.size(); ++i) {
@@ -952,17 +1074,23 @@ bool export_pdf(const std::string &path, const PageDoc &doc,
                 content += "Q\n";
             } else if (const auto *f = std::get_if<DrawFill>(&op)) {
                 emit_cm(content, f->xf);
-                content += emit_color(f->color, false, alphas, tagged);
+                content += f->gradient ? emit_gradient(grads, *f->gradient, base, f->xf, false,
+                                                       f->clip_w, f->clip_h, alphas)
+                                       : emit_color(f->color, false, alphas, tagged);
                 if (f->clip_w > 0.f && f->clip_h > 0.f)
                     content += "0 0 " + num(f->clip_w) + " " + num(f->clip_h) + " re W n\n";
+                emit_clip(content, f->clip);
                 emit_path(content, f->path);
                 content += f->rule == FillRule::EvenOdd ? "f*\nQ\n" : "f\nQ\n";
             } else if (const auto *s = std::get_if<DrawStroke>(&op)) {
                 emit_cm(content, s->xf);
-                content += emit_color(s->color, true, alphas, tagged);
+                content += s->gradient ? emit_gradient(grads, *s->gradient, base, s->xf, true,
+                                                       s->clip_w, s->clip_h, alphas)
+                                       : emit_color(s->color, true, alphas, tagged);
                 content += num(s->width) + " w\n";
                 if (s->clip_w > 0.f && s->clip_h > 0.f)
                     content += "0 0 " + num(s->clip_w) + " " + num(s->clip_h) + " re W n\n";
+                emit_clip(content, s->clip);
                 if (!s->dash.empty()) {
                     content += "[";
                     for (float d : s->dash)
@@ -1013,12 +1141,6 @@ bool export_pdf(const std::string &path, const PageDoc &doc,
         alpha_objs[kv.first] = w.add("<< /Type /ExtGState /ca " + num(kv.second) +
                                      " /CA " + num(kv.second) + " >>");
 
-    std::string srgb_space;
-    if (tagged) {
-        const std::vector<uint8_t> &icc = icc_srgb();
-        srgb_space = rgb_space(w, std::vector<uint8_t>(icc.begin(), icc.end()), true);
-    }
-
     std::string res_dict = "<< /Font <<";
     for (const auto &kv : font_res)
         res_dict += " /F" + std::to_string(kv.second) + " " + std::to_string(kv.second) +
@@ -1035,11 +1157,20 @@ bool export_pdf(const std::string &path, const PageDoc &doc,
                             std::to_string(kv.second.obj) + " 0 R";
         res_dict += " >>";
     }
-    if (!alpha_objs.empty()) {
+    if (!alpha_objs.empty() || !grads.masks.empty()) {
         res_dict += " /ExtGState <<";
         for (const auto &kv : alpha_objs)
             res_dict += " /A" + std::to_string(kv.first) + " " + std::to_string(kv.second) +
                         " 0 R";
+        for (const auto &kv : grads.masks)
+            res_dict += " /M" + std::to_string(kv.first) + " " + std::to_string(kv.second) +
+                        " 0 R";
+        res_dict += " >>";
+    }
+    if (!grads.patterns.empty()) {
+        res_dict += " /Pattern <<";
+        for (const auto &kv : grads.patterns)
+            res_dict += " /P" + std::to_string(kv.first) + " " + std::to_string(kv.second) + " 0 R";
         res_dict += " >>";
     }
     if (tagged)
@@ -1053,6 +1184,7 @@ bool export_pdf(const std::string &path, const PageDoc &doc,
         boxes += " /TrimBox [" + num(off) + " " + num(off) + " " + num(off + W) + " " +
                  num(off + H) + "] /BleedBox [" + num(off - bleed) + " " + num(off - bleed) +
                  " " + num(off + W + bleed) + " " + num(off + H + bleed) + "]";
+    soft_masks = soft_masks || grads.soft_masks;
     if (o.pdfx4 && (!alphas.empty() || soft_masks))
         boxes += " /Group << /Type /Group /S /Transparency /CS " + srgb_space + " >>";
 

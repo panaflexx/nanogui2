@@ -246,10 +246,10 @@ void append_placed_vector(DrawList &out, const PageDoc &, const Item &it, const 
     const float ss = std::sqrt(std::fabs(sx * sy));
     const float opacity = std::clamp(pv->opacity, 0.f, 100.f) / 100.f;
     auto map_pt = [&](float x, float y) { return Point{pv->x + x * sx, pv->y + y * sy}; };
-    for (const VectorShape &sh : scene.shapes) {
+    auto map_path = [&](const Path &from) {
         Path path;
-        path.reserve(sh.path.size());
-        for (PathCmd c : sh.path) {
+        path.reserve(from.size());
+        for (PathCmd c : from) {
             if (c.kind == PathCmd::Quad || c.kind == PathCmd::Cubic) {
                 const Point c1 = map_pt(c.cx1, c.cy1);
                 c.cx1 = c1.x;
@@ -267,6 +267,41 @@ void append_placed_vector(DrawList &out, const PageDoc &, const Item &it, const 
             }
             path.push_back(c);
         }
+        return path;
+    };
+    /* Each clip is mapped once, when a shape first names it. */
+    std::vector<DrawClip> clips(scene.clips.size());
+    auto clip_of = [&](int i) -> DrawClip {
+        if (i < 0 || (size_t) i >= clips.size())
+            return nullptr;
+        if (!clips[(size_t) i]) {
+            auto layers = std::make_shared<ClipLayers>();
+            for (const auto &layer : scene.clips[(size_t) i]) {
+                layers->emplace_back();
+                for (const ClipPath &cp : layer)
+                    layers->back().push_back({map_path(cp.path), cp.rule});
+            }
+            clips[(size_t) i] = std::move(layers);
+        }
+        return clips[(size_t) i];
+    };
+    const Transform box_to_item = Transform::translate(pv->x, pv->y) * Transform::scale(sx, sy);
+    auto gradient_of = [&](const VectorPaint &p) -> DrawGradientRef {
+        if (!p.gradient() || p.stops.size() < 2)
+            return nullptr;
+        auto g = std::make_shared<DrawGradient>();
+        g->radial = p.kind == PaintKind::Radial;
+        g->stops = p.stops;
+        for (GradientStop &stop : g->stops)
+            stop.color.a = clamp01(stop.color.a * opacity);
+        g->xf = box_to_item * p.xf;
+        g->focal = p.focal;
+        g->spread = p.spread;
+        return g;
+    };
+    for (const VectorShape &sh : scene.shapes) {
+        const Path path = map_path(sh.path);
+        const DrawClip clip = clip_of(sh.clip);
         if (!sh.fill.none()) {
             DrawFill f;
             f.path = path;
@@ -276,6 +311,8 @@ void append_placed_vector(DrawList &out, const PageDoc &, const Item &it, const 
             f.rule = sh.rule;
             f.clip_w = it.w;
             f.clip_h = it.h;
+            f.clip = clip;
+            f.gradient = gradient_of(sh.fill);
             out.push_back(std::move(f));
         }
         if (!sh.stroke.none()) {
@@ -293,6 +330,8 @@ void append_placed_vector(DrawList &out, const PageDoc &, const Item &it, const 
             s.xf = it.xf;
             s.clip_w = it.w;
             s.clip_h = it.h;
+            s.clip = clip;
+            s.gradient = gradient_of(sh.stroke.paint);
             out.push_back(std::move(s));
         }
     }

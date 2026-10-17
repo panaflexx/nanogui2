@@ -147,6 +147,7 @@ enum NVGdrawCallType {
 	NVG_DRAW_FILL,
 	NVG_DRAW_STROKE,
 	NVG_DRAW_TRIANGLES,
+	NVG_DRAW_CLIP,
 };
 
 struct NVGdrawPath {
@@ -173,6 +174,7 @@ struct NVGdrawCall {
 	int triangleOffset;
 	int triangleCount;
 	int fillRule;
+	int clipOp;		// NVG_DRAW_CLIP only
 };
 typedef struct NVGdrawCall NVGdrawCall;
 
@@ -777,6 +779,29 @@ static void nvg__dlCaptureTriangles(NVGdrawList* list, NVGpaint* paint, NVGcompo
 	call->triangleCount = nverts;
 }
 
+static void nvg__dlCaptureClip(NVGdrawList* list, int op, const float* bounds, const NVGpath* paths,
+	int npaths, int fillRule)
+{
+	NVGdrawCall* call;
+	int pathOffset = 0;
+	if (list == NULL) return;
+	call = nvg__dlAllocCall(list);
+	if (call == NULL) return;
+	if (!nvg__dlCapturePaths(list, paths, npaths, &pathOffset)) {
+		list->ncalls--;
+		return;
+	}
+	call->type = NVG_DRAW_CLIP;
+	call->clipOp = op;
+	call->pathOffset = pathOffset;
+	call->pathCount = npaths;
+	call->fillRule = fillRule;
+	call->scissor.extent[0] = -1.0f;
+	call->scissor.extent[1] = -1.0f;
+	if (bounds != NULL)
+		memcpy(call->bounds, bounds, sizeof(float) * 4);
+}
+
 static int nvg__dlEnsurePathScratch(NVGdrawList* list, int npaths)
 {
 	if (npaths <= list->cpathScratch) return 1;
@@ -814,7 +839,7 @@ static void nvg__dlAppendList(NVGdrawList* dst, const NVGdrawList* src, const fl
 			nvgTransformPremultiply(dc->paint.xform, xform);
 			if (dc->scissor.extent[0] >= 0.0f)
 				nvgTransformPremultiply(dc->scissor.xform, xform);
-			if (sc->type == NVG_DRAW_FILL) {
+			if (sc->type == NVG_DRAW_FILL || sc->type == NVG_DRAW_CLIP) {
 				float x0, y0, x1, y1, x2, y2, x3, y3;
 				nvgTransformPoint(&x0, &y0, xform, sc->bounds[0], sc->bounds[1]);
 				nvgTransformPoint(&x1, &y1, xform, sc->bounds[2], sc->bounds[1]);
@@ -826,7 +851,7 @@ static void nvg__dlAppendList(NVGdrawList* dst, const NVGdrawList* src, const fl
 				dc->bounds[3] = nvg__maxf(nvg__maxf(y0, y1), nvg__maxf(y2, y3));
 			}
 		}
-		if (sc->type == NVG_DRAW_FILL || sc->type == NVG_DRAW_STROKE) {
+		if (sc->type == NVG_DRAW_FILL || sc->type == NVG_DRAW_STROKE || sc->type == NVG_DRAW_CLIP) {
 			int pathOffset = nvg__dlAllocPaths(dst, sc->pathCount);
 			if (pathOffset < 0) { dst->ncalls--; return; }
 			dc->pathOffset = pathOffset;
@@ -993,7 +1018,9 @@ static void nvg__drawListSubmit(NVGcontext* ctx, const NVGdrawList* list, int us
 			paint.outerColor.a *= alpha;
 		}
 
-		if (call->type == NVG_DRAW_FILL || call->type == NVG_DRAW_STROKE) {
+		if (call->type == NVG_DRAW_CLIP && ctx->params.renderClip == NULL)
+			continue;
+		if (call->type == NVG_DRAW_FILL || call->type == NVG_DRAW_STROKE || call->type == NVG_DRAW_CLIP) {
 			int vertCount = 0;
 			int vertBase = 0;
 			if (!nvg__dlEnsurePathScratch(mutableList, call->pathCount))
@@ -1040,7 +1067,7 @@ static void nvg__drawListSubmit(NVGcontext* ctx, const NVGdrawList* list, int us
 				}
 			}
 
-			if (call->type == NVG_DRAW_FILL) {
+			if (call->type == NVG_DRAW_FILL || call->type == NVG_DRAW_CLIP) {
 				const float* boundsPtr = call->bounds;
 				if (applyXform) {
 					// Transform AABB corners; approximate bounds for stencil fills.
@@ -1055,9 +1082,13 @@ static void nvg__drawListSubmit(NVGcontext* ctx, const NVGdrawList* list, int us
 					bounds[3] = nvg__maxf(nvg__maxf(y0, y1), nvg__maxf(y2, y3));
 					boundsPtr = bounds;
 				}
-				ctx->params.renderFill(ctx->params.userPtr, &paint, call->compositeOperation,
-					(NVGscissor*)scissorPtr, call->fringe, boundsPtr, mutableList->pathScratch, call->pathCount,
-					call->fillRule);
+				if (call->type == NVG_DRAW_CLIP)
+					ctx->params.renderClip(ctx->params.userPtr, call->clipOp, boundsPtr,
+						mutableList->pathScratch, call->pathCount, call->fillRule);
+				else
+					ctx->params.renderFill(ctx->params.userPtr, &paint, call->compositeOperation,
+						(NVGscissor*)scissorPtr, call->fringe, boundsPtr, mutableList->pathScratch, call->pathCount,
+						call->fillRule);
 			} else {
 				ctx->params.renderStroke(ctx->params.userPtr, &paint, call->compositeOperation,
 					(NVGscissor*)scissorPtr, call->fringe, call->strokeWidth, mutableList->pathScratch, call->pathCount);
@@ -1736,6 +1767,34 @@ NVGpaint nvgRadialGradient(NVGcontext* ctx,
 
 	p.innerColor = icol;
 	p.outerColor = ocol;
+
+	return p;
+}
+
+NVGpaint nvgRampGradient(NVGcontext* ctx, const float* xform, int kind,
+						 float fx, float fy, int spread, int ramp, float alpha, NVGcolor fallback)
+{
+	NVGpaint p;
+	float d;
+	NVG_NOTUSED(ctx);
+	memset(&p, 0, sizeof(p));
+
+	memcpy(p.xform, xform, sizeof(float) * 6);
+	p.ramp = kind == NVG_RAMP_RADIAL ? NVG_RAMP_RADIAL : NVG_RAMP_LINEAR;
+	p.spread = spread;
+	p.image = ramp;
+	// The focal point must be inside the circle for t to be defined everywhere.
+	d = sqrtf(fx*fx + fy*fy);
+	if (d > 0.99f) {
+		fx *= 0.99f / d;
+		fy *= 0.99f / d;
+	}
+	p.extent[0] = p.ramp == NVG_RAMP_RADIAL ? fx : 0.0f;
+	p.extent[1] = p.ramp == NVG_RAMP_RADIAL ? fy : 0.0f;
+	// innerColor is the fallback; outerColor carries the alpha the ramp is scaled by.
+	p.innerColor = fallback;
+	p.innerColor.a *= alpha;
+	p.outerColor = nvgRGBAf(1.0f, 1.0f, 1.0f, alpha);
 
 	return p;
 }
@@ -3091,6 +3150,36 @@ void nvgFill(NVGcontext* ctx)
 		ctx->fillTriCount += path->nstroke-2;
 		ctx->drawCallCount += 2;
 	}
+}
+
+static void nvg__clipOp(NVGcontext* ctx, int op, const float* bounds, const NVGpath* paths, int npaths,
+	int fillRule)
+{
+	if (ctx->recording != NULL)
+		nvg__dlCaptureClip(ctx->recording, op, bounds, paths, npaths, fillRule);
+	else if (ctx->params.renderClip != NULL)
+		ctx->params.renderClip(ctx->params.userPtr, op, bounds, paths, npaths, fillRule);
+}
+
+void nvgClipPath(NVGcontext* ctx)
+{
+	NVGstate* state = nvg__getState(ctx);
+
+	nvg__flattenPaths(ctx);
+	// No fringe: the stencil takes the path's interior only.
+	nvg__expandFill(ctx, 0.0f, NVG_MITER, 2.4f);
+	if (ctx->cache->npaths <= 0) return;
+	nvg__clipOp(ctx, NVG_CLIP_ADD, ctx->cache->bounds, ctx->cache->paths, ctx->cache->npaths, state->fillRule);
+}
+
+void nvgClipEnd(NVGcontext* ctx)
+{
+	nvg__clipOp(ctx, NVG_CLIP_END, NULL, NULL, 0, NVG_FILLRULE_NONZERO);
+}
+
+void nvgResetClip(NVGcontext* ctx)
+{
+	nvg__clipOp(ctx, NVG_CLIP_RESET, NULL, NULL, 0, NVG_FILLRULE_NONZERO);
 }
 
 void nvgStroke(NVGcontext* ctx)

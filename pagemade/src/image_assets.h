@@ -8,7 +8,8 @@
  * and the composer imports it, then places it.
  *
  * Library folders live here, not in the publication, so New and Open leave
- * them alone. The app hides the window when it is closed rather than
+ * them alone. They are saved to assets.conf whenever they change and read
+ * back when the window is first made. The app hides the window when it is closed rather than
  * destroying it, so the folders, files and thumbnails are kept for the
  * session. Thumbnails of pictures the publication already holds are
  * decoded from the ImageStore on the widget's loader thread.
@@ -66,6 +67,8 @@ private:
     /* Fold the details pane away, or bring it back where it was. */
     void toggle_details();
     bool add_root(const std::string &path);
+    /* The folder list changed: save it, then scan again. */
+    void roots_changed();
     void restart_scan();
     void stop_scan();
     static void scan_main(const std::shared_ptr<ScanState> &state);

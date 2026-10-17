@@ -70,7 +70,15 @@ enum MNVGcallType {
   MNVG_CONVEXFILL,
   MNVG_STROKE,
   MNVG_TRIANGLES,
+  MNVG_CLIP,
 };
+
+/* Clip paths use the top two stencil bits: MNVG_CLIP_BIT marks the active
+ * clip and MNVG_CLIP_PENDING the clip being built. Fills and stencil
+ * strokes count coverage in the low six bits and never write the top two. */
+#define MNVG_CLIP_BIT 0x80
+#define MNVG_CLIP_PENDING 0x40
+#define MNVG_COUNT_MASK 0x3f
 
 struct MNVGblend {
   MTLBlendFactor srcRGB;
@@ -94,6 +102,8 @@ struct MNVGcall {
   int uniformOffset;
   MNVGblend blendFunc;
   int fillRule;
+  int clip;    // the active clip applies (draws); a clip was active (MNVG_CLIP)
+  int clipOp;  // NVGclipOp, MNVG_CLIP only
 };
 typedef struct MNVGcall MNVGcall;
 
@@ -161,6 +171,8 @@ typedef struct MNVGfragUniforms MNVGfragUniforms;
 @property (nonatomic, assign) vector_uint2 viewPortSize;
 @property (nonatomic, assign) MTLClearColor clearColor;
 @property (nonatomic, assign) BOOL clearBufferOnFlush;
+@property (nonatomic, assign) vector_float2 viewSize;
+@property (nonatomic, assign) BOOL clipActive;
 
 // Textures
 @property (nonatomic, strong) NSMutableArray<MNVGtexture*>* textures;
@@ -184,6 +196,18 @@ typedef struct MNVGfragUniforms MNVGfragUniforms;
 @property (nonatomic, strong) id<MTLDepthStencilState>
     strokeAntiAliasStencilState;
 @property (nonatomic, strong) id<MTLDepthStencilState> strokeClearStencilState;
+// Clip variants of the states above (reference MNVG_CLIP_BIT), and the
+// states that build and clear the clip.
+@property (nonatomic, strong) id<MTLDepthStencilState> clipTestStencilState;
+@property (nonatomic, strong) id<MTLDepthStencilState> fillAntiAliasClipStencilState;
+@property (nonatomic, strong) id<MTLDepthStencilState> fillClipStencilState;
+@property (nonatomic, strong) id<MTLDepthStencilState> strokeShapeClipStencilState;
+@property (nonatomic, strong) id<MTLDepthStencilState> strokeAntiAliasClipStencilState;
+@property (nonatomic, strong) id<MTLDepthStencilState> clipAddStencilState;
+@property (nonatomic, strong) id<MTLDepthStencilState> clipEndStencilState;
+@property (nonatomic, strong) id<MTLDepthStencilState> clipEndActiveStencilState;
+@property (nonatomic, strong) id<MTLDepthStencilState> clipClearPendingStencilState;
+@property (nonatomic, strong) id<MTLDepthStencilState> clipResetStencilState;
 @property (nonatomic, strong) id<MTLFunction> fragmentFunction;
 @property (nonatomic, strong) id<MTLFunction> vertexFunction;
 @property MTLPixelFormat piplelinePixelFormat;
@@ -195,6 +219,8 @@ typedef struct MNVGfragUniforms MNVGfragUniforms;
 @property (nonatomic, strong) MTLVertexDescriptor* vertexDescriptor;
 
 - (MNVGtexture*)allocTexture;
+
+- (void)clip:(MNVGcall*)call;
 
 - (void)convexFill:(MNVGcall*)call;
 
@@ -226,6 +252,12 @@ typedef struct MNVGfragUniforms MNVGfragUniforms;
                    fillRule:(int)fillRule;
 
 - (void)renderFlush;
+
+- (void)renderClipWithOp:(int)op
+                  bounds:(const float*)bounds
+                   paths:(const NVGpath*)paths
+                  npaths:(int)npaths
+                fillRule:(int)fillRule;
 
 - (int)renderGetTextureSizeForImage:(int)image
                               width:(int*)width
@@ -301,6 +333,26 @@ static BOOL mtlnvg_convertBlendFuncFactor(int factor, MTLBlendFactor* result) {
 
 static int mtlnvg__maxi(int a, int b) { return a > b ? a : b; }
 
+// A stencil state for one test. `fail` covers stencil and depth failure.
+// Front faces only unless `both`, like the cover states built inline.
+static id<MTLDepthStencilState> mtlnvg__stencilState(
+    id<MTLDevice> device, MTLCompareFunction func, uint32_t readMask,
+    uint32_t writeMask, MTLStencilOperation fail, MTLStencilOperation pass,
+    BOOL both) {
+  MTLStencilDescriptor* stencil = [MTLStencilDescriptor new];
+  stencil.stencilCompareFunction = func;
+  stencil.readMask = readMask;
+  stencil.writeMask = writeMask;
+  stencil.stencilFailureOperation = fail;
+  stencil.depthFailureOperation = fail;
+  stencil.depthStencilPassOperation = pass;
+  MTLDepthStencilDescriptor* descriptor = [MTLDepthStencilDescriptor new];
+  descriptor.depthCompareFunction = MTLCompareFunctionAlways;
+  descriptor.frontFaceStencil = stencil;
+  descriptor.backFaceStencil = both ? stencil : nil;
+  return [device newDepthStencilStateWithDescriptor:descriptor];
+}
+
 static int mtlnvg__maxVertCount(const NVGpath* paths, int npaths,
                                 int* indexCount, int* strokeCount) {
   int count = 0;
@@ -375,6 +427,17 @@ static void mtlnvg__renderFill(void* uptr, NVGpaint* paint,
                      paths:paths
                     npaths:npaths
                   fillRule:fillRule];
+}
+
+static void mtlnvg__renderClip(void* uptr, int op, const float* bounds,
+                               const NVGpath* paths, int npaths,
+                               int fillRule) {
+  MNVGcontext* mtl = (__bridge MNVGcontext*)uptr;
+  [mtl renderClipWithOp:op
+                 bounds:bounds
+                  paths:paths
+                 npaths:npaths
+               fillRule:fillRule];
 }
 
 static void mtlnvg__renderFlush(void* uptr) {
@@ -464,6 +527,7 @@ NVGcontext* nvgCreateMTL(void* metalLayer, void *commandQueue, int flags) {
   params.renderFill = mtlnvg__renderFill;
   params.renderStroke = mtlnvg__renderStroke;
   params.renderTriangles = mtlnvg__renderTriangles;
+  params.renderClip = mtlnvg__renderClip;
   params.renderDelete = mtlnvg__renderDelete;
   params.userPtr = (__bridge_retained void*)mtl;
   params.edgeAntiAlias = flags & NVG_ANTIALIAS ? 1 : 0;
@@ -762,7 +826,16 @@ void mnvgReadPixels(NVGcontext* ctx, int image, int x, int y, int width,
   frag->strokeMult = (width * 0.5f + fringe * 0.5f) / fringe;
   frag->strokeThr = strokeThr;
 
-  if (paint->image != 0) {
+  if (paint->ramp != NVG_RAMP_NONE) {
+    /* The precompiled shaders have no ramp lookup: fill flat with the
+     * fallback color, a gradient whose two ends are the same. */
+    frag->type = MNVG_SHADER_FILLGRAD;
+    frag->outerCol = frag->innerCol;
+    frag->extent = (vector_float2){1.0f, 1.0f};
+    frag->radius = 0.0f;
+    frag->feather = 1.0f;
+    nvgTransformInverse(invxform, paint->xform);
+  } else if (paint->image != 0) {
     tex = [self findTexture:paint->image];
     if (tex == nil) return 0;
     if (tex->flags & NVG_IMAGE_FLIPY) {
@@ -795,10 +868,73 @@ void mnvgReadPixels(NVGcontext* ctx, int image, int x, int y, int width,
   return 1;
 }
 
+// Draws that do not use the stencil themselves test the clip bit, if any.
+- (void)beginClipTest:(MNVGcall*)call {
+  if (!call->clip) return;
+  [_renderEncoder setDepthStencilState:_clipTestStencilState];
+  [_renderEncoder setStencilReferenceValue:MNVG_CLIP_BIT];
+}
+
+- (void)endClipTest:(MNVGcall*)call {
+  if (!call->clip) return;
+  [_renderEncoder setDepthStencilState:_defaultStencilState];
+  [_renderEncoder setStencilReferenceValue:0];
+}
+
+- (void)clip:(MNVGcall*)call {
+  const int kIndexBufferOffset = call->indexOffset * _indexSize;
+  [_renderEncoder setRenderPipelineState:_stencilOnlyPipelineState];
+  [_renderEncoder setCullMode:MTLCullModeNone];
+  if (call->clipOp == NVG_CLIP_ADD) {
+    // Counts coverage in the low bits, as -fill: does.
+    if (call->fillRule == NVG_FILLRULE_EVENODD)
+      [_renderEncoder setDepthStencilState:_fillEvenOddStencilState];
+    else
+      [_renderEncoder setDepthStencilState:_fillShapeStencilState];
+    if (call->indexCount > 0) {
+      [_renderEncoder drawIndexedPrimitives:MTLPrimitiveTypeTriangle
+                                 indexCount:call->indexCount
+                                  indexType:MTLIndexTypeUInt32
+                                indexBuffer:_buffers->indexBuffer
+                          indexBufferOffset:kIndexBufferOffset];
+    }
+    // Covered pixels join the pending clip; the count goes back to zero.
+    [_renderEncoder setDepthStencilState:_clipAddStencilState];
+    [_renderEncoder setStencilReferenceValue:MNVG_CLIP_PENDING];
+    [_renderEncoder drawPrimitives:MTLPrimitiveTypeTriangleStrip
+                       vertexStart:call->triangleOffset
+                       vertexCount:call->triangleCount];
+  } else if (call->clipOp == NVG_CLIP_END) {
+    // The quad covers the view. The clip bit becomes the pending bit, ANDed
+    // with the clip bit when a clip was already active; then the pending
+    // bit is cleared.
+    [_renderEncoder setDepthStencilState:(call->clip ? _clipEndActiveStencilState
+                                                     : _clipEndStencilState)];
+    [_renderEncoder setStencilReferenceValue:(MNVG_CLIP_BIT | MNVG_CLIP_PENDING)];
+    [_renderEncoder drawPrimitives:MTLPrimitiveTypeTriangleStrip
+                       vertexStart:call->triangleOffset
+                       vertexCount:call->triangleCount];
+    [_renderEncoder setDepthStencilState:_clipClearPendingStencilState];
+    [_renderEncoder drawPrimitives:MTLPrimitiveTypeTriangleStrip
+                       vertexStart:call->triangleOffset
+                       vertexCount:call->triangleCount];
+  } else {
+    [_renderEncoder setDepthStencilState:_clipResetStencilState];
+    [_renderEncoder drawPrimitives:MTLPrimitiveTypeTriangleStrip
+                       vertexStart:call->triangleOffset
+                       vertexCount:call->triangleCount];
+  }
+  [_renderEncoder setCullMode:MTLCullModeBack];
+  [_renderEncoder setDepthStencilState:_defaultStencilState];
+  [_renderEncoder setStencilReferenceValue:0];
+  [_renderEncoder setRenderPipelineState:_pipelineState];
+}
+
 - (void)convexFill:(MNVGcall*)call {
   const int kIndexBufferOffset = call->indexOffset * _indexSize;
   [self setUniforms:call->uniformOffset image:call->image];
   [_renderEncoder setRenderPipelineState:_pipelineState];
+  [self beginClipTest:call];
   if (call->indexCount > 0) {
     [_renderEncoder drawIndexedPrimitives:MTLPrimitiveTypeTriangle
                                indexCount:call->indexCount
@@ -813,6 +949,7 @@ void mnvgReadPixels(NVGcontext* ctx, int image, int x, int y, int width,
                        vertexStart:call->strokeOffset
                        vertexCount:call->strokeCount];
   }
+  [self endClipTest:call];
 }
 
 -(void)fill:(MNVGcall*)call {
@@ -839,19 +976,24 @@ void mnvgReadPixels(NVGcontext* ctx, int image, int x, int y, int width,
 
   // Draws anti-aliased fragments.
   [self setUniforms:call->uniformOffset image:call->image];
+  if (call->clip)
+    [_renderEncoder setStencilReferenceValue:MNVG_CLIP_BIT];
   if (_flags & NVG_ANTIALIAS && call->strokeCount > 0) {
-    [_renderEncoder setDepthStencilState:_fillAntiAliasStencilState];
+    [_renderEncoder setDepthStencilState:(call->clip ? _fillAntiAliasClipStencilState
+                                                     : _fillAntiAliasStencilState)];
     [_renderEncoder drawPrimitives:MTLPrimitiveTypeTriangleStrip
                        vertexStart:call->strokeOffset
                        vertexCount:call->strokeCount];
   }
 
   // Draws fill.
-  [_renderEncoder setDepthStencilState:_fillStencilState];
+  [_renderEncoder setDepthStencilState:(call->clip ? _fillClipStencilState
+                                                   : _fillStencilState)];
   [_renderEncoder drawPrimitives:MTLPrimitiveTypeTriangleStrip
                      vertexStart:call->triangleOffset
                      vertexCount:call->triangleCount];
   [_renderEncoder setDepthStencilState:_defaultStencilState];
+  [_renderEncoder setStencilReferenceValue:0];
 }
 
 - (MNVGtexture*)findTexture:(int)id {
@@ -867,6 +1009,7 @@ void mnvgReadPixels(NVGcontext* ctx, int image, int x, int y, int width,
 }
 
 - (void)renderCancel {
+  _clipActive = NO;
   _buffers->image = 0;
   _buffers->isBusy = NO;
   _buffers->nindexes = 0;
@@ -1070,11 +1213,15 @@ void mnvgReadPixels(NVGcontext* ctx, int image, int x, int y, int width,
   frontFaceStencilDescriptor.stencilCompareFunction = MTLCompareFunctionAlways;
   frontFaceStencilDescriptor.depthStencilPassOperation = \
       MTLStencilOperationIncrementWrap;
+  // Counts stay in the low bits; the clip bits are never written here.
+  frontFaceStencilDescriptor.readMask = MNVG_COUNT_MASK;
+  frontFaceStencilDescriptor.writeMask = MNVG_COUNT_MASK;
 
   MTLStencilDescriptor* backFaceStencilDescriptor = [MTLStencilDescriptor new];
   backFaceStencilDescriptor.stencilCompareFunction = MTLCompareFunctionAlways;
   backFaceStencilDescriptor.depthStencilPassOperation = \
       MTLStencilOperationDecrementWrap;
+  backFaceStencilDescriptor.writeMask = MNVG_COUNT_MASK;
 
   stencilDescriptor.depthCompareFunction = MTLCompareFunctionAlways;
   stencilDescriptor.backFaceStencil = backFaceStencilDescriptor;
@@ -1086,9 +1233,11 @@ void mnvgReadPixels(NVGcontext* ctx, int image, int x, int y, int width,
   MTLStencilDescriptor* evenFront = [MTLStencilDescriptor new];
   evenFront.stencilCompareFunction = MTLCompareFunctionAlways;
   evenFront.depthStencilPassOperation = MTLStencilOperationInvert;
+  evenFront.writeMask = MNVG_COUNT_MASK;
   MTLStencilDescriptor* evenBack = [MTLStencilDescriptor new];
   evenBack.stencilCompareFunction = MTLCompareFunctionAlways;
   evenBack.depthStencilPassOperation = MTLStencilOperationInvert;
+  evenBack.writeMask = MNVG_COUNT_MASK;
   MTLDepthStencilDescriptor* evenDescriptor = [MTLDepthStencilDescriptor new];
   evenDescriptor.depthCompareFunction = MTLCompareFunctionAlways;
   evenDescriptor.frontFaceStencil = evenFront;
@@ -1153,6 +1302,47 @@ void mnvgReadPixels(NVGcontext* ctx, int image, int x, int y, int width,
   stencilDescriptor.frontFaceStencil = frontFaceStencilDescriptor;
   _strokeClearStencilState = [device
       newDepthStencilStateWithDescriptor:stencilDescriptor];
+
+  // Clipped variants: the reference is MNVG_CLIP_BIT, and the read mask
+  // adds that bit to the count so a test also needs the pixel in the clip.
+  const uint32_t kClipRead = MNVG_CLIP_BIT | MNVG_COUNT_MASK;
+  _fillAntiAliasClipStencilState = mtlnvg__stencilState(device,
+      MTLCompareFunctionEqual, kClipRead, MNVG_COUNT_MASK,
+      MTLStencilOperationKeep, MTLStencilOperationZero, NO);
+  // CLIP_BIT < (stencil & read): in the clip, with a nonzero count.
+  _fillClipStencilState = mtlnvg__stencilState(device,
+      MTLCompareFunctionLess, kClipRead, MNVG_COUNT_MASK,
+      MTLStencilOperationZero, MTLStencilOperationZero, NO);
+  _strokeShapeClipStencilState = mtlnvg__stencilState(device,
+      MTLCompareFunctionEqual, kClipRead, MNVG_COUNT_MASK,
+      MTLStencilOperationKeep, MTLStencilOperationIncrementClamp, NO);
+  _strokeAntiAliasClipStencilState = mtlnvg__stencilState(device,
+      MTLCompareFunctionEqual, kClipRead, MNVG_COUNT_MASK,
+      MTLStencilOperationKeep, MTLStencilOperationKeep, NO);
+  _clipTestStencilState = mtlnvg__stencilState(device,
+      MTLCompareFunctionEqual, MNVG_CLIP_BIT, 0,
+      MTLStencilOperationKeep, MTLStencilOperationKeep, YES);
+
+  // Clip building. Add: a nonzero count sets the pending bit (the
+  // reference) and zeroes the count.
+  _clipAddStencilState = mtlnvg__stencilState(device,
+      MTLCompareFunctionNotEqual, MNVG_COUNT_MASK,
+      MNVG_CLIP_PENDING | MNVG_COUNT_MASK,
+      MTLStencilOperationKeep, MTLStencilOperationReplace, YES);
+  // End: the clip bit becomes the pending bit (ANDed with the clip bit
+  // when one is active). The reference is both bits.
+  _clipEndStencilState = mtlnvg__stencilState(device,
+      MTLCompareFunctionEqual, MNVG_CLIP_PENDING, MNVG_CLIP_BIT,
+      MTLStencilOperationZero, MTLStencilOperationReplace, YES);
+  _clipEndActiveStencilState = mtlnvg__stencilState(device,
+      MTLCompareFunctionEqual, MNVG_CLIP_BIT | MNVG_CLIP_PENDING, MNVG_CLIP_BIT,
+      MTLStencilOperationZero, MTLStencilOperationReplace, YES);
+  _clipClearPendingStencilState = mtlnvg__stencilState(device,
+      MTLCompareFunctionAlways, 0xff, MNVG_CLIP_PENDING,
+      MTLStencilOperationZero, MTLStencilOperationZero, YES);
+  _clipResetStencilState = mtlnvg__stencilState(device,
+      MTLCompareFunctionAlways, 0xff, MNVG_CLIP_BIT | MNVG_CLIP_PENDING,
+      MTLStencilOperationZero, MTLStencilOperationZero, YES);
 
   return 1;
 }
@@ -1266,6 +1456,16 @@ void mnvgReadPixels(NVGcontext* ctx, int image, int x, int y, int width,
   _strokeShapeStencilState = nil;
   _strokeAntiAliasStencilState = nil;
   _strokeClearStencilState = nil;
+  _clipTestStencilState = nil;
+  _fillAntiAliasClipStencilState = nil;
+  _fillClipStencilState = nil;
+  _strokeShapeClipStencilState = nil;
+  _strokeAntiAliasClipStencilState = nil;
+  _clipAddStencilState = nil;
+  _clipEndStencilState = nil;
+  _clipEndActiveStencilState = nil;
+  _clipClearPendingStencilState = nil;
+  _clipResetStencilState = nil;
   _fragmentFunction = nil;
   _vertexFunction = nil;
   _pipelineState = nil;
@@ -1307,6 +1507,7 @@ void mnvgReadPixels(NVGcontext* ctx, int image, int x, int y, int width,
   if (call == NULL) return;
 
   call->type = MNVG_FILL;
+  call->clip = _clipActive;
   call->triangleCount = 4;
   call->image = paint->image;
   call->blendFunc = [self blendCompositeOperation:compositeOperation];
@@ -1388,7 +1589,86 @@ error:
   if (_buffers->ncalls > 0) _buffers->ncalls--;
 }
 
+- (void)renderClipWithOp:(int)op
+                  bounds:(const float*)bounds
+                   paths:(const NVGpath*)paths
+                  npaths:(int)npaths
+                fillRule:(int)fillRule {
+  if (op == NVG_CLIP_ADD && (npaths <= 0 || bounds == NULL)) return;
+  MNVGcall* call = [self allocCall];
+  if (call == NULL) return;
+
+  call->type = MNVG_CLIP;
+  call->clipOp = op;
+  call->clip = _clipActive;
+  call->fillRule = fillRule;
+  call->blendFunc.srcRGB = MTLBlendFactorOne;
+  call->blendFunc.dstRGB = MTLBlendFactorOneMinusSourceAlpha;
+  call->blendFunc.srcAlpha = MTLBlendFactorOne;
+  call->blendFunc.dstAlpha = MTLBlendFactorOneMinusSourceAlpha;
+
+  int indexCount = 0;
+  int maxverts = 4;
+  if (op == NVG_CLIP_ADD)
+    maxverts += mtlnvg__maxVertCount(paths, npaths, &indexCount, NULL);
+  int vertOffset = [self allocVerts:maxverts];
+  if (vertOffset == -1) goto error;
+
+  if (op == NVG_CLIP_ADD) {
+    // Only fill vertices: a clip path is expanded without a fringe.
+    int indexOffset = [self allocIndexes:indexCount];
+    if (indexOffset == -1) goto error;
+    call->indexOffset = indexOffset;
+    call->indexCount = indexCount;
+    uint32_t* index = &_buffers->indexes[indexOffset];
+    NVGpath* path = (NVGpath*)&paths[0];
+    for (int i = npaths; i--; ++path) {
+      if (path->nfill > 2) {
+        memcpy(&_buffers->verts[vertOffset], path->fill,
+               sizeof(NVGvertex) * path->nfill);
+        int hubVertOffset = vertOffset++;
+        for (int j = 2; j < path->nfill; j++) {
+          *index++ = hubVertOffset;
+          *index++ = vertOffset++;
+          *index++ = vertOffset;
+        }
+        vertOffset++;
+      }
+    }
+  }
+
+  // The path's bounds for ADD; the whole view, with a margin, otherwise.
+  call->triangleOffset = vertOffset;
+  call->triangleCount = 4;
+  NVGvertex* quad = &_buffers->verts[vertOffset];
+  if (op == NVG_CLIP_ADD) {
+    mtlnvg__vset(&quad[0], bounds[2], bounds[3], 0.5f, 1.0f);
+    mtlnvg__vset(&quad[1], bounds[2], bounds[1], 0.5f, 1.0f);
+    mtlnvg__vset(&quad[2], bounds[0], bounds[3], 0.5f, 1.0f);
+    mtlnvg__vset(&quad[3], bounds[0], bounds[1], 0.5f, 1.0f);
+  } else {
+    const float w = _viewSize.x + 1.0f, h = _viewSize.y + 1.0f;
+    mtlnvg__vset(&quad[0], w, h, 0.5f, 1.0f);
+    mtlnvg__vset(&quad[1], w, -1.0f, 0.5f, 1.0f);
+    mtlnvg__vset(&quad[2], -1.0f, h, 0.5f, 1.0f);
+    mtlnvg__vset(&quad[3], -1.0f, -1.0f, 0.5f, 1.0f);
+  }
+
+  if (op == NVG_CLIP_END)
+    _clipActive = YES;
+  else if (op == NVG_CLIP_RESET)
+    _clipActive = NO;
+  return;
+
+error:
+  if (_buffers->ncalls > 0) _buffers->ncalls--;
+}
+
 - (void)renderFlush {
+  // Calls are recorded. The stencil is cleared when the pass loads, so a
+  // clip left active only needs its flag reset.
+  _clipActive = NO;
+
   // Cancelled if the drawable is invisible.
   if (_viewPortSize.x == 0 || _viewPortSize.y == 0) {
     [self renderCancel];
@@ -1446,6 +1726,8 @@ error:
       [self stroke:call];
     else if (call->type == MNVG_TRIANGLES)
       [self triangles:call];
+    else if (call->type == MNVG_CLIP)
+      [self clip:call];
   }
 
   [_renderEncoder endEncoding];
@@ -1489,6 +1771,7 @@ error:
   if (call == NULL) return;
 
   call->type = MNVG_STROKE;
+  call->clip = _clipActive;
   call->image = paint->image;
   call->blendFunc = [self blendCompositeOperation:compositeOperation];
 
@@ -1563,6 +1846,7 @@ error:
   if (call == NULL) return;
 
   call->type = MNVG_TRIANGLES;
+  call->clip = _clipActive;
   call->image = paint->image;
   call->blendFunc = [self blendCompositeOperation:compositeOperation];
 
@@ -1646,6 +1930,7 @@ error:
   float* viewSize = (float*)[_buffers->viewSizeBuffer contents];
   viewSize[0] = width;
   viewSize[1] = height;
+  _viewSize = (vector_float2){width, height};
 }
 
 - (void)setUniforms:(int)uniformOffset image:(int)image {
@@ -1667,9 +1952,12 @@ error:
   }
 
   if (_flags & NVG_STENCIL_STROKES) {
+    if (call->clip)
+      [_renderEncoder setStencilReferenceValue:MNVG_CLIP_BIT];
     // Fills the stroke base without overlap.
     [self setUniforms:(call->uniformOffset + _fragSize) image:call->image];
-    [_renderEncoder setDepthStencilState:_strokeShapeStencilState];
+    [_renderEncoder setDepthStencilState:(call->clip ? _strokeShapeClipStencilState
+                                                     : _strokeShapeStencilState)];
     [_renderEncoder setRenderPipelineState:_pipelineState];
     [_renderEncoder drawPrimitives:MTLPrimitiveTypeTriangleStrip
                        vertexStart:call->strokeOffset
@@ -1677,7 +1965,8 @@ error:
 
     // Draws anti-aliased fragments.
     [self setUniforms:call->uniformOffset image:call->image];
-    [_renderEncoder setDepthStencilState:_strokeAntiAliasStencilState];
+    [_renderEncoder setDepthStencilState:(call->clip ? _strokeAntiAliasClipStencilState
+                                                     : _strokeAntiAliasStencilState)];
     [_renderEncoder drawPrimitives:MTLPrimitiveTypeTriangleStrip
                        vertexStart:call->strokeOffset
                        vertexCount:call->strokeCount];
@@ -1689,22 +1978,27 @@ error:
                        vertexStart:call->strokeOffset
                        vertexCount:call->strokeCount];
     [_renderEncoder setDepthStencilState:_defaultStencilState];
+    [_renderEncoder setStencilReferenceValue:0];
   } else {
     // Draws strokes.
     [self setUniforms:call->uniformOffset image:call->image];
     [_renderEncoder setRenderPipelineState:_pipelineState];
+    [self beginClipTest:call];
     [_renderEncoder drawPrimitives:MTLPrimitiveTypeTriangleStrip
                        vertexStart:call->strokeOffset
                        vertexCount:call->strokeCount];
+    [self endClipTest:call];
   }
 }
 
 - (void)triangles:(MNVGcall*)call {
   [self setUniforms:call->uniformOffset image:call->image];
   [_renderEncoder setRenderPipelineState:_pipelineState];
+  [self beginClipTest:call];
   [_renderEncoder drawPrimitives:MTLPrimitiveTypeTriangle
                      vertexStart:call->triangleOffset
                      vertexCount:call->triangleCount];
+  [self endClipTest:call];
 }
 
 - (void)updateRenderPipelineStatesForBlend:(MNVGblend*)blend
