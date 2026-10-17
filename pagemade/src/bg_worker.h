@@ -13,11 +13,13 @@
 #pragma once
 
 #include <condition_variable>
+#include <cstdio>
 #include <deque>
 #include <functional>
 #include <memory>
 #include <mutex>
 #include <string>
+#include <system_error>
 #include <thread>
 #include <utility>
 
@@ -42,8 +44,15 @@ public:
                 }
         m_state->queue.emplace_back(key, std::move(job));
         if (!m_state->running) {
-            m_state->running = true;
-            std::thread(run, m_state).detach();
+            try {
+                std::thread t(run, m_state);
+                t.detach();
+                m_state->running = true;   // only once the thread exists
+            } catch (const std::system_error &) {
+                /* Out of threads: the job stays queued and the next post()
+                 * tries to spawn the worker again. */
+                return;
+            }
         }
         m_state->cv.notify_one();
     }
@@ -87,7 +96,13 @@ private:
             std::function<void()> job = std::move(state->queue.front().second);
             state->queue.pop_front();
             lock.unlock();
-            job();
+            try {
+                job();
+            } catch (...) {
+                /* A failed job must not take the process down with it:
+                 * an exception escaping a thread is std::terminate. */
+                std::fprintf(stderr, "pagemade: a background job threw and was dropped\n");
+            }
             job = nullptr;               // captured state goes before the lock
             lock.lock();
         }

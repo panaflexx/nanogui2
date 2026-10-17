@@ -77,6 +77,9 @@ public:
     ~ComposerView() override;
 
     void set_document(pagemade::PageDoc doc);
+    /* Drop every composition (they hold raw Font pointers). Call before
+     * FontLibrary::clear_document_fonts(), which may free those fonts. */
+    void invalidate_compositions() { m_comp.clear(); }
     /* Edit freely, then call recompose(). */
     pagemade::PageDoc &document() { return m_doc; }
     void recompose();

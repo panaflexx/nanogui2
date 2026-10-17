@@ -20,6 +20,7 @@
 #endif
 
 #include <algorithm>
+#include <atomic>
 #include <cctype>
 #include <cmath>
 #include <cstdio>
@@ -824,7 +825,7 @@ void oriented_uv(int orient, float u, float v, float &ox, float &oy) {
     }
 }
 
-uint64_t g_store_gen = 0;
+std::atomic<uint64_t> g_store_gen{0};
 
 bool read_file_bytes(const std::string &path, std::vector<uint8_t> *out, std::string *error) {
     FILE *f = std::fopen(path.c_str(), "rb");

@@ -55,7 +55,9 @@ struct PlacedGlyph {
     uint8_t  flags = 0;
 };
 
-/* Consecutive glyphs on one line that share font, size and color. */
+/* Consecutive glyphs on one line that share font, size and color.
+ * `font` is borrowed from the FontLibrary that shaped the run: the library
+ * must outlive the run (beware clear_document_fonts()). */
 struct GlyphRun {
     const Font *font = nullptr;
     float size = 12.f;

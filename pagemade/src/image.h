@@ -246,13 +246,16 @@ public:
     bool is_loaded(uint32_t id) const;
     std::string path_of(uint32_t id) const;
     /* The current display view without decoding (it may be smaller than
-     * wanted, or missing while not loaded). */
+     * wanted, or missing while not loaded). The returned pointer is borrowed:
+     * install(), set_proxy() and unload() invalidate it, so use it only on
+     * the thread that edits the store. */
     bool cached_display(uint32_t id, const uint8_t **rgba, int *w, int *h) const;
 
     /* The display view. `long_edge` is how many pixels the composer wants
      * on the long side (a power of two is the usual request). The proxy is
      * rebuilt only when a larger one is asked for, and never past the
-     * upright source. */
+     * upright source. The returned pointer is borrowed: install(),
+     * set_proxy() and unload() invalidate it. */
     bool display(uint32_t id, int long_edge, const uint8_t **rgba, int *w, int *h);
 
 private:

@@ -744,7 +744,10 @@ const DictValue *field(const DictValue *o, const char *k) {
 size_t count(const DictValue *a) {
     return a && a->type == DICT_ARRAY ? a->array_value.length : 0;
 }
-const DictValue *at(const DictValue *a, size_t i) { return a->array_value.items[i]; }
+const DictValue *at(const DictValue *a, size_t i) {
+    return a && a->type == DICT_ARRAY && i < a->array_value.length ? a->array_value.items[i]
+                                                                   : nullptr;
+}
 
 bool number(const DictValue *v, double &out) {
     if (v && v->type == DICT_NUMBER) { out = v->number_value; return true; }
@@ -1068,13 +1071,23 @@ void repair(PageDoc &d, std::vector<std::string> &warnings) {
     d.next_asset = std::max(d.next_asset, max_asset + 1);
 }
 
+/* Refuse absurd entries (a zip bomb claims gigabytes of plain data). */
+constexpr size_t kMaxEntry = 512u * 1024u * 1024u;
+
 std::vector<char> extract(mz_zip_archive &zip, const std::string &entry, bool *found) {
+    if (found)
+        *found = false;
+    mz_zip_archive_file_stat st;
+    const int index = mz_zip_reader_locate_file(&zip, entry.c_str(), nullptr, 0);
+    if (index < 0 || !mz_zip_reader_file_stat(&zip, (mz_uint) index, &st) ||
+        st.m_uncomp_size > kMaxEntry)
+        return {};
     size_t n = 0;
     void *p = mz_zip_reader_extract_file_to_heap(&zip, entry.c_str(), &n, 0);
-    if (found)
-        *found = p != nullptr;
     std::vector<char> out;
     if (p) {
+        if (found)
+            *found = true;
         out.assign((const char *) p, (const char *) p + n);
         mz_free(p);
     }

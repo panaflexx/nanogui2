@@ -990,6 +990,7 @@ public:
     void new_document() {
         close_document_then([this] {
             ask_new_document(this, [this](const NewDocument &spec) {
+                m_view->invalidate_compositions();   // before the fonts go
                 m_fonts.clear_document_fonts();
                 m_images.clear();
                 PageDoc doc = new_publication(spec.setup, spec.pages);
@@ -1043,6 +1044,7 @@ public:
         }
         /* The old publication's embedded fonts go, this one's arrive; the
          * view recomposes with them straight away. */
+        m_view->invalidate_compositions();   // their GlyphRuns name the old fonts
         m_fonts.clear_document_fonts();
         for (const DocumentFont &f : r.fonts)
             m_fonts.add_document_font(f.family, f.style, f.font);

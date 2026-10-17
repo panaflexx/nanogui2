@@ -277,6 +277,8 @@ void set_align_ranges(Story &s, const std::vector<std::pair<TextPos, TextPos>> &
     struct Span { size_t para; uint32_t begin, end; };
     std::vector<Span> spans;
     for (std::pair<TextPos, TextPos> r : ranges) {
+        if (s.paragraphs.empty())
+            break;
         TextPos a = clamp(s, r.first), b = clamp(s, r.second);
         if (b < a)
             std::swap(a, b);
@@ -347,6 +349,8 @@ void set_align_ranges(Story &s, const std::vector<std::pair<TextPos, TextPos>> &
 }
 
 void restyle(Story &s, TextPos a, TextPos b, const std::function<void(CharStyle &)> &fn) {
+    if (s.paragraphs.empty())
+        return;
     a = clamp(s, a);
     b = clamp(s, b);
     if (b < a)
@@ -368,6 +372,8 @@ void restyle(Story &s, TextPos a, TextPos b, const std::function<void(CharStyle 
 }
 
 std::string copy_text(const Story &s, TextPos a, TextPos b) {
+    if (s.paragraphs.empty())
+        return {};
     a = clamp(s, a);
     b = clamp(s, b);
     if (b < a)
