@@ -93,6 +93,7 @@ struct MNVGcall {
   int strokeCount;
   int uniformOffset;
   MNVGblend blendFunc;
+  int fillRule;
 };
 typedef struct MNVGcall MNVGcall;
 
@@ -175,6 +176,7 @@ typedef struct MNVGfragUniforms MNVGfragUniforms;
 @property (nonatomic, assign) MNVGblend* blendFunc;
 @property (nonatomic, strong) id<MTLDepthStencilState> defaultStencilState;
 @property (nonatomic, strong) id<MTLDepthStencilState> fillShapeStencilState;
+@property (nonatomic, strong) id<MTLDepthStencilState> fillEvenOddStencilState;
 @property (nonatomic, strong) id<MTLDepthStencilState>
     fillAntiAliasStencilState;
 @property (nonatomic, strong) id<MTLDepthStencilState> fillStencilState;
@@ -220,7 +222,8 @@ typedef struct MNVGfragUniforms MNVGfragUniforms;
                      fringe:(float)fringe
                      bounds:(const float*)bounds
                       paths:(const NVGpath*)paths
-                     npaths:(int)npaths;
+                     npaths:(int)npaths
+                   fillRule:(int)fillRule;
 
 - (void)renderFlush;
 
@@ -362,7 +365,7 @@ static void mtlnvg__renderFill(void* uptr, NVGpaint* paint,
                               NVGcompositeOperationState compositeOperation,
                               NVGscissor* scissor, float fringe,
                               const float* bounds, const NVGpath* paths,
-                              int npaths) {
+                              int npaths, int fillRule) {
   MNVGcontext* mtl = (__bridge MNVGcontext*)uptr;
   [mtl renderFillWithPaint:paint
         compositeOperation:compositeOperation
@@ -370,7 +373,8 @@ static void mtlnvg__renderFill(void* uptr, NVGpaint* paint,
                     fringe:fringe
                     bounds:bounds
                      paths:paths
-                    npaths:npaths];
+                    npaths:npaths
+                  fillRule:fillRule];
 }
 
 static void mtlnvg__renderFlush(void* uptr) {
@@ -815,7 +819,11 @@ void mnvgReadPixels(NVGcontext* ctx, int image, int x, int y, int width,
   // Draws shapes.
   const int kIndexBufferOffset = call->indexOffset * _indexSize;
   [_renderEncoder setCullMode:MTLCullModeNone];
-  [_renderEncoder setDepthStencilState:_fillShapeStencilState];
+  /* Even-odd inverts both faces. The cover pass still tests nonzero. */
+  if (call->fillRule == NVG_FILLRULE_EVENODD)
+    [_renderEncoder setDepthStencilState:_fillEvenOddStencilState];
+  else
+    [_renderEncoder setDepthStencilState:_fillShapeStencilState];
   [_renderEncoder setRenderPipelineState:_stencilOnlyPipelineState];
   if (call->indexCount > 0) {
     [_renderEncoder drawIndexedPrimitives:MTLPrimitiveTypeTriangle
@@ -1074,6 +1082,20 @@ void mnvgReadPixels(NVGcontext* ctx, int image, int x, int y, int width,
   _fillShapeStencilState = [device
       newDepthStencilStateWithDescriptor:stencilDescriptor];
 
+  /* Even-odd: invert on both faces so an odd crossing stays nonzero. */
+  MTLStencilDescriptor* evenFront = [MTLStencilDescriptor new];
+  evenFront.stencilCompareFunction = MTLCompareFunctionAlways;
+  evenFront.depthStencilPassOperation = MTLStencilOperationInvert;
+  MTLStencilDescriptor* evenBack = [MTLStencilDescriptor new];
+  evenBack.stencilCompareFunction = MTLCompareFunctionAlways;
+  evenBack.depthStencilPassOperation = MTLStencilOperationInvert;
+  MTLDepthStencilDescriptor* evenDescriptor = [MTLDepthStencilDescriptor new];
+  evenDescriptor.depthCompareFunction = MTLCompareFunctionAlways;
+  evenDescriptor.frontFaceStencil = evenFront;
+  evenDescriptor.backFaceStencil = evenBack;
+  _fillEvenOddStencilState = [device
+      newDepthStencilStateWithDescriptor:evenDescriptor];
+
   // Fill anti-aliased stencil.
   frontFaceStencilDescriptor.stencilCompareFunction = MTLCompareFunctionEqual;
   frontFaceStencilDescriptor.stencilFailureOperation = MTLStencilOperationKeep;
@@ -1239,6 +1261,7 @@ void mnvgReadPixels(NVGcontext* ctx, int image, int x, int y, int width,
   _cbuffers = nil;
   _defaultStencilState = nil;
   _fillShapeStencilState = nil;
+  _fillEvenOddStencilState = nil;
   _fillAntiAliasStencilState = nil;
   _strokeShapeStencilState = nil;
   _strokeAntiAliasStencilState = nil;
@@ -1276,7 +1299,8 @@ void mnvgReadPixels(NVGcontext* ctx, int image, int x, int y, int width,
                      fringe:(float)fringe
                      bounds:(const float*)bounds
                       paths:(const NVGpath*)paths
-                     npaths:(int)npaths {
+                     npaths:(int)npaths
+                   fillRule:(int)fillRule {
   MNVGcall* call = [self allocCall];
   NVGvertex* quad;
 
@@ -1286,7 +1310,9 @@ void mnvgReadPixels(NVGcontext* ctx, int image, int x, int y, int width,
   call->triangleCount = 4;
   call->image = paint->image;
   call->blendFunc = [self blendCompositeOperation:compositeOperation];
+  call->fillRule = fillRule;
 
+  /* One convex path is filled the same under both rules. */
   if (npaths == 1 && paths[0].convex) {
     call->type = MNVG_CONVEXFILL;
     call->triangleCount = 0;  // Bounding box fill quad not needed for convex fill

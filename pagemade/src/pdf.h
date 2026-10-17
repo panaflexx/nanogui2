@@ -29,17 +29,20 @@ struct PageDoc;
 class ImageStore;
 
 struct PdfSettings;
+class VectorStore;
 
 /* `comps` holds one composition per story, in PageDoc::stories order.
  * `images` supplies picture sources; null draws a stand-in for each one.
  * `settings` (null: the document's own) choose the pages, picture
  * resolution and compression, color, PDF/X-4, bleed and crop marks, and
- * the title and author. False when the file can't be written or a font
- * fails to subset. */
+ * the title and author. `vectors` supplies placed SVG scenes; null draws
+ * those frames as nothing but still draws their borders. False when the
+ * file can't be written or a font fails to subset. */
 bool export_pdf(const std::string &path, const PageDoc &doc,
                 const std::vector<Composition> &comps,
                 const ImageStore *images = nullptr,
-                const PdfSettings *settings = nullptr);
+                const PdfSettings *settings = nullptr,
+                const VectorStore *vectors = nullptr);
 
 /* What may print badly with these settings, one sentence each: pictures
  * below the minimum resolution as placed, missing pictures, transparency,

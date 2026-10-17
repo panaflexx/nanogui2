@@ -69,6 +69,9 @@ void draw_glyph_run(NVGcontext *ctx, const GlyphRun &run, const Color &color) {
     }
     if (any) {
         nvgFillColor(ctx, nvgRGBAf(color.r, color.g, color.b, color.a));
+        /* A placed SVG may have left even-odd on the context. Glyph holes
+         * are nonzero winding, and a leftover rule would punch them out. */
+        nvgFillRule(ctx, NVG_FILLRULE_NONZERO);
         nvgFill(ctx);
     }
     std::vector<RuleSpan> rules;
@@ -125,7 +128,7 @@ void draw_stroke(NVGcontext *ctx, const DrawStroke &s, float px) {
     std::vector<Point> dots;
     bool any = false;
     nvgBeginPath(ctx);
-    for (const Polyline &d : dash(flatten(s.path, tol), s.dash)) {
+    for (const Polyline &d : dash(flatten(s.path, tol), s.dash, s.dash_offset)) {
         float len = 0;
         for (size_t i = 1; i < d.pts.size(); ++i)
             len += std::hypot(d.pts[i].x - d.pts[i - 1].x, d.pts[i].y - d.pts[i - 1].y);
@@ -145,6 +148,7 @@ void draw_stroke(NVGcontext *ctx, const DrawStroke &s, float px) {
         for (const Point &d : dots)
             nvgCircle(ctx, d.x, d.y, s.width * 0.5f);
         nvgFillColor(ctx, nvg_color(s.color));
+        nvgFillRule(ctx, NVG_FILLRULE_NONZERO);
         nvgFill(ctx);
     }
 }
@@ -192,12 +196,18 @@ void draw_list(NVGcontext *ctx, const DrawList &list, float px,
             draw_glyph_run(ctx, *g->run, g->color);
         } else if (const auto *f = std::get_if<DrawFill>(&op)) {
             apply_transform(ctx, f->xf);
+            if (f->clip_w > 0.f && f->clip_h > 0.f)
+                nvgIntersectScissor(ctx, 0, 0, f->clip_w, f->clip_h);
             nvgBeginPath(ctx);
             add_path(ctx, f->path);
             nvgFillColor(ctx, nvg_color(f->color));
+            nvgFillRule(ctx, f->rule == FillRule::EvenOdd ? NVG_FILLRULE_EVENODD
+                                                          : NVG_FILLRULE_NONZERO);
             nvgFill(ctx);
         } else if (const auto *s = std::get_if<DrawStroke>(&op)) {
             apply_transform(ctx, s->xf);
+            if (s->clip_w > 0.f && s->clip_h > 0.f)
+                nvgIntersectScissor(ctx, 0, 0, s->clip_w, s->clip_h);
             draw_stroke(ctx, *s, px);
         } else if (const auto *im = std::get_if<DrawImage>(&op)) {
             apply_transform(ctx, im->xf);

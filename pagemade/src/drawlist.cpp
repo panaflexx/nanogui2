@@ -2,6 +2,7 @@
  * pagemade/drawlist.cpp — see drawlist.h.
  */
 #include "drawlist.h"
+#include "vector.h"
 
 #include <algorithm>
 
@@ -48,7 +49,7 @@ void add_stroke(DrawList &out, const PageDoc &doc, const Path &path, const Strok
 } // namespace
 
 DrawList build_page(const PageDoc &doc, size_t page, const std::vector<Composition> &comps,
-                    const std::vector<ItemId> *which, bool only) {
+                    const std::vector<ItemId> *which, bool only, const VectorStore *vectors) {
     DrawList out;
     if (page >= doc.pages.size())
         return out;
@@ -77,6 +78,14 @@ DrawList build_page(const PageDoc &doc, size_t page, const std::vector<Compositi
             out.push_back(d);
             if (!im->stroke.none())      // the border, over the picture
                 add_stroke(out, doc, rect_path(0, 0, it.w, it.h), im->stroke, it.xf);
+            continue;
+        }
+        if (const PlacedVector *pv = it.vector()) {
+            if (vectors)
+                if (const VectorScene *scene = vectors->scene(pv->asset))
+                    append_placed_vector(out, doc, it, *scene);
+            if (!pv->stroke.none())      // the frame's border, not clipped with the graphic
+                add_stroke(out, doc, rect_path(0, 0, it.w, it.h), pv->stroke, it.xf);
             continue;
         }
         size_t ti = 0;

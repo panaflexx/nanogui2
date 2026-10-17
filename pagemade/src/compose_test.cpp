@@ -20,6 +20,7 @@
 #include "pdf.h"
 #include "docfile.h"
 #include "uri.h"
+#include "vector.h"
 #include "nanovg_exif.h"
 #include "bg_worker.h"
 #ifdef PAGEMADE_HAVE_HEIF
@@ -3910,6 +3911,319 @@ static void test_swatch_library() {
           "config path %s", config_path.c_str());
 }
 
+static std::vector<uint8_t> bytes_of(const std::string &s) {
+    return {s.begin(), s.end()};
+}
+
+static bool sniffs_svg(const std::string &xml) {
+    return vector_loader().match(reinterpret_cast<const uint8_t *>(xml.data()), xml.size()) != nullptr;
+}
+
+static bool decode_svg(const std::string &xml, VectorScene &scene, std::string &err) {
+    const std::vector<uint8_t> b = bytes_of(xml);
+    return vector_loader().decode(b.data(), b.size(), &scene, &err);
+}
+
+static bool path_at(const Path &p, PathCmd::Kind kind, float x, float y) {
+    for (const PathCmd &c : p)
+        if (c.kind == kind && near(c.x, x) && near(c.y, y))
+            return true;
+    return false;
+}
+
+static int path_kind(const Path &p, PathCmd::Kind kind) {
+    int n = 0;
+    for (const PathCmd &c : p)
+        n += c.kind == kind;
+    return n;
+}
+
+static std::string join_skipped(const std::vector<std::string> &skipped) {
+    std::string s;
+    for (const std::string &t : skipped) {
+        if (!s.empty())
+            s += ",";
+        s += t;
+    }
+    return s;
+}
+
+/* SVG place: one graphic, solids and strokes, the frame at the margin.
+ * Gradients paint their middle stop; clips and text are named and skipped. */
+static void test_svg(const FontLibrary &fonts) {
+    const std::string declared =
+        "<?xml version=\"1.0\"?>\n"
+        "<!-- saved as icon.txt -->\n"
+        "<!DOCTYPE svg PUBLIC \"-//W3C//DTD SVG 1.1//EN\" \"http://www.w3.org/Graphics/SVG/1.1/DTD/svg11.dtd\">\n"
+        "<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 1 1\"/>";
+    CHECK(sniffs_svg(declared), "an svg root sniffs; the .txt name is not consulted");
+    CHECK(sniffs_svg("\xEF\xBB\xBF<svg xmlns=\"http://www.w3.org/2000/svg\"/>"), "a BOM still sniffs");
+    CHECK(sniffs_svg("<svg:svg xmlns:svg=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 4 4\"/>"),
+          "a prefixed svg root sniffs");
+    CHECK(!sniffs_svg("<html><body><svg viewBox=\"0 0 1 1\"></svg></body></html>"),
+          "an svg later in html is not an svg file");
+    CHECK(!sniffs_svg("<SVG viewBox=\"0 0 1 1\"/>"), "the root name is case-sensitive");
+
+    std::string err;
+    VectorScene scene;
+    CHECK(decode_svg(
+              "<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 24 24\" width=\"24\" height=\"24\">"
+              "<rect width=\"24\" height=\"24\"/></svg>",
+              scene, err),
+          "24px icon: %s", err.c_str());
+    CHECK(near(scene.width, 18.f) && near(scene.height, 18.f), "24px is 18pt (%g x %g)",
+          scene.width, scene.height);
+    CHECK(scene.shapes.size() == 1 && path_at(scene.shapes[0].path, PathCmd::Move, 0, 0) &&
+              path_at(scene.shapes[0].path, PathCmd::Line, 18, 0) &&
+              path_at(scene.shapes[0].path, PathCmd::Line, 18, 18),
+          "the view box scales the rect into the 18pt box");
+
+    CHECK(decode_svg(
+              "<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 10 10\" width=\"10\" height=\"10\">"
+              "<g transform=\"translate(2,3)\">"
+              "<rect width=\"1\" height=\"1\" stroke=\"black\" stroke-width=\"2\"/>"
+              "</g></svg>",
+              scene, err),
+          "translated rect: %s", err.c_str());
+    CHECK(near(scene.width, 7.5f) && scene.shapes.size() == 1, "10px box is 7.5pt");
+    if (!scene.shapes.empty()) {
+        const VectorShape &sh = scene.shapes[0];
+        CHECK(path_at(sh.path, PathCmd::Move, 1.5f, 2.25f) &&
+                  path_at(sh.path, PathCmd::Line, 2.25f, 2.25f) &&
+                  path_at(sh.path, PathCmd::Line, 2.25f, 3.f) &&
+                  path_at(sh.path, PathCmd::Line, 1.5f, 3.f),
+              "translate then the 0.75 scale bakes the unit rect");
+        CHECK(near(sh.stroke.width, 1.5f), "stroke width scales with the view box (%g)", sh.stroke.width);
+    }
+
+    CHECK(decode_svg(
+              "<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 30 30\" width=\"30\">"
+              "<path d=\"M10 20 A10 10 0 0 1 20 20\" fill=\"none\" stroke=\"black\"/></svg>",
+              scene, err),
+          "arc: %s", err.c_str());
+    CHECK(!scene.shapes.empty() && path_kind(scene.shapes[0].path, PathCmd::Cubic) >= 1 &&
+              path_at(scene.shapes[0].path, PathCmd::Cubic, 15.f, 15.f),
+          "an arc becomes cubics in the point box");
+
+    CHECK(decode_svg(
+              "<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 10 10\" width=\"10\">"
+              "<style>rect { fill:#0000ff } .cls { fill:#ff0000 }</style>"
+              "<rect class=\"cls\" fill=\"#ffffff\" width=\"2\" height=\"2\"/>"
+              "<rect style=\"fill:#00ff00\" x=\"3\" width=\"2\" height=\"2\"/>"
+              "</svg>",
+              scene, err),
+          "styles: %s", err.c_str());
+    CHECK(scene.shapes.size() == 2, "two styled rects (%zu)", scene.shapes.size());
+    if (scene.shapes.size() == 2) {
+        check_color(scene.shapes[0].fill.color, Color{1, 0, 0, 1}, "class over presentation and element");
+        check_color(scene.shapes[1].fill.color, Color{0, 1, 0, 1}, "style attribute");
+    }
+
+    CHECK(decode_svg(
+              "<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 10 10\" width=\"10\">"
+              "<defs><linearGradient id=\"g\">"
+              "<stop offset=\"0\" stop-color=\"#000000\"/>"
+              "<stop offset=\"0.5\" stop-color=\"#123456\"/>"
+              "<stop offset=\"1\" stop-color=\"#ffffff\"/>"
+              "</linearGradient>"
+              "<clipPath id=\"c\"><rect width=\"2\" height=\"2\"/></clipPath></defs>"
+              "<rect width=\"10\" height=\"10\" fill=\"url(#g)\" clip-path=\"url(#c)\"/>"
+              "<text x=\"1\" y=\"2\">Hi</text></svg>",
+              scene, err),
+          "skipped features: %s", err.c_str());
+    CHECK(scene.shapes.size() == 1, "the clipped rect is still drawn (%zu)", scene.shapes.size());
+    if (!scene.shapes.empty()) {
+        const Color mid{18.f / 255.f, 52.f / 255.f, 86.f / 255.f, 1.f};
+        check_color(scene.shapes[0].fill.color, mid, "middle gradient stop");
+        CHECK(path_at(scene.shapes[0].path, PathCmd::Line, 7.5f, 0),
+              "the clip does not trim the rect");
+    }
+    CHECK(join_skipped(scene.skipped) == "gradients,clips,text", "skipped %s",
+          join_skipped(scene.skipped).c_str());
+    CHECK(vector_place_note("mark.svg", scene.skipped) ==
+              "placed mark.svg (gradients, clips, text skipped)",
+          "the status names what was skipped");
+
+    CHECK(decode_svg(
+              "<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 4 4\" width=\"4\">"
+              "<rect width=\"1\" height=\"1\" fill=\"url(#missing)\"/></svg>",
+              scene, err) &&
+              !scene.shapes.empty() && scene.shapes[0].fill.color.r == 0 &&
+              join_skipped(scene.skipped) == "gradients",
+          "a missing gradient paints black and is noted");
+
+    CHECK(decode_svg(
+              "<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 20 20\" width=\"20\">"
+              "<g display=\"none\"><rect width=\"20\" height=\"20\"/></g>"
+              "<path fill-rule=\"evenodd\" d=\"M0 0 H10 V10 H0 Z M2 2 H8 V8 H2 Z\"/>"
+              "<path fill-rule=\"nonzero\" d=\"M0 12 H10 V20 H0 Z M2 14 H8 V18 H2 Z\"/>"
+              "</svg>",
+              scene, err),
+          "fill rules: %s", err.c_str());
+    CHECK(scene.shapes.size() == 2, "display:none draws nothing; two paths remain (%zu)",
+          scene.shapes.size());
+    if (scene.shapes.size() == 2) {
+        CHECK(scene.shapes[0].rule == FillRule::EvenOdd && path_kind(scene.shapes[0].path, PathCmd::Move) == 2,
+              "even-odd keeps the hole subpath");
+        CHECK(scene.shapes[1].rule == FillRule::NonZero && path_kind(scene.shapes[1].path, PathCmd::Move) == 2,
+              "nonzero keeps its subpaths too");
+    }
+
+    const std::string icon =
+        "<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 24 24\" width=\"24\" height=\"24\">"
+        "<path fill-rule=\"evenodd\" d=\"M0 0 H24 V24 H0 Z M6 6 H18 V18 H6 Z\"/>"
+        "</svg>";
+    PageDoc doc;
+    VectorStore store;
+    VectorPlacement bad = place_svg_bytes(doc, store, bytes_of("<html></html>"), "no.svg", "", 0, nullptr);
+    CHECK(!bad.ok && bad.asset == 0 && store.find(1) == nullptr, "a bad file takes no id");
+    VectorPlacement placed = place_svg_bytes(doc, store, bytes_of(icon), "icon.svg", "", 0, nullptr);
+    CHECK(placed.ok, "place: %s", placed.error.c_str());
+    CHECK(placed.asset == 1 && placed.note == "placed icon.svg", "first graphic is asset 1");
+    CHECK(doc.next_asset == 1, "graphic ids do not share the picture counter");
+    const Item *it = doc.find_item(placed.item);
+    CHECK(it && it->is_vector() && it->vector() && it->vector()->asset == placed.asset, "the item is a graphic");
+    if (it) {
+        CHECK(near(it->w, 18.f) && near(it->h, 18.f) && near(it->xf.e, 54.f) && near(it->xf.f, 54.f),
+              "an 18pt graphic sits at the margin (%g,%g %g x %g)", it->xf.e, it->xf.f, it->w, it->h);
+    }
+    VectorPlacement again =
+        place_svg_bytes(doc, store, bytes_of(icon), "icon.svg", "", 0, nullptr);
+    CHECK(again.ok && again.asset == 2 && doc.vectors.size() == 2 && doc.pages[0].items.size() == 2,
+          "a second place adds another graphic");
+
+    const std::string wide =
+        "<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 400 100\" width=\"400pt\" height=\"100pt\">"
+        "<rect width=\"400\" height=\"100\"/></svg>";
+    PageDoc fitted;
+    VectorStore wide_store;
+    VectorPlacement wide_place =
+        place_svg_bytes(fitted, wide_store, bytes_of(wide), "wide.svg", "", 0, nullptr);
+    CHECK(wide_place.ok, "wide place: %s", wide_place.error.c_str());
+    if (const VectorScene *ws = wide_store.scene(wide_place.asset))
+        CHECK(near(ws->width, 400.f) && near(ws->height, 100.f), "400pt by 100pt (%g x %g)",
+              ws->width, ws->height);
+    if (const Item *w = fitted.find_item(wide_place.item))
+        CHECK(near(w->w, 243.f) && near(w->h, 60.75f) && near(w->xf.e, 54.f) && near(w->xf.f, 54.f),
+              "wider than the column becomes 243 by 60.75 at the margin");
+    Point drop{400.f, 120.f};
+    VectorPlacement dropped =
+        place_svg_bytes(fitted, wide_store, bytes_of(wide), "wide.svg", "", 0, &drop);
+    if (const Item *w = fitted.find_item(dropped.item))
+        CHECK(near(w->w, 243.f) && near(w->h, 60.75f) && near(w->xf.e, 315.f) && near(w->xf.f, 120.f),
+              "a drop in the second column fits that column (%g,%g)", w->xf.e, w->xf.f);
+
+    const std::string tall =
+        "<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 100 2000\" width=\"100pt\" height=\"2000pt\">"
+        "<rect width=\"100\" height=\"2000\"/></svg>";
+    PageDoc tall_doc;
+    VectorStore tall_store;
+    VectorPlacement tall_place =
+        place_svg_bytes(tall_doc, tall_store, bytes_of(tall), "tall.svg", "", 0, nullptr);
+    CHECK(tall_place.ok, "tall place: %s", tall_place.error.c_str());
+    if (const Item *t = tall_doc.find_item(tall_place.item))
+        CHECK(near(t->w, 34.2f) && near(t->h, 684.f) && near(t->xf.e, 158.4f) && near(t->xf.f, 54.f),
+              "taller than the live area shrinks and stays centered in the column (%g,%g %g x %g)",
+              t->xf.e, t->xf.f, t->w, t->h);
+
+    /* The draw list and the PDF see the scene. A null store draws nothing. */
+    PageDoc one;
+    VectorStore one_store;
+    VectorPlacement one_place = place_svg_bytes(one, one_store, bytes_of(icon), "icon.svg", "", 0, nullptr);
+    CHECK(build_page(one, 0, {}, nullptr, false, nullptr).empty(), "no store draws no graphic");
+    DrawList drawn = build_page(one, 0, {}, nullptr, false, &one_store);
+    const DrawFill *fill = nullptr;
+    for (const DrawOp &op : drawn)
+        if (const DrawFill *f = std::get_if<DrawFill>(&op))
+            fill = f;
+    CHECK(fill && fill->rule == FillRule::EvenOdd && near(fill->clip_w, 18.f) && near(fill->clip_h, 18.f),
+          "the frame clips and the fill is even-odd");
+    if (fill)
+        CHECK(path_at(fill->path, PathCmd::Move, 4.5f, 4.5f), "the hole is in the frame's box");
+
+    const std::string pdf_path = "/tmp/pagemade-svg.pdf";
+    std::vector<Composition> comps;
+    CHECK(export_pdf(pdf_path, one, comps, nullptr, nullptr, &one_store), "export the graphic");
+    std::string plain = pdf_plain(read_bin(pdf_path));
+    CHECK(plain.find("0 0 18 18 re W n") != std::string::npos, "the frame clips with W n");
+    CHECK(plain.find("q 1 0 0 1 54 54 cm") != std::string::npos, "the frame is at the margin");
+    CHECK(plain.find("f*\n") != std::string::npos, "even-odd fills with f*");
+
+    const std::string solid =
+        "<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 24 24\" width=\"24\">"
+        "<rect width=\"24\" height=\"24\"/></svg>";
+    PageDoc nz;
+    VectorStore nz_store;
+    CHECK(place_svg_bytes(nz, nz_store, bytes_of(solid), "solid.svg", "", 0, nullptr).ok, "nonzero place");
+    CHECK(export_pdf(pdf_path, nz, comps, nullptr, nullptr, &nz_store), "export nonzero");
+    plain = pdf_plain(read_bin(pdf_path));
+    CHECK(plain.find("f*\n") == std::string::npos && plain.find("f\n") != std::string::npos,
+          "nonzero fills with f");
+    CHECK(plain.find("0 0 18 18 re W n") != std::string::npos, "the nonzero frame clips too");
+
+    /* A paste has no source file, so the bytes are stored even when the
+     * publication otherwise links its assets. */
+    const std::string pkg = "/tmp/pagemade-svg.pagemade";
+    CHECK(save_document(one, fonts, pkg, SaveOptions{false}, &err, nullptr, &one_store),
+          "save: %s", err.c_str());
+    OpenResult opened = open_document(pkg, fonts);
+    CHECK(opened.ok, "open: %s", opened.error.c_str());
+    if (opened.ok) {
+        check_doc(one, opened.doc);
+        CHECK(opened.doc.vectors.size() == 1 && opened.doc.vectors[0].id == one_place.asset &&
+                  opened.doc.vectors[0].name == "icon.svg" && near(opened.doc.vectors[0].width, 18.f),
+              "the graphic record round-trips");
+        CHECK(opened.doc.pages[0].items.size() == 1 && opened.doc.pages[0].items[0].is_vector(),
+              "the opened item is still a graphic");
+        VectorStore::Bytes back = opened.vectors.source_of(one_place.asset);
+        CHECK(back && *back == bytes_of(icon), "the package holds the svg bytes");
+        const VectorScene *again_scene = opened.vectors.scene(one_place.asset);
+        CHECK(again_scene && again_scene->shapes.size() == 1 &&
+                  again_scene->shapes[0].rule == FillRule::EvenOdd,
+              "opening decodes the scene again");
+        const std::string json = document_json(one, fonts, SaveOptions{false}, nullptr, &one_store);
+        CHECK(json.find("\"kind\": \"vector\"") != std::string::npos &&
+                  json.find("assets/vectors/") != std::string::npos,
+              "document.json names the graphic");
+    }
+
+    const std::string link_file = "/tmp/pagemade-link.svg";
+    {
+        FILE *f = std::fopen(link_file.c_str(), "wb");
+        CHECK(f != nullptr, "write the linked svg");
+        if (f) {
+            std::fwrite(icon.data(), 1, icon.size(), f);
+            std::fclose(f);
+        }
+    }
+    PageDoc linked;
+    VectorStore link_store;
+    VectorPlacement link_place =
+        place_svg_bytes(linked, link_store, bytes_of(icon), "icon.svg", file_uri(link_file), 0, nullptr);
+    const std::string link_pkg = "/tmp/pagemade-svg-link.pagemade";
+    CHECK(link_place.ok &&
+              save_document(linked, fonts, link_pkg, SaveOptions{false}, &err, nullptr, &link_store),
+          "save the link: %s", err.c_str());
+    OpenResult from_link = open_document(link_pkg, fonts, false);
+    CHECK(from_link.ok, "open a linked graphic: %s", from_link.error.c_str());
+    if (from_link.ok) {
+        VectorStore::Bytes back = from_link.vectors.source_of(link_place.asset);
+        CHECK(back && *back == bytes_of(icon), "a linked svg is read even when pictures would wait");
+    }
+    std::remove(link_file.c_str());
+    OpenResult missing = open_document(link_pkg, fonts, false);
+    CHECK(missing.ok, "a missing linked graphic still opens");
+    bool warned = false;
+    for (const std::string &w : missing.warnings)
+        warned |= w.find("couldn't read the graphic") != std::string::npos;
+    CHECK(warned, "a missing linked graphic is reported");
+
+    std::remove(pdf_path.c_str());
+    std::remove(pkg.c_str());
+    std::remove(link_pkg.c_str());
+    std::remove(link_file.c_str());
+}
+
 static void test_system_fonts() {
     FontLibrary lib;
     register_default_fonts(lib);
@@ -3978,6 +4292,7 @@ int main(int argc, char **argv) {
     test_drawlist(fonts);
     test_docfile(fonts);
     test_images(fonts);
+    test_svg(fonts);
     test_picture_style(fonts);
     test_groups(fonts);
     test_page_markers(fonts);

@@ -177,6 +177,7 @@ struct GLNVGcall {
 	int triangleCount;
 	int uniformOffset;
 	GLNVGblend blendFunc;
+	int fillRule;
 };
 typedef struct GLNVGcall GLNVGcall;
 
@@ -1043,8 +1044,16 @@ static void glnvg__fill(GLNVGcontext* gl, GLNVGcall* call)
 	glnvg__setUniforms(gl, call->uniformOffset, 0);
 	glnvg__checkError(gl, "fill simple");
 
-	glStencilOpSeparate(GL_FRONT, GL_KEEP, GL_KEEP, GL_INCR_WRAP);
-	glStencilOpSeparate(GL_BACK, GL_KEEP, GL_KEEP, GL_DECR_WRAP);
+	/* Even-odd inverts, so an odd crossing is nonzero and the cover test
+	 * (stencil != 0) is the same one nonzero fill already uses. A single
+	 * convex path never gets here. */
+	if (call->fillRule == NVG_FILLRULE_EVENODD) {
+		glStencilOpSeparate(GL_FRONT, GL_KEEP, GL_KEEP, GL_INVERT);
+		glStencilOpSeparate(GL_BACK, GL_KEEP, GL_KEEP, GL_INVERT);
+	} else {
+		glStencilOpSeparate(GL_FRONT, GL_KEEP, GL_KEEP, GL_INCR_WRAP);
+		glStencilOpSeparate(GL_BACK, GL_KEEP, GL_KEEP, GL_DECR_WRAP);
+	}
 	glDisable(GL_CULL_FACE);
 	for (i = 0; i < npaths; i++)
 		glDrawArrays(GL_TRIANGLE_FAN, paths[i].fillOffset, paths[i].fillCount);
@@ -1374,7 +1383,7 @@ static void glnvg__vset(NVGvertex* vtx, float x, float y, float u, float v)
 }
 
 static void glnvg__renderFill(void* uptr, NVGpaint* paint, NVGcompositeOperationState compositeOperation, NVGscissor* scissor, float fringe,
-							  const float* bounds, const NVGpath* paths, int npaths)
+							  const float* bounds, const NVGpath* paths, int npaths, int fillRule)
 {
 	GLNVGcontext* gl = (GLNVGcontext*)uptr;
 	GLNVGcall* call = glnvg__allocCall(gl);
@@ -1391,7 +1400,9 @@ static void glnvg__renderFill(void* uptr, NVGpaint* paint, NVGcompositeOperation
 	call->pathCount = npaths;
 	call->image = paint->image;
 	call->blendFunc = glnvg__blendCompositeOperation(compositeOperation);
+	call->fillRule = fillRule;
 
+	/* One convex path is filled the same under both rules. */
 	if (npaths == 1 && paths[0].convex)
 	{
 		call->type = GLNVG_CONVEXFILL;

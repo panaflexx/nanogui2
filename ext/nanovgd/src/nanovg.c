@@ -114,6 +114,7 @@ struct NVGstate {
 	float fontBlur;
 	int textAlign;
 	int fontId;
+	int fillRule;			// NVGfillRule; 0 from memset is nonzero
 };
 typedef struct NVGstate NVGstate;
 
@@ -171,6 +172,7 @@ struct NVGdrawCall {
 	int pathCount;
 	int triangleOffset;
 	int triangleCount;
+	int fillRule;
 };
 typedef struct NVGdrawCall NVGdrawCall;
 
@@ -708,7 +710,7 @@ static int nvg__dlCapturePaths(NVGdrawList* list, const NVGpath* paths, int npat
 }
 
 static void nvg__dlCaptureFill(NVGdrawList* list, NVGpaint* paint, NVGcompositeOperationState compositeOperation,
-	NVGscissor* scissor, float fringe, const float* bounds, const NVGpath* paths, int npaths)
+	NVGscissor* scissor, float fringe, const float* bounds, const NVGpath* paths, int npaths, int fillRule)
 {
 	NVGdrawCall* call;
 	int pathOffset = 0;
@@ -726,6 +728,7 @@ static void nvg__dlCaptureFill(NVGdrawList* list, NVGpaint* paint, NVGcompositeO
 	call->fringe = fringe;
 	call->pathOffset = pathOffset;
 	call->pathCount = npaths;
+	call->fillRule = fillRule;
 	memcpy(call->bounds, bounds, sizeof(float) * 4);
 }
 
@@ -1053,7 +1056,8 @@ static void nvg__drawListSubmit(NVGcontext* ctx, const NVGdrawList* list, int us
 					boundsPtr = bounds;
 				}
 				ctx->params.renderFill(ctx->params.userPtr, &paint, call->compositeOperation,
-					(NVGscissor*)scissorPtr, call->fringe, boundsPtr, mutableList->pathScratch, call->pathCount);
+					(NVGscissor*)scissorPtr, call->fringe, boundsPtr, mutableList->pathScratch, call->pathCount,
+					call->fillRule);
 			} else {
 				ctx->params.renderStroke(ctx->params.userPtr, &paint, call->compositeOperation,
 					(NVGscissor*)scissorPtr, call->fringe, call->strokeWidth, mutableList->pathScratch, call->pathCount);
@@ -2897,6 +2901,12 @@ void nvgPathWinding(NVGcontext* ctx, int dir)
 	nvg__appendCommands(ctx, vals, NVG_COUNTOF(vals));
 }
 
+void nvgFillRule(NVGcontext* ctx, int rule)
+{
+	NVGstate* state = nvg__getState(ctx);
+	state->fillRule = rule == NVG_FILLRULE_EVENODD ? NVG_FILLRULE_EVENODD : NVG_FILLRULE_NONZERO;
+}
+
 void nvgArc(NVGcontext* ctx, float cx, float cy, float r, float a0, float a1, int dir)
 {
 	float a = 0, da = 0, hda = 0, kappa = 0;
@@ -3068,10 +3078,10 @@ void nvgFill(NVGcontext* ctx)
 	// Immediate mode: submit directly to the backend (original NanoVG path).
 	if (ctx->recording != NULL) {
 		nvg__dlCaptureFill(ctx->recording, &fillPaint, state->compositeOperation, &state->scissor,
-			ctx->fringeWidth, ctx->cache->bounds, ctx->cache->paths, ctx->cache->npaths);
+			ctx->fringeWidth, ctx->cache->bounds, ctx->cache->paths, ctx->cache->npaths, state->fillRule);
 	} else {
 		ctx->params.renderFill(ctx->params.userPtr, &fillPaint, state->compositeOperation, &state->scissor,
-			ctx->fringeWidth, ctx->cache->bounds, ctx->cache->paths, ctx->cache->npaths);
+			ctx->fringeWidth, ctx->cache->bounds, ctx->cache->paths, ctx->cache->npaths, state->fillRule);
 	}
 
 	// Count triangles

@@ -4,7 +4,9 @@
 #include "composerview.h"
 #include "render_nvg.h"
 #include "uri.h"
+#include "vector.h"
 
+#include <nanogui/clipboard.h>
 #include <nanogui/screen.h>
 #include <nanogui/zoomscrollpanel.h>
 #include <nanovg.h>
@@ -1182,17 +1184,24 @@ bool ComposerView::mouse_drag_event(const Vector2i &p, const Vector2i &, int, in
             bool panned = false;
             for (const Item &o : m_drag_items) {
                 Item *it = m_doc.find_item(o.id);
-                if (!it || !o.image() || !it->image())
+                if (!it || !(o.image() || o.vector()))
                     continue;
                 Point dl = o.xf.inverse().apply_vector(d);
                 if (shift) {
                     if (std::fabs(dl.x) >= std::fabs(dl.y)) dl.y = 0;
                     else dl.x = 0;
                 }
-                PlacedImage im = *o.image();
-                im.x += dl.x;
-                im.y += dl.y;
-                it->content = im;
+                if (o.image()) {
+                    PlacedImage im = *o.image();
+                    im.x += dl.x;
+                    im.y += dl.y;
+                    it->content = im;
+                } else {
+                    PlacedVector v = *o.vector();
+                    v.x += dl.x;
+                    v.y += dl.y;
+                    it->content = v;
+                }
                 panned = true;
             }
             if (panned) {
@@ -1242,7 +1251,7 @@ bool ComposerView::mouse_drag_event(const Vector2i &p, const Vector2i &, int, in
         /* A picture's corners keep its proportions, by whichever side moved
          * further, about the opposite corner; Ctrl resizes freely. */
         const bool corner = m_drag != Handle::Windowshade;
-        if (o.image() && m_tool == Tool::Pointer && corner && o.w > 0 && o.h > 0 &&
+        if ((o.image() || o.vector()) && m_tool == Tool::Pointer && corner && o.w > 0 && o.h > 0 &&
             !key_held(modifiers, GLFW_MOD_CONTROL, GLFW_KEY_LEFT_CONTROL, GLFW_KEY_RIGHT_CONTROL)) {
             const float s = std::max({(x1 - x0) / o.w, (y1 - y0) / o.h,
                                       kMinBlock / std::min(o.w, o.h)});
@@ -1263,6 +1272,12 @@ bool ComposerView::mouse_drag_event(const Vector2i &p, const Vector2i &, int, in
             it->content = crop_placement(*im, x0, y0);
         else
             it->content = scale_placement(*im, o.w, o.h, it->w, it->h);
+    }
+    if (const PlacedVector *pv = o.vector()) {
+        if (m_tool == Tool::Crop)
+            it->content = crop_placement(*pv, x0, y0);
+        else
+            it->content = scale_placement(*pv, o.w, o.h, it->w, it->h);
     }
     if (it->is_text())
         recompose();
@@ -1318,6 +1333,8 @@ void ComposerView::resize_group(Point d, int modifiers) {
         it->xf.f = origin.y;
         if (const PlacedImage *im = o.image())
             it->content = scale_placement(*im, o.w, o.h, it->w, it->h);
+        if (const PlacedVector *pv = o.vector())
+            it->content = scale_placement(*pv, o.w, o.h, it->w, it->h);
         text = text || it->is_text();
     }
     if (text)
@@ -1375,7 +1392,7 @@ bool ComposerView::mouse_motion_event(const Vector2i &p, const Vector2i &rel, in
             set_cursor(Cursor::HVResize); break;
         case Handle::Move:
             if (const Item *it = m_doc.find_item(hit.item))
-                if (it->is_image()) { set_cursor(Cursor::Hand); break; }
+                if (it->is_image() || it->is_vector()) { set_cursor(Cursor::Hand); break; }
             set_cursor(Cursor::Arrow); break;
         default:
             set_cursor(Cursor::Arrow); break;
@@ -1546,6 +1563,8 @@ void ComposerView::set_geometry(const Geometry &g) {
     }
     if (const PlacedImage *im = it->image())
         it->content = scale_placement(*im, ow, oh, it->w, it->h);
+    if (const PlacedVector *pv = it->vector())
+        it->content = scale_placement(*pv, ow, oh, it->w, it->h);
     const Point o = it->xf.apply({0, 0});
     it->xf = Transform::translate(g.x - o.x, g.y - o.y) * it->xf;
     if (it->is_text())
@@ -1566,6 +1585,12 @@ Shape ComposerView::shape_style() const {
                 look.stroke = im->stroke;
                 return look;
             }
+            if (const PlacedVector *pv = it->vector()) {
+                Shape look = m_default_shape;
+                look.fill = {kNoPaint, pv->opacity};
+                look.stroke = pv->stroke;
+                return look;
+            }
         }
     return m_default_shape;
 }
@@ -1581,7 +1606,7 @@ bool ComposerView::shapes_selected() const {
 bool ComposerView::pictures_selected() const {
     for (ItemId id : m_sel)
         if (const Item *it = m_doc.find_item(id))
-            if (it->image())
+            if (it->image() || it->vector())
                 return true;
     return false;
 }
@@ -1601,6 +1626,17 @@ void ComposerView::apply_item_style(const std::function<void(Shape &)> &shape,
                     shape(*sh);
                 else if (PlacedImage *im = it->image(); im && image)
                     image(*im);
+                else if (PlacedVector *pv = it->vector(); pv && image) {
+                    /* The palette sets opacity and the frame border, which a
+                     * placed SVG shares with a picture, so the callback stays
+                     * a picture one. */
+                    PlacedImage tmp;
+                    tmp.opacity = pv->opacity;
+                    tmp.stroke = pv->stroke;
+                    image(tmp);
+                    pv->opacity = tmp.opacity;
+                    pv->stroke = tmp.stroke;
+                }
             }
     } else if (!pictures_selected()) {
         shape(m_default_shape);          // nothing selected: set the defaults
@@ -2076,6 +2112,8 @@ bool ComposerView::remove_doc_swatch(SwatchId id) {
                 blacken(sh->stroke.paint);
             } else if (PlacedImage *im = item.image()) {
                 blacken(im->stroke.paint);
+            } else if (PlacedVector *pv = item.vector()) {
+                blacken(pv->stroke.paint);
             }
         }
     blacken(m_default_shape.fill);
@@ -2386,13 +2424,67 @@ bool ComposerView::can_copy() const {
     return editing() ? has_selection() : !m_sel.empty();
 }
 
+namespace {
+
+/* The clipboard's SVG, or its text when it is not an SVG. Comparing this
+ * with the snapshot taken at Copy tells a new SVG from the one we wrote. */
+std::string clipboard_now(GLFWwindow *win) {
+    std::string text;
+    for (const auto &kv : nanogui::read_clipboard(win)) {
+        const auto *bytes = reinterpret_cast<const uint8_t *>(kv.second.data());
+        if (vector_loader().match(bytes, kv.second.size()))
+            return kv.second;
+        if (text.empty())
+            text = kv.second;
+    }
+    return text;
+}
+
+bool clipboard_is_svg(const std::string &s) {
+    return !s.empty() &&
+           vector_loader().match(reinterpret_cast<const uint8_t *>(s.data()), s.size());
+}
+
+bool read_file_bytes(const std::string &path, std::vector<uint8_t> *out) {
+    FILE *f = std::fopen(path.c_str(), "rb");
+    if (!f)
+        return false;
+    if (std::fseek(f, 0, SEEK_END) != 0) { std::fclose(f); return false; }
+    const long n = std::ftell(f);
+    if (n < 0) { std::fclose(f); return false; }
+    std::rewind(f);
+    out->resize((size_t) n);
+    const size_t got = n ? std::fread(out->data(), 1, (size_t) n, f) : 0;
+    std::fclose(f);
+    return (long) got == n;
+}
+
+/* Enough of the front of a file to tell a picture (magic at the start)
+ * from an SVG (the root element may follow a declaration or a comment). */
+std::vector<uint8_t> read_file_prefix(const std::string &path, size_t cap) {
+    std::vector<uint8_t> out;
+    FILE *f = std::fopen(path.c_str(), "rb");
+    if (!f)
+        return out;
+    out.resize(cap);
+    const size_t got = std::fread(out.data(), 1, cap, f);
+    std::fclose(f);
+    out.resize(got);
+    return out;
+}
+
+} // namespace
+
 bool ComposerView::can_paste() const {
     if (editing()) {
         GLFWwindow *win = screen() ? screen()->glfw_window() : nullptr;
         const char *cb = win ? glfwGetClipboardString(win) : nullptr;
         return cb && *cb;
     }
-    return !m_clip.items.empty();
+    if (!m_clip.items.empty())
+        return true;
+    GLFWwindow *win = screen() ? screen()->glfw_window() : nullptr;
+    return clipboard_is_svg(clipboard_now(win));
 }
 
 void ComposerView::edit_copy() {
@@ -2424,6 +2516,33 @@ void ComposerView::edit_copy() {
                 if (!have)
                     m_clip.assets.push_back(*a);
             }
+        if (const PlacedVector *pv = it.vector())
+            if (const VectorAsset *a = m_doc.find_vector(pv->asset)) {
+                bool have = false;
+                for (const ItemClip::VectorClip &k : m_clip.vectors)
+                    have = have || k.asset.id == a->id;
+                if (!have) {
+                    ItemClip::VectorClip c;
+                    c.asset = *a;
+                    if (m_vectors)
+                        c.bytes = m_vectors->source_of(a->id);
+                    m_clip.vectors.push_back(std::move(c));
+                }
+            }
+    }
+    GLFWwindow *win = screen() ? screen()->glfw_window() : nullptr;
+    m_cb_at_copy = clipboard_now(win);
+    m_item_paste = true;
+    /* One placed SVG also goes on the system clipboard, so another program
+     * can paste it. The snapshot matches that string, so the next paste
+     * here still uses the item. */
+    if (win && m_clip.items.size() == 1 && m_clip.items[0].vector() &&
+        m_clip.vectors.size() == 1 && m_clip.vectors[0].bytes &&
+        !m_clip.vectors[0].bytes->empty()) {
+        const auto &b = *m_clip.vectors[0].bytes;
+        std::string xml(b.begin(), b.end());
+        glfwSetClipboardString(win, xml.c_str());
+        m_cb_at_copy = std::move(xml);
     }
     /* Each story with only its copied blocks threaded, in reading order */
     for (StoryId sid : stories) {
@@ -2454,6 +2573,41 @@ void ComposerView::edit_paste(const Point *at) {
         text_clipboard(GLFW_KEY_V);
         return;
     }
+    GLFWwindow *win = screen() ? screen()->glfw_window() : nullptr;
+    const std::string now = clipboard_now(win);
+    const bool own_items = m_item_paste && !m_clip.items.empty() && now == m_cb_at_copy;
+    if (!own_items && clipboard_is_svg(now)) {
+        if (!check_active_layer() || !m_vectors)
+            return;
+        std::vector<uint8_t> bytes(now.begin(), now.end());
+        std::string err;
+        VectorScene scene;
+        if (!vector_loader().decode(bytes.data(), bytes.size(), &scene, &err))
+            return;
+        push_undo();
+        const VectorPlacement placed = place_svg_bytes(m_doc, *m_vectors, std::move(bytes),
+                                                       "graphic.svg", "", m_page, at);
+        if (!placed.ok) {
+            undo();
+            return;
+        }
+        m_item_paste = false;
+        if (m_page < m_doc.pages.size())
+            show_page(m_page);
+        m_sel = {placed.item};
+        m_edit_story = 0;
+        if (m_tool != Tool::Pointer)
+            set_tool(Tool::Pointer);
+        else
+            selection_changed();
+        if (on_note)
+            on_note(placed.note);
+        if (on_document_change)
+            on_document_change();
+        if (screen())
+            screen()->redraw();
+        return;
+    }
     if (m_clip.items.empty() || !check_active_layer())
         return;
     push_undo();
@@ -2469,6 +2623,30 @@ void ComposerView::edit_paste(const Point *at) {
     for (const ImageAsset &a : m_clip.assets)
         if (!m_doc.find_image(a.id))
             m_doc.add_image(a);          // pasted into another publication
+    std::map<uint32_t, uint32_t> new_vector;
+    for (const ItemClip::VectorClip &v : m_clip.vectors) {
+        if (m_doc.find_vector(v.asset.id)) {
+            new_vector[v.asset.id] = v.asset.id;
+            continue;
+        }
+        uint32_t id = v.asset.id;
+        if (m_vectors && v.bytes && !v.bytes->empty()) {
+            const VectorStore::Bytes have = m_vectors->source_of(id);
+            const bool same = have && *have == *v.bytes;
+            if (!same) {
+                if (have)
+                    id = m_vectors->take_id();
+                else
+                    m_vectors->note_id(id);
+                if (!m_vectors->add(id, std::vector<uint8_t>(*v.bytes), nullptr))
+                    continue;
+            }
+        }
+        VectorAsset a = v.asset;
+        a.id = id;
+        if (m_doc.add_vector(std::move(a)))
+            new_vector[v.asset.id] = id;
+    }
     std::map<ItemId, ItemId> new_id;
     std::map<uint32_t, uint32_t> new_group;
     m_sel.clear();
@@ -2482,6 +2660,9 @@ void ComposerView::edit_paste(const Point *at) {
             it.group = g->second;
         }
         it.xf = Transform::translate(dx, dy) * it.xf;
+        if (PlacedVector *pv = it.vector())
+            if (new_vector.count(pv->asset))
+                pv->asset = new_vector[pv->asset];
         const ItemId id = m_doc.add_item(m_page, it);
         new_id[o.id] = id;
         m_sel.push_back(id);
@@ -3639,6 +3820,10 @@ void ComposerView::set_image_store(ImageStore *images) {
     m_tex_gen = 0;                       // the next draw drops whatever was cached
 }
 
+void ComposerView::set_vector_store(VectorStore *vectors) {
+    m_vectors = vectors;
+}
+
 void ComposerView::frame_size(const ImageMetadata &meta, size_t page, float &pw, float &ph) const {
     const PageSetup &s = m_doc.setup;
     pw = image_print_points(meta.width_px, meta.ppi_x);
@@ -3844,6 +4029,141 @@ bool ComposerView::commit_import(uint32_t id, const std::string &path, ImageImpo
     if (on_document_change)
         on_document_change();
     return true;
+}
+
+bool ComposerView::place_file(const std::string &path, std::string *error) {
+    std::vector<uint8_t> bytes;
+    if (!read_file_bytes(path, &bytes)) {
+        if (error)
+            *error = "couldn't read the file";
+        return false;
+    }
+    if (image_loader().match(bytes.data(), bytes.size()))
+        return place_image_file(path, error);
+    if (!vector_loader().match(bytes.data(), bytes.size())) {
+        if (error)
+            *error = "the file isn't a picture or an SVG";
+        return false;
+    }
+    if (!m_doc.active_layer_editable()) {
+        if (error)
+            *error = "the active layer is hidden or locked";
+        return false;
+    }
+    if (!m_vectors) {
+        if (error)
+            *error = "graphics aren't available";
+        return false;
+    }
+    std::string err;
+    VectorScene scene;
+    if (!vector_loader().decode(bytes.data(), bytes.size(), &scene, &err)) {
+        if (error)
+            *error = err.empty() ? "couldn't read the SVG" : err;
+        return false;
+    }
+    push_undo();
+    const VectorPlacement placed = place_svg_bytes(m_doc, *m_vectors, std::move(bytes),
+                                                   image_leaf_name(path), file_uri(path),
+                                                   m_page, nullptr);
+    if (!placed.ok) {
+        undo();
+        if (error)
+            *error = placed.error;
+        return false;
+    }
+    m_sel = {placed.item};
+    m_edit_story = 0;
+    if (m_tool != Tool::Pointer)
+        set_tool(Tool::Pointer);
+    else
+        selection_changed();
+    if (on_note)
+        on_note(placed.note);
+    if (on_document_change)
+        on_document_change();
+    if (screen())
+        screen()->redraw();
+    return true;
+}
+
+void ComposerView::place_file(const std::string &path, size_t page, const Point *at,
+                              std::function<void(const std::string &, const std::string &)> done) {
+    if (!check_active_layer())
+        return;
+    if (page >= m_doc.pages.size())
+        page = m_page;
+    auto gate = m_load_gate;
+    ComposerView *view = this;
+    const uint64_t epoch = m_doc_epoch;
+    const bool has_at = at != nullptr;
+    const Point drop = at ? *at : Point{};
+    importer().post([gate, view, epoch, path, page, has_at, drop, done]() {
+        std::vector<uint8_t> prefix = read_file_prefix(path, 64 * 1024);
+        bool image = image_loader().match(prefix.data(), prefix.size());
+        bool svg = !image && vector_loader().match(prefix.data(), prefix.size());
+        auto bytes = std::make_shared<std::vector<uint8_t>>();
+        std::string err;
+        if (!image) {
+            svg = false;
+            if (!read_file_bytes(path, bytes.get()))
+                err = "couldn't read the file";
+            else if (image_loader().match(bytes->data(), bytes->size()))
+                image = true;
+            else if (vector_loader().match(bytes->data(), bytes->size()))
+                svg = true;
+            else
+                err = "the file isn't a picture or an SVG";
+        }
+        async([gate, view, epoch, path, page, has_at, drop, done, image, svg, bytes, err]() {
+            if (!gate->open || epoch != view->m_doc_epoch)
+                return;
+            if (image) {
+                view->place_image_file(path, page, has_at ? &drop : nullptr,
+                                       [done](const std::string &e) {
+                    if (done)
+                        done(e, std::string());
+                });
+                return;
+            }
+            if (!svg || !view->m_vectors) {
+                if (done)
+                    done(!view->m_vectors && err.empty() ? "graphics aren't available" : err, "");
+                return;
+            }
+            std::string error;
+            VectorScene scene;
+            if (!vector_loader().decode(bytes->data(), bytes->size(), &scene, &error)) {
+                if (done)
+                    done(error.empty() ? "couldn't read the SVG" : error, "");
+                return;
+            }
+            view->push_undo();
+            const VectorPlacement placed =
+                place_svg_bytes(view->m_doc, *view->m_vectors, std::vector<uint8_t>(*bytes),
+                                image_leaf_name(path), file_uri(path), page, has_at ? &drop : nullptr);
+            if (!placed.ok) {
+                view->undo();
+                if (done)
+                    done(placed.error, "");
+                return;
+            }
+            if (page != view->m_page)
+                view->show_page(page);
+            view->m_sel = {placed.item};
+            view->m_edit_story = 0;
+            if (view->m_tool != Tool::Pointer)
+                view->set_tool(Tool::Pointer);
+            else
+                view->selection_changed();
+            if (view->on_document_change)
+                view->on_document_change();
+            if (view->screen())
+                view->screen()->redraw();
+            if (done)
+                done("", placed.note);
+        });
+    });
 }
 
 bool ComposerView::place_image_file(const std::string &path, std::string *error) {
@@ -4412,7 +4732,7 @@ void ComposerView::draw(NVGcontext *ctx) {
         for (const PageSlot &sl : slots) {
             nvgSave(ctx);
             nvgTranslate(ctx, o.x() + sl.x, o.y() + sl.y);
-            draw_list(ctx, build_page(m_doc, sl.index, m_comp, hand, only), px,
+            draw_list(ctx, build_page(m_doc, sl.index, m_comp, hand, only, m_vectors), px,
                       [&](const DrawImage &im) { return texture_for(ctx, im, px); });
             if (sl.index < m_doc.pages.size())
                 for (const Item &it : m_doc.pages[sl.index].items)

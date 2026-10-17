@@ -834,6 +834,7 @@ public:
         m_view = new ComposerView(m_scroll, &m_fonts, &m_hyphenator);
         m_rulers->set_content(m_scroll, m_view);
         m_view->set_image_store(&m_images);
+        m_view->set_vector_store(&m_vectors);
         m_view->on_recompose = [this] { update_status(); };
         m_view->on_tool_change = [this](ComposerView::Tool t) {
             sync_tool_buttons(t);
@@ -971,7 +972,7 @@ public:
     bool write_to(const std::string &path, bool embed) {
         std::string error;
         if (!save_document(m_view->document(), m_fonts, path, SaveOptions{embed}, &error,
-                           &m_images)) {
+                           &m_images, &m_vectors)) {
             show_alert(this, "The publication couldn't be saved.", error);
             return false;
         }
@@ -993,6 +994,7 @@ public:
                 m_view->invalidate_compositions();   // before the fonts go
                 m_fonts.clear_document_fonts();
                 m_images.clear();
+                m_vectors.clear();
                 PageDoc doc = new_publication(spec.setup, spec.pages);
                 seed_swatches(doc);
                 m_view->set_document(std::move(doc));
@@ -1018,18 +1020,20 @@ public:
     void place_dialog() {
         const std::string folder = m_doc_path.empty()
             ? std::string() : nanogui::fs::parent_path(m_doc_path);
-        auto paths = file_dialog(image_file_types(),
-                                 false, false, folder);
+        auto types = image_file_types();
+        for (const auto &t : vector_file_types())
+            types.push_back(t);
+        auto paths = file_dialog(types, false, false, folder);
         if (paths.empty() || paths[0].empty())
             return;
         const std::string path = paths[0];
         const std::string name = nanogui::fs::filename(path);
-        m_view->place_image_file(path, m_view->page_index(), nullptr,
-                                 [this, name](const std::string &error) {
+        m_view->place_file(path, m_view->page_index(), nullptr,
+                           [this, name](const std::string &error, const std::string &note) {
             if (!error.empty())
-                show_alert(this, "The picture couldn't be placed.", error);
+                show_alert(this, "The file couldn't be placed.", error);
             else
-                set_note("placed " + name);
+                set_note(note.empty() ? "placed " + name : note);
         });
     }
 
@@ -1049,6 +1053,7 @@ public:
         for (const DocumentFont &f : r.fonts)
             m_fonts.add_document_font(f.family, f.style, f.font);
         m_images = std::move(r.images);
+        m_vectors = std::move(r.vectors);
         m_view->set_document(std::move(r.doc));
         m_doc_path = path;
         m_embed_assets = r.embed_assets;
@@ -2507,7 +2512,7 @@ public:
             for (const Item &it : page.items)
                 if (const PlacedImage *im = it.image())
                     m_images.load(im->asset, nullptr);
-        return export_pdf(path, doc, m_view->compositions(), &m_images, settings);
+        return export_pdf(path, doc, m_view->compositions(), &m_images, settings, &m_vectors);
     }
 
     /* File > Document Setup: page size, margins, columns, bleed, and what
@@ -2799,6 +2804,7 @@ public:
 private:
     FontLibrary     m_fonts;
     ImageStore      m_images;
+    VectorStore     m_vectors;
     Hyphenator      m_hyphenator;
     MenuBar         *m_menubar = nullptr;
     ZoomScrollPanel *m_scroll = nullptr;
@@ -3013,7 +3019,7 @@ int main(int argc, char **argv) {
             app->view()->set_fit_to_columns(true);
         if (!place_path.empty()) {
             std::string error;
-            if (app->view()->place_image_file(place_path, &error))
+            if (app->view()->place_file(place_path, &error))
                 std::printf("place ok\n");
             else
                 std::printf("place FAILED %s\n", error.c_str());

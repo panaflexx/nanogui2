@@ -525,6 +525,7 @@ add_library(nanogui ${NANOGUI_LIBRARY_TYPE}
   include/nanogui/imagepanel.h src/imagepanel.cpp
   include/nanogui/imagestash.h src/imagestash.cpp
   include/nanogui/dragdrop.h src/dragdrop.cpp
+  include/nanogui/clipboard.h src/clipboard.cpp
   include/nanogui/scrollpanel.h src/scrollpanel.cpp
     include/nanogui/zoomscrollpanel.h src/zoomscrollpanel.cpp
   include/nanogui/colorwheel.h src/colorwheel.cpp
@@ -1002,6 +1003,9 @@ if (NANOGUI_BUILD_EXAMPLES)
         pagemade/src/docfile.cpp
         pagemade/src/image.cpp
         pagemade/src/image_color.cpp
+        pagemade/src/vector.cpp
+        pagemade/src/plugin/xml.cpp
+        pagemade/src/plugin/svg.cpp
         pagemade/src/setup_adjust.cpp
         pagemade/src/dialogs.cpp
         pagemade/src/image_assets.cpp
@@ -1026,6 +1030,9 @@ if (NANOGUI_BUILD_EXAMPLES)
         pagemade/src/docfile.cpp
         pagemade/src/image.cpp
         pagemade/src/image_color.cpp
+        pagemade/src/vector.cpp
+        pagemade/src/plugin/xml.cpp
+        pagemade/src/plugin/svg.cpp
         pagemade/src/setup_adjust.cpp
         pagemade/src/image_stb.cpp
         pagemade/src/swatch_library.cpp

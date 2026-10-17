@@ -79,6 +79,12 @@ enum NVGsolidity {
 	NVG_HOLE = 2,			// CW
 };
 
+/* Nonzero is the default (glyphs, ordinary shapes). Even-odd is for SVG. */
+enum NVGfillRule {
+	NVG_FILLRULE_NONZERO = 0,
+	NVG_FILLRULE_EVENODD = 1,
+};
+
 enum NVGlineCap {
 	NVG_BUTT,
 	NVG_ROUND,
@@ -579,6 +585,9 @@ extern NVG_EXPORT void nvgClosePath(NVGcontext* ctx);
 // Sets the current sub-path winding, see NVGwinding and NVGsolidity.
 extern NVG_EXPORT void nvgPathWinding(NVGcontext* ctx, int dir);
 
+// Sets how the current path is filled. NVG_FILLRULE_NONZERO is the default.
+extern NVG_EXPORT void nvgFillRule(NVGcontext* ctx, int rule);
+
 // Creates new circle arc shaped sub-path. The arc center is at cx,cy, the arc radius is r,
 // and the arc is drawn from angle a0 to a1, and swept in direction dir (NVG_CCW, or NVG_CW).
 // Angles are specified in radians.
@@ -770,7 +779,7 @@ struct NVGparams {
 	void (*renderViewport)(void* uptr, float width, float height, float devicePixelRatio);
 	void (*renderCancel)(void* uptr);
 	void (*renderFlush)(void* uptr);
-	void (*renderFill)(void* uptr, NVGpaint* paint, NVGcompositeOperationState compositeOperation, NVGscissor* scissor, float fringe, const float* bounds, const NVGpath* paths, int npaths);
+	void (*renderFill)(void* uptr, NVGpaint* paint, NVGcompositeOperationState compositeOperation, NVGscissor* scissor, float fringe, const float* bounds, const NVGpath* paths, int npaths, int fillRule);
 	void (*renderStroke)(void* uptr, NVGpaint* paint, NVGcompositeOperationState compositeOperation, NVGscissor* scissor, float fringe, float strokeWidth, const NVGpath* paths, int npaths);
 	void (*renderTriangles)(void* uptr, NVGpaint* paint, NVGcompositeOperationState compositeOperation, NVGscissor* scissor, const NVGvertex* verts, int nverts, float fringe);
 	void (*renderDelete)(void* uptr);

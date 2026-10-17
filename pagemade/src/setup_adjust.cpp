@@ -110,6 +110,8 @@ void refit(Page &p, const std::vector<size_t> &unit, const Bounds &from, float n
         it.xf.f = ny0 + (origin.y - from.y0) * sy;
         if (const PlacedImage *im = o.image())
             it.content = scale_placement(*im, o.w, o.h, it.w, it.h);
+        if (const PlacedVector *pv = o.vector())
+            it.content = scale_placement(*pv, o.w, o.h, it.w, it.h);
         if (scale_strokes) {
             const float k = std::sqrt(sx * sy);
             if (Shape *sh = it.shape()) {
@@ -118,13 +120,15 @@ void refit(Page &p, const std::vector<size_t> &unit, const Bounds &from, float n
             }
             if (PlacedImage *im = it.image())
                 im->stroke.weight *= k;
+            if (PlacedVector *pv = it.vector())
+                pv->stroke.weight *= k;
         }
     }
 }
 
 bool has_picture(const Page &p, const std::vector<size_t> &unit) {
     for (size_t i : unit)
-        if (p.items[i].image())
+        if (p.items[i].image() || p.items[i].vector())
             return true;
     return false;
 }

@@ -830,6 +830,10 @@ std::vector<std::string> pdf_preflight(const PageDoc &doc, const std::vector<Com
                     if (a->meta.alpha)
                         transparent.insert(pi + 1);
             }
+            if (const PlacedVector *pv = it.vector())
+                if (pv->opacity < 99.95f ||
+                    (!pv->stroke.none() && doc.resolve(pv->stroke.paint).a < 0.999f))
+                    transparent.insert(pi + 1);
         }
     if (!transparent.empty()) {
         std::string list;
@@ -860,7 +864,7 @@ std::vector<std::string> pdf_preflight(const PageDoc &doc, const std::vector<Com
 
 bool export_pdf(const std::string &path, const PageDoc &doc,
                 const std::vector<Composition> &comps, const ImageStore *images,
-                const PdfSettings *settings) {
+                const PdfSettings *settings, const VectorStore *vectors) {
     const PdfSettings &o = settings ? *settings : doc.pdf;
     /* PDF/X and tagged RGB tag every color; CMYK is not done yet and is
      * written as tagged RGB */
@@ -870,7 +874,7 @@ bool export_pdf(const std::string &path, const PageDoc &doc,
     /* Draw lists for the chosen pages, and the fonts they use. */
     std::vector<DrawList> pages;
     for (size_t i : chosen)
-        pages.push_back(build_page(doc, i, comps));
+        pages.push_back(build_page(doc, i, comps, nullptr, false, vectors));
     if (pages.empty())
         pages.emplace_back();   // a PDF needs a page; a fully hidden document is blank
 
@@ -949,17 +953,21 @@ bool export_pdf(const std::string &path, const PageDoc &doc,
             } else if (const auto *f = std::get_if<DrawFill>(&op)) {
                 emit_cm(content, f->xf);
                 content += emit_color(f->color, false, alphas, tagged);
+                if (f->clip_w > 0.f && f->clip_h > 0.f)
+                    content += "0 0 " + num(f->clip_w) + " " + num(f->clip_h) + " re W n\n";
                 emit_path(content, f->path);
-                content += "f\nQ\n";
+                content += f->rule == FillRule::EvenOdd ? "f*\nQ\n" : "f\nQ\n";
             } else if (const auto *s = std::get_if<DrawStroke>(&op)) {
                 emit_cm(content, s->xf);
                 content += emit_color(s->color, true, alphas, tagged);
                 content += num(s->width) + " w\n";
+                if (s->clip_w > 0.f && s->clip_h > 0.f)
+                    content += "0 0 " + num(s->clip_w) + " " + num(s->clip_h) + " re W n\n";
                 if (!s->dash.empty()) {
                     content += "[";
                     for (float d : s->dash)
                         content += num(d) + " ";
-                    content += "] 0 d\n";
+                    content += "] " + num(s->dash_offset) + " d\n";
                 }
                 content += std::to_string(s->cap == LineCap::Round ? 1
                                            : s->cap == LineCap::Square ? 2 : 0) + " J\n";

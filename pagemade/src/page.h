@@ -228,6 +228,19 @@ PlacedImage scale_placement(PlacedImage im, float old_w, float old_h, float new_
  * picture stays put on the page. */
 PlacedImage crop_placement(PlacedImage im, float left, float top);
 
+/* A placed vector graphic. The frame clips it the way a picture's frame
+ * does: x, y, w, h are the whole graphic in item space. The file bytes and
+ * the parsed scene live in a VectorStore, not in the document snapshot. */
+struct PlacedVector {
+    uint32_t asset = 0;
+    float x = 0, y = 0, w = 0, h = 0;
+    float opacity = 100.f;
+    Stroke stroke{{kNoPaint, 100.f}, 1.f, LineStyle::Solid};
+};
+
+PlacedVector scale_placement(PlacedVector v, float old_w, float old_h, float new_w, float new_h);
+PlacedVector crop_placement(PlacedVector v, float left, float top);
+
 /* A layer of the publication, on every page. Layers stack bottom to top;
  * within one, items keep their own stacking order. A hidden layer is not
  * drawn, printed or exported; a locked one is drawn but its items can't be
@@ -249,14 +262,17 @@ struct Item {
     uint32_t  group = 0;
     float     w = 0, h = 0;
     Transform xf;                // item space -> page
-    std::variant<TextFrame, Shape, PlacedImage> content;
+    std::variant<TextFrame, Shape, PlacedImage, PlacedVector> content;
 
     bool is_text() const { return std::holds_alternative<TextFrame>(content); }
     bool is_image() const { return std::holds_alternative<PlacedImage>(content); }
+    bool is_vector() const { return std::holds_alternative<PlacedVector>(content); }
     const Shape *shape() const { return std::get_if<Shape>(&content); }
     Shape *shape() { return std::get_if<Shape>(&content); }
     const PlacedImage *image() const { return std::get_if<PlacedImage>(&content); }
     PlacedImage *image() { return std::get_if<PlacedImage>(&content); }
+    const PlacedVector *vector() const { return std::get_if<PlacedVector>(&content); }
+    PlacedVector *vector() { return std::get_if<PlacedVector>(&content); }
 };
 
 /* One picture the publication owns. Page items store the id. `source` is
@@ -272,6 +288,22 @@ struct ImageAsset {
      * the 64-bit FNV-1a of those bytes. */
     uint64_t source_size = 0;
     int64_t  source_mtime = 0;           // seconds since the epoch
+    uint64_t hash = 0;
+};
+
+/* One vector graphic the publication owns. Page items store the id. The
+ * scene parsed from the file is not here: a VectorStore keeps it, the same
+ * way an ImageStore keeps picture bytes. `skipped` is what this slice did
+ * not draw ("gradients", "clips", "text"). Ids come from that store and
+ * are not the picture ids. */
+struct VectorAsset {
+    uint32_t id = 0;
+    std::string name;
+    std::string source;
+    float width = 0, height = 0;         // the graphic's box, points
+    std::vector<std::string> skipped;
+    uint64_t source_size = 0;
+    int64_t source_mtime = 0;
     uint64_t hash = 0;
 };
 
@@ -391,6 +423,7 @@ struct PageDoc {
     std::vector<StyleDef>   styles = default_styles();
     std::vector<CharStyleDef> char_styles = default_char_styles();
     std::vector<ImageAsset> images;        // the publication's pictures
+    std::vector<VectorAsset> vectors;      // the publication's placed graphics
     std::vector<Guide>      guides;        // ruler guides on every page
     PdfSettings             pdf;           // how this publication exports
     std::vector<Layer>      layers{Layer{1, "Default"}};   // bottom to top
@@ -446,6 +479,12 @@ struct PageDoc {
     uint32_t add_image(ImageAsset asset);
     /* True when some item still shows this picture. */
     bool image_placed(uint32_t id) const;
+    const VectorAsset *find_vector(uint32_t id) const;
+    VectorAsset       *find_vector(uint32_t id);
+    /* `asset.id` is the store's id. 0 is refused, and picture ids are left
+     * alone: the two tables don't share a counter. */
+    uint32_t add_vector(VectorAsset asset);
+    bool vector_placed(uint32_t id) const;
     /* Take an unused picture out of the publication (a placed one stays:
      * false). Pictures otherwise stay when their last frame goes, so an
      * asset library can show and place them again. */

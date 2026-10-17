@@ -20,11 +20,16 @@ namespace pagemade {
 
 enum class LineCap { Butt, Round, Square };
 enum class LineJoin { Miter, Round, Bevel };
+/* Nonzero is what shapes and glyphs already use. Even-odd is for SVG. */
+enum class FillRule { NonZero, EvenOdd };
 
 struct DrawFill {
     Path      path;
     Color     color;
     Transform xf;
+    FillRule  rule = FillRule::NonZero;
+    /* The frame in item space. 0 leaves the path unclipped (shapes). */
+    float     clip_w = 0, clip_h = 0;
 };
 
 struct DrawStroke {
@@ -34,7 +39,9 @@ struct DrawStroke {
     std::vector<float> dash;            // on/off lengths; empty = solid
     LineCap            cap = LineCap::Butt;
     LineJoin           join = LineJoin::Miter;
+    float              dash_offset = 0;
     Transform          xf;
+    float              clip_w = 0, clip_h = 0;
 };
 
 struct DrawGlyphs {
@@ -60,7 +67,11 @@ using DrawList = std::vector<DrawOp>;
 /* `comps` holds one composition per story, in PageDoc::stories order.
  * `which`, when set, skips those items, or draws only them when `only`
  * is set. A null list draws the whole page. */
+class VectorStore;
+
+/* `vectors` supplies placed SVG scenes. Null draws those frames as nothing. */
 DrawList build_page(const PageDoc &doc, size_t page, const std::vector<Composition> &comps,
-                    const std::vector<ItemId> *which = nullptr, bool only = false);
+                    const std::vector<ItemId> *which = nullptr, bool only = false,
+                    const VectorStore *vectors = nullptr);
 
 } // namespace pagemade

@@ -7,9 +7,10 @@
  *   document.json       setup, swatches, assets, stories, pages and items
  *   assets/fonts/...    font programs, when assets are embedded
  *   assets/images/...   picture files, when those are embedded
+ *   assets/vectors/...  SVG files, when those are embedded
  *
- * document.json lists the assets the publication uses (fonts and pictures;
- * SVGs later) by URI (uri.h): an embedded copy is a reference relative to the
+ * document.json lists the assets the publication uses (fonts, pictures and
+ * placed SVGs) by URI (uri.h): an embedded copy is a reference relative to the
  * package root ("assets/fonts/P052-Roman.otf"), a linked one an absolute
  * file: URI. Each entry also keeps "source", the URI the asset came from, so
  * it can be relinked or refreshed. A font loaded from another publication, or
@@ -28,6 +29,7 @@
 #pragma once
 
 #include "page.h"
+#include "vector.h"
 
 #include <memory>
 #include <string>
@@ -68,11 +70,15 @@ struct OpenResult {
     /* Picture bytes for the assets in `doc`. Empty when the file linked a
      * picture that could not be read; the asset record is still there. */
     ImageStore images;
+    /* SVG bytes and the scene parsed from them. Empty when a linked file
+     * could not be read; the asset record is still in `doc`. */
+    VectorStore vectors;
 };
 
 bool save_document(const PageDoc &doc, const FontLibrary &fonts, const std::string &path,
                    const SaveOptions &opts, std::string *error = nullptr,
-                   const ImageStore *images = nullptr);
+                   const ImageStore *images = nullptr,
+                   const VectorStore *vectors = nullptr);
 /* `installed` decides which linked fonts are needed: a family already
  * installed is used as is. With `load_linked` false, linked pictures are
  * registered in OpenResult::images without being read (their metadata comes
@@ -83,6 +89,7 @@ OpenResult open_document(const std::string &path, const FontLibrary &installed,
 /* The document.json text for a document (tests and debugging).
  * `images` supplies picture bytes when an asset is embedded. */
 std::string document_json(const PageDoc &doc, const FontLibrary &fonts, const SaveOptions &opts,
-                          const ImageStore *images = nullptr);
+                          const ImageStore *images = nullptr,
+                          const VectorStore *vectors = nullptr);
 
 } // namespace pagemade

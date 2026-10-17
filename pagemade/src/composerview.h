@@ -145,6 +145,15 @@ public:
     /* Picture bytes live outside the document (undo snapshots stay small).
      * The view does not own the store. */
     void set_image_store(pagemade::ImageStore *images);
+    /* SVG bytes live outside the document, the same way picture bytes do. */
+    void set_vector_store(pagemade::VectorStore *vectors);
+    /* Place a picture or an SVG. The synchronous form reads on the caller
+     * (the command line). The other reads on a background thread: a picture
+     * keeps the picture path, and an SVG is placed when the read finishes.
+     * `done` gets the error (empty when it was placed) and the status note. */
+    bool place_file(const std::string &path, std::string *error);
+    void place_file(const std::string &path, size_t page, const pagemade::Point *at,
+                    std::function<void(const std::string &error, const std::string &note)> done);
     /* Place a file: one undo step, selected, then back to the pointer.
      * The id is taken before the file is read, and a failure does not
      * reuse it. False leaves the document unchanged. This form reads on
@@ -633,6 +642,11 @@ private:
         std::vector<pagemade::Item> items;           // stacking order
         std::vector<pagemade::StoryEntry> stories;   // threads name copied ids
         std::vector<pagemade::ImageAsset> assets;
+        struct VectorClip {
+            pagemade::VectorAsset asset;
+            std::shared_ptr<const std::vector<uint8_t>> bytes;
+        };
+        std::vector<VectorClip> vectors;
         pagemade::Bounds bounds;
         size_t page = 0;
         int pastes = 0;                              // each Ctrl+V steps further
@@ -769,6 +783,12 @@ private:
     bool m_lock_guides = false;
 
     pagemade::ImageStore *m_images = nullptr;
+    pagemade::VectorStore *m_vectors = nullptr;
+    /* The system clipboard as it was when items were copied. Paste places an
+     * SVG from the clipboard only when those bytes have changed since, so a
+     * copy inside the publication is not replaced by a stale SVG. */
+    std::string m_cb_at_copy;
+    bool m_item_paste = false;
     /* Cleared in the destructor so a load still in flight does not touch
      * the view after it is gone; m_doc_epoch drops one meant for a
      * document that has since been replaced. */

@@ -363,6 +363,17 @@ void write_item(JsonOut &j, const Item &it) {
             j.key("stroke");
             write_stroke(j, im->stroke);
         }
+    } else if (const PlacedVector *pv = it.vector()) {
+        j.key("type").value("vector");
+        j.key("asset").value(pv->asset);
+        if (pv->x != 0.f || pv->y != 0.f || pv->w != it.w || pv->h != it.h)
+            j.key("vector").numbers({pv->x, pv->y, pv->w, pv->h});
+        if (pv->opacity != 100.f)
+            j.key("opacity").value(pv->opacity);
+        if (!pv->stroke.paint.none()) {
+            j.key("stroke");
+            write_stroke(j, pv->stroke);
+        }
     } else {
         j.key("type").value("text");
     }
@@ -523,6 +534,62 @@ void write_image_meta(JsonOut &j, const ImageMetadata &m) {
     j.end_object();
 }
 
+std::vector<uint8_t> vector_bytes(const VectorAsset &a, const VectorStore *vectors) {
+    if (vectors)
+        if (VectorStore::Bytes bytes = vectors->source_of(a.id))
+            if (!bytes->empty())
+                return *bytes;
+    std::string path;
+    std::vector<uint8_t> bytes;
+    if (!a.source.empty() && file_path_from_uri(a.source, path) && read_whole_file(path, &bytes))
+        return bytes;
+    return {};
+}
+
+std::string vector_leaf(const VectorAsset &a) {
+    std::string name = a.name.empty() ? std::string("graphic.svg") : a.name;
+    if (name.find('.') == std::string::npos)
+        name += ".svg";
+    return name;
+}
+
+/* Same package rules as pictures: a link keeps its source URI, and a paste
+ * (no source file) is copied in even when the publication is otherwise linked. */
+ImagePlan plan_vectors(const PageDoc &doc, const SaveOptions &opts, const VectorStore *vectors) {
+    ImagePlan plan;
+    std::set<std::string> names;
+    for (const VectorAsset &a : doc.vectors) {
+        const bool link = !opts.embed_assets && !a.source.empty();
+        if (link) {
+            plan.uri[a.id] = a.source;
+            continue;
+        }
+        std::vector<uint8_t> bytes = vector_bytes(a, vectors);
+        if (bytes.empty()) {
+            plan.error = "the graphic \"" + (a.name.empty() ? std::to_string(a.id) : a.name) +
+                         "\" has no file to embed";
+            return plan;
+        }
+        const std::string name = unique_file_name(vector_leaf(a), names, "graphic");
+        plan.uri[a.id] = package_ref("assets/vectors", name);
+        plan.embedded.push_back({a.id, "assets/vectors/" + name, std::move(bytes)});
+    }
+    return plan;
+}
+
+uint64_t parse_hash(const std::string &hex) {
+    uint64_t h = 0;
+    for (char c : hex) {
+        int d;
+        if (c >= '0' && c <= '9') d = c - '0';
+        else if (c >= 'a' && c <= 'f') d = c - 'a' + 10;
+        else if (c >= 'A' && c <= 'F') d = c - 'A' + 10;
+        else break;
+        h = (h << 4) | (uint64_t) d;
+    }
+    return h;
+}
+
 ImagePlan plan_images(const PageDoc &doc, const SaveOptions &opts, const ImageStore *images) {
     ImagePlan plan;
     std::set<std::string> names;
@@ -548,7 +615,7 @@ ImagePlan plan_images(const PageDoc &doc, const SaveOptions &opts, const ImageSt
 }
 
 std::string make_json(const PageDoc &doc, const SaveOptions &opts, const std::vector<FontRef> &refs,
-                      const FontPlan &plan, const ImagePlan &images) {
+                      const FontPlan &plan, const ImagePlan &images, const ImagePlan &vectors) {
     JsonOut j;
     j.begin_object();
     j.key("format").value("pagemade");
@@ -685,6 +752,34 @@ std::string make_json(const PageDoc &doc, const SaveOptions &opts, const std::ve
             j.key("hash").value(hex);
         }
         write_image_meta(j, a.meta);
+        j.end_object();
+    }
+    for (const VectorAsset &a : doc.vectors) {
+        auto uri = vectors.uri.find(a.id);
+        if (uri == vectors.uri.end())
+            continue;
+        j.begin_object();
+        j.key("kind").value("vector");
+        j.key("id").value(a.id);
+        j.key("name").value(a.name);
+        j.key("uri").value(uri->second);
+        if (!a.source.empty())
+            j.key("source").value(a.source);
+        j.key("width").value(a.width);
+        j.key("height").value(a.height);
+        if (!a.skipped.empty()) {
+            j.key("skipped").begin_array();
+            for (const std::string &s : a.skipped)
+                j.value(s);
+            j.end_array();
+        }
+        if (a.source_size) j.key("source_size").value((double) a.source_size);
+        if (a.source_mtime) j.key("source_mtime").value((double) a.source_mtime);
+        if (a.hash) {
+            char hex[17];
+            std::snprintf(hex, sizeof hex, "%016llx", (unsigned long long) a.hash);
+            j.key("hash").value(hex);
+        }
         j.end_object();
     }
     j.end_array();
@@ -957,6 +1052,25 @@ bool read_item(const DictValue *o, Item &it) {
         it.content = im;
         return true;
     }
+    if (type == "vector") {
+        PlacedVector pv;
+        get(o, "asset", pv.asset);
+        float box[4] = {0, 0, it.w, it.h};
+        if (floats(o, "vector", box, 4) == 4) {
+            pv.x = box[0];
+            pv.y = box[1];
+            pv.w = box[2];
+            pv.h = box[3];
+        } else {
+            pv.w = it.w;
+            pv.h = it.h;
+        }
+        get(o, "opacity", pv.opacity);
+        pv.opacity = std::clamp(pv.opacity, 0.f, 100.f);
+        pv.stroke = read_stroke(field(o, "stroke"), pv.stroke);
+        it.content = pv;
+        return true;
+    }
     if (type != "shape")
         return false;
     Shape sh;
@@ -1069,6 +1183,29 @@ void repair(PageDoc &d, std::vector<std::string> &warnings) {
         warnings.push_back(std::to_string(missing) +
                            " pictures point at a picture the publication doesn't have");
     d.next_asset = std::max(d.next_asset, max_asset + 1);
+
+    /* Graphic ids are their own sequence. A repeated id keeps the first
+     * record. next_asset is the picture counter and stays as it is. */
+    std::set<uint32_t> vector_ids;
+    size_t dropped_vectors = 0;
+    auto bad_vector = [&](const VectorAsset &a) {
+        return a.id == 0 || !vector_ids.insert(a.id).second;
+    };
+    auto vector_end = std::remove_if(d.vectors.begin(), d.vectors.end(), bad_vector);
+    dropped_vectors = (size_t) (d.vectors.end() - vector_end);
+    d.vectors.erase(vector_end, d.vectors.end());
+    if (dropped_vectors)
+        warnings.push_back(std::to_string(dropped_vectors) +
+                           " graphics with missing or repeated ids were dropped");
+    size_t missing_vectors = 0;
+    for (const Page &p : d.pages)
+        for (const Item &it : p.items)
+            if (const PlacedVector *pv = it.vector())
+                if (!d.find_vector(pv->asset))
+                    ++missing_vectors;
+    if (missing_vectors)
+        warnings.push_back(std::to_string(missing_vectors) +
+                           " graphics point at a graphic the publication doesn't have");
 }
 
 /* Refuse absurd entries (a zip bomb claims gigabytes of plain data). */
@@ -1099,13 +1236,15 @@ std::vector<char> extract(mz_zip_archive &zip, const std::string &entry, bool *f
 /* ---- Public API ------------------------------------------------------------ */
 
 std::string document_json(const PageDoc &doc, const FontLibrary &fonts, const SaveOptions &opts,
-                          const ImageStore *images) {
+                          const ImageStore *images, const VectorStore *vectors) {
     const std::vector<FontRef> refs = used_fonts(doc, fonts);
-    return make_json(doc, opts, refs, plan_fonts(refs, opts), plan_images(doc, opts, images));
+    return make_json(doc, opts, refs, plan_fonts(refs, opts), plan_images(doc, opts, images),
+                     plan_vectors(doc, opts, vectors));
 }
 
 bool save_document(const PageDoc &doc, const FontLibrary &fonts, const std::string &path,
-                   const SaveOptions &opts, std::string *error, const ImageStore *images) {
+                   const SaveOptions &opts, std::string *error, const ImageStore *images,
+                   const VectorStore *vectors) {
     const std::vector<FontRef> refs = used_fonts(doc, fonts);
     const FontPlan plan = plan_fonts(refs, opts);
     const ImagePlan pictures = plan_images(doc, opts, images);
@@ -1114,7 +1253,13 @@ bool save_document(const PageDoc &doc, const FontLibrary &fonts, const std::stri
             *error = pictures.error;
         return false;
     }
-    const std::string json = make_json(doc, opts, refs, plan, pictures);
+    const ImagePlan graphics = plan_vectors(doc, opts, vectors);
+    if (!graphics.error.empty()) {
+        if (error)
+            *error = graphics.error;
+        return false;
+    }
+    const std::string json = make_json(doc, opts, refs, plan, pictures, graphics);
     const std::string tmp = path + ".saving";
 
     mz_zip_archive zip;
@@ -1138,6 +1283,9 @@ bool save_document(const PageDoc &doc, const FontLibrary &fonts, const std::stri
         ok = ok && mz_zip_writer_add_mem(&zip, e.entry.c_str(), data, n, MZ_DEFAULT_COMPRESSION);
     }
     for (const auto &e : pictures.embedded)
+        ok = ok && mz_zip_writer_add_mem(&zip, e.entry.c_str(), e.bytes.data(), e.bytes.size(),
+                                         MZ_DEFAULT_COMPRESSION);
+    for (const auto &e : graphics.embedded)
         ok = ok && mz_zip_writer_add_mem(&zip, e.entry.c_str(), e.bytes.data(), e.bytes.size(),
                                          MZ_DEFAULT_COMPRESSION);
     ok = ok && mz_zip_writer_finalize_archive(&zip);
@@ -1410,18 +1558,8 @@ OpenResult open_document(const std::string &path, const FontLibrary &installed,
         if (number(field(a, "source_mtime"), stamp)) asset.source_mtime = (int64_t) stamp;
         std::string hex;
         get(a, "hash", hex);
-        if (!hex.empty()) {
-            uint64_t h = 0;
-            for (char c : hex) {
-                int d;
-                if (c >= '0' && c <= '9') d = c - '0';
-                else if (c >= 'a' && c <= 'f') d = c - 'a' + 10;
-                else if (c >= 'A' && c <= 'F') d = c - 'A' + 10;
-                else break;
-                h = (h << 4) | (uint64_t) d;
-            }
-            asset.hash = h;
-        }
+        if (!hex.empty())
+            asset.hash = parse_hash(hex);
         std::string uri;
         get(a, "uri", uri);
         if (const DictValue *meta = field(a, "meta")) {
@@ -1448,6 +1586,37 @@ OpenResult open_document(const std::string &path, const FontLibrary &installed,
         if (!image_uris.count(asset.id))
             image_uris[asset.id] = uri;
         d.images.push_back(std::move(asset));
+    }
+    std::map<uint32_t, std::string> vector_uris;
+    for (size_t i = 0; i < count(assets); ++i) {
+        const DictValue *a = at(assets, i);
+        std::string kind;
+        get(a, "kind", kind);
+        if (kind != "vector")
+            continue;
+        VectorAsset asset;
+        get(a, "id", asset.id);
+        get(a, "name", asset.name);
+        get(a, "source", asset.source);
+        double wh = 0;
+        if (number(field(a, "width"), wh)) asset.width = (float) wh;
+        if (number(field(a, "height"), wh)) asset.height = (float) wh;
+        if (const DictValue *sk = field(a, "skipped"))
+            for (size_t k = 0; k < count(sk); ++k)
+                if (const DictValue *v = at(sk, k); v && v->type == DICT_STRING && v->string_value)
+                    asset.skipped.push_back(v->string_value);
+        double stamp = 0;
+        if (number(field(a, "source_size"), stamp) && stamp > 0) asset.source_size = (uint64_t) stamp;
+        if (number(field(a, "source_mtime"), stamp)) asset.source_mtime = (int64_t) stamp;
+        std::string hex;
+        get(a, "hash", hex);
+        if (!hex.empty())
+            asset.hash = parse_hash(hex);
+        std::string uri;
+        get(a, "uri", uri);
+        if (!vector_uris.count(asset.id))
+            vector_uris[asset.id] = uri;
+        d.vectors.push_back(std::move(asset));
     }
     repair(d, r.warnings);
 
@@ -1489,6 +1658,48 @@ OpenResult open_document(const std::string &path, const FontLibrary &installed,
                 r.images.set_path(asset.id, link_path);
         } else
             r.warnings.push_back("couldn't read the picture " + where +
+                                 (err.empty() ? "" : ": " + err));
+    }
+
+    /* Graphics are small, so a linked SVG is read here even when pictures
+     * wait until they are on screen. The scene is what drawing uses. */
+    for (VectorAsset &asset : d.vectors) {
+        r.vectors.note_id(asset.id);
+        const std::string uri = vector_uris.count(asset.id) ? vector_uris[asset.id] : std::string();
+        std::vector<uint8_t> bytes;
+        std::string where = asset.name.empty() ? uri : asset.name;
+        std::string link_path;
+        bool got = false;
+        if (is_package_ref(uri)) {
+            const std::string entry = package_entry(uri);
+            where = entry;
+            bool found_entry = false;
+            std::vector<char> raw = extract(zip, entry, &found_entry);
+            if (found_entry) {
+                bytes.assign(raw.begin(), raw.end());
+                got = true;
+            }
+        } else if (std::string path; file_path_from_uri(uri, path)) {
+            link_path = path;
+            where = path;
+            got = read_whole_file(path, &bytes);
+        }
+        if (!got || bytes.empty()) {
+            if (!uri.empty())
+                r.warnings.push_back("couldn't read the graphic " + where);
+            continue;
+        }
+        std::string err;
+        if (r.vectors.add(asset.id, std::move(bytes), &err)) {
+            if (const VectorScene *scene = r.vectors.scene(asset.id)) {
+                asset.width = scene->width;
+                asset.height = scene->height;
+                asset.skipped = scene->skipped;
+            }
+            if (!link_path.empty())
+                r.vectors.set_path(asset.id, link_path);
+        } else
+            r.warnings.push_back("couldn't read the graphic " + where +
                                  (err.empty() ? "" : ": " + err));
     }
 

@@ -523,6 +523,26 @@ PlacedImage crop_placement(PlacedImage im, float left, float top) {
     return im;
 }
 
+PlacedVector scale_placement(PlacedVector v, float old_w, float old_h, float new_w, float new_h) {
+    if (old_w != 0.f) {
+        float s = new_w / old_w;
+        v.x *= s;
+        v.w *= s;
+    }
+    if (old_h != 0.f) {
+        float s = new_h / old_h;
+        v.y *= s;
+        v.h *= s;
+    }
+    return v;
+}
+
+PlacedVector crop_placement(PlacedVector v, float left, float top) {
+    v.x -= left;
+    v.y -= top;
+    return v;
+}
+
 const ImageAsset *PageDoc::find_image(uint32_t id) const {
     for (const ImageAsset &a : images)
         if (a.id == id)
@@ -548,6 +568,33 @@ bool PageDoc::image_placed(uint32_t id) const {
         for (const Item &it : p.items)
             if (const PlacedImage *im = it.image())
                 if (im->asset == id)
+                    return true;
+    return false;
+}
+
+const VectorAsset *PageDoc::find_vector(uint32_t id) const {
+    for (const VectorAsset &a : vectors)
+        if (a.id == id)
+            return &a;
+    return nullptr;
+}
+
+VectorAsset *PageDoc::find_vector(uint32_t id) {
+    return const_cast<VectorAsset *>(static_cast<const PageDoc *>(this)->find_vector(id));
+}
+
+uint32_t PageDoc::add_vector(VectorAsset asset) {
+    if (asset.id == 0)
+        return 0;
+    vectors.push_back(std::move(asset));
+    return vectors.back().id;
+}
+
+bool PageDoc::vector_placed(uint32_t id) const {
+    for (const Page &p : pages)
+        for (const Item &it : p.items)
+            if (const PlacedVector *v = it.vector())
+                if (v->asset == id)
                     return true;
     return false;
 }

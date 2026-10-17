@@ -123,21 +123,31 @@ and its nanovgd renderer. The composer lays out in points and every backend
   proxy. The crop tool trims the frame or pans the picture inside it (Shift
   locks one axis); the pointer scales the picture with the frame. The frame is
   a rectangle: the screen intersects the scissor, and PDF clips with `W n`.
-  Clipping to an arbitrary path stays with SVG import. Another format registers
+  Clipping a picture to an arbitrary path is still later. Another format registers
   an ImageDecoder (TIFF and HEIC are not built in). The asset table is what a
   later library will move between documents and pages; that window is not built.
+- **SVG import and paste**: File > Place and a paste of SVG add one placed
+  graphic on the active layer, as one undo step. The decoder is linked in from
+  `pagemade/src/plugin/` (a small XML reader and the SVG reader); nothing is
+  loaded from a directory at run time. The page item names the asset. The file
+  bytes and the parsed scene live in a VectorStore beside the document, and
+  both screen and PDF draw that scene. The scene is already in the graphic's
+  box, in points: viewBox, transforms, presentation attributes, and one
+  `<style>` block of element and class selectors. CSS px at 96dpi is 0.75pt.
+  Wider than the column under the drop shrinks to that column and keeps its
+  aspect; taller than the live area shrinks the same way. Solids and strokes
+  draw, arcs become cubics, and even-odd fill reaches nanovgd and the Metal
+  backend. A gradient paints the stop nearest its middle. A clip or some text
+  is named in the status line; the shape is drawn in full, and text draws
+  nothing. The frame clips like a picture. Copying one placed SVG also puts
+  its source on the system clipboard. Point editing of an imported path is not
+  in this slice. A `.pagemade` file stores the bytes under `assets/vectors/`.
 
 ## Next, in order
 
-1. **SVG import**: nanosvg makes a group of path items in the shape format. This
-   step brings even-odd fill and per-subpath winding to nanovgd. The fill rule
-   reaches the backend through the `renderFill` hook, which the Metal backend
-   (`ext/nanovg_metal`) implements too, so Mac builds need the matching change.
-   Multi-stop gradients come with it. Rectangular picture crops are already
-   clipped; this step is where a clip becomes an arbitrary path.
-2. **Text wrap**: lines ask which horizontal spans are free at their height,
+1. **Text wrap**: lines ask which horizontal spans are free at their height,
    from the wrap outlines of items in front of the text.
-3. **Print dialog**: choose the printer, copies and page range. Linux first (the
+2. **Print dialog**: choose the printer, copies and page range. Linux first (the
    CUPS API with our own dialog, or GTK's), then Mac (NSPrintOperation on the
    PDF), then Windows. Today printing exports a PDF and hands it to `lp`.
 
@@ -149,6 +159,8 @@ and its nanovgd renderer. The composer lays out in points and every backend
 - Groups; master pages; spreads or a continuous page view (the view shows one
   page at a time). An asset library that moves pictures between documents and
   pages; the publication's asset table is the record it will move.
+- SVG still to come: a gradient drawn as its real stops, and clipping a shape
+  to a path. The frame stays a rectangle until then.
 - Import: Markdown/HTML (gumbo), RTF, DOCX; old PageMaker files via libpagemaker.
 - Story editor; Styles and Colors palettes; the rest of the Control palette
   (its object and type views are done).
