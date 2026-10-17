@@ -85,6 +85,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <string>
+#include <unordered_map>
 #include <vector>
 
 #if !defined(_WIN32)
@@ -123,19 +124,30 @@ private:
 };
 
 /* PageMaker's page icons: a row of little pages at the bottom of the
- * window. Click turns to that page; drag rearranges them. A hidden page
- * is gray. Three buttons on the right choose one page, a side-by-side
- * spread, or every page in a stack. */
+ * window. Click turns to that page; drag rearranges them (the page lifts
+ * and follows the pointer while the others slide aside). The row scrolls
+ * with the wheel or the thin bar underneath when it overflows. With
+ * facing pages the icons pair into spreads. A hidden page is gray. On the right, "+" inserts a page after the current one
+ * and three buttons choose one page, a side-by-side spread, or every
+ * page in a stack. */
 class PageIconStrip : public Widget {
 public:
     std::function<void()> on_turned;   // a click turned to a page
     std::function<void()> on_view;     // a view button changed the pasteboard
+    std::function<void(const Vector2i &)> on_page_menu;   // right-click, screen coords
 
     PageIconStrip(Widget *parent, ComposerView *view) : Widget(parent), m_view(view) {
-        set_height(32);
-        set_min_height(32);
+        set_height(kStripH);
+        set_min_height(kStripH);
         set_height_flex(SizeMode::Fixed);
-        set_tooltip("Pages. Click to turn to a page, drag to rearrange.");
+        /* Drawn every frame from the document and animated; a cached
+         * parent must not bake it. */
+        set_live(true);
+        set_tooltip("Pages. Click to turn to a page, drag to rearrange, right-click for more.");
+        m_add = new ToolButton(this, FA_PLUS);
+        m_add->set_fixed_size(Vector2i(kBtn, kBtn));
+        m_add->set_tooltip("Insert a page after this one");
+        m_add->set_callback([this] { add_page(); });
         auto add = [&](PageView mode, int icon, const char *tip) {
             ToolButton *b = new ToolButton(this, icon);
             b->set_fixed_size(Vector2i(kBtn, kBtn));
@@ -154,44 +166,57 @@ public:
     }
 
     void draw(NVGcontext *ctx) override {
-        update_scroll();
+        const double now = glfwGetTime();
+        const float dt = m_last_time < 0 ? 0.f : (float) std::min(now - m_last_time, 0.05);
+        m_last_time = now;
+
         sync_buttons();
         place_buttons();
+        sync_slots();
+        const bool moving = step(dt);
+
         const int n = (int) m_view->page_count();
         const int cur = (int) m_view->page_index();
-        const int right = m_pos.x() + m_size.x() - chrome();
+        const float left = (float) m_pos.x();
+        const float right = (float) (m_pos.x() + view_width());
+        const float y = (float) m_pos.y() + kIconTop;
+
+        nvgSave(ctx);
+        nvgIntersectScissor(ctx, left, (float) m_pos.y(), right - left, (float) m_size.y());
         nvgFontFace(ctx, "sans");
         nvgFontSize(ctx, 11);
         nvgTextAlign(ctx, NVG_ALIGN_CENTER | NVG_ALIGN_MIDDLE);
-        const float y = (float) m_pos.y() + (m_size.y() - kH) * 0.5f;
-        for (int i = 0; i < n; ++i) {
-            const float x = (float) (m_pos.x() + kPad + i * (kW + kGap) - m_scroll);
-            if (x + kW < m_pos.x() || x > right)
-                continue;
-            const bool hidden = m_view->page_hidden((size_t) i);
-            const bool on = i == cur;
-            nvgBeginPath(ctx);
-            nvgRect(ctx, x + 1, y + 1, kW, kH);
-            nvgFillColor(ctx, nvgRGBA(0, 0, 0, 40));
-            nvgFill(ctx);
-            nvgBeginPath(ctx);
-            nvgRect(ctx, x, y, kW, kH);
-            nvgFillColor(ctx, on ? nvgRGB(0, 0, 0) : hidden ? nvgRGB(196, 196, 196) : nvgRGB(255, 255, 255));
-            nvgFill(ctx);
-            nvgStrokeColor(ctx, nvgRGB(0, 0, 0));
-            nvgStrokeWidth(ctx, 1);
-            nvgStroke(ctx);
-            char num[16];
-            std::snprintf(num, sizeof num, "%d", i + 1);
-            nvgFillColor(ctx, on ? nvgRGB(255, 255, 255) : nvgRGB(0, 0, 0));
-            nvgText(ctx, x + kW * 0.5f, y + kH * 0.5f, num, nullptr);
-        }
+        /* The lifted page draws last, over its neighbors. */
+        for (int pass = 0; pass < 2; ++pass)
+            for (int i = 0; i < n; ++i) {
+                const bool lifted = m_dragging && i == cur;
+                if (lifted != (pass == 1))
+                    continue;
+                const float x = left + m_x[(size_t) i] - m_scroll;
+                if (x + kW + 4 < left || x - 4 > right)
+                    continue;
+                float scale = 1.f;
+                for (const auto &ap : m_appearing)
+                    if (ap.first == m_uids[(size_t) i]) {
+                        const float t = std::clamp((float) ((now - ap.second) / kAppearSecs), 0.f, 1.f);
+                        scale = 1.f - (1.f - t) * (1.f - t);
+                    }
+                draw_icon(ctx, i, x, lifted ? y - 2.f : y, scale, i == cur, lifted);
+            }
+        nvgRestore(ctx);
+
+        draw_scrollbar(ctx);
+
         nvgSave(ctx);
         nvgTranslate(ctx, (float) m_pos.x(), (float) m_pos.y());
         for (Widget *c : children())
             if (c->visible())
                 c->draw(ctx);
         nvgRestore(ctx);
+
+        /* Keep the frames coming only while something is moving. */
+        if (moving != self_animating())
+            set_self_animating(moving);
     }
 
     void perform_layout(NVGcontext *ctx) override {
@@ -200,7 +225,7 @@ public:
     }
 
     bool mouse_button_event(const Vector2i &p, int button, bool down, int modifiers) override {
-        /* The view buttons sit on this strip. Hand them the click before the
+        /* The buttons sit on this strip. Hand them the click before the
          * page-icon logic, which otherwise treats that area as empty. */
         for (auto it = m_children.rbegin(); it != m_children.rend(); ++it) {
             Widget *child = *it;
@@ -208,55 +233,349 @@ public:
                 child->mouse_button_event(p - m_pos, button, down, modifiers))
                 return true;
         }
+        /* Right-click: turn to the page under it, then its menu. */
+        if (button == GLFW_MOUSE_BUTTON_2) {
+            if (!down || m_press >= 0 || p.x() - m_pos.x() >= view_width())
+                return false;
+            sync_slots();
+            const int i = index_at(p);
+            if (i >= 0)
+                m_view->show_page((size_t) i);
+            if (on_page_menu)
+                on_page_menu(parent()->absolute_position() + p);
+            return true;
+        }
         if (button != GLFW_MOUSE_BUTTON_1)
             return false;
         if (!down) {
+            if (m_thumb_grab >= 0) {
+                m_thumb_grab = -1;
+                return true;
+            }
             const bool mine = m_press >= 0;
-            const bool turn = mine && !m_moved;
+            const bool turn = mine && !m_dragging;
             m_press = -1;
-            m_moved = false;
+            m_dragging = false;
+            set_self_animating(true);   // the dropped page settles into its slot
             if (turn && on_turned)
                 on_turned();
             return mine;
         }
-        update_scroll();
-        const int i = index_at(p, false);
+        sync_slots();
+        /* The scroll bar: grab the thumb, or page toward a click on the track. */
+        if (overflow() > 0 && p.y() - m_pos.y() >= m_size.y() - kBarZone &&
+            p.x() - m_pos.x() < view_width()) {
+            float tx, tw;
+            thumb(tx, tw);
+            const float px = (float) (p.x() - m_pos.x());
+            if (px >= tx && px <= tx + tw) {
+                m_thumb_grab = px - tx;
+            } else {
+                m_scroll_target = std::clamp(m_scroll_target + (px < tx ? -1.f : 1.f) * view_width() * 0.8f,
+                                             0.f, (float) overflow());
+                m_follow = false;
+                set_self_animating(true);
+            }
+            return true;
+        }
+        const int i = index_at(p);
         if (i < 0)
             return false;
         m_press = i;
-        m_moved = false;
+        m_dragging = false;
+        m_moved_once = false;
+        m_press_x = p.x();
+        m_grab = (float) (p.x() - m_pos.x()) + m_scroll - m_x[(size_t) i];
+        m_pointer_x = p.x();
         m_view->show_page((size_t) i);
         return true;
     }
 
     bool mouse_drag_event(const Vector2i &p, const Vector2i &, int, int) override {
+        if (m_thumb_grab >= 0) {
+            float tx, tw;
+            thumb(tx, tw);
+            const float track = (float) view_width() - 2.f * kBarInset - tw;
+            const float t = track > 0 ? ((float) (p.x() - m_pos.x()) - m_thumb_grab - kBarInset) / track : 0.f;
+            m_scroll = m_scroll_target = std::clamp(t, 0.f, 1.f) * (float) overflow();
+            m_follow = false;
+            return true;
+        }
         if (m_press < 0)
             return false;
-        update_scroll();
-        const int i = index_at(p, true);
-        if (i < 0 || i == (int) m_view->page_index())
+        m_pointer_x = p.x();
+        if (!m_dragging && std::abs(p.x() - m_press_x) < kDragSlop)
             return true;
-        m_view->move_page_to((size_t) i, !m_moved);
-        m_moved = true;
-        m_press = i;
+        if (!m_dragging) {
+            m_dragging = true;
+            set_self_animating(true);
+        }
+        drag_to_pointer();
+        return true;
+    }
+
+    bool scroll_event(const Vector2i &p, const Vector2f &rel) override {
+        if (p.x() - m_pos.x() >= view_width())
+            return Widget::scroll_event(p, rel);
+        if (overflow() <= 0)
+            return true;
+        /* Wheels scroll vertically; trackpads may send either axis. */
+        const float d = std::abs(rel.x()) > std::abs(rel.y()) ? rel.x() : rel.y();
+        m_scroll_target = std::clamp(m_scroll_target - d * kStride * 2.f, 0.f, (float) overflow());
+        m_follow = false;
+        set_self_animating(true);
         return true;
     }
 
 private:
-    static constexpr int kW = 18, kH = 24, kGap = 6, kPad = 8;
-    static constexpr int kBtn = 26, kBtnGap = 2;
+    static constexpr int kW = 18, kH = 24, kGap = 6, kPad = 8, kStride = kW + kGap;
+    static constexpr int kSpreadGap = 8;     // between facing spreads
+    static constexpr int kStripH = 36, kIconTop = 4, kBarZone = 7;
+    static constexpr int kBtn = 26, kBtnGap = 2, kAddGap = 8;
+    static constexpr int kDragSlop = 3;
+    static constexpr float kBarH = 3.f, kBarInset = 4.f;
+    static constexpr float kSlideRate = 18.f;   // per second, exponential
+    static constexpr float kEdge = 28.f;        // autoscroll zone while dragging
+    static constexpr double kAppearSecs = 0.18;
+
+    void draw_icon(NVGcontext *ctx, int i, float x, float y, float scale, bool on, bool lifted) {
+        const bool hidden = m_view->page_hidden((size_t) i);
+        nvgSave(ctx);
+        if (scale < 1.f) {
+            nvgTranslate(ctx, x + kW * 0.5f, y + kH);
+            nvgScale(ctx, scale, scale);
+            nvgTranslate(ctx, -(x + kW * 0.5f), -(y + kH));
+        }
+        if (lifted) {
+            NVGpaint shadow = nvgBoxGradient(ctx, x + 1, y + 3, kW, kH, 2, 6, nvgRGBA(0, 0, 0, 90),
+                                             nvgRGBA(0, 0, 0, 0));
+            nvgBeginPath(ctx);
+            nvgRect(ctx, x - 6, y - 4, kW + 12, kH + 14);
+            nvgFillPaint(ctx, shadow);
+            nvgFill(ctx);
+        } else {
+            nvgBeginPath(ctx);
+            nvgRect(ctx, x + 1, y + 1, kW, kH);
+            nvgFillColor(ctx, nvgRGBA(0, 0, 0, 40));
+            nvgFill(ctx);
+        }
+        nvgBeginPath(ctx);
+        nvgRect(ctx, x, y, kW, kH);
+        nvgFillColor(ctx, on ? nvgRGB(0, 0, 0) : hidden ? nvgRGB(196, 196, 196) : nvgRGB(255, 255, 255));
+        nvgFill(ctx);
+        nvgStrokeColor(ctx, nvgRGB(0, 0, 0));
+        nvgStrokeWidth(ctx, 1);
+        nvgStroke(ctx);
+        char num[16];
+        std::snprintf(num, sizeof num, "%d", i + 1);
+        nvgFillColor(ctx, on ? nvgRGB(255, 255, 255) : nvgRGB(0, 0, 0));
+        nvgText(ctx, x + kW * 0.5f, y + kH * 0.5f, num, nullptr);
+        nvgRestore(ctx);
+    }
+
+    void draw_scrollbar(NVGcontext *ctx) {
+        if (overflow() <= 0)
+            return;
+        float tx, tw;
+        thumb(tx, tw);
+        const float by = (float) (m_pos.y() + m_size.y()) - kBarH - 2.f;
+        nvgBeginPath(ctx);
+        nvgRoundedRect(ctx, m_pos.x() + kBarInset, by, view_width() - 2.f * kBarInset, kBarH, kBarH * 0.5f);
+        nvgFillColor(ctx, nvgRGBA(0, 0, 0, 25));
+        nvgFill(ctx);
+        nvgBeginPath(ctx);
+        nvgRoundedRect(ctx, m_pos.x() + tx, by, tw, kBarH, kBarH * 0.5f);
+        nvgFillColor(ctx, nvgRGBA(0, 0, 0, m_thumb_grab >= 0 ? 150 : 100));
+        nvgFill(ctx);
+    }
+
+    /* Thumb x (strip-local) and width. */
+    void thumb(float &x, float &w) const {
+        const float track = (float) view_width() - 2.f * kBarInset;
+        const float content = (float) content_width();
+        w = std::max(20.f, track * (float) view_width() / std::max(content, 1.f));
+        const float t = overflow() > 0 ? m_scroll / (float) overflow() : 0.f;
+        x = kBarInset + t * (track - w);
+    }
+
+    void add_page() {
+        m_view->insert_page(true);
+        sync_slots();   // the new page grows in; the ones after it slide over
+        if (on_turned)
+            on_turned();
+    }
+
+    /* Keep one display position per page, following each page by its uid,
+     * so any reorder (a drag, a menu, undo) slides the icons to their new
+     * slots and new pages grow in. A whole new document snaps into place.
+     * The strip follows the current page when it changes. */
+    void sync_slots() {
+        const size_t n = m_view->page_count();
+        bool same = m_uids.size() == n;
+        for (size_t i = 0; same && i < n; ++i)
+            same = m_uids[i] == m_view->page_uid(i);
+        if (!same) {
+            std::unordered_map<uint32_t, float> was;
+            for (size_t i = 0; i < m_uids.size() && i < m_x.size(); ++i)
+                was[m_uids[i]] = m_x[i];
+            bool known = false;
+            for (size_t i = 0; i < n && !known; ++i)
+                known = was.count(m_view->page_uid(i)) != 0;
+            const double now = glfwGetTime();
+            std::vector<uint32_t> uids(n);
+            std::vector<float> xs(n);
+            for (size_t i = 0; i < n; ++i) {
+                uids[i] = m_view->page_uid(i);
+                auto it = was.find(uids[i]);
+                if (it != was.end()) {
+                    xs[i] = it->second;
+                } else {
+                    xs[i] = (float) slot_x((int) i);
+                    if (known)
+                        m_appearing.push_back({uids[i], now});
+                }
+            }
+            m_uids = std::move(uids);
+            m_x = std::move(xs);
+            set_self_animating(true);
+        }
+        const int cur = (int) m_view->page_index();
+        if (cur != m_last_cur || (int) n != m_last_count) {
+            if (!m_dragging)
+                m_follow = true;
+            m_last_cur = cur;
+            m_last_count = (int) n;
+        }
+    }
+
+    /* Advance the slide, scroll and drag animations; true while any of
+     * them still has somewhere to go. */
+    bool step(float dt) {
+        const int n = (int) m_x.size();
+        const int cur = (int) m_view->page_index();
+        const float k = 1.f - std::exp(-kSlideRate * dt);
+        bool moving = false;
+
+        /* Dragging near either end scrolls, and the page keeps up. */
+        if (m_dragging) {
+            const float px = (float) (m_pointer_x - m_pos.x());
+            float v = 0.f;
+            if (px < kEdge)
+                v = -(kEdge - px) * 20.f;
+            else if (px > view_width() - kEdge)
+                v = (px - (view_width() - kEdge)) * 20.f;
+            if (v != 0.f && overflow() > 0) {
+                const float before = m_scroll;
+                m_scroll = m_scroll_target = std::clamp(m_scroll + v * dt, 0.f, (float) overflow());
+                if (m_scroll != before) {
+                    drag_to_pointer();
+                    moving = true;
+                }
+            }
+        } else if (m_follow) {
+            ensure_visible(cur);
+        }
+
+        for (int i = 0; i < n; ++i) {
+            if (m_dragging && i == cur)
+                continue;   // drag_to_pointer places it
+            float &x = m_x[(size_t) i];
+            const float target = (float) slot_x(i);
+            if (std::abs(target - x) < 0.3f) {
+                x = target;
+            } else {
+                x += (target - x) * k;
+                moving = true;
+            }
+        }
+
+        if (std::abs(m_scroll_target - m_scroll) < 0.3f) {
+            m_scroll = m_scroll_target;
+        } else {
+            m_scroll += (m_scroll_target - m_scroll) * k;
+            moving = true;
+        }
+        const float max_scroll = (float) std::max(overflow(), 0);
+        m_scroll = std::clamp(m_scroll, 0.f, max_scroll);
+        m_scroll_target = std::clamp(m_scroll_target, 0.f, max_scroll);
+
+        const double now = glfwGetTime();
+        m_appearing.erase(std::remove_if(m_appearing.begin(), m_appearing.end(),
+                                         [&](const std::pair<uint32_t, double> &ap) {
+                                             return now - ap.second >= kAppearSecs;
+                                         }),
+                          m_appearing.end());
+        if (!m_appearing.empty())
+            moving = true;
+        return moving || m_dragging;
+    }
+
+    /* The lifted page follows the pointer; when its center crosses into
+     * another slot, the document moves it there. */
+    void drag_to_pointer() {
+        const int n = (int) m_x.size();
+        int cur = (int) m_view->page_index();
+        if (n <= 0 || cur >= n)
+            return;
+        const float lo = (float) slot_x(0), hi = (float) slot_x(n - 1);
+        const float x = std::clamp((float) (m_pointer_x - m_pos.x()) + m_scroll - m_grab, lo, hi);
+        int slot = 0;
+        for (int i = 1; i < n; ++i)
+            if (std::abs(slot_x(i) - x) < std::abs(slot_x(slot) - x))
+                slot = i;
+        if (slot != cur) {
+            m_view->move_page_to((size_t) slot, !m_moved_once);
+            m_moved_once = true;
+            sync_slots();   // the display positions travel with their pages
+            cur = (int) m_view->page_index();
+            m_press = cur;
+        }
+        if ((size_t) cur < m_x.size())
+            m_x[(size_t) cur] = x;
+    }
+
+    void ensure_visible(int i) {
+        const float view = (float) view_width();
+        const float x = (float) slot_x(i);
+        float target = m_scroll_target;
+        if (x - kPad < target)
+            target = x - kPad;
+        else if (x + kW + kPad > target + view)
+            target = x + kW + kPad - view;
+        m_scroll_target = std::clamp(target, 0.f, (float) std::max(overflow(), 0));
+        m_follow = false;
+    }
+
+    bool facing() const { return m_view->document().setup.facing; }
+
+    /* Icon x, content coords. Facing pages group into spreads like the
+     * pasteboard: page 1 alone, then 2-3, 4-5, ... touching at the spine. */
+    int slot_x(int i) const {
+        if (!facing())
+            return kPad + i * kStride;
+        return kPad + i * kW + (i + 1) / 2 * kSpreadGap;
+    }
+
+    int content_width() const {
+        const int n = (int) m_view->page_count();
+        return n > 0 ? slot_x(n - 1) + kW + kPad : kPad * 2;
+    }
+
+    int view_width() const { return std::max(m_size.x() - chrome(), 1); }
+
+    int overflow() const { return content_width() - view_width(); }
 
     int chrome() const {
         const int n = (int) m_modes.size();
-        if (n <= 0)
-            return 0;
-        return kPad + n * kBtn + (n - 1) * kBtnGap + kPad;
+        return kPad + kBtn + kAddGap + n * kBtn + std::max(0, n - 1) * kBtnGap + kPad;
     }
 
     void place_buttons() {
         const int n = (int) m_modes.size();
         int x = m_size.x() - kPad - n * kBtn - std::max(0, n - 1) * kBtnGap;
         const int y = std::max(0, (m_size.y() - kBtn) / 2);
+        m_add->set_position(Vector2i(x - kAddGap - kBtn, y));
+        m_add->set_size(Vector2i(kBtn, kBtn));
         for (auto &mb : m_modes) {
             mb.second->set_position(Vector2i(x, y));
             mb.second->set_size(Vector2i(kBtn, kBtn));
@@ -271,49 +590,34 @@ private:
                 mb.second->set_pushed(mb.first == v);
     }
 
-    void update_scroll() {
+    /* The page icon under `p` (parent coordinates), or -1. */
+    int index_at(const Vector2i &p) const {
         const int n = (int) m_view->page_count();
-        const int content = kPad * 2 + n * kW + std::max(0, n - 1) * kGap;
-        const int view = std::max(m_size.x() - chrome(), 1);
-        if (content <= view) {
-            m_scroll = 0;
-            return;
-        }
-        /* While a page is being dragged, keep the strip still so the icon
-         * under the pointer does not jump as the current page recenters. */
-        if (m_press >= 0) {
-            m_scroll = std::clamp(m_scroll, 0, content - view);
-            return;
-        }
-        const int cur = kPad + (int) m_view->page_index() * (kW + kGap);
-        m_scroll = std::clamp(cur - (view - kW) / 2, 0, content - view);
-    }
-
-    /* `nearest` picks a slot while dragging, including the gaps. */
-    int index_at(const Vector2i &p, bool nearest) const {
-        const int n = (int) m_view->page_count();
-        if (n <= 0)
+        if (n <= 0 || p.x() - m_pos.x() >= view_width())
             return -1;
-        if (p.x() >= m_pos.x() + m_size.x() - chrome())
-            return -1;
-        const int local = p.x() - m_pos.x() + m_scroll - kPad;
-        const int stride = kW + kGap;
-        if (!nearest) {
-            if (local < 0)
-                return -1;
-            const int i = local / stride;
-            if (i >= n || local % stride > kW)
-                return -1;
-            return i;
-        }
-        return std::clamp((local + kGap / 2) / stride, 0, n - 1);
+        const float x = (float) (p.x() - m_pos.x()) + m_scroll;
+        for (int i = 0; i < n; ++i)
+            if (x >= slot_x(i) && x <= slot_x(i) + kW)
+                return i;
+        return -1;
     }
 
     ComposerView *m_view;
-    int m_press = -1;
-    int m_scroll = 0;
-    bool m_moved = false;
+    ToolButton *m_add = nullptr;
     std::vector<std::pair<PageView, ToolButton *>> m_modes;
+    std::vector<float> m_x;          // display x per page, content coords
+    std::vector<uint32_t> m_uids;    // Page::uid per slot when m_x was synced
+    float m_scroll = 0.f, m_scroll_target = 0.f;
+    bool m_follow = true;            // scroll the current page into view
+    int m_last_cur = -1, m_last_count = -1;
+    double m_last_time = -1.0;
+    int m_press = -1;                // page under the button, -1 when up
+    int m_press_x = 0, m_pointer_x = 0;
+    float m_grab = 0.f;              // pointer offset into the lifted page
+    bool m_dragging = false;
+    bool m_moved_once = false;       // one undo step per drag
+    float m_thumb_grab = -1.f;       // pointer offset into the thumb
+    std::vector<std::pair<uint32_t, double>> m_appearing;   // new pages growing in
 };
 
 class PagemadeApp : public Screen {
@@ -586,6 +890,7 @@ public:
             if (m_view->page_view() != PageView::One)
                 frame_view();
         };
+        m_pages->on_page_menu = [this](const Vector2i &at) { show_page_menu(at); };
 
         m_status = new Label(window, "", "sans", 16);
         m_status->set_min_height(24);
@@ -1045,6 +1350,14 @@ public:
         Dropdown *layout = m_menubar->add_menu("Layout");
         add_cmd(layout, "Insert Page", {}, [this] { m_view->insert_page(true); });
         add_cmd(layout, "Insert Page Before", {}, [this] { m_view->insert_page(false); });
+        add_cmd(layout, "Duplicate Page", {}, [this] {
+            m_view->duplicate_page(false);
+            after_page_command();
+        });
+        m_dup_spread = add_cmd(layout, "Duplicate Spread", {}, [this] {
+            m_view->duplicate_page(true);
+            after_page_command();
+        });
         m_remove_page = add_cmd(layout, "Remove Page", {}, [this] { m_view->remove_page(); });
         new Separator(layout->popup());
         m_move_earlier = add_cmd(layout, "Move Page Earlier", {}, [this] { m_view->move_page_by(-1); });
@@ -1559,14 +1872,93 @@ public:
      * items get those and Remove, Group or Ungroup, Align (two or more
      * items or groups), Arrange, Reload Picture and the layers to move to;
      * empty space gets Paste. */
-    void show_context_menu(const Vector2i &at) {
+    /* The shared right-click menu, emptied for refilling. */
+    bool reset_context_popup() {
         if (!m_root_window)
-            return;
+            return false;
         if (!m_context_popup)
             m_context_popup = new PopupMenu(this, m_root_window, nullptr, false);
         m_context_popup->set_visible(false);
         while (m_context_popup->child_count() > 0)
             m_context_popup->remove_child_at(m_context_popup->child_count() - 1);
+        return true;
+    }
+
+    /* Show the filled menu at `at`, kept on screen. */
+    void open_context_popup(const Vector2i &at) {
+        NVGcontext *ctx = nvg_context();
+        const Vector2i pref = m_context_popup->preferred_size(ctx);
+        m_context_popup->set_size(pref);
+        m_context_popup->perform_layout(ctx);
+        Vector2i pos = at;
+        pos.x() = std::min(pos.x(), std::max(0, width() - pref.x()));
+        if (pos.y() + pref.y() > height())
+            pos.y() = std::max(0, pos.y() - pref.y());
+        m_context_popup->set_position(pos);
+        m_context_popup->set_visible(true);
+        set_popup_visible(m_context_popup);
+        m_context_popup->request_focus();
+        redraw();
+    }
+
+    /* A menu item that runs once the menu has closed (the command may
+     * rebuild the menu). */
+    void context_item(const std::string &caption, int icon, bool enabled,
+                      std::vector<Shortcut> keys, std::function<void()> fn) {
+        if (keys.empty())
+            keys = {{0, 0}};
+        auto *mi = new MenuItem(m_context_popup, caption, icon, keys);
+        mi->set_enabled(enabled);
+        mi->set_callback([this, fn] {
+            m_context_popup->set_visible(false);
+            async([fn] { fn(); });
+        });
+    }
+
+    /* Right-click on the page strip: commands for the current page. */
+    void show_page_menu(const Vector2i &at) {
+        if (!reset_context_popup())
+            return;
+        ComposerView *v = m_view;
+        const size_t page = v->page_index();
+        context_item("Duplicate Page", FA_CLONE, true, {}, [this, v] {
+            v->duplicate_page(false);
+            after_page_command();
+        });
+        if (v->document().setup.facing)
+            context_item("Duplicate Spread", FA_BOOK_OPEN, v->can_duplicate_spread(), {}, [this, v] {
+                v->duplicate_page(true);
+                after_page_command();
+            });
+        new Separator(m_context_popup);
+        context_item("Insert Page After", FA_PLUS, true, {}, [this, v] {
+            v->insert_page(true);
+            after_page_command();
+        });
+        context_item("Insert Page Before", 0, true, {}, [this, v] {
+            v->insert_page(false);
+            after_page_command();
+        });
+        new Separator(m_context_popup);
+        const bool hidden = v->page_hidden(page);
+        context_item(hidden ? "Show Page" : "Hide Page", hidden ? FA_EYE : FA_EYE_SLASH, true, {},
+                     [v, hidden] { v->set_page_hidden(!hidden); });
+        context_item("Remove Page", FA_TRASH_ALT, v->page_count() > 1, {}, [this, v] {
+            v->remove_page();
+            after_page_command();
+        });
+        open_context_popup(at);
+    }
+
+    /* A page added or removed: the spread and stack views reframe. */
+    void after_page_command() {
+        if (m_view->page_view() != PageView::One)
+            frame_view();
+    }
+
+    void show_context_menu(const Vector2i &at) {
+        if (!reset_context_popup())
+            return;
 
         const int C = SYSTEM_COMMAND_MOD, S = GLFW_MOD_SHIFT;
         bool any = false, need_sep = false;
@@ -1575,15 +1967,7 @@ public:
             if (need_sep && any)
                 new Separator(m_context_popup);
             need_sep = false;
-            if (keys.empty())
-                keys = {{0, 0}};
-            auto *mi = new MenuItem(m_context_popup, caption, icon, keys);
-            mi->set_enabled(enabled);
-            /* After the menu has closed: the command may rebuild it */
-            mi->set_callback([this, fn] {
-                m_context_popup->set_visible(false);
-                async([fn] { fn(); });
-            });
+            context_item(caption, icon, enabled, std::move(keys), std::move(fn));
             any = true;
         };
         auto section = [&] { need_sep = true; };
@@ -1637,20 +2021,7 @@ public:
         }
         if (!any)
             return;
-
-        NVGcontext *ctx = nvg_context();
-        const Vector2i pref = m_context_popup->preferred_size(ctx);
-        m_context_popup->set_size(pref);
-        m_context_popup->perform_layout(ctx);
-        Vector2i pos = at;
-        pos.x() = std::min(pos.x(), std::max(0, width() - pref.x()));
-        if (pos.y() + pref.y() > height())
-            pos.y() = std::max(0, pos.y() - pref.y());
-        m_context_popup->set_position(pos);
-        m_context_popup->set_visible(true);
-        set_popup_visible(m_context_popup);
-        m_context_popup->request_focus();
-        redraw();
+        open_context_popup(at);
     }
 
     /* The Layers window, like Image Assets: made once, hidden when closed. */
@@ -2036,20 +2407,12 @@ public:
         update_status();
     }
 
-    /* Center the spread, or the current page when the pages are stacked. */
+    /* Center the spread, or the current page (its spread when facing) when
+     * the pages are stacked. */
     void frame_view() {
         perform_layout();
         double z = m_scroll->zoom();
-        Vector2f v;
-        if (m_view->page_view() == PageView::Stack) {
-            const PageSetup &s = m_view->document().setup;
-            v = m_view->page_origin() + m_view->page_slot_offset(m_view->page_index()) +
-                Vector2f(s.width * 0.5f, s.height * 0.5f);
-        } else {
-            float w, h;
-            m_view->fit_extent(w, h);
-            v = m_view->page_origin() + Vector2f(w * 0.5f, h * 0.5f);
-        }
+        const Vector2f v = m_view->page_origin() + m_view->fit_center();
         m_scroll->set_pan_offset(ZoomScrollPanel::Vector2d(m_scroll->size().x() * 0.5 - v.x() * z,
                                                            m_scroll->size().y() * 0.5 - v.y() * z));
     }
@@ -2110,6 +2473,7 @@ public:
             m_move_earlier->set_enabled(page > 0);
             m_move_later->set_enabled(page + 1 < np);
             m_hide_page->set_caption(hidden ? "Show Page" : "Hide Page");
+            m_dup_spread->set_enabled(m_view->can_duplicate_spread());
         }
         if (m_to_front) {
             const bool can = !m_view->selection().empty();
@@ -2484,6 +2848,7 @@ private:
     Vector2i         m_type_float_size{0, 0};
     FloatSpin       *m_size = nullptr, *m_leading = nullptr, *m_baseline = nullptr;
     FloatSpin       *m_spacing = nullptr;
+    MenuItem        *m_dup_spread = nullptr;
     MenuItem        *m_remove_page = nullptr, *m_move_earlier = nullptr, *m_move_later = nullptr;
     MenuItem        *m_hide_page = nullptr;
     MenuItem        *m_to_front = nullptr, *m_forward = nullptr, *m_backward = nullptr, *m_to_back = nullptr;

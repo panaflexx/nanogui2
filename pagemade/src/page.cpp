@@ -956,6 +956,53 @@ void PageDoc::move_page(size_t from, size_t to) {
                     pages.begin() + (long) from + 1);
 }
 
+size_t PageDoc::duplicate_pages(size_t first, size_t count) {
+    if (first >= pages.size() || count == 0)
+        return SIZE_MAX;
+    count = std::min(count, pages.size() - first);
+    std::map<ItemId, ItemId> new_id;
+    std::map<uint32_t, uint32_t> new_group;
+    std::vector<Page> copies;
+    for (size_t p = first; p < first + count; ++p) {
+        Page copy;                       // a fresh uid
+        copy.hidden = pages[p].hidden;
+        copy.guides = pages[p].guides;
+        for (const Item &o : pages[p].items) {
+            Item it = o;
+            it.id = next_id++;
+            if (it.group) {
+                auto g = new_group.find(o.group);
+                if (g == new_group.end())
+                    g = new_group.emplace(o.group, next_id++).first;
+                it.group = g->second;
+            }
+            new_id[o.id] = it.id;
+            copy.items.push_back(std::move(it));
+        }
+        copies.push_back(std::move(copy));
+    }
+    const size_t at = first + count;
+    pages.insert(pages.begin() + (long) at, std::make_move_iterator(copies.begin()),
+                 std::make_move_iterator(copies.end()));
+    /* Stories last: add_story may grow `stories` while we read it. */
+    const size_t story_count = stories.size();
+    for (size_t si = 0; si < story_count; ++si) {
+        std::vector<ItemId> thread;
+        for (ItemId f : stories[si].thread) {
+            auto it = new_id.find(f);
+            if (it != new_id.end())
+                thread.push_back(it->second);
+        }
+        if (thread.empty())
+            continue;
+        Story story = stories[si].story;
+        const StoryId sid = add_story(std::move(story));
+        if (StoryEntry *e = find_story(sid))
+            e->thread = std::move(thread);
+    }
+    return at;
+}
+
 PageDoc new_publication(PageSetup setup, int page_count) {
     PageDoc doc;
     doc.setup = setup;
@@ -990,10 +1037,23 @@ void arrange_pages(const PageSetup &setup, size_t page_count, size_t current,
         return;
     }
     if (view == PageView::Stack) {
-        for (size_t i = 0; i < page_count; ++i)
-            slots.push_back({i, 0.f, i * (ph + gap)});
-        width = pw;
-        height = page_count * ph + (page_count - 1) * gap;
+        if (!setup.facing || page_count == 1) {
+            for (size_t i = 0; i < page_count; ++i)
+                slots.push_back({i, 0.f, i * (ph + gap)});
+            width = pw;
+            height = page_count * ph + (page_count - 1) * gap;
+            return;
+        }
+        /* A column of spreads, meeting at the spine: page 1 alone on the
+         * right, then 2-3, 4-5, ... */
+        for (size_t i = 0; i < page_count; ++i) {
+            const size_t row = (i + 1) / 2;
+            const bool verso = i % 2 == 1;
+            slots.push_back({i, verso ? 0.f : pw, row * (ph + gap)});
+        }
+        const size_t rows = page_count / 2 + 1;
+        width = pw * 2.f;
+        height = rows * ph + (rows - 1) * gap;
         return;
     }
 
@@ -1008,14 +1068,16 @@ void arrange_pages(const PageSetup &setup, size_t page_count, size_t current,
         first = 1 + ((current - 1) / 2) * 2;
         n = std::min<size_t>(2, page_count - first);
     }
+    /* Facing spreads meet at the spine; other pairs keep the gap. */
+    const float split = setup.facing ? 0.f : gap;
     const bool pair = page_count > 1;
-    width = pair ? pw * 2.f + gap : pw;
+    width = pair ? pw * 2.f + split : pw;
     height = ph;
     if (n == 2) {
         slots.push_back({first, 0.f, 0.f});
-        slots.push_back({first + 1, pw + gap, 0.f});
+        slots.push_back({first + 1, pw + split, 0.f});
     } else if (setup.facing && first == 0)
-        slots.push_back({first, pair ? pw + gap : 0.f, 0.f});
+        slots.push_back({first, pair ? pw + split : 0.f, 0.f});
     else
         slots.push_back({first, 0.f, 0.f});
 }

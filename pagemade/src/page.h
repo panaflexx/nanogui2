@@ -128,7 +128,9 @@ struct PageSlot {
 
 /* Pages on screen for `current`, and the size of that arrangement.
  * A facing spread puts page 1 alone on the right, then pairs 2–3, 4–5, …
- * With facing pages off, pages pair as 1–2, 3–4, … */
+ * meeting at the spine; a facing stack is a column of those spreads.
+ * With facing pages off, pages pair as 1–2, 3–4, … with a gap, and the
+ * stack is a single column. */
 void arrange_pages(const PageSetup &setup, size_t page_count, size_t current,
                    PageView view, std::vector<PageSlot> &slots,
                    float &width, float &height);
@@ -288,7 +290,16 @@ struct Guide {
     float pos = 0;
 };
 
+/* A fresh identity for each page made this session. */
+inline uint32_t next_page_uid() {
+    static uint32_t next = 0;
+    return ++next;
+}
+
 struct Page {
+    /* Session-only identity, not saved: copies (undo snapshots) keep it,
+     * so a page can be followed across undo and reordering. */
+    uint32_t uid = next_page_uid();
     std::vector<Item> items;     // bottom to top
     bool hidden = false;         // kept, and shown, but not printed
     std::vector<Guide> guides;   // ruler guides on this page only
@@ -496,6 +507,13 @@ struct PageDoc {
     bool    remove_page(size_t index);
     /* `to` is the index the page occupies after the move. */
     void    move_page(size_t from, size_t to);
+    /* Copy pages [first, first + count) and insert the copies right after
+     * them: items (new ids and groups, same layers and stacking), guides
+     * and the hidden flag. Each story threading copied frames is copied
+     * with only those frames threaded, so a story that runs across a
+     * copied spread stays one story in the copy. Returns the index of the
+     * first copy, or SIZE_MAX when the range is empty. */
+    size_t  duplicate_pages(size_t first, size_t count);
 };
 
 /* A blank publication: `page_count` empty pages (at least one) at `setup`. */

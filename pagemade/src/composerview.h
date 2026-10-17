@@ -205,14 +205,28 @@ public:
     bool page_hidden(size_t i) const {
         return i < m_doc.pages.size() && m_doc.pages[i].hidden;
     }
+    /* Page::uid of page `i` (0 past the end), for following pages. */
+    uint32_t page_uid(size_t i) const {
+        return i < m_doc.pages.size() ? m_doc.pages[i].uid : 0;
+    }
     void set_page_view(pagemade::PageView view);
     pagemade::PageView page_view() const { return m_page_view; }
     /* Top-left of page `index` in the arrangement (0, 0 when it is off screen). */
     nanogui::Vector2f page_slot_offset(size_t index) const;
-    /* The rectangle Fit Page should frame: one page, or the whole spread. */
+    /* The rectangle Fit Page should frame: one page, or the whole spread
+     * (in a facing stack, the spread that holds the current page). */
     void fit_extent(float &width, float &height) const;
+    /* The middle of that rectangle, in arrangement coordinates (add
+     * page_origin() for view-local). */
+    nanogui::Vector2f fit_center() const;
     void show_page(size_t i);
     void insert_page(bool after);          // one undo step
+    /* Copy the current page, or with facing pages the two-page spread that
+     * holds it, right after itself, and turn to the (first) copy. One undo
+     * step. A spread keeps every later page on its own side. */
+    void duplicate_page(bool spread);
+    /* The facing spread holding the current page has two pages. */
+    bool can_duplicate_spread() const;
     void remove_page();                    // keeps the last page
     void move_page_by(int delta);
     /* Dragging a page icon: `record_undo` on the first step of the gesture
@@ -720,6 +734,7 @@ private:
     };
     /* Push a state as an undo step; the current state gets a new version. */
     void push_snapshot(pagemade::PageDoc doc, uint64_t version);
+    void follow_page(uint32_t uid);
     void bump_version();
     std::deque<Snapshot> m_undo, m_redo;
     uint64_t m_version = 0, m_clean_version = 0, m_next_version = 0;

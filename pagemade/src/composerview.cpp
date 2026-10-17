@@ -322,13 +322,25 @@ void ComposerView::set_pdf_settings(const PdfSettings &settings) {
     bump_version();                      // saved with the file: it needs saving
 }
 
+/* Undo and redo stay on the page they were on, wherever it now sits (a
+ * page move undoes back to the moved page). */
+void ComposerView::follow_page(uint32_t uid) {
+    for (size_t i = 0; i < m_doc.pages.size(); ++i)
+        if (m_doc.pages[i].uid == uid) {
+            m_page = i;
+            return;
+        }
+}
+
 void ComposerView::undo() {
     if (m_undo.empty())
         return;
+    const uint32_t uid = page_uid(m_page);
     m_redo.push_back({std::move(m_doc), m_version});
     m_doc = std::move(m_undo.back().doc);
     m_version = m_undo.back().version;
     m_undo.pop_back();
+    follow_page(uid);
     restore_snapshot();
     if (on_document_change)
         on_document_change();
@@ -337,10 +349,12 @@ void ComposerView::undo() {
 void ComposerView::redo() {
     if (m_redo.empty())
         return;
+    const uint32_t uid = page_uid(m_page);
     m_undo.push_back({std::move(m_doc), m_version});
     m_doc = std::move(m_redo.back().doc);
     m_version = m_redo.back().version;
     m_redo.pop_back();
+    follow_page(uid);
     restore_snapshot();
     if (on_document_change)
         on_document_change();
@@ -421,12 +435,24 @@ Vector2f ComposerView::page_slot_offset(size_t index) const {
 
 void ComposerView::fit_extent(float &width, float &height) const {
     if (m_page_view == PageView::Stack) {
-        width = m_doc.setup.width > 1.f ? m_doc.setup.width : 1.f;
+        std::vector<PageSlot> slots;
+        float aw, ah;
+        arrangement(m_doc, m_page, m_page_view, slots, aw, ah);
+        width = aw;              // a page, or a facing spread
         height = m_doc.setup.height > 1.f ? m_doc.setup.height : 1.f;
         return;
     }
     std::vector<PageSlot> slots;
     arrangement(m_doc, m_page, m_page_view, slots, width, height);
+}
+
+Vector2f ComposerView::fit_center() const {
+    float w, h;
+    fit_extent(w, h);
+    if (m_page_view != PageView::Stack)
+        return {w * 0.5f, h * 0.5f};
+    /* The current page's row: the stack is one page or one spread wide. */
+    return {w * 0.5f, page_slot_offset(m_page).y() + h * 0.5f};
 }
 
 float ComposerView::zoom() const {
@@ -2727,6 +2753,43 @@ void ComposerView::insert_page(bool after) {
         screen()->perform_layout();
 }
 
+/* The current page's facing spread: page 1 alone, then 2-3, 4-5, ... */
+static void spread_of(const PageDoc &doc, size_t page, size_t &first, size_t &count) {
+    const size_t n = doc.pages.size();
+    if (!doc.setup.facing || page == 0 || page >= n) {
+        first = page;
+        count = 1;
+        return;
+    }
+    first = 1 + ((page - 1) / 2) * 2;
+    count = std::min<size_t>(2, n - first);
+}
+
+bool ComposerView::can_duplicate_spread() const {
+    size_t first, count;
+    spread_of(m_doc, m_page, first, count);
+    return count == 2;
+}
+
+void ComposerView::duplicate_page(bool spread) {
+    end_placement(false);
+    if (m_creating)
+        finish_creation();
+    size_t first = m_page, count = 1;
+    if (spread)
+        spread_of(m_doc, m_page, first, count);
+    if (first >= m_doc.pages.size())
+        return;
+    push_undo();
+    m_page = m_doc.duplicate_pages(first, count);
+    recompose();                         // page numbers after it move up
+    page_changed();
+    if (on_document_change)
+        on_document_change();
+    if (m_page_view == PageView::Stack && screen())
+        screen()->perform_layout();
+}
+
 void ComposerView::remove_page() {
     if (m_doc.pages.size() <= 1)
         return;
@@ -3219,10 +3282,38 @@ void ComposerView::draw_page(NVGcontext *ctx, float px, size_t page) {
 
     if (!m_show_guides)
         return;
-    /* The bleed: how far past the trim pictures and fills should run */
-    if (s.bleed > 0.f) {
+    /* Facing pages: a soft fold shade on the spine side (left of a
+     * right-hand page, right of a left-hand page). Screen only. */
+    const bool verso = s.facing && page % 2 == 1;
+    if (s.facing) {
+        const float fold = std::min(14.f, s.width * 0.04f);
+        const float sx = verso ? s.width : 0.f;
+        const float ex = verso ? s.width - fold : fold;
         nvgBeginPath(ctx);
-        nvgRect(ctx, -s.bleed, -s.bleed, s.width + 2 * s.bleed, s.height + 2 * s.bleed);
+        nvgRect(ctx, std::min(sx, ex), 0, fold, s.height);
+        nvgFillPaint(ctx, nvgLinearGradient(ctx, sx, 0, ex, 0, nvgRGBA(0, 0, 0, 28),
+                                            nvgRGBA(0, 0, 0, 0)));
+        nvgFill(ctx);
+    }
+    /* The bleed: how far past the trim pictures and fills should run. A
+     * facing spread has none at the spine, where the pages meet. */
+    if (s.bleed > 0.f) {
+        const float b = s.bleed, w = s.width, h = s.height;
+        const bool spine = s.facing && m_page_view != PageView::One;
+        nvgBeginPath(ctx);
+        if (!spine) {
+            nvgRect(ctx, -b, -b, w + 2 * b, h + 2 * b);
+        } else if (verso) {      // open on the right
+            nvgMoveTo(ctx, w, -b);
+            nvgLineTo(ctx, -b, -b);
+            nvgLineTo(ctx, -b, h + b);
+            nvgLineTo(ctx, w, h + b);
+        } else {                 // open on the left
+            nvgMoveTo(ctx, 0, -b);
+            nvgLineTo(ctx, w + b, -b);
+            nvgLineTo(ctx, w + b, h + b);
+            nvgLineTo(ctx, 0, h + b);
+        }
         nvgStrokeWidth(ctx, px);
         nvgStrokeColor(ctx, nvgRGBA(220, 60, 60, 160));
         nvgStroke(ctx);

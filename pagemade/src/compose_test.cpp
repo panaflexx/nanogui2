@@ -1230,6 +1230,34 @@ static void test_model(const FontLibrary &fonts) {
         CHECK(pages.remove_page(0) && pages.pages.size() == 1 && pages.pages[0].items.empty() &&
               pages.stories.empty(), "removing a page removes its items and their stories");
     }
+    {
+        PageDoc dup = sample_document();
+        dup.pages[0].guides.push_back(Guide{});
+        const size_t items = dup.pages[0].items.size();
+        const size_t stories = dup.stories.size();
+        dup.insert_page(1);
+        CHECK(dup.duplicate_pages(0, 1) == 1 && dup.pages.size() == 3 &&
+              dup.pages[1].items.size() == items && dup.pages[2].items.empty() &&
+              dup.pages[1].guides.size() == 1, "duplicate_pages inserts the copy after");
+        CHECK(dup.pages[1].uid != dup.pages[0].uid, "a copy is a new page");
+        bool fresh = true, threaded = true;
+        for (size_t i = 0; i < items; ++i) {
+            const Item &o = dup.pages[0].items[i], &c = dup.pages[1].items[i];
+            fresh = fresh && c.id != o.id && c.layer == o.layer && c.xf == o.xf &&
+                    (o.group == 0) == (c.group == 0) && (o.group == 0 || c.group != o.group);
+            if (o.is_text()) {
+                const StoryEntry *os = dup.story_of(o.id), *cs = dup.story_of(c.id);
+                threaded = threaded && os && cs && os->id != cs->id;
+            }
+        }
+        CHECK(fresh, "copies get new ids and groups, same layer and place");
+        CHECK(threaded && dup.stories.size() == stories * 2, "copied frames thread copied stories");
+        CHECK(dup.duplicate_pages(1, 2) == 3 && dup.pages.size() == 5 &&
+              dup.pages[3].items.size() == items && dup.pages[4].items.empty(),
+              "a spread duplicates as a pair");
+        CHECK(dup.duplicate_pages(9, 1) == SIZE_MAX && dup.pages.size() == 5,
+              "past the end duplicates nothing");
+    }
     const Composition after = compose(body.story, doc.thread_frames(body), fonts);
     CHECK(after.lines.size() == before.lines.size() && body.thread[0] == col1,
           "rearranging doesn't change the thread or the composition");
@@ -1752,16 +1780,25 @@ static void test_arrange() {
     CHECK(slots.size() == 1 && slots[0].x == 0 && w == 100, "a single page has no empty half");
     s.facing = true;
     arrange_pages(s, 5, 0, PageView::Spread, slots, w, h);
-    CHECK(slots.size() == 1 && slots[0].index == 0 && slots[0].x == 124,
-          "facing page 1 sits on the right");
+    CHECK(slots.size() == 1 && slots[0].index == 0 && slots[0].x == 100 && w == 200,
+          "facing page 1 sits on the right, at the spine");
     arrange_pages(s, 5, 1, PageView::Spread, slots, w, h);
-    CHECK(slots.size() == 2 && slots[0].index == 1 && slots[1].index == 2, "facing pages 2–3");
+    CHECK(slots.size() == 2 && slots[0].index == 1 && slots[1].index == 2 && slots[1].x == 100,
+          "facing pages 2–3 meet at the spine");
     arrange_pages(s, 5, 2, PageView::Spread, slots, w, h);
     CHECK(slots.size() == 2 && slots[0].index == 1 && slots[1].index == 2,
           "page 3 shares the 2–3 spread");
     arrange_pages(s, 4, 3, PageView::Spread, slots, w, h);
     CHECK(slots.size() == 1 && slots[0].index == 3 && slots[0].x == 0,
           "a trailing left-hand page sits on the left");
+    arrange_pages(s, 4, 0, PageView::Stack, slots, w, h);
+    CHECK(slots.size() == 4 && slots[0].x == 100 && slots[0].y == 0 && slots[1].x == 0 &&
+          slots[1].y == 200 + kPageGap && slots[2].x == 100 && slots[2].y == slots[1].y &&
+          slots[3].x == 0 && slots[3].y == 2 * (200 + kPageGap) && w == 200 &&
+          h == 3 * 200 + 2 * kPageGap, "facing stack is a column of spreads");
+    arrange_pages(s, 1, 0, PageView::Stack, slots, w, h);
+    CHECK(slots.size() == 1 && slots[0].x == 0 && w == 100, "a lone facing page stacks alone");
+    s.facing = false;
     arrange_pages(s, 3, 0, PageView::Stack, slots, w, h);
     CHECK(slots.size() == 3 && slots[2].y == 2 * (200 + kPageGap) && w == 100 &&
           h == 3 * 200 + 2 * kPageGap, "stack");
