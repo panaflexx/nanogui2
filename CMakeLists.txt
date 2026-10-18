@@ -991,6 +991,7 @@ if (NANOGUI_BUILD_EXAMPLES)
         pagemade/src/main.cpp
         pagemade/src/composerview.cpp
         pagemade/src/render_nvg.cpp
+        pagemade/src/raster_nvg.cpp
         pagemade/src/pdf.cpp
         pagemade/src/default_fonts.cpp
         pagemade/src/system_fonts.cpp

@@ -77,6 +77,8 @@ struct PdfForm {
     Dropdown *standard = nullptr;
     Dropdown *intent = nullptr;
     CheckBox *bleed = nullptr, *marks = nullptr;
+    CheckBox *flatten = nullptr;
+    IntSpin *flatten_ppi = nullptr;
     TextBox *title = nullptr, *author = nullptr, *subject = nullptr;
     CheckBox *preflight = nullptr, *open_after = nullptr;
     IntSpin *min_ppi = nullptr;
@@ -116,6 +118,9 @@ struct PdfForm {
         intent->set_enabled(s.pdfx4);
         bleed->set_checked(s.bleed);
         marks->set_checked(s.crop_marks);
+        flatten->set_checked(s.flatten);
+        flatten_ppi->set_value((int) std::lround(s.flatten_ppi));
+        flatten_ppi->set_enabled(s.flatten);
         title->set_value(s.title);
         author->set_value(s.author);
         subject->set_value(s.subject);
@@ -157,10 +162,14 @@ void apply_pdf_preset(const std::string &name, PdfSettings &s) {
     s.output_intent.clear();
     s.bleed = true;
     s.crop_marks = false;
+    s.flatten = false;
+    s.flatten_ppi = d.flatten_ppi;
     s.min_ppi = d.min_ppi;
     if (name == "Prodigi photo book") {
-        /* Prodigi: PDF/X-4 against FOGRA39, RGB, no bleed or marks (their
-         * system adds them), 300 ppi pictures */
+        /* Prodigi (HP Indigo): PDF/X-4 against FOGRA39, RGB, no bleed or
+         * marks (their system adds them), 300 ppi pictures. Transparency
+         * stays live, as PDF/X-4 allows, so text and art stay vector and
+         * pictures untouched; Flatten is there if a job is refused. */
         s.jpeg_quality = 95;
         s.color = PdfSettings::Color::RgbTagged;
         s.pdfx4 = true;
@@ -339,6 +348,19 @@ void ask_pdf_settings(Screen *screen, const PdfSettings &current, int page_count
     label(r, "", 110);
     st->marks = new CheckBox(r, "Crop marks", [st](bool v) { st->s.crop_marks = v; st->changed(); });
     note(r, "outside the bleed");
+
+    /* ---- Transparency */
+    heading(form, "Transparency");
+    r = row(form);
+    label(r, "", 110);
+    st->flatten = new CheckBox(r, "Flatten at", [st](bool v) { st->s.flatten = v; st->changed(); });
+    st->flatten->set_tooltip("Pages with anything see-through (PNG alpha, opacity, fading gradients) "
+                             "are written as one picture. Other pages stay vector.");
+    st->flatten_ppi = new IntSpin(r, 300, 10, 72, 1200);
+    st->flatten_ppi->set_units("ppi");
+    st->flatten_ppi->set_fixed_size(Vector2i(96, 28));
+    st->flatten_ppi->set_callback([st](int v) { st->s.flatten_ppi = (float) v; st->changed(); });
+    note(r, "for printers that ask for it");
 
     /* ---- Document */
     heading(form, "Document");

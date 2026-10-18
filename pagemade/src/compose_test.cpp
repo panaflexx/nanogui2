@@ -3911,6 +3911,125 @@ static void test_swatch_library() {
           "config path %s", config_path.c_str());
 }
 
+/* Export without loading every picture first, flattening, and stopping. */
+static void test_pdf_export_jobs() {
+    std::string err;
+    /* A linked JPEG the store hasn't loaded (it was off screen) */
+    const std::string jpg = "/tmp/pagemade-linked-export.jpg";
+    {
+        const std::vector<uint8_t> bytes = make_jpeg_rgb(16, 8, 20, 120, 220);
+        FILE *f = std::fopen(jpg.c_str(), "wb");
+        CHECK(f != nullptr, "write the linked jpeg");
+        if (f) {
+            std::fwrite(bytes.data(), 1, bytes.size(), f);
+            std::fclose(f);
+        }
+    }
+    const ImageImport probed = probe_image_file(jpg);
+    CHECK(probed.ok, "probe the linked jpeg");
+    ImageStore store;
+    PageDoc doc;
+    const uint32_t id = store.take_id();
+    store.add_link(id, jpg, probed.meta);
+    ImageAsset asset;
+    asset.id = id;
+    asset.name = "linked.jpg";
+    asset.meta = probed.meta;
+    asset.source = file_uri(jpg);
+    doc.add_image(asset);
+    Item pic;
+    pic.w = 160;
+    pic.h = 80;
+    pic.content = PlacedImage{id, 0, 0, 160, 80};
+    doc.add_item(0, pic);
+
+    PdfSettings o;
+    auto unreadable = [&](const std::vector<std::string> &warnings) {
+        for (const std::string &w : warnings)
+            if (w.find("can't be read") != std::string::npos)
+                return true;
+        return false;
+    };
+    CHECK(!store.is_loaded(id) && !unreadable(pdf_preflight(doc, {}, &store, o)),
+          "an unloaded link whose file is there is not reported missing");
+    const std::string pdf = "/tmp/pagemade-export-jobs.pdf";
+    CHECK(export_pdf(pdf, doc, {}, &store, &o), "export with the link unloaded");
+    std::string plain = pdf_plain(read_bin(pdf));
+    CHECK(plain.find("/Im" + std::to_string(id) + " Do") != std::string::npos &&
+              plain.find("/DCTDecode") != std::string::npos,
+          "the export reads the linked file itself");
+    CHECK(!store.is_loaded(id), "and leaves the store as it was");
+    const std::string moved = jpg + ".moved";
+    std::rename(jpg.c_str(), moved.c_str());
+    CHECK(unreadable(pdf_preflight(doc, {}, &store, o)), "a link whose file is gone is reported");
+    std::rename(moved.c_str(), jpg.c_str());
+
+    /* Flatten: the translucent page is rendered by the hook, the opaque
+     * one stays vector */
+    PageDoc fd;
+    fd.insert_page(1);
+    const SwatchId glass = fd.add_swatch("Glass", {0.2f, 0.4f, 0.8f, 0.5f});
+    const SwatchId solid = fd.add_swatch("Solid", {0.8f, 0.2f, 0.2f, 1.f});
+    for (int pg = 0; pg < 2; ++pg) {
+        Item box;
+        box.w = 100;
+        box.h = 50;
+        Shape sh;
+        sh.fill = Paint{pg == 0 ? glass : solid, 100.f};
+        sh.stroke.weight = 0;
+        box.content = sh;
+        fd.add_item((size_t) pg, box);
+    }
+    CHECK(draws_transparency(build_page(fd, 0, {}), fd) && !draws_transparency(build_page(fd, 1, {}), fd),
+          "draws_transparency finds the translucent fill only");
+    PdfSettings flat;
+    flat.flatten = true;
+    flat.flatten_ppi = 144.f;
+    flat.bleed = false;
+    int calls = 0, got_w = 0, got_h = 0;
+    PdfExportHooks hooks;
+    hooks.rasterize = [&](const DrawList &list, const std::map<uint32_t, PdfRasterPicture> &,
+                          float, float, float, float, int width, int height,
+                          std::vector<uint8_t> &rgba) {
+        ++calls;
+        got_w = width;
+        got_h = height;
+        rgba.assign((size_t) width * height * 4, list.empty() ? 0 : 200);
+        return true;
+    };
+    CHECK(export_pdf(pdf, fd, {}, nullptr, &flat, nullptr, &hooks), "export flattened");
+    plain = pdf_plain(read_bin(pdf));
+    CHECK(calls == 1 && got_w == (int) std::lround(fd.setup.width * 2) &&
+              got_h == (int) std::lround(fd.setup.height * 2),
+          "one page rendered, at 144 ppi (%d calls, %d x %d)", calls, got_w, got_h);
+    CHECK(plain.find("/Fl0 Do") != std::string::npos && plain.find("/Fl1") == std::string::npos &&
+              plain.find("/ExtGState") == std::string::npos,
+          "the translucent page is a picture; no transparency is left");
+    CHECK(export_pdf(pdf, fd, {}, nullptr, &flat), "without a rasterizer");
+    plain = pdf_plain(read_bin(pdf));
+    CHECK(plain.find("/Fl0") == std::string::npos && plain.find("/ExtGState") != std::string::npos,
+          "the page is written as it is");
+
+    /* Progress, and a stop that leaves no file */
+    std::remove(pdf.c_str());
+    float last = -1.f;
+    bool rising = true;
+    PdfExportHooks watch;
+    watch.progress = [&](float f, const std::string &) {
+        rising = rising && f >= last;
+        last = f;
+        return true;
+    };
+    CHECK(export_pdf(pdf, doc, {}, &store, &o, nullptr, &watch) && rising && last > 0.999f,
+          "progress rises to 1 (%g)", last);
+    std::remove(pdf.c_str());
+    PdfExportHooks stop;
+    stop.progress = [](float, const std::string &) { return false; };
+    CHECK(!export_pdf(pdf, doc, {}, &store, &o, nullptr, &stop) && !nanogui::fs::exists(pdf),
+          "a stop writes no file");
+    std::remove(jpg.c_str());
+}
+
 /* fill_windings: holes stay holes, the outline is kept counter-clockwise
  * (NanoVG's sign) whichever way it was drawn, and a mirror changes nothing. */
 static void test_fill_windings() {
@@ -4524,6 +4643,7 @@ int main(int argc, char **argv) {
     test_svg(fonts);
     test_asset_library_config();
     test_fill_windings();
+    test_pdf_export_jobs();
     test_picture_style(fonts);
     test_groups(fonts);
     test_page_markers(fonts);

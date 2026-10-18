@@ -658,6 +658,10 @@ std::string make_json(const PageDoc &doc, const SaveOptions &opts, const std::ve
         if (!o.output_intent.empty()) j.key("output_intent").value(o.output_intent);
         j.key("bleed").value(o.bleed);
         if (o.crop_marks) j.key("crop_marks").value(true);
+        if (o.flatten) {
+            j.key("flatten").value(true);
+            j.key("flatten_ppi").value(o.flatten_ppi);
+        }
         if (!o.title.empty()) j.key("title").value(o.title);
         if (!o.author.empty()) j.key("author").value(o.author);
         if (!o.subject.empty()) j.key("subject").value(o.subject);
@@ -1407,6 +1411,9 @@ OpenResult open_document(const std::string &path, const FontLibrary &installed,
         get(o, "output_intent", ps.output_intent);
         get(o, "bleed", ps.bleed);
         get(o, "crop_marks", ps.crop_marks);
+        get(o, "flatten", ps.flatten);
+        get(o, "flatten_ppi", ps.flatten_ppi);
+        ps.flatten_ppi = std::clamp(ps.flatten_ppi, 72.f, 1200.f);
         get(o, "title", ps.title);
         get(o, "author", ps.author);
         get(o, "subject", ps.subject);

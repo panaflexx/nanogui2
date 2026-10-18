@@ -560,7 +560,29 @@ struct PdfPicture {
     int obj = 0;
     bool upright = false;               // pixels already oriented (not a raw JPEG)
     bool soft_mask = false;             // transparent pixels (an /SMask)
+    int orientation = 1;                // EXIF, for a picture that isn't upright
 };
+
+/* A picture's source for export: the store's bytes, or for a linked picture
+ * the store has unloaded (it was off screen), its file. Reading here rather
+ * than loading into the store keeps one picture in memory at a time and
+ * leaves the store to the screen. */
+bool picture_source(const ImageStore *images, uint32_t id, ImageStore::Bytes &bytes,
+                    ImageMetadata &meta) {
+    if (!images)
+        return false;
+    if (images->export_source(id, &bytes, &meta))
+        return true;
+    const std::string path = images->path_of(id);
+    if (path.empty())
+        return false;
+    ImageImport read = read_image_import(path);
+    if (!read.ok)
+        return false;
+    bytes = std::make_shared<const std::vector<uint8_t>>(std::move(read.bytes));
+    meta = std::move(read.meta);
+    return true;
+}
 
 /* One XObject for the picture's source. A JPEG that isn't resampled keeps
  * its DCT stream and its stored (unrotated) pixel size; the page stream
@@ -917,9 +939,14 @@ std::vector<std::string> pdf_preflight(const PageDoc &doc, const std::vector<Com
                           std::to_string(where[kv.first]) + " (below " +
                           std::to_string((int) o.min_ppi) + "): it may print soft.");
         }
-        ImageStore::Bytes bytes;
-        ImageMetadata meta;
-        if (images && !images->export_source(kv.first, &bytes, &meta))
+        /* A linked picture off screen is unloaded, not missing: the export
+         * reads its file, so the file only has to be there. */
+        bool readable = !images || images->is_loaded(kv.first);
+        if (!readable) {
+            const std::string link = images->path_of(kv.first);
+            readable = !link.empty() && nanogui::fs::is_regular_file(link);
+        }
+        if (!readable)
             out.push_back(name + " (page " + std::to_string(where[kv.first]) +
                           ") can't be read: it prints as a gray box.");
     }
@@ -948,12 +975,14 @@ std::vector<std::string> pdf_preflight(const PageDoc &doc, const std::vector<Com
                     (!pv->stroke.none() && doc.resolve(pv->stroke.paint).a < 0.999f))
                     transparent.insert(pi + 1);
         }
-    if (!transparent.empty()) {
+    if (!transparent.empty() && !o.flatten) {
         std::string list;
         for (size_t p : transparent)
             list += (list.empty() ? "" : ", ") + std::to_string(p);
         out.push_back("Transparency on page " + list +
-                      ": some printers (Prodigi among them) ask for it to be flattened.");
+                      (o.pdfx4 ? ": kept live, as PDF/X-4 allows. Turn on Flatten if your printer "
+                                 "can't take it."
+                               : ": some printers ask for it to be flattened (Flatten, or PDF/X-4)."));
     }
     for (size_t si = 0; si < comps.size() && si < doc.stories.size(); ++si)
         if (comps[si].overset) {
@@ -975,10 +1004,50 @@ std::vector<std::string> pdf_preflight(const PageDoc &doc, const std::vector<Com
     return out;
 }
 
+bool draws_transparency(const DrawList &list, const PageDoc &doc) {
+    auto see_through = [](const Color &c) { return c.a < 0.999f; };
+    auto gradient = [&](const DrawGradientRef &g) {
+        if (g)
+            for (const GradientStop &st : g->stops)
+                if (see_through(st.color))
+                    return true;
+        return false;
+    };
+    for (const DrawOp &op : list) {
+        if (const auto *f = std::get_if<DrawFill>(&op)) {
+            if (f->gradient ? gradient(f->gradient) : see_through(f->color))
+                return true;
+        } else if (const auto *s = std::get_if<DrawStroke>(&op)) {
+            if (s->gradient ? gradient(s->gradient) : see_through(s->color))
+                return true;
+        } else if (const auto *g = std::get_if<DrawGlyphs>(&op)) {
+            if (see_through(g->color))
+                return true;
+        } else if (const auto *im = std::get_if<DrawImage>(&op)) {
+            if (im->opacity < 0.999f)
+                return true;
+            if (const ImageAsset *a = doc.find_image(im->asset))
+                if (a->meta.alpha)
+                    return true;
+        }
+    }
+    return false;
+}
+
 bool export_pdf(const std::string &path, const PageDoc &doc,
                 const std::vector<Composition> &comps, const ImageStore *images,
-                const PdfSettings *settings, const VectorStore *vectors) {
+                const PdfSettings *settings, const VectorStore *vectors,
+                const PdfExportHooks *hooks) {
     const PdfSettings &o = settings ? *settings : doc.pdf;
+    /* Progress in units of work: a picture is one, a flattened page four,
+     * the page streams and the file two. */
+    double done_units = 0, total_units = 2;
+    auto step = [&](double units, const std::string &what) {
+        done_units += units;
+        if (!hooks || !hooks->progress)
+            return true;
+        return hooks->progress((float) std::min(1.0, done_units / total_units), what);
+    };
     /* PDF/X and tagged RGB tag every color; CMYK is not done yet and is
      * written as tagged RGB */
     const bool tagged = o.pdfx4 || o.color != PdfSettings::Color::Rgb;
@@ -990,6 +1059,27 @@ bool export_pdf(const std::string &path, const PageDoc &doc,
         pages.push_back(build_page(doc, i, comps, nullptr, false, vectors));
     if (pages.empty())
         pages.emplace_back();   // a PDF needs a page; a fully hidden document is blank
+
+    /* Pages to flatten: those that draw anything see-through, when there
+     * is a rasterizer to draw them */
+    std::vector<char> flat(pages.size(), 0);
+    size_t flat_count = 0;
+    if (o.flatten && hooks && hooks->rasterize)
+        for (size_t i = 0; i < pages.size(); ++i)
+            if (draws_transparency(pages[i], doc)) {
+                flat[i] = 1;
+                ++flat_count;
+            }
+    std::set<uint32_t> embed_ids;
+    for (size_t i = 0; i < pages.size(); ++i)
+        if (!flat[i])
+            for (const DrawOp &op : pages[i])
+                if (const auto *im = std::get_if<DrawImage>(&op))
+                    if (im->asset)
+                        embed_ids.insert(im->asset);
+    total_units += (double) (images ? embed_ids.size() : 0) + 4.0 * (double) flat_count;
+    if (!step(0, "Fonts"))
+        return false;
 
     std::map<const Font *, PdfFont> fonts;
     collect_unicodes(doc, comps, fonts, std::set<size_t>(chosen.begin(), chosen.end()));
@@ -1011,14 +1101,21 @@ bool export_pdf(const std::string &path, const PageDoc &doc,
     const std::map<uint32_t, float> ppi = placed_ppi(doc, chosen);
     bool soft_masks = false;
     if (images) {
-        for (const DrawList &list : pages)
-            for (const DrawOp &op : list)
+        size_t n_done = 0;
+        for (size_t pi = 0; pi < pages.size(); ++pi)
+            for (const DrawOp &op : pages[pi])
                 if (const auto *im = std::get_if<DrawImage>(&op))
-                    if (im->asset && !image_res.count(im->asset)) {
+                    if (im->asset && !flat[pi] && !image_res.count(im->asset)) {
+                        if (!step(1, "Picture " + std::to_string(++n_done) + " of " +
+                                         std::to_string(embed_ids.size())))
+                            return false;
                         ImageStore::Bytes bytes;
                         ImageMetadata meta;
-                        if (!images->export_source(im->asset, &bytes, &meta))
+                        if (!picture_source(images, im->asset, bytes, meta)) {
+                            image_res[im->asset] = PdfPicture();   // a stand-in, asked once
                             continue;
+                        }
+                        const int orientation = meta.orientation >= 1 ? meta.orientation : 1;
                         PictureOpts po;
                         po.compression = o.compression;
                         po.quality = std::clamp(o.jpeg_quality, 10, 100);
@@ -1035,6 +1132,7 @@ bool export_pdf(const std::string &path, const PageDoc &doc,
                         held.source = std::move(bytes);
                         held.meta = std::move(meta);
                         image_res[im->asset] = embed_picture(w, held, po);
+                        image_res[im->asset].orientation = orientation;
                         soft_masks = soft_masks || image_res[im->asset].soft_mask;
                     }
     }
@@ -1056,6 +1154,79 @@ bool export_pdf(const std::string &path, const PageDoc &doc,
     grads.w = &w;
     grads.cs = tagged ? srgb_space : std::string("/DeviceRGB");
     const Transform base{1, 0, 0, -1, off, H + off};
+
+    /* Flattened pages: the sheet to the bleed, rendered by the caller with
+     * the pictures decoded here at the page's resolution, then one JPEG */
+    std::vector<int> flat_obj(pages.size(), 0);
+    const float fppi = std::clamp(o.flatten_ppi, 72.f, 1200.f);
+    size_t flat_done = 0;
+    for (size_t i = 0; i < pages.size(); ++i) {
+        if (!flat[i])
+            continue;
+        if (!step(0, "Flattening page " + std::to_string(++flat_done) + " of " +
+                         std::to_string(flat_count)))
+            return false;
+        std::map<uint32_t, PdfRasterPicture> pics;
+        for (const DrawOp &op : pages[i]) {
+            const auto *im = std::get_if<DrawImage>(&op);
+            if (!im || !im->asset || pics.count(im->asset))
+                continue;
+            ImageStore::Bytes bytes;
+            ImageMetadata meta;
+            if (!picture_source(images, im->asset, bytes, meta))
+                continue;
+            const int edge = std::max(1, (int) std::ceil(std::max(std::fabs(im->w), std::fabs(im->h)) *
+                                                         fppi / 72.f));
+            PdfRasterPicture rp;
+            std::string err;
+            if (make_display(bytes->data(), bytes->size(), edge, &rp.rgba, &rp.width, &rp.height, &err))
+                pics[im->asset] = std::move(rp);
+        }
+        const float sx = -bleed, sy = -bleed, sw = W + 2 * bleed, sh = H + 2 * bleed;
+        const int pw = std::max(1, (int) std::lround(sw * fppi / 72.f));
+        const int ph = std::max(1, (int) std::lround(sh * fppi / 72.f));
+        std::vector<uint8_t> rgba;
+        std::string jpeg;
+        if (hooks->rasterize(pages[i], pics, sx, sy, sw, sh, pw, ph, rgba) &&
+            rgba.size() == (size_t) pw * ph * 4 &&
+            encode_jpeg(rgba.data(), pw, ph, std::clamp(o.jpeg_quality, 10, 100), &jpeg))
+            flat_obj[i] = w.add_raw_stream(
+                "/Type /XObject /Subtype /Image /Width " + std::to_string(pw) + " /Height " +
+                    std::to_string(ph) + " /ColorSpace " + rgb_space(w, {}, tagged) +
+                    " /BitsPerComponent 8 /Interpolate true /Filter /DCTDecode",
+                jpeg);
+        if (!step(4, "Flattening page " + std::to_string(flat_done) + " of " +
+                         std::to_string(flat_count)))
+            return false;
+    }
+    /* A page that couldn't be flattened is written as it is */
+    for (size_t i = 0; i < pages.size(); ++i)
+        if (flat[i] && !flat_obj[i] && images)
+            for (const DrawOp &op : pages[i])
+                if (const auto *im = std::get_if<DrawImage>(&op))
+                    if (im->asset && !image_res.count(im->asset)) {
+                        ImageStore::Bytes bytes;
+                        ImageMetadata meta;
+                        if (!picture_source(images, im->asset, bytes, meta)) {
+                            image_res[im->asset] = PdfPicture();
+                            continue;
+                        }
+                        PictureOpts po;
+                        po.compression = o.compression;
+                        po.quality = std::clamp(o.jpeg_quality, 10, 100);
+                        po.tagged = tagged;
+                        po.interpolate = !o.pdfx4;
+                        const int orientation = meta.orientation >= 1 ? meta.orientation : 1;
+                        ImageStore::Entry held;
+                        held.source = std::move(bytes);
+                        held.meta = std::move(meta);
+                        image_res[im->asset] = embed_picture(w, held, po);
+                        image_res[im->asset].orientation = orientation;
+                        soft_masks = soft_masks || image_res[im->asset].soft_mask;
+                    }
+    if (!step(0, "Writing pages"))
+        return false;
+
     std::vector<std::string> contents_src;
     contents_src.reserve(pages.size());
     for (size_t i = 0; i < pages.size(); ++i) {
@@ -1064,7 +1235,15 @@ bool export_pdf(const std::string &path, const PageDoc &doc,
         std::string content = "q " + num(off - bleed) + " " + num(off - bleed) + " " +
                               num(W + 2 * bleed) + " " + num(H + 2 * bleed) + " re W n\n";
         content += "1 0 0 -1 " + num(off) + " " + num(H + off) + " cm\n";
-        for (const DrawOp &op : pages[i]) {
+        static const DrawList kFlattened;
+        if (flat_obj[i]) {
+            float m[6];
+            image_pdf_matrix(1, -bleed, -bleed, W + 2 * bleed, H + 2 * bleed, m);
+            content += "q " + num(m[0]) + " " + num(m[1]) + " " + num(m[2]) + " " + num(m[3]) +
+                       " " + num(m[4]) + " " + num(m[5]) + " cm\n/Fl" + std::to_string(i) +
+                       " Do\nQ\n";
+        }
+        for (const DrawOp &op : flat_obj[i] ? kFlattened : pages[i]) {
             if (const auto *g = std::get_if<DrawGlyphs>(&op)) {
                 auto it = g->run->font ? font_res.find(g->run->font) : font_res.end();
                 if (it == font_res.end())
@@ -1116,10 +1295,7 @@ bool export_pdf(const std::string &path, const PageDoc &doc,
                     /* The frame clips in item space; the picture's own matrix
                      * then maps the unit square onto the placement rect. */
                     content += "0 0 " + num(im->clip_w) + " " + num(im->clip_h) + " re W n\n";
-                    int orient = 1;
-                    if (!found->second.upright && images)
-                        if (const ImageStore::Entry *e = images->find(im->asset))
-                            orient = e->meta.orientation >= 1 ? e->meta.orientation : 1;
+                    const int orient = found->second.upright ? 1 : found->second.orientation;
                     float m[6];
                     image_pdf_matrix(orient, im->x, im->y, im->w, im->h, m);
                     content += num(m[0]) + " " + num(m[1]) + " " + num(m[2]) + " " +
@@ -1149,12 +1325,17 @@ bool export_pdf(const std::string &path, const PageDoc &doc,
     bool any_image = false;
     for (const auto &kv : image_res)
         any_image |= kv.second.obj != 0;
+    for (int obj : flat_obj)
+        any_image |= obj != 0;
     if (any_image) {
         res_dict += " /XObject <<";
         for (const auto &kv : image_res)
             if (kv.second.obj)
                 res_dict += " /Im" + std::to_string(kv.first) + " " +
                             std::to_string(kv.second.obj) + " 0 R";
+        for (size_t i = 0; i < flat_obj.size(); ++i)
+            if (flat_obj[i])
+                res_dict += " /Fl" + std::to_string(i) + " " + std::to_string(flat_obj[i]) + " 0 R";
         res_dict += " >>";
     }
     if (!alpha_objs.empty() || !grads.masks.empty()) {
@@ -1253,7 +1434,11 @@ bool export_pdf(const std::string &path, const PageDoc &doc,
     }
     int catalog = w.add("<< /Type /Catalog /Pages " + std::to_string(pages_obj) + " 0 R" +
                         catalog_extra + " >>");
-    return w.write(path, catalog, o.pdfx4 ? "1.6" : "1.7", trailer);
+    if (!step(1, "Writing the file"))
+        return false;
+    const bool ok = w.write(path, catalog, o.pdfx4 ? "1.6" : "1.7", trailer);
+    step(1, "Done");
+    return ok;
 }
 
 } // namespace pagemade

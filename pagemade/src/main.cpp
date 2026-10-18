@@ -69,6 +69,7 @@
 #include "paragraph_panel.h"
 #include "pdf.h"
 #include "pdf_dialog.h"
+#include "raster_nvg.h"
 #include "spinbox.h"
 #include "swatch_library.h"
 #include "swatch_menu.h"
@@ -78,7 +79,12 @@
 
 #include <algorithm>
 #include <array>
+#include <atomic>
 #include <cmath>
+#include <future>
+#include <memory>
+#include <mutex>
+#include <thread>
 #include <nanogui/fscompat.h>
 #include <map>
 #include <cctype>
@@ -2503,16 +2509,125 @@ public:
         update_status();
     }
 
-    /* `settings` null: the publication's own */
+    /* `settings` null: the publication's own. On this thread, to the end:
+     * for scripted runs. The menus use run_pdf_export. Linked pictures the
+     * store has unloaded are read from their files by the export. */
     bool export_pdf_to(const std::string &path, const PdfSettings *settings = nullptr) {
-        /* Off-screen linked pictures are unloaded. Export needs the bytes,
-         * or the page is drawn with a gray stand-in. */
-        const PageDoc &doc = m_view->document();
-        for (const Page &page : doc.pages)
-            for (const Item &it : page.items)
-                if (const PlacedImage *im = it.image())
-                    m_images.load(im->asset, nullptr);
-        return export_pdf(path, doc, m_view->compositions(), &m_images, settings, &m_vectors);
+        PdfExportHooks hooks;
+        NVGcontext *ctx = nvg_context();
+        hooks.rasterize = [ctx](const DrawList &list,
+                                const std::map<uint32_t, PdfRasterPicture> &pictures, float x,
+                                float y, float w_pt, float h_pt, int width, int height,
+                                std::vector<uint8_t> &rgba) {
+            return rasterize_page(ctx, list, pictures, x, y, w_pt, h_pt, width, height, rgba);
+        };
+        return export_pdf(path, m_view->document(), m_view->compositions(), &m_images, settings,
+                          &m_vectors, &hooks);
+    }
+
+    /* A PDF export on its own thread behind a modal progress dialog, so a
+     * long one doesn't stall the window (Wayland offers to force-quit an
+     * app that stops answering). The thread gets copies of the document
+     * and its compositions; the dialog keeps everything else still.
+     * Flattened pages are drawn here, between frames, where the GL context
+     * is. `done` runs on this thread when the export ends. */
+    struct PdfJob {
+        std::atomic<bool> cancel{false};
+        std::mutex mu;
+        float done = 0;
+        std::string what;
+        bool posted = false;             // a progress update is on its way
+        ModalDialog *dialog = nullptr;
+        Label *label = nullptr;
+        ProgressBar *bar = nullptr;
+        Button *cancel_button = nullptr;
+    };
+    std::shared_ptr<PdfJob> m_pdf_job;
+    std::thread m_pdf_thread;
+
+    void run_pdf_export(const std::string &path, const PdfSettings &settings,
+                        const std::string &title, std::function<void(bool ok, bool cancelled)> done) {
+        if (m_pdf_job)
+            return;                      // one at a time
+        auto job = std::make_shared<PdfJob>();
+        m_pdf_job = job;
+
+        auto *d = new ModalDialog(this, title);
+        Widget *body = d->body();
+        body->set_layout(new BoxLayout(Orientation::Vertical, Alignment::Fill, 0, 8));
+        job->label = new Label(body, "Starting\u2026", "sans");
+        job->label->set_fixed_size(Vector2i(420, 0));
+        job->bar = new ProgressBar(body);
+        job->bar->set_fixed_size(Vector2i(420, 12));
+        job->cancel_button = d->add_button("Cancel", [job] {
+            job->cancel = true;
+            if (job->label)
+                job->label->set_caption("Cancelling\u2026");
+            if (job->cancel_button)
+                job->cancel_button->set_enabled(false);
+        }, ModalDialog::Role::Cancel, false);
+        job->dialog = d;
+        d->open();
+
+        auto doc = std::make_shared<const PageDoc>(m_view->document());
+        auto comps = std::make_shared<const std::vector<Composition>>(m_view->compositions());
+        NVGcontext *ctx = nvg_context();
+        m_pdf_thread = std::thread([this, job, doc, comps, path, settings, ctx, done] {
+            PdfExportHooks hooks;
+            hooks.progress = [job](float f, const std::string &what) {
+                bool post = false;
+                {
+                    std::lock_guard<std::mutex> lock(job->mu);
+                    job->done = f;
+                    job->what = what;
+                    post = !job->posted;
+                    job->posted = true;
+                }
+                if (post) {
+                    nanogui::async([job] {
+                        std::lock_guard<std::mutex> lock(job->mu);
+                        job->posted = false;
+                        if (job->bar)
+                            job->bar->set_value(job->done);
+                        if (job->label && !job->cancel)
+                            job->label->set_caption(job->what);
+                    });
+                    glfwPostEmptyEvent();
+                }
+                return !job->cancel.load();
+            };
+            hooks.rasterize = [job, ctx](const DrawList &list,
+                                         const std::map<uint32_t, PdfRasterPicture> &pictures,
+                                         float x, float y, float w_pt, float h_pt, int width,
+                                         int height, std::vector<uint8_t> &rgba) {
+                if (job->cancel)
+                    return false;
+                /* This thread waits while the UI thread draws the page */
+                std::promise<bool> drawn;
+                std::future<bool> result = drawn.get_future();
+                nanogui::async([&] {
+                    drawn.set_value(rasterize_page(ctx, list, pictures, x, y, w_pt, h_pt, width,
+                                                   height, rgba));
+                });
+                glfwPostEmptyEvent();
+                return result.get();
+            };
+            const bool ok = export_pdf(path, *doc, *comps, &m_images, &settings, &m_vectors, &hooks);
+            nanogui::async([this, job, ok, done] {
+                if (m_pdf_thread.joinable())
+                    m_pdf_thread.join();
+                if (job->dialog)
+                    job->dialog->close();
+                job->dialog = nullptr;
+                job->label = nullptr;
+                job->bar = nullptr;
+                job->cancel_button = nullptr;
+                const bool cancelled = job->cancel;
+                m_pdf_job.reset();
+                done(ok, cancelled);
+            });
+            glfwPostEmptyEvent();
+        });
     }
 
     /* File > Document Setup: page size, margins, columns, bleed, and what
@@ -2548,10 +2663,12 @@ public:
                 std::string path = paths[0];
                 if (path.size() < 4 || path.compare(path.size() - 4, 4, ".pdf") != 0)
                     path += ".pdf";
-                const bool ok = export_pdf_to(path, &s);
-                set_note(ok ? "wrote " + path : "PDF export FAILED: " + path);
-                if (ok && s.open_after)
-                    open_with_desktop(path);
+                run_pdf_export(path, s, "Exporting PDF", [this, s, path](bool ok, bool cancelled) {
+                    set_note(cancelled ? "PDF export cancelled"
+                             : ok ? "wrote " + path : "PDF export FAILED: " + path);
+                    if (ok && !cancelled && s.open_after)
+                        open_with_desktop(path);
+                });
             };
             if (!s.preflight) {
                 write();
@@ -2612,23 +2729,29 @@ public:
         print.all_pages = true;
         print.bleed = false;
         print.crop_marks = false;
-        if (!export_pdf_to(path, &print)) {
-            set_note("print failed: could not write " + path);
-            return;
-        }
+        run_pdf_export(path, print, "Preparing to Print", [this, path](bool ok, bool cancelled) {
+            if (cancelled) {
+                set_note("print cancelled");
+                return;
+            }
+            if (!ok) {
+                set_note("print failed: could not write " + path);
+                return;
+            }
 #if defined(_WIN32)
-        set_note("printing is not wired up on Windows yet; use Export PDF");
+            set_note("printing is not wired up on Windows yet; use Export PDF");
 #else
-        pid_t pid = fork();
-        if (pid == 0) {
-            setsid();
-            int fd = open("/dev/null", O_RDWR);
-            if (fd >= 0) { dup2(fd, 0); dup2(fd, 1); dup2(fd, 2); if (fd > 2) close(fd); }
-            execlp("lp", "lp", path.c_str(), (char *) nullptr);
-            _exit(127);
-        }
-        set_note(pid > 0 ? "sent to the default printer (lp)" : "print failed (fork)");
+            pid_t pid = fork();
+            if (pid == 0) {
+                setsid();
+                int fd = open("/dev/null", O_RDWR);
+                if (fd >= 0) { dup2(fd, 0); dup2(fd, 1); dup2(fd, 2); if (fd > 2) close(fd); }
+                execlp("lp", "lp", path.c_str(), (char *) nullptr);
+                _exit(127);
+            }
+            set_note(pid > 0 ? "sent to the default printer (lp)" : "print failed (fork)");
 #endif
+        });
     }
 
     bool keyboard_event(int key, int scancode, int action, int modifiers) override {

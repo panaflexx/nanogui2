@@ -43,13 +43,16 @@ public:
     /* Where the dialog's content goes, above the buttons. */
     nanogui::Widget *body() { return m_body; }
     /* Buttons line up on the right in the order added. The action runs
-     * after the dialog closes. */
+     * after the dialog closes; with `closes` false the dialog stays up and
+     * the action runs at once (a Cancel that has to wait for work to stop). */
     nanogui::Button *add_button(const std::string &caption, std::function<void()> action,
-                                Role role = Role::Normal);
+                                Role role = Role::Normal, bool closes = true);
     /* Cmd/Ctrl + key presses `button`. */
     void add_shortcut(int key, nanogui::Button *button);
     /* Lay out, center over the window, take the keyboard. */
     void open();
+    /* Close without pressing a button: the work it waited on is done. */
+    void close();
 
     /* True while any dialog is up: the app ignores its own shortcuts. */
     static bool any_open();
@@ -58,7 +61,7 @@ public:
     bool keyboard_event(int key, int scancode, int action, int modifiers) override;
 
 private:
-    struct Action { nanogui::Button *button; std::function<void()> fn; };
+    struct Action { nanogui::Button *button; std::function<void()> fn; bool closes; };
     void press(nanogui::Button *button);
     void commit_text_boxes(nanogui::Widget *w);
 

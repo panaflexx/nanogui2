@@ -110,11 +110,12 @@ bool ModalDialog::any_open() {
     return s_open_dialogs > 0;
 }
 
-Button *ModalDialog::add_button(const std::string &caption, std::function<void()> action, Role role) {
+Button *ModalDialog::add_button(const std::string &caption, std::function<void()> action, Role role,
+                                bool closes) {
     Button *b = new Button(m_buttons, caption);
     b->set_fixed_size(Vector2i(std::max(96, (int) caption.size() * 9 + 24), 30));
     b->set_callback([this, b] { press(b); });
-    m_actions.push_back({b, std::move(action)});
+    m_actions.push_back({b, std::move(action), closes});
     if (role == Role::Default || role == Role::DefaultCancel) {
         m_default = b;
         b->set_background_color(kDefaultButton);
@@ -134,6 +135,14 @@ void ModalDialog::open() {
     request_focus();
 }
 
+void ModalDialog::close() {
+    if (m_closing)
+        return;
+    m_closing = true;
+    --s_open_dialogs;
+    dispose();
+}
+
 void ModalDialog::commit_text_boxes(Widget *w) {
     for (Widget *child : w->children()) {
         if (auto *tb = dynamic_cast<TextBox *>(child))
@@ -148,9 +157,17 @@ void ModalDialog::press(Button *button) {
         return;
     commit_text_boxes(this);
     std::function<void()> fn;
+    bool closes = true;
     for (const Action &a : m_actions)
-        if (a.button == button)
+        if (a.button == button) {
             fn = a.fn;
+            closes = a.closes;
+        }
+    if (!closes) {
+        if (fn)
+            fn();
+        return;
+    }
     m_closing = true;
     --s_open_dialogs;
     dispose();

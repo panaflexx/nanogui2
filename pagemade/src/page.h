@@ -109,6 +109,12 @@ struct PdfSettings {
     std::string output_intent;   // ICC profile file; empty is the built-in sRGB
     bool  bleed = true;          // the Document Setup bleed, past the trim
     bool  crop_marks = false;
+    /* Flatten transparency: a page with anything see-through is written as
+     * one opaque picture at `flatten_ppi` (for print services that can't
+     * take live transparency; PDF/X-4 carries it, so presets leave this
+     * off). Pages without transparency stay vector. */
+    bool  flatten = false;
+    float flatten_ppi = 300.f;
     std::string title, author, subject;
     /* Check the publication first and list what may print badly. */
     bool  preflight = true;
