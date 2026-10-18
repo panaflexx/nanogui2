@@ -64,6 +64,9 @@ struct DrawFill {
     float     clip_w = 0, clip_h = 0;
     DrawClip  clip{};                   // null: no clip path
     DrawGradientRef gradient{};         // null: `color` is the paint
+    /* fill_windings(path), when worked out ahead (placed SVG); null has
+     * the renderer work it out. */
+    std::shared_ptr<const std::vector<uint8_t>> windings{};
 };
 
 struct DrawStroke {

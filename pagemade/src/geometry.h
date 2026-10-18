@@ -42,6 +42,16 @@ Path shape_path(const Item &it);
 Bounds item_bounds(const Item &it);
 Bounds path_bounds(const Path &p);
 
+/* For each subpath of a path to be filled, in order: should NanoVG keep it
+ * counter-clockwise (1) or clockwise (0)? Each keeps its own winding, so
+ * nonzero fills as drawn, and if the largest contour is clockwise all are
+ * reversed, which fills the same and keeps NanoVG's anti-aliasing fringe
+ * inside the shape. Mirroring the path does not change the answer, so it
+ * can be worked out once (see render_nvg.cpp's fill path). A subpath ends
+ * at a move, at a close, and at the end; drawing on after a close starts
+ * another. */
+std::vector<uint8_t> fill_windings(const Path &p);
+
 /* Curves become line segments no farther than `tolerance` from the curve. */
 std::vector<Polyline> flatten(const Path &p, float tolerance);
 

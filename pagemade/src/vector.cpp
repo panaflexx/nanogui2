@@ -313,6 +313,7 @@ void append_placed_vector(DrawList &out, const PageDoc &, const Item &it, const 
             f.clip_h = it.h;
             f.clip = clip;
             f.gradient = gradient_of(sh.fill);
+            f.windings = sh.windings;
             out.push_back(std::move(f));
         }
         if (!sh.stroke.none()) {

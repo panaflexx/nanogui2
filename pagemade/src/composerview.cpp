@@ -4637,6 +4637,37 @@ bool ComposerView::drag_drop_event(const Vector2i &, DragEvent &e) {
     return e.accept(this, DropCopy);
 }
 
+/* PAGEMADE_FRAME_STATS=1: every two seconds, stderr gets the view's frame
+ * rate, the CPU time of its draw (average and worst), the pages it drew and
+ * the pictures uploaded to the GPU. The draw time leaves out the GPU and
+ * the rest of the window: a low rate with a short draw points there. */
+namespace {
+struct FrameStats {
+    bool on = std::getenv("PAGEMADE_FRAME_STATS") != nullptr;
+    double since = 0, draw = 0, worst = 0, upload_mb = 0;
+    int frames = 0, pages = 0, uploads = 0;
+
+    void frame(double t0, double t1, int drawn) {
+        if (since == 0)
+            since = t0;
+        ++frames;
+        draw += t1 - t0;
+        worst = std::max(worst, t1 - t0);
+        pages += drawn;
+        if (t1 - since < 2.0)
+            return;
+        std::fprintf(stderr,
+                     "pagemade view: %.1f fps, draw %.1f ms (worst %.1f), %.1f pages, "
+                     "%d uploads (%.0f MB)\n",
+                     frames / (t1 - since), 1000.0 * draw / frames, 1000.0 * worst,
+                     (double) pages / frames, uploads, upload_mb);
+        *this = FrameStats();
+        since = t1;
+    }
+};
+FrameStats g_frame_stats;
+} // namespace
+
 void ComposerView::sync_textures(NVGcontext *ctx) {
     const uint64_t gen = m_images ? m_images->generation() : 0;
     if (gen == m_tex_gen)
@@ -4684,11 +4715,16 @@ int ComposerView::texture_for(NVGcontext *ctx, const DrawImage &im, float px) {
     if (it != m_tex.end() && it->second.id)
         nvgDeleteImage(ctx, it->second.id);
     const int id = nvgCreateImageRGBA(ctx, w, h, 0, rgba);
+    if (g_frame_stats.on) {
+        ++g_frame_stats.uploads;
+        g_frame_stats.upload_mb += (double) w * h * 4 / (1024.0 * 1024.0);
+    }
     m_tex[im.asset] = {id, w, h};
     return id;
 }
 
 void ComposerView::draw(NVGcontext *ctx) {
+    const double stats_t0 = g_frame_stats.on ? glfwGetTime() : 0.0;
     float xf[6];
     nvgCurrentTransform(ctx, xf);
     const float scale = std::sqrt(xf[0] * xf[0] + xf[1] * xf[1]);
@@ -4713,9 +4749,45 @@ void ComposerView::draw(NVGcontext *ctx) {
     lifted_ids(lifted);
     const std::vector<ItemId> *hand = lifted.empty() ? nullptr : &lifted;
 
+    /* Pages the scroll panel doesn't show are not drawn at all: not their
+     * paper, items or chrome. A page counts as shown when it, or any item
+     * on it (one can hang onto the pasteboard), touches the window, with a
+     * margin for the shadow, bleed, handles and tabs. */
+    std::vector<char> shown(slots.size(), 1);
+    {
+        float cur[6], inv[6];
+        nvgCurrentTransform(ctx, cur);
+        if (nvgTransformInverse(inv, cur)) {
+            const Widget *port = parent() ? parent() : this;
+            const Vector2i pa = port->absolute_position(), ps = port->size();
+            Bounds vis;
+            for (int i = 0; i < 4; ++i) {
+                const float sx = (float) pa.x() + ((i & 1) ? (float) ps.x() : 0.f);
+                const float sy = (float) pa.y() + ((i & 2) ? (float) ps.y() : 0.f);
+                vis.add(Point{inv[0] * sx + inv[2] * sy + inv[4], inv[1] * sx + inv[3] * sy + inv[5]});
+            }
+            const float margin = 32.f * px + std::max(0.f, m_doc.setup.bleed);
+            for (size_t i = 0; i < slots.size(); ++i) {
+                const PageSlot &sl = slots[i];
+                Bounds b;
+                b.add(Point{0, 0});
+                b.add(Point{m_doc.setup.width, m_doc.setup.height});
+                if (sl.index < m_doc.pages.size())
+                    for (const Item &it : m_doc.pages[sl.index].items)
+                        b.add(item_bounds(it));
+                const float x0 = o.x() + sl.x + b.x0 - margin, x1 = o.x() + sl.x + b.x1 + margin;
+                const float y0 = o.y() + sl.y + b.y0 - margin, y1 = o.y() + sl.y + b.y1 + margin;
+                shown[i] = x1 >= vis.x0 && x0 <= vis.x1 && y1 >= vis.y0 && y0 <= vis.y1;
+            }
+        }
+    }
+
     /* Paper for every page first. An item that crosses onto the next page
      * is then drawn over that page, not under its sheet. */
-    for (const PageSlot &sl : slots) {
+    for (size_t si = 0; si < slots.size(); ++si) {
+        const PageSlot &sl = slots[si];
+        if (!shown[si])
+            continue;
         nvgSave(ctx);
         nvgTranslate(ctx, o.x() + sl.x, o.y() + sl.y);
         if (sl.index < m_doc.pages.size() && m_doc.pages[sl.index].hidden) {
@@ -4730,7 +4802,10 @@ void ComposerView::draw(NVGcontext *ctx) {
     }
 
     auto paint_items = [&](bool only) {
-        for (const PageSlot &sl : slots) {
+        for (size_t si = 0; si < slots.size(); ++si) {
+            const PageSlot &sl = slots[si];
+            if (!only && !shown[si])
+                continue;                // the item in hand is drawn wherever it is
             nvgSave(ctx);
             nvgTranslate(ctx, o.x() + sl.x, o.y() + sl.y);
             draw_list(ctx, build_page(m_doc, sl.index, m_comp, hand, only, m_vectors), px,
@@ -4773,4 +4848,6 @@ void ComposerView::draw(NVGcontext *ctx) {
 
     nvgRestore(ctx);
     update_live_images();
+    if (g_frame_stats.on)
+        g_frame_stats.frame(stats_t0, glfwGetTime(), (int) std::count(shown.begin(), shown.end(), 1));
 }

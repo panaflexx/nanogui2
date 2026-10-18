@@ -1229,6 +1229,8 @@ void emit_shape(VectorScene &scene, const Path &user, const Transform &xf, const
     }
     if (shape.fill.none() && shape.stroke.none())
         return;
+    if (!shape.fill.none())
+        shape.windings = std::make_shared<const std::vector<uint8_t>>(fill_windings(shape.path));
     scene.shapes.push_back(std::move(shape));
 }
 

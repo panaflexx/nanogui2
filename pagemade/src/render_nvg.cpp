@@ -115,105 +115,51 @@ void add_path(NVGcontext *ctx, const Path &p) {
 
 /* A path to fill. NanoVG turns every subpath counter-clockwise unless told
  * its winding, which fills in a nonzero path's holes (an SVG drawn as one
- * path with reversed inner contours). So each subpath keeps the winding it
- * has, as in the PDF. NanoVG also puts its anti-aliasing fringe inside a
- * counter-clockwise contour and outside a clockwise one, so if the largest
- * contour runs clockwise every subpath is reversed: nonzero and even-odd
- * fill the same, and solids and holes both get the fringe on the right side
- * instead of growing by a pixel. Areas use NanoVG's sign (nvg__polyArea,
- * after the current transform). */
-void add_fill_path(NVGcontext *ctx, const Path &p) {
-    float xf[6];
-    nvgCurrentTransform(ctx, xf);
-    const bool mirrored = xf[0] * xf[3] - xf[1] * xf[2] < 0.f;
-    constexpr int kSteps = 8;            // enough for the sign of the area
-
-    /* One pass for the areas, one to add the path. */
-    std::vector<float> areas;
-    for (int pass = 0; pass < 2; ++pass) {
-        bool flip = false;
-        if (pass == 1) {
-            float biggest = 0.f;
-            for (float a : areas)
-                if (std::fabs(a) > std::fabs(biggest))
-                    biggest = a;
-            flip = biggest < 0.f;
-        }
-        size_t index = 0;
-        Point start{0, 0}, cur{0, 0};
-        float area = 0.f;
-        bool open = false;
-        auto edge = [&](Point b) {
-            open = true;                 // also drawing on after a close
-            area += cur.x * b.y - b.x * cur.y;
-            cur = b;
-        };
-        auto end_subpath = [&] {
-            if (!open)
-                return;
-            area += cur.x * start.y - start.x * cur.y;
-            /* The shoelace sum is the negative of NanoVG's area. */
-            const float nvg_area = mirrored ? area : -area;
-            if (pass == 0) {
-                areas.push_back(nvg_area);
-            } else {
-                const float a = index < areas.size() ? areas[index] : nvg_area;
-                const bool ccw = flip ? a < 0.f : a >= 0.f;
-                nvgPathWinding(ctx, ccw ? NVG_CCW : NVG_CW);
-            }
-            ++index;
-            open = false;
-            area = 0.f;
-        };
-        const bool emit = pass == 1;
-        for (const PathCmd &c : p) {
-            switch (c.kind) {
-            case PathCmd::Move:
-                end_subpath();
-                if (emit)
-                    nvgMoveTo(ctx, c.x, c.y);
-                start = cur = {c.x, c.y};
-                open = true;
-                break;
-            case PathCmd::Line:
-                if (emit)
-                    nvgLineTo(ctx, c.x, c.y);
-                edge({c.x, c.y});
-                break;
-            case PathCmd::Quad: {
-                if (emit)
-                    nvgQuadTo(ctx, c.cx1, c.cy1, c.x, c.y);
-                const Point p0 = cur;
-                for (int k = 1; k <= kSteps; ++k) {
-                    const float t = (float) k / kSteps, u = 1.f - t;
-                    edge({u * u * p0.x + 2 * u * t * c.cx1 + t * t * c.x,
-                          u * u * p0.y + 2 * u * t * c.cy1 + t * t * c.y});
-                }
-                break;
-            }
-            case PathCmd::Cubic: {
-                if (emit)
-                    nvgBezierTo(ctx, c.cx1, c.cy1, c.cx2, c.cy2, c.x, c.y);
-                const Point p0 = cur;
-                for (int k = 1; k <= kSteps; ++k) {
-                    const float t = (float) k / kSteps, u = 1.f - t;
-                    const float b0 = u * u * u, b1 = 3 * u * u * t, b2 = 3 * u * t * t, b3 = t * t * t;
-                    edge({b0 * p0.x + b1 * c.cx1 + b2 * c.cx2 + b3 * c.x,
-                          b0 * p0.y + b1 * c.cy1 + b2 * c.cy2 + b3 * c.y});
-                }
-                break;
-            }
-            case PathCmd::Close:
-                if (emit)
-                    nvgClosePath(ctx);
-                end_subpath();
-                /* Drawing on without a move continues from the start point. */
-                cur = start;
-                break;
-            }
-        }
-        end_subpath();
+ * path with reversed inner contours), so each subpath is tagged as
+ * fill_windings() says. `windings` is that list when it was worked out
+ * ahead; null works it out here. */
+void add_fill_path(NVGcontext *ctx, const Path &p, const std::vector<uint8_t> *windings) {
+    std::vector<uint8_t> own;
+    if (!windings) {
+        own = fill_windings(p);
+        windings = &own;
     }
+    size_t index = 0;
+    bool open = false;
+    auto end_subpath = [&] {
+        if (!open)
+            return;
+        if (index < windings->size())
+            nvgPathWinding(ctx, (*windings)[index] ? NVG_CCW : NVG_CW);
+        ++index;
+        open = false;
+    };
+    for (const PathCmd &c : p) {
+        switch (c.kind) {
+        case PathCmd::Move:
+            end_subpath();
+            nvgMoveTo(ctx, c.x, c.y);
+            open = true;
+            break;
+        case PathCmd::Line:
+            nvgLineTo(ctx, c.x, c.y);
+            open = true;
+            break;
+        case PathCmd::Quad:
+            nvgQuadTo(ctx, c.cx1, c.cy1, c.x, c.y);
+            open = true;
+            break;
+        case PathCmd::Cubic:
+            nvgBezierTo(ctx, c.cx1, c.cy1, c.cx2, c.cy2, c.x, c.y);
+            open = true;
+            break;
+        case PathCmd::Close:
+            nvgClosePath(ctx);
+            end_subpath();
+            break;
+        }
+    }
+    end_subpath();
 }
 
 NVGcolor nvg_color(const Color &c) { return nvgRGBAf(c.r, c.g, c.b, c.a); }
@@ -224,7 +170,7 @@ void set_clip(NVGcontext *ctx, const ClipLayers &clip) {
     for (const auto &layer : clip) {
         for (const ClipPath &cp : layer) {
             nvgBeginPath(ctx);
-            add_fill_path(ctx, cp.path);
+            add_fill_path(ctx, cp.path, nullptr);
             nvgFillRule(ctx, cp.rule == FillRule::EvenOdd ? NVG_FILLRULE_EVENODD : NVG_FILLRULE_NONZERO);
             nvgClipPath(ctx);
         }
@@ -368,6 +314,48 @@ void draw_stroke(NVGcontext *ctx, const DrawStroke &s, float px) {
     }
 }
 
+/* Type this small on screen (its size in pixels) is greeked: each word is
+ * a soft bar along its x-height, the way layout programs draw small text.
+ * Outlines that small read as gray anyway, and filling them is most of the
+ * cost of a zoomed-out spread. */
+constexpr float kGreekBelowPx = 4.f;
+
+void draw_greeked_run(NVGcontext *ctx, const GlyphRun &run, const Color &color) {
+    if (!run.font || run.glyphs.empty())
+        return;
+    const float top = -0.5f * run.size, h = 0.42f * run.size;
+    bool any = false, open = false;
+    float x0 = 0, x1 = 0, base = 0;
+    nvgBeginPath(ctx);
+    auto close_word = [&] {
+        if (open && x1 > x0) {
+            nvgRect(ctx, x0, base + top, x1 - x0, h);
+            any = true;
+        }
+        open = false;
+    };
+    for (const PlacedGlyph &g : run.glyphs) {
+        const bool ink = !(g.flags & PlacedGlyph::Invisible) && !run.font->outline(g.gid).empty();
+        if (!ink || (open && g.y != base)) {
+            close_word();
+            if (!ink)
+                continue;
+        }
+        if (!open) {
+            x0 = g.x;
+            base = g.y;
+            open = true;
+        }
+        x1 = g.x + g.adv;
+    }
+    close_word();
+    if (!any)
+        return;
+    nvgFillColor(ctx, nvgRGBAf(color.r, color.g, color.b, color.a * 0.45f));
+    nvgFillRule(ctx, NVG_FILLRULE_NONZERO);
+    nvgFill(ctx);
+}
+
 /* A picture still being read: the placeholder box with a gray cross (the
  * missing picture's cross is red). */
 void draw_loading_image(NVGcontext *ctx, const DrawImage &im) {
@@ -421,14 +409,17 @@ void draw_list(NVGcontext *ctx, const DrawList &list, float px,
         if (const auto *g = std::get_if<DrawGlyphs>(&op)) {
             use_clip(nullptr);
             apply_transform(ctx, g->xf);
-            draw_glyph_run(ctx, *g->run, g->color);
+            if (g->run->size * transform_scale(g->xf) < kGreekBelowPx * px)
+                draw_greeked_run(ctx, *g->run, g->color);
+            else
+                draw_glyph_run(ctx, *g->run, g->color);
         } else if (const auto *f = std::get_if<DrawFill>(&op)) {
             apply_transform(ctx, f->xf);
             use_clip(f->clip);
             if (f->clip_w > 0.f && f->clip_h > 0.f)
                 nvgIntersectScissor(ctx, 0, 0, f->clip_w, f->clip_h);
             nvgBeginPath(ctx);
-            add_fill_path(ctx, f->path);
+            add_fill_path(ctx, f->path, f->windings.get());
             if (f->gradient)
                 nvgFillPaint(ctx, gradient_paint(ctx, *f->gradient, f->color));
             else

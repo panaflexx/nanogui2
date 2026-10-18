@@ -61,6 +61,7 @@ struct VectorShape {
     VectorPaint fill;
     VectorStroke stroke;
     int clip = -1;                       // index into VectorScene::clips, or -1
+    std::shared_ptr<const std::vector<uint8_t>> windings;   // fill_windings(path)
 };
 
 struct VectorScene {

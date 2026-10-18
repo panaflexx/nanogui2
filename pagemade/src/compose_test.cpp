@@ -3911,6 +3911,37 @@ static void test_swatch_library() {
           "config path %s", config_path.c_str());
 }
 
+/* fill_windings: holes stay holes, the outline is kept counter-clockwise
+ * (NanoVG's sign) whichever way it was drawn, and a mirror changes nothing. */
+static void test_fill_windings() {
+    auto square = [](Path &p, float x, float y, float w, bool cw) {
+        p.push_back({PathCmd::Move, 0, 0, 0, 0, x, y});
+        if (cw) {
+            p.push_back({PathCmd::Line, 0, 0, 0, 0, x + w, y});
+            p.push_back({PathCmd::Line, 0, 0, 0, 0, x + w, y + w});
+            p.push_back({PathCmd::Line, 0, 0, 0, 0, x, y + w});
+        } else {
+            p.push_back({PathCmd::Line, 0, 0, 0, 0, x, y + w});
+            p.push_back({PathCmd::Line, 0, 0, 0, 0, x + w, y + w});
+            p.push_back({PathCmd::Line, 0, 0, 0, 0, x + w, y});
+        }
+        p.push_back({PathCmd::Close, 0, 0, 0, 0, 0, 0});
+    };
+    for (int outer_cw = 0; outer_cw < 2; ++outer_cw) {
+        Path p;
+        square(p, 0, 0, 10, outer_cw);
+        square(p, 2, 2, 2, !outer_cw);     // a hole
+        square(p, 6, 6, 2, outer_cw);      // a second solid
+        const std::vector<uint8_t> w = fill_windings(p);
+        CHECK(w.size() == 3 && w[0] == 1 && w[1] == 0 && w[2] == 1,
+              "outline ccw, hole cw, solid ccw (outer drawn %s)", outer_cw ? "cw" : "ccw");
+        Path mirrored = p;
+        for (PathCmd &c : mirrored)
+            c.x = -c.x;
+        CHECK(fill_windings(mirrored) == w, "a mirror doesn't change the windings");
+    }
+}
+
 /* The Image Assets library's folders and files survive a restart. */
 static void test_asset_library_config() {
     const std::string dir = "/tmp/pagemade-assets-test";
@@ -4492,6 +4523,7 @@ int main(int argc, char **argv) {
     test_images(fonts);
     test_svg(fonts);
     test_asset_library_config();
+    test_fill_windings();
     test_picture_style(fonts);
     test_groups(fonts);
     test_page_markers(fonts);

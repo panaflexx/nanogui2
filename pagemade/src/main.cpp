@@ -32,7 +32,7 @@
  *            [--drag x0,y0:x1,y1 ...] [--click x,y ...] [--type txt ...]
  *            [--key [mod+]name ...] [--open file.pagemade] [--place picture.png]
  *            [--save file.pagemade ...] [--save-embedded file.pagemade ...]
- *            [--dialog save|changes|new] [--blank-pages n] [--page-view one|spread|stack]
+ *            [--dialog save|changes|new] [--blank-pages n] [--page n] [--page-view one|spread|stack]
  *            [--print-title] [--caption-pictures] [--fit-columns]
  *            [--ui-click x,y ...] [--ui-rclick x,y ...] [--ui-drag x0,y0:x1,y1 ...]
  *            [--ui-scroll x,y:dy ...]
@@ -2927,7 +2927,7 @@ int main(int argc, char **argv) {
     float at_x = -1, at_y = -1, sel_a = -1, sel_b = -1;
     bool baselines = false, loose = false, no_kern = false, no_snap = false;
     bool caption_pictures = false, fit_columns = false;
-    int blank_pages = 0;
+    int blank_pages = 0, goto_page = 0;
     std::string page_view;
     std::vector<Action> actions;
     for (int i = 1; i < argc; ++i) {
@@ -2941,6 +2941,7 @@ int main(int argc, char **argv) {
         else if (a == "--dialog" && i + 1 < argc) dialog = argv[++i];
         else if (a == "--blank-pages" && i + 1 < argc) blank_pages = std::atoi(argv[++i]);
         else if (a == "--page-view" && i + 1 < argc) page_view = argv[++i];
+        else if (a == "--page" && i + 1 < argc) goto_page = std::atoi(argv[++i]);
         else if ((a == "--save" || a == "--save-embedded") && i + 1 < argc) {
             act.kind = a == "--save" ? Action::Save : Action::SaveEmbedded;
             act.text = argv[++i];
@@ -3025,6 +3026,8 @@ int main(int argc, char **argv) {
                 std::printf("place FAILED %s\n", error.c_str());
         }
 
+        if (goto_page > 0 && (size_t) goto_page <= app->view()->page_count())
+            app->view()->show_page((size_t) goto_page - 1);
         if (blank_pages > 1) {
             while ((int) app->view()->page_count() < blank_pages)
                 app->view()->insert_page(true);

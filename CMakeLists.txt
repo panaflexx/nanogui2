@@ -1017,6 +1017,25 @@ if (NANOGUI_BUILD_EXAMPLES)
         pagemade/src/swatch_library.cpp
         pagemade/src/swatch_menu.cpp
         pagemade/src/sample.cpp)
+    add_executable(pagemade_book
+        pagemade/src/book_gen.cpp
+        pagemade/src/default_fonts.cpp
+        pagemade/src/system_fonts.cpp
+        pagemade/src/font_menu.cpp
+        pagemade/src/page.cpp
+        pagemade/src/geometry.cpp
+        pagemade/src/drawlist.cpp
+        pagemade/src/uri.cpp
+        pagemade/src/docfile.cpp
+        pagemade/src/image.cpp
+        pagemade/src/image_color.cpp
+        pagemade/src/vector.cpp
+        pagemade/src/plugin/xml.cpp
+        pagemade/src/plugin/svg.cpp
+        pagemade/src/setup_adjust.cpp
+        pagemade/src/image_stb.cpp
+        pagemade/src/swatch_library.cpp
+        pagemade/src/sample.cpp)
     add_executable(pagemade_compose_test
         pagemade/src/compose_test.cpp
         pagemade/src/pdf.cpp
@@ -1037,7 +1056,25 @@ if (NANOGUI_BUILD_EXAMPLES)
         pagemade/src/image_stb.cpp
         pagemade/src/swatch_library.cpp
         pagemade/src/sample.cpp)
-    foreach(_t pagemade_app pagemade_compose_test)
+    # Times the screen draw path for a publication, without a window.
+    add_executable(pagemade_render_bench
+        pagemade/src/render_bench.cpp
+        pagemade/src/render_nvg.cpp
+        pagemade/src/default_fonts.cpp
+        pagemade/src/system_fonts.cpp
+        pagemade/src/page.cpp
+        pagemade/src/geometry.cpp
+        pagemade/src/drawlist.cpp
+        pagemade/src/uri.cpp
+        pagemade/src/docfile.cpp
+        pagemade/src/image.cpp
+        pagemade/src/image_color.cpp
+        pagemade/src/vector.cpp
+        pagemade/src/plugin/xml.cpp
+        pagemade/src/plugin/svg.cpp
+        pagemade/src/image_stb.cpp
+        pagemade/src/sample.cpp)
+    foreach(_t pagemade_app pagemade_compose_test pagemade_book pagemade_render_bench)
       # dict.h (the JSON reader) lives at the repository root.
       # nanovg_exif.h and stb_image.h live with nanovgd. fscompat.h is in
       # include/, which pagemade_compose_test doesn't get via libnanogui.
@@ -1059,9 +1096,13 @@ if (NANOGUI_BUILD_EXAMPLES)
         ${HARFBUZZ_SUBSET_LIBRARIES} ${NANOGUI_LIBS})
     target_link_libraries(pagemade_compose_test pagemade_composer miniz
         ${HARFBUZZ_SUBSET_LIBRARIES})
+    target_link_libraries(pagemade_book pagemade_composer miniz
+        ${HARFBUZZ_SUBSET_LIBRARIES})
+    target_link_libraries(pagemade_render_bench pagemade_composer nanogui miniz
+        ${HARFBUZZ_SUBSET_LIBRARIES} ${NANOGUI_LIBS})
     # Output name "pagemade" would collide with the pagemade/ source directory
     set_target_properties(pagemade_app PROPERTIES OUTPUT_NAME pagemade)
-    set_target_properties(pagemade_app pagemade_compose_test PROPERTIES
+    set_target_properties(pagemade_app pagemade_compose_test pagemade_book pagemade_render_bench PROPERTIES
         RUNTIME_OUTPUT_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}/bin
         RUNTIME_OUTPUT_DIRECTORY_DEBUG ${CMAKE_CURRENT_BINARY_DIR}/bin
         RUNTIME_OUTPUT_DIRECTORY_RELEASE ${CMAKE_CURRENT_BINARY_DIR}/bin

@@ -122,6 +122,72 @@ Bounds path_bounds(const Path &p) {
     return b;
 }
 
+std::vector<uint8_t> fill_windings(const Path &p) {
+    constexpr int kSteps = 8;            // enough for the sign of the area
+    std::vector<float> areas;
+    Point start{0, 0}, cur{0, 0};
+    float area = 0.f;
+    bool open = false;
+    auto edge = [&](Point b) {
+        open = true;
+        area += cur.x * b.y - b.x * cur.y;
+        cur = b;
+    };
+    auto end_subpath = [&] {
+        if (!open)
+            return;
+        area += cur.x * start.y - start.x * cur.y;
+        areas.push_back(-area);          // NanoVG's sign is the shoelace sum's opposite
+        open = false;
+        area = 0.f;
+    };
+    for (const PathCmd &c : p) {
+        switch (c.kind) {
+        case PathCmd::Move:
+            end_subpath();
+            start = cur = {c.x, c.y};
+            open = true;
+            break;
+        case PathCmd::Line:
+            edge({c.x, c.y});
+            break;
+        case PathCmd::Quad: {
+            const Point p0 = cur;
+            for (int k = 1; k <= kSteps; ++k) {
+                const float t = (float) k / kSteps, u = 1.f - t;
+                edge({u * u * p0.x + 2 * u * t * c.cx1 + t * t * c.x,
+                      u * u * p0.y + 2 * u * t * c.cy1 + t * t * c.y});
+            }
+            break;
+        }
+        case PathCmd::Cubic: {
+            const Point p0 = cur;
+            for (int k = 1; k <= kSteps; ++k) {
+                const float t = (float) k / kSteps, u = 1.f - t;
+                const float b0 = u * u * u, b1 = 3 * u * u * t, b2 = 3 * u * t * t, b3 = t * t * t;
+                edge({b0 * p0.x + b1 * c.cx1 + b2 * c.cx2 + b3 * c.x,
+                      b0 * p0.y + b1 * c.cy1 + b2 * c.cy2 + b3 * c.y});
+            }
+            break;
+        }
+        case PathCmd::Close:
+            end_subpath();
+            cur = start;                 // drawing on continues from the start
+            break;
+        }
+    }
+    end_subpath();
+    float biggest = 0.f;
+    for (float a : areas)
+        if (std::fabs(a) > std::fabs(biggest))
+            biggest = a;
+    const bool flip = biggest < 0.f;
+    std::vector<uint8_t> out(areas.size());
+    for (size_t i = 0; i < areas.size(); ++i)
+        out[i] = (flip ? areas[i] < 0.f : areas[i] >= 0.f) ? 1 : 0;
+    return out;
+}
+
 /* ---- Flattening --------------------------------------------------------- */
 
 std::vector<Polyline> flatten(const Path &path, float tol) {
