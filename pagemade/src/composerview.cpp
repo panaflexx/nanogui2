@@ -196,8 +196,39 @@ bool ComposerView::is_selected(ItemId id) const {
 }
 
 void ComposerView::selection_changed() {
+    m_pending_selection = false;
     if (on_selection_change)
         on_selection_change();
+}
+
+void ComposerView::defer_recompose(ItemId frame) {
+    const StoryEntry *se = m_doc.story_of(frame);
+    const size_t si = se ? m_doc.story_index(se->id) : SIZE_MAX;
+    if (si == SIZE_MAX || m_comp.size() != m_doc.stories.size())
+        m_pending_full = true;
+    else
+        m_pending_stories.insert(si);
+}
+
+void ComposerView::defer_selection_changed() {
+    m_pending_selection = true;
+}
+
+void ComposerView::flush_deferred() {
+    if (m_pending_full || m_comp.size() != m_doc.stories.size()) {
+        if (m_pending_full || !m_pending_stories.empty())
+            recompose();
+    } else if (!m_pending_stories.empty()) {
+        for (size_t si : m_pending_stories)
+            if (si < m_doc.stories.size())
+                m_comp[si] = compose(m_doc.stories[si].story, m_doc.thread_frames(m_doc.stories[si]),
+                                     *m_fonts, m_hyphenator);
+        m_pending_stories.clear();
+        if (on_recompose)
+            on_recompose();
+    }
+    if (m_pending_selection)
+        selection_changed();
 }
 
 Bounds ComposerView::selection_bounds() const {
@@ -386,6 +417,8 @@ void ComposerView::set_tool(Tool t) {
 }
 
 void ComposerView::recompose() {
+    m_pending_stories.clear();           // all of them, now
+    m_pending_full = false;
     m_comp.clear();
     for (const StoryEntry &s : m_doc.stories)
         m_comp.push_back(compose(s.story, m_doc.thread_frames(s), *m_fonts, m_hyphenator));
@@ -897,6 +930,55 @@ ItemId ComposerView::text_frame_at(const Point &pt, size_t page) const {
 
 /* ---- Mouse --------------------------------------------------------------- */
 
+bool ComposerView::scroll_event(const Vector2i &, const Vector2f &rel) {
+    /* Ctrl + Shift: Alt + wheel is the desktop's (Ubuntu changes
+     * workspace), and Ctrl alone zooms the view */
+    if (m_tool != Tool::Crop || rel.y() == 0.f || editing() ||
+        !key_held(0, GLFW_MOD_CONTROL, GLFW_KEY_LEFT_CONTROL, GLFW_KEY_RIGHT_CONTROL) ||
+        !key_held(0, GLFW_MOD_SHIFT, GLFW_KEY_LEFT_SHIFT, GLFW_KEY_RIGHT_SHIFT))
+        return false;
+    std::vector<ItemId> targets;
+    for (ItemId id : m_sel)
+        if (const Item *it = m_doc.find_item(id))
+            if (m_doc.item_editable(*it) && ((it->image() && it->image()->asset) || it->vector()))
+                targets.push_back(id);
+    if (targets.empty())
+        return false;
+    /* Turns less than a second apart are one gesture, one undo step */
+    const double now = glfwGetTime();
+    if (now - m_wheel_scale_time > 0.8)
+        push_undo();
+    m_wheel_scale_time = now;
+    const float k = (float) std::pow(1.1, (double) rel.y());
+    const Point at = page_point_from_screen(screen()->mouse_pos());
+    for (ItemId id : targets) {
+        Item *it = m_doc.find_item(id);
+        if (!it)
+            continue;
+        Point a = it->xf.inverse().apply(at);
+        if (a.x < 0.f || a.x > it->w || a.y < 0.f || a.y > it->h)
+            a = {it->w * 0.5f, it->h * 0.5f};
+        auto scale = [&](float &x, float &y, float &w, float &h) {
+            if (std::fabs(w * k) < 1.f || std::fabs(h * k) < 1.f)
+                return;                  // no smaller than a point
+            x = a.x + (x - a.x) * k;
+            y = a.y + (y - a.y) * k;
+            w *= k;
+            h *= k;
+        };
+        if (PlacedImage *im = it->image())
+            scale(im->x, im->y, im->w, im->h);
+        else if (PlacedVector *pv = it->vector())
+            scale(pv->x, pv->y, pv->w, pv->h);
+    }
+    defer_selection_changed();
+    if (on_document_change)
+        on_document_change();
+    if (screen())
+        screen()->redraw();
+    return true;
+}
+
 /* A modifier as it is now. The screen refreshes the modifiers it passes
  * along only on clicks, so one pressed mid-drag is read from the keyboard. */
 bool ComposerView::key_held(int modifiers, int mod, int key_left, int key_right) const {
@@ -949,6 +1031,7 @@ bool ComposerView::mouse_button_event(const Vector2i &p, int button, bool down, 
 
     if (!down) {
         m_pointer_down = false;
+        flush_deferred();                // the drag's last move, before it ends
         if (m_creating) {
             finish_creation();
         } else if (m_marquee) {
@@ -1174,7 +1257,7 @@ bool ComposerView::mouse_drag_event(const Vector2i &p, const Vector2i &, int, in
         for (const Item &o : m_drag_items)
             if (Item *it = m_doc.find_item(o.id))
                 it->xf = Transform::rotate_about(o.xf, c, delta);
-        selection_changed();
+        defer_selection_changed();
         return true;                     // turning doesn't change the composition
     }
 
@@ -1187,9 +1270,35 @@ bool ComposerView::mouse_drag_event(const Vector2i &p, const Vector2i &, int, in
                 if (!it || !(o.image() || o.vector()))
                     continue;
                 Point dl = o.xf.inverse().apply_vector(d);
+                bool lock_x = false, lock_y = false;
                 if (shift) {
-                    if (std::fabs(dl.x) >= std::fabs(dl.y)) dl.y = 0;
-                    else dl.x = 0;
+                    if (std::fabs(dl.x) >= std::fabs(dl.y)) { dl.y = 0; lock_y = true; }
+                    else { dl.x = 0; lock_x = true; }
+                }
+                /* With Snap on, an edge of the picture near an edge of the
+                 * frame lands on it (the nearer pair, per axis, within the
+                 * snap distance on screen). A locked axis stays put. */
+                float px0, py0, pw, ph;
+                if (o.image()) {
+                    px0 = o.image()->x; py0 = o.image()->y; pw = o.image()->w; ph = o.image()->h;
+                } else {
+                    px0 = o.vector()->x; py0 = o.vector()->y; pw = o.vector()->w; ph = o.vector()->h;
+                }
+                if (m_snap) {
+                    const float tol = kSnapPx / (zoom() * item_scale(o.xf));
+                    auto snap_axis = [tol](float pos, float size, float frame) {
+                        const float a = std::min(pos, pos + size), b = std::max(pos, pos + size);
+                        float best = tol + 1.f;
+                        for (float e : {a, b})
+                            for (float f : {0.f, frame})
+                                if (std::fabs(f - e) < std::fabs(best))
+                                    best = f - e;
+                        return std::fabs(best) <= tol ? best : 0.f;
+                    };
+                    if (!lock_x)
+                        dl.x += snap_axis(px0 + dl.x, pw, o.w);
+                    if (!lock_y)
+                        dl.y += snap_axis(py0 + dl.y, ph, o.h);
                 }
                 if (o.image()) {
                     PlacedImage im = *o.image();
@@ -1205,7 +1314,7 @@ bool ComposerView::mouse_drag_event(const Vector2i &p, const Vector2i &, int, in
                 panned = true;
             }
             if (panned) {
-                selection_changed();
+                defer_selection_changed();
                 return true;
             }
         }
@@ -1213,7 +1322,7 @@ bool ComposerView::mouse_drag_event(const Vector2i &p, const Vector2i &, int, in
         for (const Item &o : m_drag_items)
             if (Item *it = m_doc.find_item(o.id))
                 it->xf = Transform::translate(sd.x, sd.y) * o.xf;
-        selection_changed();
+        defer_selection_changed();
         return true;                     // nor does moving
     }
 
@@ -1280,8 +1389,8 @@ bool ComposerView::mouse_drag_event(const Vector2i &p, const Vector2i &, int, in
             it->content = scale_placement(*pv, o.w, o.h, it->w, it->h);
     }
     if (it->is_text())
-        recompose();
-    selection_changed();
+        defer_recompose(it->id);
+    defer_selection_changed();
     return true;
 }
 
@@ -1318,7 +1427,6 @@ void ComposerView::resize_group(Point d, int modifiers) {
         return len > 0.f ? std::hypot(v.x * sx, v.y * sy) / len : 1.f;
     };
 
-    bool text = false;
     for (const Item &o : m_drag_items) {
         if (o.group != m_drag_group)
             continue;
@@ -1335,11 +1443,10 @@ void ComposerView::resize_group(Point d, int modifiers) {
             it->content = scale_placement(*im, o.w, o.h, it->w, it->h);
         if (const PlacedVector *pv = o.vector())
             it->content = scale_placement(*pv, o.w, o.h, it->w, it->h);
-        text = text || it->is_text();
+        if (it->is_text())
+            defer_recompose(it->id);
     }
-    if (text)
-        recompose();
-    selection_changed();
+    defer_selection_changed();
 }
 
 bool ComposerView::mouse_motion_event(const Vector2i &p, const Vector2i &rel, int button,
@@ -1483,8 +1590,8 @@ void ComposerView::update_creation(Point pt, bool constrain) {
         it->h = std::fabs(dy);
     }
     if (it->is_text())
-        recompose();
-    selection_changed();
+        defer_recompose(it->id);
+    defer_selection_changed();
 }
 
 void ComposerView::finish_creation() {
@@ -4964,6 +5071,7 @@ int ComposerView::texture_for(NVGcontext *ctx, const DrawImage &im, float px) {
 
 void ComposerView::draw(NVGcontext *ctx) {
     const double stats_t0 = g_frame_stats.on ? glfwGetTime() : 0.0;
+    flush_deferred();                    // a drag's moves since the last frame, once
     float xf[6];
     nvgCurrentTransform(ctx, xf);
     const float scale = std::sqrt(xf[0] * xf[0] + xf[1] * xf[1]);

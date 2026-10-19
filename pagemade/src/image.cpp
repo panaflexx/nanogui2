@@ -908,10 +908,25 @@ ColorModel color_model_from(const std::string &s) {
     return ColorModel::Unknown;
 }
 
+bool image_ppi_plausible(double ppi_x, double ppi_y) {
+    auto ok = [](double v) { return v >= 10.0 && v <= 20000.0; };
+    return ok(ppi_x) && ok(ppi_y) && ppi_x <= 4.0 * ppi_y && ppi_y <= 4.0 * ppi_x;
+}
+
 float image_print_points(int px, double ppi) {
-    double use = ppi > 0 ? ppi : 72.0;
+    double use = ppi >= 10.0 && ppi <= 20000.0 ? ppi : 72.0;
     return (float) ((double) px * 72.0 / use);
 }
+
+namespace {
+
+/* A resolution no picture has is no resolution: 72, as when unstated. */
+void forget_implausible_ppi(ImageMetadata &m) {
+    if ((m.ppi_x > 0 || m.ppi_y > 0) && !image_ppi_plausible(m.ppi_x, m.ppi_y))
+        m.ppi_x = m.ppi_y = 0;
+}
+
+} // namespace
 
 void image_pdf_matrix(int orientation, float x, float y, float w, float h, float m[6]) {
     auto at = [&](float u, float v) {
@@ -947,7 +962,11 @@ bool ImageLoader::probe(const uint8_t *data, size_t n, ImageMetadata *meta, std:
             *error = "no picture decoder accepted this file";
         return false;
     }
-    return d->probe(data, n, meta, error);
+    if (!d->probe(data, n, meta, error))
+        return false;
+    if (meta)
+        forget_implausible_ppi(*meta);
+    return true;
 }
 
 bool ImageLoader::decode(const uint8_t *data, size_t n, DecodedImage *out, std::string *error) const {
@@ -957,7 +976,11 @@ bool ImageLoader::decode(const uint8_t *data, size_t n, DecodedImage *out, std::
             *error = "no picture decoder accepted this file";
         return false;
     }
-    return d->decode(data, n, out, error);
+    if (!d->decode(data, n, out, error))
+        return false;
+    if (out)
+        forget_implausible_ppi(out->meta);
+    return true;
 }
 
 bool ImageLoader::decode_preview(const uint8_t *data, size_t n, int long_edge,
@@ -968,7 +991,11 @@ bool ImageLoader::decode_preview(const uint8_t *data, size_t n, int long_edge,
             *error = "no picture decoder accepted this file";
         return false;
     }
-    return d->decode_preview(data, n, long_edge, out, error);
+    if (!d->decode_preview(data, n, long_edge, out, error))
+        return false;
+    if (out)
+        forget_implausible_ppi(out->meta);
+    return true;
 }
 
 void register_builtin_decoders(ImageLoader &loader) {

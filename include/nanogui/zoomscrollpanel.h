@@ -112,6 +112,10 @@ public:
      * the viewport.
      */
     void set_child_fills_view(bool on) { m_child_fills_view = on; }
+    /// The child sees the wheel first (its scroll_event gets the panel's
+    /// point); only what it declines zooms or scrolls the panel. Off by default.
+    void set_child_scroll_first(bool on) { m_child_scroll_first = on; }
+    bool child_scroll_first() const { return m_child_scroll_first; }
     bool child_fills_view() const { return m_child_fills_view; }
 
     /// Pan offset in panel-local pixels (negative values move the child up/left).
@@ -184,6 +188,7 @@ protected:
     double    m_zoom_wheel_step;   ///< Multiplicative factor per wheel tick when zooming.
     bool      m_zoom_enabled;
     bool      m_child_fills_view = false;
+    bool      m_child_scroll_first = false;
     /// Does the child take this point (child space)?  See set_child_fills_view.
     bool child_takes(const Widget* child, const Vector2i& cp) const {
         return m_child_fills_view || child->contains(cp);

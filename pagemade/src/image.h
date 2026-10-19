@@ -60,8 +60,14 @@ const char *color_model_name(ColorModel m);
 ColorModel color_model_from(const std::string &s);
 
 /* Points across `px` pixels at `ppi`. Unspecified resolution is 72, so a
- * pixel is a point until the file says otherwise. */
+ * pixel is a point until the file says otherwise; so is one outside
+ * image_ppi_plausible's range (a placement made before that check). */
 float image_print_points(int px, double ppi);
+
+/* Is this a resolution a picture can really have: each in 10 to 20000 ppi,
+ * and no more than 4:1 between them? Some writers leave junk (EXIF
+ * 1/196 by 102/72, a photo miles wide); the loader treats that as unknown. */
+bool image_ppi_plausible(double ppi_x, double ppi_y);
 
 /* Maps the PDF image unit square — (0, 0) at the lower left, the file's
  * first row at the top — onto the upright placement rectangle (x, y, w, h)

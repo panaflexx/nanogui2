@@ -489,6 +489,13 @@ public:
     void draw(NVGcontext *ctx) override;
     bool mouse_button_event(const nanogui::Vector2i &p, int button, bool down,
                             int modifiers) override;
+    /* With the Crop tool, Ctrl + Shift + wheel scales the selected pictures (and
+     * placed graphics) inside their frames, about the point under the
+     * pointer (the frame's center when the pointer is outside it); the
+     * frames stay. A burst of turns is one undo step. Anything else goes
+     * back to the scroll panel (it calls this first: set_child_scroll_first). */
+    bool scroll_event(const nanogui::Vector2i &p, const nanogui::Vector2f &rel) override;
+    double m_wheel_scale_time = -1e9;    // the last scaling wheel step, glfwGetTime
     bool mouse_drag_event(const nanogui::Vector2i &p, const nanogui::Vector2i &rel,
                           int button, int modifiers) override;
     bool mouse_motion_event(const nanogui::Vector2i &p, const nanogui::Vector2i &rel,
@@ -541,6 +548,16 @@ private:
     /* `ids` and everything grouped with them, without repeats. */
     std::vector<pagemade::ItemId> with_groups(const std::vector<pagemade::ItemId> &ids) const;
     void selection_changed();
+    /* Mid-drag, a mouse event can come many times a frame: what it changes
+     * is noted here and done once, at the next draw or when the drag ends.
+     * defer_recompose(frame) recomposes only the story through that text
+     * frame (a story's layout depends only on its own frames). */
+    void defer_recompose(pagemade::ItemId frame);
+    void defer_selection_changed();
+    void flush_deferred();
+    std::set<size_t> m_pending_stories;   // indices into m_doc.stories
+    bool m_pending_full = false;
+    bool m_pending_selection = false;
     pagemade::Bounds selection_bounds() const;
     /* The composition of the story threading text frame `id`, and the
      * frame's place in the thread. */

@@ -460,6 +460,10 @@ bool ZoomScrollPanel::mouse_drag_event(const Vector2i& p, const Vector2i& rel,
 }
 
 bool ZoomScrollPanel::scroll_event(const Vector2i& p, const Vector2f& rel) {
+    if (m_child_scroll_first && !m_children.empty() && m_children[0]->visible() &&
+        m_children[0]->scroll_event(p, rel))
+        return true;
+
     // Ctrl + wheel = zoom about cursor.
     if (m_zoom_enabled && (glfwGetKey(screen()->glfw_window(), GLFW_KEY_LEFT_CONTROL) == GLFW_PRESS ||
                            glfwGetKey(screen()->glfw_window(), GLFW_KEY_RIGHT_CONTROL) == GLFW_PRESS))

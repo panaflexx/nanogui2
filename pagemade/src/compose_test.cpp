@@ -4083,6 +4083,46 @@ static void test_empty_frames(const FontLibrary &fonts) {
           "the border prints");
 }
 
+/* A JPEG whose EXIF resolution is junk (1/196 by 102/72 ppi, as some old
+ * files carry) sizes as an unstated one, 72 ppi, not miles wide. */
+static void test_junk_resolution() {
+    std::vector<uint8_t> jpg = make_jpeg_rgb(96, 128, 90, 120, 150);
+    /* APP1 Exif, big-endian TIFF: IFD0 with XResolution, YResolution and
+     * ResolutionUnit (inches), the rationals after the IFD */
+    std::vector<uint8_t> tiff = {'M', 'M', 0, 42, 0, 0, 0, 8};
+    auto u16 = [&](unsigned v) { tiff.push_back((uint8_t) (v >> 8)); tiff.push_back((uint8_t) v); };
+    auto u32 = [&](unsigned v) { u16(v >> 16); u16(v & 0xFFFF); };
+    const unsigned rationals = 8 + 2 + 3 * 12 + 4;
+    u16(3);
+    u16(0x011A); u16(5); u32(1); u32(rationals);
+    u16(0x011B); u16(5); u32(1); u32(rationals + 8);
+    u16(0x0128); u16(3); u32(1); u16(2); u16(0);
+    u32(0);
+    u32(1); u32(196);                    // XResolution 1/196
+    u32(102); u32(72);                   // YResolution 102/72
+    std::vector<uint8_t> app1 = {0xFF, 0xE1};
+    const size_t len = 2 + 6 + tiff.size();
+    app1.push_back((uint8_t) (len >> 8));
+    app1.push_back((uint8_t) len);
+    for (char c : std::string("Exif\0\0", 6))
+        app1.push_back((uint8_t) c);
+    app1.insert(app1.end(), tiff.begin(), tiff.end());
+    jpg.insert(jpg.begin() + 2, app1.begin(), app1.end());   // after SOI
+
+    ImageMetadata meta;
+    std::string err;
+    CHECK(image_loader().probe(jpg.data(), jpg.size(), &meta, &err), "probe: %s", err.c_str());
+    CHECK(meta.ppi_x == 0 && meta.ppi_y == 0, "junk resolution is no resolution (%g x %g)",
+          meta.ppi_x, meta.ppi_y);
+    CHECK(near(image_print_points(meta.width_px, meta.ppi_x), 96.f) &&
+              near(image_print_points(meta.height_px, meta.ppi_y), 128.f),
+          "it sizes at 72 ppi");
+    CHECK(near(image_print_points(960, 1.0 / 196.0), 960.f), "a stored junk ppi is ignored too");
+    CHECK(image_ppi_plausible(300, 300) && image_ppi_plausible(72, 96) &&
+              !image_ppi_plausible(300, 30) && !image_ppi_plausible(5, 5),
+          "plausible resolutions");
+}
+
 /* fill_windings: holes stay holes, the outline is kept counter-clockwise
  * (NanoVG's sign) whichever way it was drawn, and a mirror changes nothing. */
 static void test_fill_windings() {
@@ -4698,6 +4738,7 @@ int main(int argc, char **argv) {
     test_fill_windings();
     test_pdf_export_jobs();
     test_empty_frames(fonts);
+    test_junk_resolution();
     test_picture_style(fonts);
     test_groups(fonts);
     test_page_markers(fonts);

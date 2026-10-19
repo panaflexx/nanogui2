@@ -672,7 +672,7 @@ public:
                  "arrows nudge; Ctrl+F front, Ctrl+] forward, Ctrl+[ backward, Ctrl+B back)");
         tool_btn(Tool::Crop, FA_CROP,
                  "Crop tool (drag a handle to trim the frame, drag inside to slide; "
-                 "Shift locks one axis)");
+                 "Shift locks one axis; Ctrl+Shift+wheel scales the picture)");
         tool_btn(Tool::Rotate, FA_SYNC_ALT, "Rotate tool (Shift snaps to 15\u00B0)");
         tool_btn(Tool::Text, FA_I_CURSOR, "Text tool (drag on empty space for a new block)");
         tool_btn(Tool::Line, FA_SLASH, "Line tool (Shift: 45\u00B0 steps)");
@@ -843,6 +843,7 @@ public:
         m_scroll->set_zoom_range(0.1, 16.0);
         m_scroll->set_zoom_enabled(true);
         m_scroll->set_child_fills_view(true);   // the pasteboard is clickable wherever it shows
+        m_scroll->set_child_scroll_first(true); // Crop tool + Ctrl+Shift+wheel scales a picture
 
         m_view = new ComposerView(m_scroll, &m_fonts, &m_hyphenator);
         m_rulers->set_content(m_scroll, m_view);
@@ -1795,7 +1796,10 @@ public:
         m_applying_font = false;
     }
 
-    void refill_palette_font() {
+    /* `force` false (a selection sync) skips the rebuild when the menu
+     * would come out the same: rebuilding every family's row is slow, and
+     * a drag syncs every frame. Opening, searching and starring force it. */
+    void refill_palette_font(bool force = true) {
         if (!m_font || !m_view)
             return;
         ComposerView::TypeStyle t;
@@ -1810,10 +1814,19 @@ public:
         view.query = m_font_query;
         view.mixed = t.mix_family;
         view.current = t.mix_family ? std::string() : t.family;
+        std::string key = view.query + '\x1f' + (view.mixed ? "\x1e" : view.current) + '\x1f' +
+                          std::to_string(view.installed.size());
+        for (const std::string &f : view.document)
+            key += '\x1f' + f;
+        if (!force && key == m_font_menu_key)
+            return;
+        m_font_menu_key = key;
         refill_font_menu(m_font, view,
                          [this](const std::string &fam) { pick_font(fam); },
                          [this](const std::string &fam) { m_font_menu.toggle_star(fam); });
     }
+
+    std::string m_font_menu_key;         // what the font menu was last filled for
 
     void load_styles(const std::string &family) {
         m_style_family = family;
@@ -2356,7 +2369,7 @@ public:
         /* Choosing a row runs this while that row still exists. Rebuilding
            the open menu would free it. A search refill is the query callback. */
         if (!m_applying_font && m_font->popup() && !m_font->popup()->visible())
-            refill_palette_font();
+            refill_palette_font(false);
         if (m_style_family != t.family)
             load_styles(t.family);
         if (t.mix_style) {
