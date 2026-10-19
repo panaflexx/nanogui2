@@ -373,6 +373,37 @@ void draw_loading_image(NVGcontext *ctx, const DrawImage &im) {
     nvgStroke(ctx);
 }
 
+/* An empty picture frame on screen: a pale frame with a cross and its
+ * name, at one screen pixel. Never printed. */
+void draw_empty_frame(NVGcontext *ctx, const DrawImage &im, float px) {
+    const float lpx = px / transform_scale(im.xf);
+    nvgBeginPath(ctx);
+    nvgRect(ctx, 0, 0, im.clip_w, im.clip_h);
+    nvgFillColor(ctx, nvgRGBA(120, 140, 170, 28));
+    nvgFill(ctx);
+    nvgStrokeColor(ctx, nvgRGB(150, 160, 175));
+    nvgStrokeWidth(ctx, lpx);
+    nvgBeginPath(ctx);
+    nvgMoveTo(ctx, 0, 0);
+    nvgLineTo(ctx, im.clip_w, im.clip_h);
+    nvgMoveTo(ctx, im.clip_w, 0);
+    nvgLineTo(ctx, 0, im.clip_h);
+    nvgStroke(ctx);
+    const float size = 11.f * lpx;
+    if (im.clip_w > 90.f * lpx && im.clip_h > 3.f * size) {
+        nvgFontFace(ctx, "sans");
+        nvgFontSize(ctx, size);
+        nvgTextAlign(ctx, NVG_ALIGN_CENTER | NVG_ALIGN_MIDDLE);
+        const float bw = nvgTextBounds(ctx, 0, 0, "Empty picture frame", nullptr, nullptr) + 8.f * lpx;
+        nvgBeginPath(ctx);
+        nvgRect(ctx, (im.clip_w - bw) * 0.5f, im.clip_h * 0.5f - size, bw, 2.f * size);
+        nvgFillColor(ctx, nvgRGBA(255, 255, 255, 220));
+        nvgFill(ctx);
+        nvgFillColor(ctx, nvgRGB(110, 120, 135));
+        nvgText(ctx, im.clip_w * 0.5f, im.clip_h * 0.5f, "Empty picture frame", nullptr);
+    }
+}
+
 void draw_missing_image(NVGcontext *ctx, const DrawImage &im) {
     nvgBeginPath(ctx);
     nvgRect(ctx, 0, 0, im.clip_w, im.clip_h);
@@ -440,7 +471,10 @@ void draw_list(NVGcontext *ctx, const DrawList &list, float px,
              * The frame itself is exact, including when the picture is rotated. */
             nvgIntersectScissor(ctx, 0, 0, im->clip_w, im->clip_h);
             int img = texture ? texture(*im) : 0;
-            if (img > 0 && im->w != 0.f && im->h != 0.f) {
+            if (!im->asset) {
+                if (img == kEmptyFramePlaceholder)
+                    draw_empty_frame(ctx, *im, px);
+            } else if (img > 0 && im->w != 0.f && im->h != 0.f) {
                 nvgBeginPath(ctx);
                 nvgRect(ctx, im->x, im->y, im->w, im->h);
                 NVGpaint paint = nvgImagePattern(ctx, im->x, im->y, im->w, im->h, 0, img,

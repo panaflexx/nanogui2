@@ -951,8 +951,9 @@ std::vector<std::string> pdf_preflight(const PageDoc &doc, const std::vector<Com
                           ") can't be read: it prints as a gray box.");
     }
 
-    /* Transparency, and text that doesn't fit */
+    /* Transparency, empty picture frames, and text that doesn't fit */
     std::set<size_t> transparent;
+    std::map<size_t, int> empty_frames;   // page (1-based) -> how many
     for (size_t pi : pages)
         for (const Item &it : doc.pages[pi].items) {
             if (!doc.item_visible(it))
@@ -962,7 +963,9 @@ std::vector<std::string> pdf_preflight(const PageDoc &doc, const std::vector<Com
                 if ((!sh->fill.none() && f.a < 0.999f) || (!sh->stroke.none() && st.a < 0.999f))
                     transparent.insert(pi + 1);
             }
-            if (const PlacedImage *im = it.image()) {
+            if (const PlacedImage *im = it.image(); im && !im->asset) {
+                ++empty_frames[pi + 1];
+            } else if (im) {
                 if (im->opacity < 99.95f ||
                     (!im->stroke.none() && doc.resolve(im->stroke.paint).a < 0.999f))
                     transparent.insert(pi + 1);
@@ -975,6 +978,16 @@ std::vector<std::string> pdf_preflight(const PageDoc &doc, const std::vector<Com
                     (!pv->stroke.none() && doc.resolve(pv->stroke.paint).a < 0.999f))
                     transparent.insert(pi + 1);
         }
+    if (!empty_frames.empty()) {
+        int n = 0;
+        std::string list;
+        for (const auto &kv : empty_frames) {
+            n += kv.second;
+            list += (list.empty() ? "" : ", ") + std::to_string(kv.first);
+        }
+        out.push_back(std::to_string(n) + (n == 1 ? " empty picture frame" : " empty picture frames") +
+                      " (page " + list + "): it prints as nothing but its border.");
+    }
     if (!transparent.empty() && !o.flatten) {
         std::string list;
         for (size_t p : transparent)
@@ -1024,6 +1037,8 @@ bool draws_transparency(const DrawList &list, const PageDoc &doc) {
             if (see_through(g->color))
                 return true;
         } else if (const auto *im = std::get_if<DrawImage>(&op)) {
+            if (!im->asset)
+                continue;                // an empty frame draws nothing
             if (im->opacity < 0.999f)
                 return true;
             if (const ImageAsset *a = doc.find_image(im->asset))
@@ -1283,8 +1298,8 @@ bool export_pdf(const std::string &path, const PageDoc &doc,
                 emit_path(content, s->path);
                 content += "S\nQ\n";
             } else if (const auto *im = std::get_if<DrawImage>(&op)) {
-                if (!(im->clip_w > 0.f) || !(im->clip_h > 0.f))
-                    continue;
+                if (!im->asset || !(im->clip_w > 0.f) || !(im->clip_h > 0.f))
+                    continue;            // an empty frame prints nothing (its border prints)
                 emit_cm(content, im->xf);
                 auto found = image_res.find(im->asset);
                 const bool have = found != image_res.end() && found->second.obj &&

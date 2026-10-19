@@ -184,6 +184,29 @@ public:
      * no-op when every picture is placed. */
     void remove_unused_images();
 
+    /* Empty picture frames, for templates: a picture frame with no picture
+     * (asset 0). It prints nothing but its border; the screen shows a gray
+     * cross. place_empty_frame puts one down the way a picture is placed:
+     * at the margin of the current page, a column wide with Fit Placed
+     * Pictures to Columns (else 3 in), 4:3, with a "Caption" caption when
+     * Caption Placed Pictures is on. One undo step, then selected. */
+    void place_empty_frame();
+    /* Replace a frame's picture (or fill an empty frame). The frame keeps
+     * its place, size, border, opacity and caption; the picture fills it,
+     * centered and cropped to it. A caption still showing the old name (or
+     * "Caption") takes the new one. One undo step. */
+    bool replace_picture(pagemade::ItemId frame, uint32_t asset);
+    /* The same from a file, read off the UI thread the way place_image_file
+     * reads one; `done` gets an error, empty when it went in. */
+    void replace_picture_file(pagemade::ItemId frame, const std::string &path,
+                              std::function<void(const std::string &error)> done,
+                              nanogui::Vector2i px_hint = nanogui::Vector2i(0, 0));
+    /* The topmost editable picture frame (empty or not) under a page point. */
+    pagemade::ItemId picture_frame_at(size_t page, const pagemade::Point &at) const;
+    /* The picture frame the right-click menu is about: the one selection,
+     * when it is a picture frame; else 0. */
+    pagemade::ItemId context_picture_frame() const;
+
     /* Pictures in a frame on screen as of the last draw. Linked pictures
      * are read when they become live, on a background thread. */
     const std::set<uint32_t> &live_images() const { return m_live; }
@@ -195,7 +218,9 @@ public:
     /* Drag and drop. A publication picture (kImageAssetDragType) is placed
      * where it drops. Files ("text/uri-list") go to on_drop_files with the
      * drop point and, from the asset window, the first file's pixel size
-     * (kImagePixelsDragType; 0 x 0 if unknown). */
+     * (kImagePixelsDragType; 0 x 0 if unknown). Holding Ctrl over a picture
+     * frame outlines it in green, and the drop replaces its picture
+     * (replace_picture) instead; let go of Ctrl and it drops as usual. */
     std::function<void(const std::vector<std::string> &paths, size_t page,
                        pagemade::Point at, nanogui::Vector2i px_hint)> on_drop_files;
     bool drag_motion_event(const nanogui::Vector2i &p, nanogui::DragEvent &e) override;
@@ -600,6 +625,12 @@ private:
     /* The caption block under `picture` (on `page`), or 0 when captions
      * are off. Its story is one Caption paragraph of the picture's name. */
     pagemade::ItemId add_caption(size_t page, const pagemade::Item &picture);
+    std::string caption_name(uint32_t asset) const;
+    pagemade::ItemId caption_of(pagemade::ItemId frame) const;
+    void refill_frame(pagemade::ItemId frame, uint32_t asset, const pagemade::ImageMetadata &meta);
+    /* The frame a drop would refill: Ctrl held over a picture frame, with
+     * a publication picture or a picture file in hand; else 0. */
+    pagemade::ItemId drop_replace_target(const nanogui::DragEvent &e);
     /* The depth a new caption takes below its picture (gap included), or 0
      * when captions are off. */
     float caption_depth() const;
@@ -631,6 +662,10 @@ private:
         bool column = false;             // fitted to the column at col_x, col_w
         float col_x = 0, col_w = 0;
         float w = 0, h = 0;              // the stand-in frame's size
+        /* A replace: the frame stays, and the picture is refitted to it
+         * when its real size is known, unless moved in the frame meanwhile */
+        bool replace = false;
+        pagemade::PlacedImage picture;
     };
     pagemade::ItemId m_last_caption = 0; // set by place_frame
     pagemade::Point m_context_pt;         // where the last right-click was
@@ -807,6 +842,7 @@ private:
     /* A drag over the view: where it would land, and the frame's size (0
      * while unknown: files are only probed on drop) */
     bool m_drop_hover = false;
+    pagemade::ItemId m_drop_replace = 0;  // the frame a Ctrl-drop would refill
     size_t m_drop_page = 0;
     pagemade::Point m_drop_at;
     float m_drop_w = 0.f, m_drop_h = 0.f;

@@ -27,7 +27,10 @@ void draw_glyph_run(NVGcontext *ctx, const GlyphRun &run, const Color &color);
 void draw_glyph_run(NVGcontext *ctx, const GlyphRun &run);
 /* `texture` returns a NanoVG image for a picture, 0 for the missing-picture
  * stand-in, or -1 for a plain tile while it loads. The id is the display
- * view, not the source file. */
+ * view, not the source file. An empty picture frame (asset 0) draws nothing
+ * unless `texture` returns kEmptyFramePlaceholder for it: then the screen's
+ * placeholder, a light frame with a cross. */
+constexpr int kEmptyFramePlaceholder = -2;
 void draw_list(NVGcontext *ctx, const DrawList &list, float px,
                const std::function<int(const DrawImage &)> &texture = {});
 void apply_transform(NVGcontext *ctx, const Transform &t);

@@ -4030,6 +4030,59 @@ static void test_pdf_export_jobs() {
     std::remove(jpg.c_str());
 }
 
+/* Empty picture frames (asset 0), for templates: saved and opened without
+ * a warning, drawn as nothing in the PDF (the border prints), named by
+ * preflight, and not counted as transparency. */
+static void test_empty_frames(const FontLibrary &fonts) {
+    PageDoc doc;
+    const SwatchId edge = doc.add_swatch("Edge", {0.1f, 0.1f, 0.1f, 1.f});
+    Item frame;
+    frame.w = 120;
+    frame.h = 90;
+    frame.xf = Transform::translate(40, 50);
+    PlacedImage empty{0, 0, 0, 120, 90};
+    empty.opacity = 50.f;                // would be transparency, if it drew
+    empty.stroke = Stroke{{edge, 100.f}, 2.f, LineStyle::Solid};
+    frame.content = empty;
+    const ItemId id = doc.add_item(0, frame);
+
+    const DrawList list = build_page(doc, 0, {});
+    const DrawImage *di = nullptr;
+    for (const DrawOp &op : list)
+        if (const auto *d = std::get_if<DrawImage>(&op))
+            di = d;
+    CHECK(di && di->asset == 0, "the draw list carries the empty frame for the screen");
+    CHECK(!draws_transparency(list, doc), "an empty frame's opacity isn't transparency");
+
+    std::string err;
+    const std::string pkg = "/tmp/pagemade-empty-frame.pagemade";
+    CHECK(save_document(doc, fonts, pkg, SaveOptions{true}, &err), "save: %s", err.c_str());
+    OpenResult back = open_document(pkg, fonts);
+    CHECK(back.ok, "open: %s", back.error.c_str());
+    if (back.ok) {
+        const Item *it = back.doc.find_item(id);
+        CHECK(it && it->image() && it->image()->asset == 0 && it->w == 120,
+              "the empty frame round-trips");
+        bool warned = false;
+        for (const std::string &w : back.warnings)
+            warned |= w.find("doesn't have") != std::string::npos;
+        CHECK(!warned, "an empty frame isn't a missing picture");
+    }
+
+    PdfSettings o;
+    bool named = false;
+    for (const std::string &w : pdf_preflight(doc, {}, nullptr, o))
+        named |= w.find("1 empty picture frame (page 1)") != std::string::npos;
+    CHECK(named, "preflight names the empty frame");
+    const std::string pdf = "/tmp/pagemade-empty-frame.pdf";
+    CHECK(export_pdf(pdf, doc, {}, nullptr, &o), "export");
+    const std::string plain = pdf_plain(read_bin(pdf));
+    CHECK(plain.find("0.6 0.25 0.25") == std::string::npos && plain.find(" Do") == std::string::npos,
+          "no missing-picture stand-in and no picture");
+    CHECK(plain.find("2 w\n") != std::string::npos && plain.find("120 90 l\n") != std::string::npos,
+          "the border prints");
+}
+
 /* fill_windings: holes stay holes, the outline is kept counter-clockwise
  * (NanoVG's sign) whichever way it was drawn, and a mirror changes nothing. */
 static void test_fill_windings() {
@@ -4644,6 +4697,7 @@ int main(int argc, char **argv) {
     test_asset_library_config();
     test_fill_windings();
     test_pdf_export_jobs();
+    test_empty_frames(fonts);
     test_picture_style(fonts);
     test_groups(fonts);
     test_page_markers(fonts);

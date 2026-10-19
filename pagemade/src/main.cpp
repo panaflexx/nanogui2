@@ -681,6 +681,13 @@ public:
         tool_btn(Tool::Polygon, FA_DRAW_POLYGON, "Polygon tool (Shift: regular)");
         m_tool_btns.front().second->set_pushed(true);
 
+        /* Not a tool: puts an empty picture frame down, as a placed
+         * picture goes down, for templates */
+        auto *frame_btn = new Button(toolbar, "", FA_IMAGE);
+        frame_btn->set_tooltip("Empty picture frame (placed like a picture; fill it with "
+                               "right-click > Place Picture, or Ctrl+drag a picture onto it)");
+        frame_btn->set_callback([this] { m_view->place_empty_frame(); });
+
         m_snap_btn = new Button(toolbar, "", FA_MAGNET);
         m_snap_btn->set_flags(Button::ToggleButton);
         m_snap_btn->set_pushed(true);
@@ -1043,6 +1050,22 @@ public:
         });
     }
 
+    /* Right-click > Place / Replace Picture: a picture file into the frame */
+    void place_into_frame_dialog(ItemId frame) {
+        const std::string folder = m_doc_path.empty()
+            ? std::string() : nanogui::fs::parent_path(m_doc_path);
+        auto paths = file_dialog(image_file_types(), false, false, folder);
+        if (paths.empty() || paths[0].empty())
+            return;
+        const std::string name = nanogui::fs::filename(paths[0]);
+        m_view->replace_picture_file(frame, paths[0], [this, name](const std::string &error) {
+            if (!error.empty())
+                show_alert(this, "The picture couldn't be placed.", error);
+            else
+                set_note("placed " + name + " in the frame");
+        });
+    }
+
     /* Open without asking about the current publication (callers do that). */
     bool open_path(const std::string &path) {
         /* Linked pictures are read as they come on screen, not here */
@@ -1262,6 +1285,7 @@ public:
         add_cmd(file, "New Document", {{SYSTEM_COMMAND_MOD, GLFW_KEY_N}}, [this] { new_document(); });
         add_cmd(file, "Open...", {{SYSTEM_COMMAND_MOD, GLFW_KEY_O}}, [this] { open_document_dialog(); });
         add_cmd(file, "Place...", {{SYSTEM_COMMAND_MOD, GLFW_KEY_D}}, [this] { place_dialog(); });
+        add_cmd(file, "Place Empty Picture Frame", {}, [this] { m_view->place_empty_frame(); });
         new Separator(file->popup());
         add_cmd(file, "Save", {{SYSTEM_COMMAND_MOD, GLFW_KEY_S}}, [this] { save(); });
         add_cmd(file, "Save As...", {{SYSTEM_COMMAND_MOD | GLFW_MOD_SHIFT, GLFW_KEY_S}},
@@ -2018,6 +2042,13 @@ public:
             item("Bring to Front", 0, true, {{C, GLFW_KEY_F}},
                  [v] { v->arrange(ComposerView::Stack::Front); });
             item("Send to Back", 0, true, {}, [v] { v->arrange(ComposerView::Stack::Back); });
+            if (const ItemId frame = v->context_picture_frame()) {
+                section();
+                const Item *it = v->document().find_item(frame);
+                const bool empty = it && it->image() && !it->image()->asset;
+                item(empty ? "Place Picture\u2026" : "Replace Picture\u2026", FA_IMAGE, true, {},
+                     [this, frame] { place_into_frame_dialog(frame); });
+            }
             if (v->can_reload_pictures()) {
                 section();
                 item("Reload Picture", FA_SYNC_ALT, true, {}, [v] { v->reload_pictures(); });

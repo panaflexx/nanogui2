@@ -3899,6 +3899,15 @@ void ComposerView::place_frame(uint32_t asset, const ImageMetadata &meta,
         screen()->redraw();
 }
 
+namespace {
+
+std::string image_leaf_name(const std::string &path) {
+    const size_t slash = path.find_last_of("/\\");
+    return slash == std::string::npos ? path : path.substr(slash + 1);
+}
+
+} // namespace
+
 /* The space between a picture and its caption, points. */
 static constexpr float kCaptionGap = 4.f;
 
@@ -3948,20 +3957,24 @@ void ComposerView::fit_column(size_t, float col_x, float col_w, float aspect,
     x = col_x + (col_w - w) * 0.5f;
 }
 
-ItemId ComposerView::add_caption(size_t page, const Item &picture) {
-    const PlacedImage *im = picture.image();
-    if (!m_caption_pictures || !im || page >= m_doc.pages.size())
-        return 0;
-    /* The file name without its extension: something to type over. */
-    std::string text = "Caption";
-    if (const ImageAsset *a = m_doc.find_image(im->asset)) {
+/* What a new caption says: the picture's file name without its extension,
+ * something to type over; "Caption" for an empty frame. */
+std::string ComposerView::caption_name(uint32_t asset) const {
+    std::string text;
+    if (const ImageAsset *a = m_doc.find_image(asset)) {
         text = a->name;
         const size_t dot = text.find_last_of('.');
         if (dot != std::string::npos && dot > 0)
             text.erase(dot);
-        if (text.empty())
-            text = "Caption";
     }
+    return text.empty() ? "Caption" : text;
+}
+
+ItemId ComposerView::add_caption(size_t page, const Item &picture) {
+    const PlacedImage *im = picture.image();
+    if (!m_caption_pictures || !im || page >= m_doc.pages.size())
+        return 0;
+    const std::string text = caption_name(im->asset);
     Paragraph para;
     para.style.name = "Caption";
     para.runs.push_back(Run{m_default_type, text});
@@ -3987,14 +4000,188 @@ void ComposerView::fit_caption(ItemId caption, const Item &picture) {
     c->xf = picture.xf * Transform::translate(0.f, picture.h + kCaptionGap);
 }
 
+/* ---- Empty frames and replacing a frame's picture --------------------------- */
+
 namespace {
 
-std::string image_leaf_name(const std::string &path) {
-    const size_t slash = path.find_last_of("/\\");
-    return slash == std::string::npos ? path : path.substr(slash + 1);
+/* `im` showing a picture of `meta`'s print proportions, filling a frame of
+ * fw x fh: scaled to cover it, centered, the overflow cropped by the frame.
+ * Opacity and border stay. */
+PlacedImage fill_frame(PlacedImage im, uint32_t asset, float fw, float fh, const ImageMetadata &meta) {
+    im.asset = asset;
+    const float pw = image_print_points(meta.width_px, meta.ppi_x);
+    const float ph = image_print_points(meta.height_px, meta.ppi_y);
+    if (!(pw > 0.f) || !(ph > 0.f) || !(fw > 0.f) || !(fh > 0.f)) {
+        im.x = im.y = 0.f;
+        im.w = fw;
+        im.h = fh;
+        return im;
+    }
+    const float k = std::max(fw / pw, fh / ph);
+    im.w = pw * k;
+    im.h = ph * k;
+    im.x = (fw - im.w) * 0.5f;
+    im.y = (fh - im.h) * 0.5f;
+    return im;
+}
+
+bool same_rect(const PlacedImage &a, const PlacedImage &b) {
+    return std::fabs(a.x - b.x) < 1e-3f && std::fabs(a.y - b.y) < 1e-3f &&
+           std::fabs(a.w - b.w) < 1e-3f && std::fabs(a.h - b.h) < 1e-3f;
 }
 
 } // namespace
+
+void ComposerView::place_empty_frame() {
+    if (m_page >= m_doc.pages.size() || !check_active_layer())
+        return;
+    /* 3 x 2.25 in, as a 72 ppi "picture": place_frame sizes it the way it
+     * sizes a picture (a column wide with Fit to Columns) */
+    ImageMetadata meta;
+    meta.width_px = meta.stored_width_px = 216;
+    meta.height_px = meta.stored_height_px = 162;
+    meta.ppi_x = meta.ppi_y = 72.0;
+    push_undo();
+    place_frame(0, meta, m_page, nullptr);
+    if (on_document_change)
+        on_document_change();
+}
+
+ItemId ComposerView::picture_frame_at(size_t page, const Point &at) const {
+    if (page >= m_doc.pages.size())
+        return 0;
+    const std::vector<Item> &items = m_doc.pages[page].items;
+    for (auto i = items.rbegin(); i != items.rend(); ++i) {
+        if (!i->is_image() || !m_doc.item_editable(*i))
+            continue;
+        const Point l = i->xf.inverse().apply(at);
+        if (l.x >= 0.f && l.x <= i->w && l.y >= 0.f && l.y <= i->h)
+            return i->id;
+    }
+    return 0;
+}
+
+ItemId ComposerView::context_picture_frame() const {
+    if (editing())
+        return 0;
+    const ItemId id = picture_frame_at(m_page, m_context_pt);
+    return id && is_selected(id) ? id : 0;
+}
+
+/* The caption grouped with a picture frame, or 0. */
+ItemId ComposerView::caption_of(ItemId frame) const {
+    size_t page = 0;
+    const Item *it = m_doc.find_item(frame, &page);
+    if (!it || !it->group || page >= m_doc.pages.size())
+        return 0;
+    for (const Item &o : m_doc.pages[page].items)
+        if (o.id != frame && o.group == it->group && o.is_text())
+            return o.id;
+    return 0;
+}
+
+/* The frame shows `asset` (of `meta`), filling it. A caption that still
+ * reads as what the frame showed before takes the new picture's name; one
+ * that was written over keeps its words. No undo step of its own. */
+void ComposerView::refill_frame(ItemId frame, uint32_t asset, const ImageMetadata &meta) {
+    Item *it = m_doc.find_item(frame);
+    PlacedImage *im = it ? it->image() : nullptr;
+    if (!im)
+        return;
+    const uint32_t old = im->asset;
+    it->content = fill_frame(*im, asset, it->w, it->h, meta);
+    const ItemId cap = caption_of(frame);
+    StoryEntry *se = cap ? m_doc.story_of(cap) : nullptr;
+    if (!se || se->story.paragraphs.size() != 1)
+        return;
+    Paragraph &para = se->story.paragraphs.front();
+    std::string text;
+    for (const Run &r : para.runs)
+        text += r.text;
+    if (!text.empty() && text != caption_name(old) && text != "Caption")
+        return;
+    CharStyle look = para.runs.empty() ? m_default_type : para.runs.front().style;
+    para.runs.clear();
+    para.runs.push_back(Run{look, caption_name(asset)});
+    recompose();
+}
+
+bool ComposerView::replace_picture(ItemId frame, uint32_t asset) {
+    const ImageAsset *a = m_doc.find_image(asset);
+    const Item *it = m_doc.find_item(frame);
+    if (!a || !it || !it->image() || !m_doc.item_editable(*it))
+        return false;
+    const ImageMetadata meta = a->meta;
+    push_undo();
+    refill_frame(frame, asset, meta);
+    m_sel = with_groups({frame});
+    m_edit_story = 0;
+    selection_changed();
+    if (on_document_change)
+        on_document_change();
+    if (screen())
+        screen()->redraw();
+    return true;
+}
+
+void ComposerView::replace_picture_file(ItemId frame, const std::string &path,
+                                        std::function<void(const std::string &error)> done,
+                                        Vector2i px_hint) {
+    const Item *it = m_doc.find_item(frame);
+    if (!it || !it->image() || !m_doc.item_editable(*it)) {
+        if (done) done("that frame can't be changed");
+        return;
+    }
+    if (!m_images) {
+        if (done) done("pictures aren't available");
+        return;
+    }
+    /* As place_image_file: the id is taken now and never given back; a
+     * link at the hinted size goes in at once, and the header is read on
+     * a background thread */
+    const uint32_t id = m_images->take_id();
+    ImageMetadata guess;
+    const bool hinted = px_hint.x() > 0 && px_hint.y() > 0;
+    guess.width_px = guess.stored_width_px = hinted ? px_hint.x() : 108;
+    guess.height_px = guess.stored_height_px = hinted ? px_hint.y() : 108;
+    m_images->add_link(id, path, guess);
+    ImageAsset asset;
+    asset.id = id;
+    asset.name = image_leaf_name(path);
+    asset.source = file_uri(path);
+    asset.meta = guess;
+    push_undo();
+    m_doc.add_image(std::move(asset));
+    refill_frame(frame, id, guess);
+    Probing probing;
+    probing.item = frame;
+    probing.replace = true;
+    if (const Item *now = m_doc.find_item(frame)) {
+        probing.w = now->w;
+        probing.h = now->h;
+        probing.picture = *now->image();
+    }
+    m_probing[id] = probing;
+    m_sel = with_groups({frame});
+    m_edit_story = 0;
+    selection_changed();
+    if (on_document_change)
+        on_document_change();
+    if (screen())
+        screen()->redraw();
+
+    auto gate = m_load_gate;
+    ComposerView *view = this;
+    const uint64_t epoch = m_doc_epoch;
+    importer().post([gate, view, epoch, path, id, done]() {
+        auto held = std::make_shared<ImageImport>(probe_image_file(path));
+        async([gate, view, epoch, id, done, held]() {
+            if (!gate->open || epoch != view->m_doc_epoch)
+                return;
+            view->finish_probe(id, *held, done);
+        });
+    });
+}
 
 bool ComposerView::commit_import(uint32_t id, const std::string &path, ImageImport imported,
                                  size_t page, bool place, const Point *at, std::string *error) {
@@ -4269,10 +4456,18 @@ void ComposerView::finish_probe(uint32_t id, const ImageImport &imported,
     if (!m_images->is_loaded(id))
         m_images->add_link(id, m_images->path_of(id), imported.meta);
 
-    /* The frame takes the print size, unless it was resized meanwhile */
+    /* The frame takes the print size, unless it was resized meanwhile. A
+     * replaced picture is refitted to its frame instead, unless it was
+     * moved or the frame resized. */
     size_t page = 0;
     Item *it = probing.item ? m_doc.find_item(probing.item, &page) : nullptr;
-    if (it && it->image() && it->image()->asset == id &&
+    if (probing.replace) {
+        if (it && it->image() && it->image()->asset == id && same_rect(*it->image(), probing.picture) &&
+            std::fabs(it->w - probing.w) < 1e-3f && std::fabs(it->h - probing.h) < 1e-3f) {
+            it->content = fill_frame(*it->image(), id, it->w, it->h, imported.meta);
+            selection_changed();
+        }
+    } else if (it && it->image() && it->image()->asset == id &&
         std::fabs(it->w - probing.w) < 1e-3f && std::fabs(it->h - probing.h) < 1e-3f) {
         float w, h;
         frame_size(imported.meta, page, w, h);
@@ -4592,6 +4787,28 @@ void ComposerView::drop_target(const DragData &data, Point &at, size_t &page,
     }
 }
 
+ItemId ComposerView::drop_replace_target(const DragEvent &e) {
+    if (!key_held(e.modifiers, GLFW_MOD_CONTROL, GLFW_KEY_LEFT_CONTROL, GLFW_KEY_RIGHT_CONTROL))
+        return 0;
+    if (!dragged_asset(e.data)) {
+        if (!e.data.has("text/uri-list"))
+            return 0;
+        const std::vector<std::string> paths = e.data.file_paths();
+        if (paths.empty())
+            return 0;
+        /* A picture file; an SVG is placed as a graphic, not into a frame */
+        std::string ext = paths.front();
+        const size_t dot = ext.find_last_of('.');
+        ext = dot == std::string::npos ? std::string() : ext.substr(dot + 1);
+        for (char &c : ext)
+            c = (char) std::tolower((unsigned char) c);
+        if (ext == "svg" || ext == "svgz")
+            return 0;
+    }
+    const Point at = page_point_from_screen(screen()->mouse_pos());
+    return picture_frame_at(m_point_page, at);
+}
+
 bool ComposerView::drag_motion_event(const Vector2i &, DragEvent &e) {
     const uint32_t asset = dragged_asset(e.data);
     const bool files = !asset && on_drop_files && e.data.has("text/uri-list");
@@ -4600,6 +4817,7 @@ bool ComposerView::drag_motion_event(const Vector2i &, DragEvent &e) {
         return false;
     }
     drop_target(e.data, m_drop_at, m_drop_page, m_drop_w, m_drop_h);
+    m_drop_replace = drop_replace_target(e);
     m_drop_hover = true;
     screen()->redraw();
     return true;
@@ -4609,12 +4827,31 @@ void ComposerView::drag_leave_event() {
     if (!m_drop_hover)
         return;
     m_drop_hover = false;
+    m_drop_replace = 0;
     if (screen())
         screen()->redraw();
 }
 
 bool ComposerView::drag_drop_event(const Vector2i &, DragEvent &e) {
     drag_leave_event();
+    if (const ItemId frame = drop_replace_target(e)) {
+        /* Ctrl over a picture frame: its picture is replaced */
+        if (const uint32_t asset = dragged_asset(e.data)) {
+            replace_picture(frame, asset);
+        } else {
+            const std::vector<std::string> paths = e.data.file_paths();
+            Vector2i hint(0, 0);
+            if (const std::string *px = e.data.get(kImagePixelsDragType))
+                if (std::sscanf(px->c_str(), "%d %d", &hint.x(), &hint.y()) != 2)
+                    hint = Vector2i(0, 0);
+            replace_picture_file(frame, paths.front(), [this](const std::string &error) {
+                if (!error.empty() && on_note)
+                    on_note("couldn't replace the picture: " + error);
+            }, hint);
+        }
+        request_focus();
+        return e.accept(this, DropCopy);
+    }
     Point at;
     size_t page = 0;
     float w, h;
@@ -4680,7 +4917,9 @@ void ComposerView::sync_textures(NVGcontext *ctx) {
 }
 
 int ComposerView::texture_for(NVGcontext *ctx, const DrawImage &im, float px) {
-    if (!m_images || !im.asset)
+    if (!im.asset)
+        return kEmptyFramePlaceholder;   // an empty frame: shown, not printed
+    if (!m_images)
         return 0;
     const ImageStore::Entry *e = m_images->find(im.asset);
     if (!e)
@@ -4826,7 +5065,28 @@ void ComposerView::draw(NVGcontext *ctx) {
 
     /* A drag over the view: the frame it would place, or a place-gun mark
      * while its size isn't known yet */
-    if (m_drop_hover)
+    size_t replace_page = 0;
+    const Item *replacing = m_drop_hover && m_drop_replace ? m_doc.find_item(m_drop_replace, &replace_page)
+                                                           : nullptr;
+    if (replacing) {
+        /* Ctrl held over a picture frame: the frame the drop refills */
+        for (const PageSlot &sl : slots) {
+            if (sl.index != replace_page)
+                continue;
+            nvgSave(ctx);
+            nvgTranslate(ctx, o.x() + sl.x, o.y() + sl.y);
+            apply_transform(ctx, replacing->xf);
+            const float lpx = px / item_scale(replacing->xf);
+            nvgBeginPath(ctx);
+            nvgRect(ctx, 0, 0, replacing->w, replacing->h);
+            nvgFillColor(ctx, nvgRGBA(40, 200, 80, 40));
+            nvgFill(ctx);
+            nvgStrokeColor(ctx, nvgRGB(30, 170, 60));
+            nvgStrokeWidth(ctx, 3.f * lpx);
+            nvgStroke(ctx);
+            nvgRestore(ctx);
+        }
+    } else if (m_drop_hover)
         for (const PageSlot &sl : slots) {
             if (sl.index != m_drop_page)
                 continue;

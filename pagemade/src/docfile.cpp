@@ -1181,7 +1181,7 @@ void repair(PageDoc &d, std::vector<std::string> &warnings) {
     for (const Page &p : d.pages)
         for (const Item &it : p.items)
             if (const PlacedImage *im = it.image())
-                if (!d.find_image(im->asset))
+                if (im->asset && !d.find_image(im->asset))   // 0: an empty frame
                     ++missing;
     if (missing)
         warnings.push_back(std::to_string(missing) +
