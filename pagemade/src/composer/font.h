@@ -140,6 +140,10 @@ public:
     void add_document_font(const std::string &family, const std::string &style,
                            std::shared_ptr<Font> font);
     void clear_document_fonts();
+    /* The library's shared_ptr for a face find() returned. Empty when
+     * `font` is null or not one of this library's loaded faces. Holding
+     * the result keeps the face alive across clear_document_fonts(). */
+    std::shared_ptr<Font> retain(const Font *font) const;
     bool has_family(const std::string &family) const;
     /* Installed faces only, not document fonts. */
     bool has_installed_family(const std::string &family) const;

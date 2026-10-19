@@ -1435,6 +1435,21 @@ void Screen::cursor_pos_callback_event(double x, double y) {
             return;
         }
 
+        /* Motion behind a modal dialog used to reach the page (hover,
+         * cursor, anything a move handler changes). Clicks and the wheel
+         * are already swallowed below. A drag that started on the dialog
+         * still follows the pointer outside it. */
+        if (Window *modal = front_modal(m_children)) {
+            if (!m_drag_active && !modal->contains(p) && !over_open_popup(m_children, p)) {
+                m_mouse_pos = p;
+                if (m_cursor != Cursor::Arrow) {
+                    m_cursor = Cursor::Arrow;
+                    glfwSetCursor(m_glfw_window, m_cursors[(int) m_cursor]);
+                }
+                return;
+            }
+        }
+
         bool ret = false;
         if (!m_drag_active) {
             Widget* widget = find_widget(p);
@@ -1643,15 +1658,23 @@ void Screen::drop_callback_event(int count, const char** filenames) {
     for (int i = 0; i < count; ++i)
         arg[i] = filenames[i];
     try {
+        double x, y;
+        glfwGetCursorPos(m_glfw_window, &x, &y);
+        m_mouse_pos = logical_cursor(x, y, m_pixel_ratio);
+        /* A drop on the page while a dialog is up would open or place a
+         * file on the UI thread, under the export worker. */
+        if (Window *modal = front_modal(m_children)) {
+            if (!modal->contains(m_mouse_pos) && !over_open_popup(m_children, m_mouse_pos)) {
+                m_redraw = true;
+                return;
+            }
+        }
         if (drop_event(arg)) {
             m_redraw = true;
             return;
         }
         /* Not taken by the screen: offer the files to the widget under the
            cursor as a drag from outside the application */
-        double x, y;
-        glfwGetCursorPos(m_glfw_window, &x, &y);
-        m_mouse_pos = logical_cursor(x, y, m_pixel_ratio);
         DragData data;
         data.set("text/uri-list", DragData::uri_list(arg));
         DragEvent e(data, DropCopy | DropLink, m_modifiers, nullptr);
@@ -1892,6 +1915,19 @@ void Screen::update_focus(Widget* widget) {
 		return;
 	}
 
+    /* A widget whose parents don't reach this screen is detached (its
+     * window was just disposed, say from its own button). Focusing it
+     * would hold pointers to widgets about to be freed: clear focus. */
+    {
+        const Widget* top = widget;
+        while (top->parent())
+            top = top->parent();
+        if (top != this) {
+            update_focus(nullptr);
+            return;
+        }
+    }
+
     for (auto w : m_focus_path) {
         if (w == nullptr || !w->focused())
             continue;
@@ -1961,7 +1997,15 @@ void Screen::move_window_to_front(Window* window) {
     if (window && window->is_root())
         return;
 
-    m_children.erase(std::remove(m_children.begin(), m_children.end(), window), m_children.end());
+    /* Reorder only. A window that isn't ours any more (disposed: its entry
+     * and reference went to the cleanup queue) must not be pushed back:
+     * do_widget_cleanup sees no parent, frees it, and the list keeps a
+     * dangling pointer for the next draw to walk (an nmail crash in
+     * dynamic_cast over children()). */
+    auto at = std::find(m_children.begin(), m_children.end(), window);
+    if (at == m_children.end())
+        return;
+    m_children.erase(at);
     m_children.push_back(window);
     /* Brute force topological sort (no problem for a few windows..) */
     bool changed = false;
@@ -2003,6 +2047,11 @@ void Screen::do_widget_cleanup() {
                 auto& ch = p->m_children;
                 ch.erase(std::remove(ch.begin(), ch.end(), w), ch.end());
                 w->set_parent(nullptr);
+            } else {
+                /* Released, so not ours; a stray entry (put back without a
+                 * reference) must not outlive it. */
+                m_children.erase(std::remove(m_children.begin(), m_children.end(), w),
+                                 m_children.end());
             }
             w->dec_ref();
         }

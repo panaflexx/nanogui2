@@ -2338,6 +2338,43 @@ static void test_outline_cache(const FontLibrary &fonts) {
 }
 
 /* BackgroundWorker: keyed jobs replace queued ones; drop_if takes them out. */
+static void test_export_snapshots(const FontLibrary &fonts) {
+    const Font *serif = fonts.find("Serif", false, false);
+    std::shared_ptr<Font> held = fonts.retain(serif);
+    CHECK(serif && held.get() == serif, "retain returns the library's face");
+
+    FontLibrary docs;
+    docs.add_document_font("DocFace", "Regular", held);
+    const Font *doc_face = docs.find("DocFace", false, false);
+    std::shared_ptr<Font> kept = docs.retain(doc_face);
+    CHECK(kept && kept.get() == doc_face, "a document face can be retained");
+    docs.clear_document_fonts();
+    CHECK(kept && kept->units_per_em() > 0, "clear_document_fonts leaves a retained face");
+    CHECK(docs.find("DocFace", false, false) == nullptr, "the library dropped the document face");
+
+    VectorStore vectors;
+    VectorScene scene;
+    scene.width = 12.f;
+    scene.height = 7.f;
+    CHECK(vectors.add(1, std::vector<uint8_t>{'<', 's'}, std::move(scene)), "add a scene");
+    VectorStore copy = vectors.snapshot();
+    vectors.clear();
+    const VectorScene *again = copy.scene(1);
+    CHECK(again && again->width == 12.f && again->height == 7.f && vectors.scene(1) == nullptr,
+          "vector snapshot outlives clear");
+
+    ImageMetadata meta;
+    meta.format = "png";
+    meta.width_px = 2;
+    meta.height_px = 2;
+    ImageStore images;
+    images.add_link(3, "/tmp/pagemade-snap.png", meta);
+    ImageStore pics = images.snapshot();
+    images.clear();
+    CHECK(pics.path_of(3) == "/tmp/pagemade-snap.png" && images.path_of(3).empty(),
+          "image snapshot outlives clear");
+}
+
 static void test_background_worker() {
     BackgroundWorker worker;
     std::mutex mu;
@@ -2372,6 +2409,55 @@ static void test_background_worker() {
         std::this_thread::sleep_for(std::chrono::milliseconds(10));
     std::lock_guard<std::mutex> lock(mu);
     CHECK(ran == std::vector<int>({2, 3}), "the newest job per key ran, in order");
+}
+
+/* Two threads: a job stuck on a slow read doesn't hold up the next one. */
+static void test_background_pool() {
+    BackgroundWorker pool(2);
+    std::mutex mu;
+    std::condition_variable cv;
+    bool release = false;
+    std::atomic<bool> second_ran{false};
+    pool.post([&] {                      // the slow one
+        std::unique_lock<std::mutex> lock(mu);
+        cv.wait_for(lock, std::chrono::seconds(5), [&] { return release; });
+    }, "slow");
+    pool.post([&] { second_ran = true; }, "fast");
+    for (int i = 0; i < 200 && !second_ran; ++i)
+        std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    CHECK(second_ran, "the second job ran while the first was still busy");
+    {
+        std::lock_guard<std::mutex> lock(mu);
+        release = true;
+    }
+    cv.notify_all();
+
+    /* A display view shrinks on request, never grows that way */
+    ImageStore store;
+    ImageMetadata meta;
+    std::string err;
+    const std::vector<uint8_t> jpg = make_jpeg_rgb(64, 32, 10, 20, 30);
+    const uint32_t id = store.take_id();
+    CHECK(store.add(id, jpg, &meta, &err), "add: %s", err.c_str());
+    store.set_proxy(id, std::vector<uint8_t>(64 * 32 * 4, 9), 64, 32);
+    store.shrink_proxy(id, std::vector<uint8_t>(16 * 8 * 4, 7), 16, 8);
+    const uint8_t *px = nullptr;
+    int w = 0, h = 0;
+    CHECK(store.cached_display(id, &px, &w, &h) && w == 16 && h == 8, "shrink_proxy gives memory back");
+    store.shrink_proxy(id, std::vector<uint8_t>(32 * 16 * 4, 7), 32, 16);
+    CHECK(store.cached_display(id, &px, &w, &h) && w == 16, "and doesn't grow it");
+
+    /* New bytes for one picture make only its texture stale */
+    const uint32_t other = store.take_id();
+    CHECK(store.add(other, jpg, &meta, &err), "add another: %s", err.c_str());
+    const uint64_t gen = store.generation();
+    const uint64_t v_other = store.version(other);
+    CHECK(store.add(id, make_jpeg_rgb(64, 32, 200, 20, 30), &meta, &err), "replace: %s", err.c_str());
+    CHECK(store.version(id) == 1 && store.version(other) == v_other && store.generation() == gen,
+          "replacing one picture bumps its version, not the store's generation");
+    CHECK(!store.cached_display(id, &px, &w, &h), "and drops its old view");
+    store.clear();
+    CHECK(store.generation() != gen, "a cleared store has a new generation");
 }
 
 static bool near_px(const uint8_t *p, int r, int g, int b, int tol) {
@@ -2445,6 +2531,15 @@ static std::vector<uint8_t> make_avif(int w, int h, uint8_t r, uint8_t g, uint8_
 
 static void test_image_color(const FontLibrary &fonts) {
     (void) fonts;
+    /* Opaque red beside a clear pixel must stay red, at half alpha. */
+    const uint8_t src[8] = {255, 0, 0, 255, 0, 0, 0, 0};
+    std::vector<uint8_t> dst;
+    resample_rgba(src, 2, 1, 1, 1, dst);
+    CHECK(dst.size() == 4 && dst[0] >= 250 && dst[1] <= 5 && dst[2] <= 5 &&
+              dst[3] >= 127 && dst[3] <= 128,
+          "downsample keeps red beside clear (%u %u %u %u)",
+          dst.size() == 4 ? dst[0] : 0, dst.size() == 4 ? dst[1] : 0,
+          dst.size() == 4 ? dst[2] : 0, dst.size() == 4 ? dst[3] : 0);
     /* Display P3 from its xy numbers comes out as Apple's profile does. */
     std::vector<uint8_t> p3 = icc_from_primaries(kP3Red, kP3Green, kP3Blue, kD65,
                                                  Transfer::SRGB, "Display P3");
@@ -4027,6 +4122,21 @@ static void test_pdf_export_jobs() {
     stop.progress = [](float, const std::string &) { return false; };
     CHECK(!export_pdf(pdf, doc, {}, &store, &o, nullptr, &stop) && !nanogui::fs::exists(pdf),
           "a stop writes no file");
+    CHECK(!nanogui::fs::exists(pdf + ".saving"), "a stop leaves no temporary file");
+    {
+        FILE *keep = std::fopen(pdf.c_str(), "wb");
+        CHECK(keep != nullptr, "seed an existing pdf");
+        if (keep) {
+            std::fputs("KEEP\n", keep);
+            std::fclose(keep);
+        }
+    }
+    CHECK(!export_pdf(pdf, doc, {}, &store, &o, nullptr, &stop), "a stop fails");
+    CHECK(read_bin(pdf) == "KEEP\n", "a stop does not truncate the existing file");
+    CHECK(export_pdf(pdf, doc, {}, &store, &o, nullptr, &watch), "export replaces the file");
+    CHECK(read_bin(pdf).compare(0, 5, "%PDF-") == 0, "the replacement is a PDF");
+    CHECK(!nanogui::fs::exists(pdf + ".saving"), "export removes the temporary file");
+    std::remove(pdf.c_str());
     std::remove(jpg.c_str());
 }
 
@@ -4121,6 +4231,63 @@ static void test_junk_resolution() {
     CHECK(image_ppi_plausible(300, 300) && image_ppi_plausible(72, 96) &&
               !image_ppi_plausible(300, 30) && !image_ppi_plausible(5, 5),
           "plausible resolutions");
+}
+
+/* JPEG screen views: decoded at a scale (libjpeg), or from the EXIF
+ * thumbnail when that covers the request and has the photo's shape. */
+static std::vector<uint8_t> jpeg_with_thumbnail(int w, int h, uint8_t r, int tw, int th, uint8_t tr) {
+    std::vector<uint8_t> photo = make_jpeg_rgb(w, h, r, 40, 40);
+    const std::vector<uint8_t> thumb = make_jpeg_rgb(tw, th, tr, 200, 40);
+    /* Big-endian TIFF: an empty IFD0, then IFD1 naming the thumbnail */
+    std::vector<uint8_t> tiff = {'M', 'M', 0, 42, 0, 0, 0, 8};
+    auto u16 = [&](unsigned v) { tiff.push_back((uint8_t) (v >> 8)); tiff.push_back((uint8_t) v); };
+    auto u32 = [&](unsigned v) { u16(v >> 16); u16(v & 0xFFFF); };
+    u16(0);
+    u32(8 + 2 + 4);                      // IFD1 right after IFD0
+    const unsigned at = 8 + 2 + 4 + 2 + 2 * 12 + 4;
+    u16(2);
+    u16(0x0201); u16(4); u32(1); u32(at);
+    u16(0x0202); u16(4); u32(1); u32((unsigned) thumb.size());
+    u32(0);
+    tiff.insert(tiff.end(), thumb.begin(), thumb.end());
+    std::vector<uint8_t> app1 = {0xFF, 0xE1};
+    const size_t len = 2 + 6 + tiff.size();
+    app1.push_back((uint8_t) (len >> 8));
+    app1.push_back((uint8_t) len);
+    for (char c : std::string("Exif\0\0", 6))
+        app1.push_back((uint8_t) c);
+    app1.insert(app1.end(), tiff.begin(), tiff.end());
+    photo.insert(photo.begin() + 2, app1.begin(), app1.end());
+    return photo;
+}
+
+static void test_jpeg_previews() {
+    std::string err;
+    DecodedImage view;
+    const std::vector<uint8_t> plain = make_jpeg_rgb(800, 600, 30, 140, 220);
+    CHECK(image_loader().decode_preview(plain.data(), plain.size(), 150, &view, &err) &&
+              std::max(view.width, view.height) >= 150 && view.width < 800 &&
+              view.meta.width_px == 800,
+          "a scaled decode covers the request and keeps the photo's size (%dx%d)", view.width,
+          view.height);
+    std::vector<uint8_t> shown;
+    int w = 0, h = 0;
+    CHECK(make_display(plain.data(), plain.size(), 150, &shown, &w, &h, &err) && w == 150 &&
+              h == 112 && near_px(shown.data(), 30, 140, 220, 6),
+          "make_display shrinks the rest of the way (%dx%d)", w, h);
+#ifdef PAGEMADE_HAVE_LIBJPEG
+    const std::vector<uint8_t> thumbed = jpeg_with_thumbnail(800, 600, 30, 160, 120, 240);
+    CHECK(image_loader().decode_preview(thumbed.data(), thumbed.size(), 120, &view, &err) &&
+              view.width == 160 && view.height == 120 && near_px(view.rgba.data(), 240, 200, 40, 8),
+          "a small view comes from the EXIF thumbnail (%dx%d)", view.width, view.height);
+    CHECK(image_loader().decode_preview(thumbed.data(), thumbed.size(), 300, &view, &err) &&
+              view.width > 160 && near_px(view.rgba.data(), 30, 40, 40, 8),
+          "a bigger one decodes the photo (%dx%d)", view.width, view.height);
+    const std::vector<uint8_t> boxed = jpeg_with_thumbnail(800, 600, 30, 160, 160, 240);
+    CHECK(image_loader().decode_preview(boxed.data(), boxed.size(), 120, &view, &err) &&
+              near_px(view.rgba.data(), 30, 40, 40, 8),
+          "a letterboxed thumbnail isn't used");
+#endif
 }
 
 /* fill_windings: holes stay holes, the outline is kept counter-clockwise
@@ -4739,6 +4906,7 @@ int main(int argc, char **argv) {
     test_pdf_export_jobs();
     test_empty_frames(fonts);
     test_junk_resolution();
+    test_jpeg_previews();
     test_picture_style(fonts);
     test_groups(fonts);
     test_page_markers(fonts);
@@ -4748,7 +4916,9 @@ int main(int argc, char **argv) {
     test_strict_loose(fonts);
     test_contents_tabs(fonts);
     test_image_color(fonts);
+    test_export_snapshots(fonts);
     test_background_worker();
+    test_background_pool();
     test_caps(fonts);
     test_type_file(fonts);
     test_font_menu();

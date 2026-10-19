@@ -671,7 +671,7 @@ private:
     struct LoadResult;
     pagemade::BackgroundWorker &loader();     // display views (reads, decodes)
     pagemade::BackgroundWorker &importer();   // Place and import reads
-    void request_display(uint32_t id, int long_edge);
+    void request_display(uint32_t id, int long_edge, bool shrink = false);
     /* A file placed before its header was read (place_image_file) */
     struct Probing {
         pagemade::ItemId item = 0;
@@ -750,7 +750,11 @@ private:
     /* extend: keep the anchor where it is (grow/shrink the selection). */
     void place_caret(pagemade::TextPos p, bool extend);
     void after_edit();                    // recompose and redraw
-    bool delete_selection();              // true when something was erased
+    /* True when something was erased. `compose` false leaves the layout to
+     * the edit that follows (an insert or a split composes once). */
+    bool delete_selection(bool compose = true);
+    /* One story's layout, now; the others are untouched. */
+    void recompose_story(pagemade::StoryId id);
     void insert_string(const std::string &utf8, bool burst);
     bool m_smart_quotes = true;
     bool m_caption_pictures = false;
@@ -849,7 +853,19 @@ private:
     std::unique_ptr<pagemade::BackgroundWorker> m_loader, m_importer;
     uint64_t m_doc_epoch = 0;
     std::map<uint32_t, int> m_load_want;      // display edge asked for, per picture
-    std::set<uint32_t> m_load_failed;         // couldn't be read: not asked again
+    /* Pictures that couldn't be read: drawn as missing, and read again in
+     * the background after `retry_at` (glfwGetTime), the wait doubling to
+     * five minutes, so a share that comes back or a file that is fixed
+     * shows up. Placing, replacing or reloading it clears this at once. */
+    struct LoadFailure { double retry_at = 0, wait = 15.0; };
+    std::map<uint32_t, LoadFailure> m_load_failed;
+    void note_load_failed(uint32_t id);
+    /* A preview more than one size step above what the screen wants is
+     * read again smaller once the zoom has settled (a second unchanged). */
+    double m_zoom_seen = 0, m_zoom_changed = 0;
+    bool m_settle_redraw = false;          // a redraw is booked for when it settles
+    void book_settle_redraw();
+    bool zoom_settled() const;
     std::map<uint32_t, Probing> m_probing;    // placed, header still being read
     std::set<uint32_t> m_live, m_live_frame;  // on screen: last draw, this draw
     std::map<uint32_t, uint64_t> m_last_live; // draw tick each was last on screen
@@ -865,7 +881,7 @@ private:
     float m_drop_w = 0.f, m_drop_h = 0.f;
     /* Screen copies of display views. Freed when the store's generation
      * changes, not from the destructor: the screen may already be gone. */
-    struct Tex { int id = 0; int w = 0, h = 0; };
+    struct Tex { int id = 0; int w = 0, h = 0; uint64_t version = 0; };
     std::map<uint32_t, Tex> m_tex;
     uint64_t m_tex_gen = 0;
 };

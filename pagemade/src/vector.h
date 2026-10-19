@@ -131,6 +131,12 @@ public:
     bool add(uint32_t id, std::vector<uint8_t> bytes, VectorScene scene);
     void set_path(uint32_t id, const std::string &path);
 
+    /* Shared source bytes and a copy of each scene. PDF export takes this
+     * on the UI thread and gives it to the worker. scene() and find()
+     * still return pointers into this store, for the thread that mutates
+     * it. */
+    VectorStore snapshot() const;
+
     const Entry *find(uint32_t id) const;
     Bytes source_of(uint32_t id) const;
     const VectorScene *scene(uint32_t id) const;

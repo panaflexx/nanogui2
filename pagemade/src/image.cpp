@@ -14,6 +14,11 @@
 #include "nanovg_exif.h"
 
 #include <stb_image.h>
+#ifdef PAGEMADE_HAVE_LIBJPEG
+#include <csetjmp>
+#include <cstdio>
+#include <jpeglib.h>
+#endif
 #include <miniz.h>
 #ifdef PAGEMADE_HAVE_HEIF
 #include <libheif/heif.h>
@@ -49,6 +54,41 @@ uint32_t tiff_u32(const uint8_t *t, int off, bool le) {
                     ((uint32_t) t[off + 2] << 16) | ((uint32_t) t[off + 3] << 24)
               : (uint32_t) t[off + 3] | ((uint32_t) t[off + 2] << 8) |
                     ((uint32_t) t[off + 1] << 16) | (uint32_t) t[off];
+}
+
+/* The JPEG thumbnail in a TIFF/EXIF block's IFD1, as a span of `t`.
+ * False when there is none or its offsets point outside the block. */
+bool tiff_thumbnail(const uint8_t *t, size_t n, const uint8_t **thumb, size_t *len) {
+    if (n < 8 || !((t[0] == 'I' && t[1] == 'I') || (t[0] == 'M' && t[1] == 'M')))
+        return false;
+    const bool le = t[0] == 'I';
+    const uint32_t ifd0 = tiff_u32(t, 4, le);
+    if ((size_t) ifd0 + 2 > n)
+        return false;
+    const unsigned count0 = tiff_u16(t, (int) ifd0, le);
+    const size_t next_at = (size_t) ifd0 + 2 + (size_t) count0 * 12;
+    if (next_at + 4 > n)
+        return false;
+    const uint32_t ifd1 = tiff_u32(t, (int) next_at, le);
+    if (ifd1 == 0 || (size_t) ifd1 + 2 > n)
+        return false;
+    const unsigned count1 = tiff_u16(t, (int) ifd1, le);
+    uint32_t off = 0, size = 0;
+    for (unsigned i = 0; i < count1; ++i) {
+        const size_t e = (size_t) ifd1 + 2 + (size_t) i * 12;
+        if (e + 12 > n)
+            return false;
+        const unsigned tag = tiff_u16(t, (int) e, le);
+        if (tag == 0x0201)
+            off = tiff_u32(t, (int) e + 8, le);
+        else if (tag == 0x0202)
+            size = tiff_u32(t, (int) e + 8, le);
+    }
+    if (!off || size < 4 || (size_t) off + size > n || t[off] != 0xFF || t[off + 1] != 0xD8)
+        return false;
+    *thumb = t + off;
+    *len = size;
+    return true;
 }
 
 /* IFD0 of a TIFF header: orientation, and resolution when it is there.
@@ -264,19 +304,33 @@ void downsample_rgba(const uint8_t *src, int sw, int sh, int dw, int dh, std::ve
             int x0 = (int) ((long long) x * sw / dw);
             int x1 = (int) ((long long) (x + 1) * sw / dw);
             if (x1 <= x0) x1 = x0 + 1;
-            unsigned sum[4] = {};
+            /* Premultiply, average, unpremultiply. Averaging straight
+             * RGBA turns an opaque red next to a clear pixel into a
+             * dark, half-transparent red. */
+            unsigned long sum_r = 0, sum_g = 0, sum_b = 0, sum_a = 0;
             int count = 0;
             for (int yy = y0; yy < y1 && yy < sh; ++yy)
                 for (int xx = x0; xx < x1 && xx < sw; ++xx) {
                     const uint8_t *s = src + ((size_t) yy * sw + xx) * 4;
-                    for (int c = 0; c < 4; ++c)
-                        sum[c] += s[c];
+                    const unsigned a = s[3];
+                    sum_r += (unsigned) s[0] * a;
+                    sum_g += (unsigned) s[1] * a;
+                    sum_b += (unsigned) s[2] * a;
+                    sum_a += a;
                     ++count;
                 }
             uint8_t *o = dst.data() + ((size_t) y * dw + x) * 4;
-            if (count < 1) count = 1;
-            for (int c = 0; c < 4; ++c)
-                o[c] = (uint8_t) (sum[c] / (unsigned) count);
+            if (count < 1)
+                count = 1;
+            if (sum_a == 0) {
+                o[0] = o[1] = o[2] = o[3] = 0;
+            } else {
+                o[0] = (uint8_t) std::min(255ul, (sum_r + sum_a / 2) / sum_a);
+                o[1] = (uint8_t) std::min(255ul, (sum_g + sum_a / 2) / sum_a);
+                o[2] = (uint8_t) std::min(255ul, (sum_b + sum_a / 2) / sum_a);
+                o[3] = (uint8_t) std::min(255ul, (sum_a + (unsigned long) count / 2) /
+                                                     (unsigned long) count);
+            }
         }
     }
 }
@@ -369,6 +423,120 @@ bool jpeg_sniff(const uint8_t *d, size_t n) {
 bool sof_marker(unsigned marker) {
     return marker >= 0xC0 && marker <= 0xCF && marker != 0xC4 && marker != 0xC8 && marker != 0xCC;
 }
+
+#ifdef PAGEMADE_HAVE_LIBJPEG
+
+/* libjpeg reports a fatal error by longjmp back to the decode. */
+struct JpegError {
+    jpeg_error_mgr mgr;
+    std::jmp_buf jump;
+};
+
+[[noreturn]] void jpeg_error_exit(j_common_ptr cinfo) {
+    std::longjmp(reinterpret_cast<JpegError *>(cinfo->err)->jump, 1);
+}
+
+void jpeg_quiet(j_common_ptr, int) {}
+
+/* Decode a JPEG at the smallest of 1/1, 1/2, 1/4 and 1/8 whose long edge
+ * still covers `long_edge` (libjpeg scales in the DCT, skipping most of the
+ * work), to straight RGBA as stored (not yet turned upright). False for
+ * what the stb path handles instead (CMYK and YCCK, which libjpeg hands
+ * back unconverted) and for anything libjpeg rejects. */
+bool jpeg_decode_scaled(const uint8_t *data, size_t n, int long_edge, std::vector<uint8_t> &rgba,
+                        int &w, int &h) {
+    jpeg_decompress_struct cinfo;
+    JpegError err;
+    cinfo.err = jpeg_std_error(&err.mgr);
+    err.mgr.error_exit = jpeg_error_exit;
+    err.mgr.emit_message = jpeg_quiet;
+    /* Nothing that needs a destructor lives between setjmp and the end */
+    uint8_t *buf = nullptr;
+    if (setjmp(err.jump)) {
+        jpeg_destroy_decompress(&cinfo);
+        std::free(buf);
+        return false;
+    }
+    jpeg_create_decompress(&cinfo);
+    jpeg_mem_src(&cinfo, data, (unsigned long) n);
+    if (jpeg_read_header(&cinfo, TRUE) != JPEG_HEADER_OK ||
+        cinfo.jpeg_color_space == JCS_CMYK || cinfo.jpeg_color_space == JCS_YCCK) {
+        jpeg_destroy_decompress(&cinfo);
+        return false;
+    }
+    const unsigned longest = std::max(cinfo.image_width, cinfo.image_height);
+    unsigned denom = 1;
+    while (denom < 8 && (longest + denom * 2 - 1) / (denom * 2) >= (unsigned) std::max(1, long_edge))
+        denom *= 2;
+    cinfo.scale_num = 1;
+    cinfo.scale_denom = denom;
+    cinfo.out_color_space = JCS_EXT_RGBA;
+    cinfo.dct_method = JDCT_ISLOW;
+    jpeg_start_decompress(&cinfo);
+    const size_t ow = cinfo.output_width, oh = cinfo.output_height;
+    buf = (uint8_t *) std::malloc(ow * oh * 4);
+    if (!buf || cinfo.output_components != 4) {
+        jpeg_destroy_decompress(&cinfo);
+        std::free(buf);
+        return false;
+    }
+    while (cinfo.output_scanline < cinfo.output_height) {
+        JSAMPROW row = buf + (size_t) cinfo.output_scanline * ow * 4;
+        jpeg_read_scanlines(&cinfo, &row, 1);
+    }
+    jpeg_finish_decompress(&cinfo);
+    jpeg_destroy_decompress(&cinfo);
+    w = (int) ow;
+    h = (int) oh;
+    rgba.assign(buf, buf + ow * oh * 4);
+    std::free(buf);
+    return true;
+}
+
+/* The EXIF thumbnail (as stored, not upright) when it covers `long_edge`
+ * and has the photo's proportions: some cameras letterbox it. */
+bool exif_thumbnail_view(const uint8_t *data, size_t n, const ImageMetadata &meta, int long_edge,
+                         std::vector<uint8_t> &rgba, int &w, int &h) {
+    size_t p = 2;
+    while (p + 4 <= n && data[p] == 0xFF) {
+        const unsigned marker = data[p + 1];
+        if (marker == 0xDA || marker == 0xD9)
+            break;
+        const size_t len = ((size_t) data[p + 2] << 8) | data[p + 3];
+        if (len < 2 || p + 2 + len > n)
+            break;
+        const uint8_t *pay = data + p + 4;
+        const size_t paylen = len - 2;
+        if (marker == 0xE1 && paylen >= 14 && std::memcmp(pay, "Exif\0\0", 6) == 0) {
+            const uint8_t *thumb = nullptr;
+            size_t tlen = 0;
+            if (!tiff_thumbnail(pay + 6, paylen - 6, &thumb, &tlen))
+                return false;
+            int tw = 0, th = 0, comp = 0;
+            if (!stbi_info_from_memory(thumb, (int) tlen, &tw, &th, &comp) ||
+                std::max(tw, th) < long_edge)
+                return false;
+            /* The stored (unrotated) photo's proportions */
+            const double sw = meta.stored_width_px > 0 ? meta.stored_width_px : meta.width_px;
+            const double sh = meta.stored_height_px > 0 ? meta.stored_height_px : meta.height_px;
+            if (sw <= 0 || sh <= 0 || th <= 0 ||
+                std::fabs((double) tw / th - sw / sh) > 0.02 * (sw / sh))
+                return false;
+            unsigned char *img = stbi_load_from_memory(thumb, (int) tlen, &tw, &th, &comp, 4);
+            if (!img)
+                return false;
+            rgba.assign(img, img + (size_t) tw * (size_t) th * 4);
+            stbi_image_free(img);
+            w = tw;
+            h = th;
+            return true;
+        }
+        p += 2 + len;
+    }
+    return false;
+}
+
+#endif
 
 class JpegDecoder : public ImageDecoder {
 public:
@@ -497,6 +665,32 @@ public:
         out->meta = std::move(meta);
         return true;
     }
+
+#ifdef PAGEMADE_HAVE_LIBJPEG
+    /* A scaled decode, turned upright. The metadata keeps the picture's
+     * own size; the raster is what was decoded. */
+    bool decode_preview(const uint8_t *data, size_t n, int long_edge, DecodedImage *out,
+                        std::string *error) const override {
+        ImageMetadata meta;
+        if (long_edge <= 0 || !probe(data, n, &meta, error))
+            return decode(data, n, out, error);
+        std::vector<uint8_t> rgba;
+        int w = 0, h = 0;
+        if (!exif_thumbnail_view(data, n, meta, long_edge, rgba, w, h) &&
+            (!jpeg_decode_scaled(data, n, long_edge, rgba, w, h) || w <= 0 || h <= 0))
+            return decode(data, n, out, error);
+        unsigned char *rotated = nvg__exifApply(rgba.data(), &w, &h, 4, meta.orientation);
+        if (rotated) {
+            rgba.assign(rotated, rotated + (size_t) w * (size_t) h * 4);
+            std::free(rotated);
+        }
+        out->width = w;
+        out->height = h;
+        out->rgba = std::move(rgba);
+        out->meta = std::move(meta);
+        return true;
+    }
+#endif
 };
 
 /* ---- HEIF (HEIC, AVIF) -------------------------------------------------- */
@@ -873,10 +1067,6 @@ bool make_display(const uint8_t *data, size_t n, int long_edge,
     DecodedImage full;
     if (!data || !image_loader().decode_preview(data, n, long_edge, &full, error))
         return false;
-    /* The screen is sRGB; a wider profile (a phone's Display P3) is
-     * converted for display only. */
-    if (full.meta.model == ColorModel::RGB && !full.meta.icc.empty())
-        icc_to_srgb(full.meta.icc, full.rgba.data(), (size_t) full.width * (size_t) full.height);
     int longest = std::max(full.width, full.height);
     int dw = full.width, dh = full.height;
     if (long_edge > 0 && longest > long_edge) {
@@ -886,6 +1076,10 @@ bool make_display(const uint8_t *data, size_t n, int long_edge,
     } else {
         *rgba = std::move(full.rgba);
     }
+    /* The screen is sRGB; a wider profile (a phone's Display P3) is
+     * converted for display only, after the shrink, on the pixels kept. */
+    if (full.meta.model == ColorModel::RGB && !full.meta.icc.empty())
+        icc_to_srgb(full.meta.icc, rgba->data(), (size_t) dw * (size_t) dh);
     *w = dw;
     *h = dh;
     return true;
@@ -1152,6 +1346,20 @@ ImageStore &ImageStore::operator=(ImageStore &&o) noexcept {
 
 void ImageStore::bump() { m_gen = ++g_store_gen; }
 
+ImageStore ImageStore::snapshot() const {
+    std::lock_guard<std::recursive_mutex> lock(m_mu);
+    ImageStore out;
+    out.m_next_id = m_next_id;
+    for (const auto &kv : m_entries) {
+        Entry e;
+        e.path = kv.second.path;
+        e.source = kv.second.source;
+        e.meta = kv.second.meta;
+        out.m_entries.emplace(kv.first, std::move(e));
+    }
+    return out;
+}
+
 void ImageStore::clear() {
     std::lock_guard<std::recursive_mutex> lock(m_mu);
     m_entries.clear();
@@ -1182,14 +1390,14 @@ bool ImageStore::add(uint32_t id, std::vector<uint8_t> bytes, ImageMetadata *met
     note_id(id);
     bool replace = m_entries.count(id) != 0;
     Entry e;
-    if (replace)
+    if (replace) {
         e.path = m_entries[id].path;
+        e.version = m_entries[id].version + 1;   // its texture is stale, no other
+    }
     e.source = std::make_shared<const std::vector<uint8_t>>(std::move(bytes));
     e.meta = probed;
     m_entries[id] = std::move(e);
     if (meta) *meta = probed;
-    if (replace)
-        bump();                      // a texture cached for this id is stale
     return true;
 }
 
@@ -1251,10 +1459,19 @@ void ImageStore::install(uint32_t id, Bytes source, const ImageMetadata &meta,
     const bool replace = e.loaded();
     e.source = std::move(source);
     e.meta = meta;
+    if (replace) {
+        ++e.version;                     // new bytes: drop this picture's view
+        e.proxy.clear();
+        e.proxy_w = e.proxy_h = e.proxy_edge = 0;
+    }
     if (!proxy.empty())
         set_proxy(id, std::move(proxy), proxy_w, proxy_h);
-    if (replace)
-        bump();
+}
+
+uint64_t ImageStore::version(uint32_t id) const {
+    std::lock_guard<std::recursive_mutex> lock(m_mu);
+    auto it = m_entries.find(id);
+    return it == m_entries.end() ? 0 : it->second.version;
 }
 
 void ImageStore::set_proxy(uint32_t id, std::vector<uint8_t> proxy, int w, int h) {
@@ -1264,6 +1481,19 @@ void ImageStore::set_proxy(uint32_t id, std::vector<uint8_t> proxy, int w, int h
         return;
     Entry &e = it->second;
     e.proxy = std::move(proxy);
+    e.proxy_w = w;
+    e.proxy_h = h;
+    e.proxy_edge = std::max(w, h);
+}
+
+void ImageStore::shrink_proxy(uint32_t id, std::vector<uint8_t> proxy, int w, int h) {
+    std::lock_guard<std::recursive_mutex> lock(m_mu);
+    auto it = m_entries.find(id);
+    if (it == m_entries.end() || proxy.empty() || std::max(w, h) >= it->second.proxy_edge)
+        return;
+    Entry &e = it->second;
+    e.proxy = std::move(proxy);
+    e.proxy.shrink_to_fit();
     e.proxy_w = w;
     e.proxy_h = h;
     e.proxy_edge = std::max(w, h);

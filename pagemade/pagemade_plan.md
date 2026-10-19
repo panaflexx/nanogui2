@@ -283,3 +283,86 @@ The variable and its `(void)` cast are gone. `/Parent` is still patched after th
 ---
 
 **Verified non-issues** (checked and deliberately not reported): the odd-looking mask `c & (0x3F >> n)` / `c & (0x7F >> n)` in the UTF-8 decoders is equivalent to the canonical mask because the branching already constrains the lead-byte ranges; `%04X` gid formatting is safe because OpenType `numGlyphs` is uint16-bounded so gids never exceed 0xFFFF; `erase()`'s `first` reference stays valid across `s.paragraphs.erase()` because the erased range starts after it; `next_line` always makes progress (every path consumes the carry or advances `next_seg`), so no infinite loop on zero/negative measure.
+
+---
+
+# Code review: application, threading, UI, PDF, images
+
+Checked against the current sources (October 2026). Items 1–16 above still hold. This pass is the rest of the app: `PagemadeApp`, `BackgroundWorker`, the image store and asset window, `ComposerView` drawing and loading, and `export_pdf`.
+
+What is already in good shape, and should stay:
+
+- Picture and SVG bytes live in `ImageStore` / `VectorStore`, beside the document, so an undo snapshot copies the layout and the stories, not the pixels.
+- Display decodes run on `BackgroundWorker`. Results come back through `nanogui::async`, and `ComposerView`'s load gate drops them after the view, or its document, is gone. The short-circuit is `!gate->open` before any use of the view pointer.
+- A JPEG that is embedded at full size keeps its DCT stream. PDF page drawing that needs GL is posted back to the UI thread and waited on with a future, so the worker never touches the GL context.
+- The asset-library directory scan is a joinable `std::thread` with an atomic stop flag. `stop_scan` joins it. That is the lifetime model the other workers should follow.
+- Flate failure sets `Writer::ok` and `write` returns false without creating the file.
+
+## Bugs
+
+**17. Fixed. The export dialog was not modal for the mouse, and the worker used live stores.**
+Clicks and the wheel were already swallowed while a modal window is up. Motion behind it, and a file drop outside it, now are too (`Screen`, `front_modal`). An open menu popup still receives its own clicks.
+
+`run_pdf_export` copies the document and the compositions, then `ImageStore::snapshot` and `VectorStore::snapshot`, and `FontLibrary::retain` for every face those compositions use. The thread calls `export_pdf` on the copies. `clear_document_fonts`, `m_images.clear`, and `m_vectors.clear` no longer race the worker. `picture_source` still copies a `shared_ptr` to the file bytes; the worker does not call `find` or `cached_display`. (`test_export_snapshots`)
+
+**18. Fixed. The PDF thread had no exception barrier, and the app never joined it on the way out.**
+The job in `run_pdf_export` catches exceptions, so `std::bad_alloc` from the giant PDF string closes the dialog instead of killing the process. `~PagemadeApp` sets cancel and pumps `process_async` until `m_pdf_thread` is joined, before the stores die. A plain `join` would deadlock: the worker can be waiting on a rasterize posted back to this thread. Shutdown does not run the export's `done` callback.
+
+**19. Fixed. A failed or cancelled export truncated an existing PDF.**
+`Writer::write` writes `path.saving` and renames over the target, the same way `save_document` does. A short write removes the temporary file and leaves the old PDF. Cancel still returns before `write`. (`test_pdf_export_jobs`)
+
+**20. Fixed. Downsampling averaged straight RGBA.**
+`downsample_rgba` premultiplies, averages, then unpremultiplies. `make_display` and `resample_rgba` / `embed_picture` both use it, so screen and print stay matched. An opaque red pixel beside a clear pixel stays red, at the averaged alpha. (`test_image_color`)
+
+**21. Fixed. Replacing a keyed job skipped the thread-spawn retry.**
+`BackgroundWorker::post` falls through to the spawn check after a keyed replace. If the first `std::thread` constructor threw, a later post of the same key starts the worker instead of leaving `running` false.
+
+**Progress. Fixed. Export and print progress did not repaint.**
+The status line and the bar sit under a cached dialog draw list. `Label::set_caption` and `ProgressBar::set_value` now dirty that list, the two widgets are live so a parent bake cannot freeze them, and the progress callback calls `redraw`. With `mainloop(-1)` an empty event alone does not draw a frame.
+
+## Performance
+
+**22. Fixed. Screen proxies decoded the full picture, then converted color, then shrank.**
+With libjpeg (libjpeg-turbo; optional in CMake, `PAGEMADE_HAVE_LIBJPEG`), `JpegDecoder::decode_preview` decodes at the largest 1/2, 1/4 or 1/8 scale that still covers the long edge asked for, and `make_display` box-filters the rest. A JPEG whose EXIF thumbnail covers the request, at the photo's proportions (a letterboxed one is refused), is decoded from the thumbnail. CMYK and YCCK JPEGs, and anything libjpeg rejects, keep the stb path. `make_display` now shrinks first and converts the ICC profile on the pixels it keeps, for every format. Flattened PDF pages get the same scaled decodes.
+
+Measured with `pagemade_render_bench --decode` on 12 MP phone JPEGs: a 256 px view 29–38 ms (was 111–120), 512 px 42–49 ms (104–122), 1024 px 78–88 ms (134–152); 2048 px is unchanged (no scale applies). The floor is libjpeg's entropy decode of the whole file. Mean difference from the old path 0.5–2.5 levels, single pixels up to about 90 at hard edges (the DCT scale filters differently). (`test_jpeg_previews`)
+
+**23. Fixed. One loader thread, failed pictures never retried, proxies never shrank.**
+`BackgroundWorker` takes a thread count; the display loader runs two, so a slow HEIC no longer holds up the JPEG beside it. Other workers stay at one. A failed picture is drawn as missing and read again in the background after 15 s, the wait doubling to five minutes (`LoadFailure`), so a remounted share or a fixed file comes back; placing, replacing or reloading it clears the failure at once. The retry runs on the loader, so a dead share never blocks the UI. Once the zoom has been still for a second (a redraw is booked for then), a proxy more than one size step above the request is decoded again smaller from the loaded bytes (`ImageStore::shrink_proxy`, `request_display(..., shrink)`), which frees the large texture and RGBA buffer. (`test_background_pool`)
+
+**24. Fixed. Every keystroke recomposed every story, twice when replacing a selection.**
+`after_edit` recomposes only the story being edited (`recompose_story`): a story's layout depends only on its own frames, and its page markers on which pages those are, which typing doesn't change. `delete_selection(false)` erases without composing when an insert, a tab, Return or a frame break follows, so each keystroke composes once. Undo, styles, page insert, reorder and setup stay on the full path.
+
+**25. Fixed. The PDF was assembled twice in memory, and the dialog painted after the copies.**
+`Writer` opens `path.saving` and writes each object as it is made; `finish` adds the xref and renames over the target, and a Writer that doesn't finish (failure, cancel) removes its file. The page tree's number is reserved before the pages, so `/Parent` is written once instead of patched. Each page's content string is freed once written, and a picture's samples go when `embed_picture` returns, so peak memory is about one picture plus the page content strings, not the whole file twice. `run_pdf_export` opens the dialog and returns to the loop; the document copy, snapshots and thread start (`start_pdf_job`) run two async turns later, after the dialog has painted. A Cancel before then just closes it, and the destructor pumps until an unstarted job is gone. Cancel still waits for the step in hand (one picture's encode, one face's subset).
+
+**26. Half done. Idle redraw walks every visible page's geometry; one picture's new bytes dropped every texture.**
+Textures: `ImageStore::Entry::version` bumps when that picture's bytes are replaced (`add` or `install` over loaded bytes), and `texture_for` remakes only a texture whose version differs. `generation()` now moves only when the whole store is replaced (new or opened publication). The asset window's thumbnail key includes the version.
+
+Draw-list cache: not done, on purpose. Measured, `build_page` for a two-page spread is under 0.1 ms and for all 100 photobook pages about 1.4 ms, and the culling added for slow scrolling (pages outside the window aren't built) already removes most of that. The document is edited in place from many paths and there is no single change counter to key a cache on (`m_version` moves with undo steps, not every edit), so a missed invalidation would show a stale page. Revisit if a profile shows `build_page`; the safe shape is a generation bumped in one choke point that every edit already passes through.
+
+## Abstractions
+
+These are contracts the code already almost has. Writing them down, and closing the holes above, is the cleanup. Splitting `PagemadeApp` into more files is not. Menus, palettes, and document commands belong in the app; the two seams below are the ones that cross threads.
+
+**ImageStore is the session's bytes. The UI thread is the only mutator. Other threads copy `shared_ptr`s under the mutex and do not keep `Entry *`.**
+`find` and `cached_display` document this and then drop the lock before returning the pointer. `texture_for` uses them on the UI thread and uploads immediately, which is safe. `ImageStore::display` decodes on the caller and is only used from tests; the app path is `request_display` → `make_display` → `install` / `set_proxy`. Either delete the sync `display` from the app API or mark it test-only, so a later call from a worker does not mutate `proxy` while `texture_for` holds the pointer.
+
+`VectorStore` is still a plain map. `scene()` and `find()` return pointers into it and stay on the thread that mutates it. The PDF job does not: it takes `snapshot()` on the UI thread (item 17). A mutex, matching `ImageStore`, is the leftover if some other worker starts calling `scene()`.
+
+**BackgroundWorker is one ordered queue with coalescing, for jobs that post their own result to the UI thread.**
+Keep that. The asset window's scan thread shows the other rule: a thread the owner waits for is joinable. `BackgroundWorker` detaches so a destructor never blocks on a network read. The matching cost is process teardown. A job that calls `nanogui::async` after the async mutex is destroyed is a race, and `stop()` never sets `running` back to false because `stopped` is sticky. Join in `stop()` for widget teardown (the in-flight job finishes; the queue is already dropped). A read that must not hang quit needs a timeout inside the read, which a detached thread does not provide.
+
+The PDF job is the third shape: a single cancellable task with progress, a GL callback on the UI thread, and a join when it ends. It stays a private struct in `PagemadeApp`. It owns the snapshots from item 17 and the try/catch from item 18, and it does not borrow `m_images` or `m_vectors` for the run.
+
+**Draw list in, backends out.**
+`build_page` is the right cut for screen and PDF. The screen should consume a cached list (item 26). PDF consumes the list plus the snapshotted picture bytes and the retained font `shared_ptr`s. `picture_source` still copies bytes under the image lock, on the snapshot the job owns.
+
+## Leave as they are
+
+- Whole-document undo, 100 deep, with pixels outside the snapshot. A book-length story duplicates its text in the undo stack. That is the ceiling to revisit when stories get large, not a bug now.
+- `read_file` uses `ftell`, which is 64-bit on this Linux. A Windows port needs an off_t-sized size before it opens multi-gigabyte files. Fonts on Windows are already listed under later work.
+- Serial composition of one story is in decent shape after items 11 and 12. Item 24 is about which stories run, not about `fits` copying the line again.
+- CMYK, spot colors, and real gradient stops are product gaps already listed under Later and known gaps, not defects in the RGB path. PDF/X-4 still writes tagged RGB when CMYK is requested, and preflight says so.
+
+

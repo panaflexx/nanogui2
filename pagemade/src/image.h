@@ -200,6 +200,9 @@ public:
         int proxy_edge = 0;             // longest edge of `proxy`; 0 if none yet
         int proxy_w = 0, proxy_h = 0;
         std::vector<uint8_t> proxy;      // upright straight RGBA
+        /* Bumps when this picture's bytes are replaced (Reload, a modified
+         * link read again), so a GPU copy of it alone is made again. */
+        uint64_t version = 0;
 
         bool loaded() const { return source && !source->empty(); }
         const uint8_t *data() const { return loaded() ? source->data() : nullptr; }
@@ -213,9 +216,11 @@ public:
     ImageStore &operator=(ImageStore &&) noexcept;
 
     void clear();
-    /* Bumps when the set of bytes is replaced, so a GPU cache can drop
-     * textures that belonged to the previous contents. */
+    /* Bumps when the whole store is replaced (cleared, or moved in from an
+     * opened publication), so a GPU cache drops every texture. One
+     * picture's new bytes bump only its Entry::version. */
     uint64_t generation() const { return m_gen; }
+    uint64_t version(uint32_t id) const;
 
     uint32_t take_id();
     void note_id(uint32_t id);           // an id that arrived from a file
@@ -244,6 +249,11 @@ public:
     /* Bytes held for pictures that could be unloaded (linked ones). */
     size_t unloadable_bytes() const;
 
+    /* Path, source pointer and metadata for every id. No display proxy.
+     * The copy does not share the map, so another thread can export from
+     * it while this store is cleared. */
+    ImageStore snapshot() const;
+
     const Entry *find(uint32_t id) const;
     /* A copy of the source pointer, safe to keep on another thread. */
     Bytes source_of(uint32_t id) const;
@@ -263,6 +273,9 @@ public:
      * upright source. The returned pointer is borrowed: install(),
      * set_proxy() and unload() invalidate it. */
     bool display(uint32_t id, int long_edge, const uint8_t **rgba, int *w, int *h);
+    /* A smaller display view in place of a larger one, to give memory back
+     * after zooming out (set_proxy only ever grows it). */
+    void shrink_proxy(uint32_t id, std::vector<uint8_t> proxy, int w, int h);
 
 private:
     mutable std::recursive_mutex m_mu;

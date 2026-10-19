@@ -382,6 +382,15 @@ void FontLibrary::clear_document_fonts() {
                   m_faces.end());
 }
 
+std::shared_ptr<Font> FontLibrary::retain(const Font *font) const {
+    if (!font)
+        return {};
+    for (const Entry &e : m_faces)
+        if (e.font.get() == font)
+            return e.font;
+    return {};
+}
+
 const char *FontLibrary::style_name(bool bold, bool italic) {
     return bold ? (italic ? "Bold Italic" : "Bold") : (italic ? "Italic" : "Regular");
 }

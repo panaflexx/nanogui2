@@ -2,6 +2,7 @@
  * pagemade/render_bench.cpp — time the screen draw path without a window.
  *
  *   pagemade_render_bench file.pagemade [page_width_px] [frames] [first-last]
+ *   pagemade_render_bench --decode long_edge picture...
  *
  * Opens and composes a publication, then draws every page the way the
  * composer view does (build_page, then draw_list) into a NanoVG context
@@ -11,6 +12,8 @@
  * range (1-based, "1-2" for a spread) draws only those pages.
  */
 #include "default_fonts.h"
+#include "image.h"
+#include "image_color.h"
 #include "docfile.h"
 #include "drawlist.h"
 #include "render_nvg.h"
@@ -77,7 +80,70 @@ double ms_since(std::chrono::steady_clock::time_point t0) {
 
 } // namespace
 
+/* --decode: make_display (the screen view a picture gets) against a full
+ * decode shrunk afterwards, the way it was before scaled decoding. */
+int decode_bench(int argc, char **argv) {
+    const int edge = argc > 2 ? std::atoi(argv[2]) : 512;
+    for (int i = 3; i < argc; ++i) {
+        std::vector<uint8_t> bytes;
+        std::string err;
+        if (!read_file(argv[i], &bytes, &err)) {
+            std::printf("%s: %s\n", argv[i], err.c_str());
+            continue;
+        }
+        auto t0 = std::chrono::steady_clock::now();
+        std::vector<uint8_t> view;
+        int w = 0, h = 0;
+        const bool ok = make_display(bytes.data(), bytes.size(), edge, &view, &w, &h, &err);
+        const double fast = ms_since(t0);
+        t0 = std::chrono::steady_clock::now();
+        DecodedImage full;
+        image_loader().decode(bytes.data(), bytes.size(), &full, &err);
+        if (full.meta.model == ColorModel::RGB && !full.meta.icc.empty())
+            icc_to_srgb(full.meta.icc, full.rgba.data(), (size_t) full.width * full.height);
+        std::vector<uint8_t> ref;
+        const int longest = std::max(full.width, full.height);
+        int rw = full.width, rh = full.height;
+        if (longest > edge) {
+            rw = std::max(1, (int) ((long long) full.width * edge / longest));
+            rh = std::max(1, (int) ((long long) full.height * edge / longest));
+        }
+        resample_rgba(full.rgba.data(), full.width, full.height, rw, rh, ref);
+        const double slow = ms_since(t0);
+        double diff = 0;
+        int worst = 0;
+        if (ok && rw == w && rh == h)
+            for (size_t k = 0; k < view.size(); ++k) {
+                const int d = std::abs((int) view[k] - (int) ref[k]);
+                diff += d;
+                worst = std::max(worst, d);
+            }
+        /* Where the view's time goes */
+        auto ts = std::chrono::steady_clock::now();
+        ImageMetadata pm;
+        image_loader().probe(bytes.data(), bytes.size(), &pm, &err);
+        const double t_probe = ms_since(ts);
+        ts = std::chrono::steady_clock::now();
+        DecodedImage pv;
+        image_loader().decode_preview(bytes.data(), bytes.size(), edge, &pv, &err);
+        const double t_preview = ms_since(ts);
+        ts = std::chrono::steady_clock::now();
+        if (!pm.icc.empty())
+            icc_to_srgb(pm.icc, view.data(), (size_t) w * h);
+        const double t_icc = ms_since(ts);
+        std::printf("  probe %.1f ms, decode_preview %.1f ms (%dx%d), icc on the view %.1f ms\n",
+                    t_probe, t_preview, pv.width, pv.height, t_icc);
+        std::printf("%s: %dx%d -> %dx%d  view %.1f ms, full decode %.1f ms, mean diff %.2f, max %d%s\n",
+                    argv[i], full.width, full.height, w, h, fast, slow,
+                    view.empty() ? 0.0 : diff / (double) view.size(), worst,
+                    rw == w && rh == h ? "" : " (sizes differ)");
+    }
+    return 0;
+}
+
 int main(int argc, char **argv) {
+    if (argc > 1 && std::string(argv[1]) == "--decode")
+        return decode_bench(argc, argv);
     if (argc < 2) {
         std::fprintf(stderr, "usage: %s file.pagemade [page_width_px] [frames]\n", argv[0]);
         return 2;

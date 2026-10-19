@@ -86,13 +86,49 @@ std::optional<std::string> flate(const std::string &in) {
  * computed when the file is assembled.
  */
 struct Writer {
-    std::vector<std::string> objects;
+    /* Objects go to `path.saving` as they are made, so the file is never
+     * held in memory whole and a picture's bytes go as soon as its object
+     * is written. finish() adds the xref and renames over `path`; a
+     * Writer that doesn't finish removes its file. */
     bool ok = true;
     std::map<std::string, int> icc_objects;   // profile bytes -> stream, written once
 
-    int add(std::string body) {
-        objects.push_back(std::move(body));
-        return (int) objects.size();
+    Writer() = default;
+    Writer(const Writer &) = delete;
+    Writer &operator=(const Writer &) = delete;
+    ~Writer() { abandon(); }
+
+    bool open(const std::string &path, const char *version) {
+        m_path = path;
+        m_tmp = path + ".saving";
+        m_file = std::fopen(m_tmp.c_str(), "wb");
+        if (!m_file) {
+            ok = false;
+            return false;
+        }
+        put(std::string("%PDF-") + version + "\n%\xE2\xE3\xCF\xD3\n");
+        return ok;
+    }
+
+    /* A number for an object written later (set), so others can name it */
+    int reserve() {
+        m_offs.push_back(0);
+        return (int) m_offs.size();
+    }
+    void set(int id, const std::string &body) {
+        if (id < 1 || (size_t) id > m_offs.size() || m_offs[(size_t) id - 1]) {
+            ok = false;
+            return;
+        }
+        m_offs[(size_t) id - 1] = m_pos;
+        put(std::to_string(id) + " 0 obj\n");
+        put(body);
+        put("\nendobj\n");
+    }
+    int add(const std::string &body) {
+        const int id = reserve();
+        set(id, body);
+        return id;
     }
     /* A stream object, Flate-compressed. A failed compress marks the file unusable. */
     int add_stream(const std::string &dict, const std::string &data) {
@@ -101,44 +137,77 @@ struct Writer {
             ok = false;
             z = std::string();
         }
-        return add("<< " + dict + " /Length " + std::to_string(z->size()) +
-                   " /Filter /FlateDecode >>\nstream\n" + *z + "\nendstream");
+        return add_raw_stream(dict + " /Filter /FlateDecode", *z);
     }
     /* A stream already encoded (a JPEG's own bytes). `dict` includes /Filter. */
     int add_raw_stream(const std::string &dict, const std::string &data) {
-        return add("<< " + dict + " /Length " + std::to_string(data.size()) +
-                   " >>\nstream\n" + data + "\nendstream");
+        const int id = reserve();
+        if (!m_file) {
+            ok = false;
+            return id;
+        }
+        m_offs[(size_t) id - 1] = m_pos;
+        put(std::to_string(id) + " 0 obj\n<< " + dict + " /Length " + std::to_string(data.size()) +
+            " >>\nstream\n");
+        put(data);
+        put("\nendstream\nendobj\n");
+        return id;
     }
 
     /* `trailer` adds keys to the trailer (/Info, /ID). */
-    bool write(const std::string &path, int root, const char *version = "1.7",
-               const std::string &trailer = std::string()) {
-        if (!ok)
+    bool finish(int root, const std::string &trailer = std::string()) {
+        if (!m_file)
             return false;
-        std::string out = std::string("%PDF-") + version + "\n%\xE2\xE3\xCF\xD3\n";
-        std::vector<size_t> offs(objects.size());
-        for (size_t i = 0; i < objects.size(); ++i) {
-            offs[i] = out.size();
-            out += std::to_string(i + 1) + " 0 obj\n" + objects[i] + "\nendobj\n";
-        }
-        size_t xref = out.size();
-        out += "xref\n0 " + std::to_string(objects.size() + 1) + "\n";
-        out += "0000000000 65535 f \n";
+        for (size_t off : m_offs)
+            ok = ok && off != 0;         // every reserved object was written
+        const size_t xref = m_pos;
+        put("xref\n0 " + std::to_string(m_offs.size() + 1) + "\n0000000000 65535 f \n");
         char buf[32];
-        for (size_t off : offs) {
+        for (size_t off : m_offs) {
             std::snprintf(buf, sizeof buf, "%010zu 00000 n \n", off);
-            out += buf;
+            put(buf);
         }
-        out += "trailer\n<< /Size " + std::to_string(objects.size() + 1) +
-               " /Root " + std::to_string(root) + " 0 R" + trailer + " >>\n"
-               "startxref\n" + std::to_string(xref) + "\n%%EOF\n";
-        FILE *f = std::fopen(path.c_str(), "wb");
-        if (!f)
+        put("trailer\n<< /Size " + std::to_string(m_offs.size() + 1) + " /Root " +
+            std::to_string(root) + " 0 R" + trailer + " >>\nstartxref\n" + std::to_string(xref) +
+            "\n%%EOF\n");
+        /* Beside the target, then rename: a failed export leaves a good PDF */
+        const bool closed = std::fclose(m_file) == 0;
+        m_file = nullptr;
+        if (!closed || !ok) {
+            std::remove(m_tmp.c_str());
             return false;
-        bool ok = std::fwrite(out.data(), 1, out.size(), f) == out.size();
-        std::fclose(f);
-        return ok;
+        }
+#if defined(_WIN32)
+        std::remove(m_path.c_str());     // rename doesn't replace on Windows
+#endif
+        if (std::rename(m_tmp.c_str(), m_path.c_str()) != 0) {
+            std::remove(m_tmp.c_str());
+            return false;
+        }
+        return true;
     }
+
+    void abandon() {
+        if (!m_file)
+            return;
+        std::fclose(m_file);
+        m_file = nullptr;
+        std::remove(m_tmp.c_str());
+    }
+
+private:
+    void put(const std::string &bytes) {
+        if (!m_file || !ok)
+            return;
+        if (std::fwrite(bytes.data(), 1, bytes.size(), m_file) != bytes.size())
+            ok = false;
+        m_pos += bytes.size();
+    }
+
+    std::FILE *m_file = nullptr;
+    std::string m_path, m_tmp;
+    size_t m_pos = 0;
+    std::vector<size_t> m_offs;          // per object, where it starts; 0 until written
 };
 
 /* ---- Fonts ---------------------------------------------------------------
@@ -1100,6 +1169,8 @@ bool export_pdf(const std::string &path, const PageDoc &doc,
     collect_unicodes(doc, comps, fonts, std::set<size_t>(chosen.begin(), chosen.end()));
 
     Writer w;
+    if (!w.open(path, o.pdfx4 ? "1.6" : "1.7"))
+        return false;
     std::map<const Font *, int> font_res;
     int tag_seq = 0;
     for (auto &kv : fonts) {
@@ -1384,26 +1455,23 @@ bool export_pdf(const std::string &path, const PageDoc &doc,
     if (o.pdfx4 && (!alphas.empty() || soft_masks))
         boxes += " /Group << /Type /Group /S /Transparency /CS " + srgb_space + " >>";
 
+    /* The page tree's number first, so each page can name its parent as it
+     * is written; each page's content goes as soon as it is written */
+    const int pages_obj = w.reserve();
     std::vector<int> page_objs;
-    for (const std::string &content : contents_src) {
+    for (std::string &content : contents_src) {
         int contents = w.add_stream("", content);
-        page_objs.push_back(w.add("<< /Type /Page /Parent 0 0 R " + boxes +
-                                  " /Resources " + res_dict + " /Contents " +
+        std::string().swap(content);
+        page_objs.push_back(w.add("<< /Type /Page /Parent " + std::to_string(pages_obj) + " 0 R " +
+                                  boxes + " /Resources " + res_dict + " /Contents " +
                                   std::to_string(contents) + " 0 R >>"));
     }
 
     std::string kids;
     for (int p : page_objs)
         kids += " " + std::to_string(p) + " 0 R";
-    int pages_obj = w.add("<< /Type /Pages /Kids [" + kids + " ] /Count " +
-                          std::to_string(page_objs.size()) + " >>");
-    /* /Parent references resolve now that the Pages object exists. */
-    for (int p : page_objs) {
-        std::string &body = w.objects[(size_t) p - 1];
-        size_t at = body.find("/Parent 0 0 R");
-        if (at != std::string::npos)
-            body.replace(at, 13, "/Parent " + std::to_string(pages_obj) + " 0 R");
-    }
+    w.set(pages_obj, "<< /Type /Pages /Kids [" + kids + " ] /Count " +
+                         std::to_string(page_objs.size()) + " >>");
 
     /* Document information, identification and (PDF/X) the output intent */
     std::string pdf_date, xmp_date;
@@ -1451,7 +1519,7 @@ bool export_pdf(const std::string &path, const PageDoc &doc,
                         catalog_extra + " >>");
     if (!step(1, "Writing the file"))
         return false;
-    const bool ok = w.write(path, catalog, o.pdfx4 ? "1.6" : "1.7", trailer);
+    const bool ok = w.finish(catalog, trailer);
     step(1, "Done");
     return ok;
 }

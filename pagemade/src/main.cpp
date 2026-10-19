@@ -80,6 +80,7 @@
 #include <algorithm>
 #include <array>
 #include <atomic>
+#include <chrono>
 #include <cmath>
 #include <future>
 #include <memory>
@@ -626,6 +627,30 @@ private:
     std::vector<std::pair<uint32_t, double>> m_appearing;   // new pages growing in
 };
 
+/* Faces the copied compositions point at. clear_document_fonts() drops
+ * the library's shared_ptr; the export thread holds these until it
+ * finishes subsetting. */
+static std::vector<std::shared_ptr<Font>> retain_composition_fonts(
+    const FontLibrary &fonts, const std::vector<Composition> &comps) {
+    std::vector<std::shared_ptr<Font>> held;
+    std::vector<const Font *> seen;
+    for (const Composition &comp : comps)
+        for (const ComposedLine &line : comp.lines)
+            for (const GlyphRun &run : line.runs) {
+                if (!run.font)
+                    continue;
+                bool have = false;
+                for (const Font *f : seen)
+                    if (f == run.font) { have = true; break; }
+                if (have)
+                    continue;
+                seen.push_back(run.font);
+                if (std::shared_ptr<Font> face = fonts.retain(run.font))
+                    held.push_back(std::move(face));
+            }
+    return held;
+}
+
 class PagemadeApp : public Screen {
 public:
     PagemadeApp() : Screen(Vector2i(1280, 940), "pagemade") {
@@ -919,6 +944,22 @@ public:
     }
 
     ~PagemadeApp() override {
+        /* The PDF thread may be inside export_pdf, or blocked on a
+         * rasterize posted back here. Cancel, then run those callbacks
+         * (the completion one joins the thread) before the stores die.
+         * Joining without pumping deadlocks: the worker is waiting for
+         * this thread. */
+        m_shutting_down = true;
+        if (m_pdf_job)
+            m_pdf_job->cancel = true;
+        /* Also an export not yet started (its start is two async turns
+         * away): start_pdf_job sees m_shutting_down and only clears up. */
+        while (m_pdf_thread.joinable() || m_pdf_job) {
+            nanogui::process_async();
+            if (!m_pdf_thread.joinable() && !m_pdf_job)
+                break;
+            std::this_thread::sleep_for(std::chrono::milliseconds(2));
+        }
         /* The asset window's thumbnail loader reads m_images. Dispose it
          * before the members die: Screen destroys its children afterwards. */
         std::vector<ImageAssetsPanel *> panels;
@@ -2571,10 +2612,11 @@ public:
 
     /* A PDF export on its own thread behind a modal progress dialog, so a
      * long one doesn't stall the window (Wayland offers to force-quit an
-     * app that stops answering). The thread gets copies of the document
-     * and its compositions; the dialog keeps everything else still.
-     * Flattened pages are drawn here, between frames, where the GL context
-     * is. `done` runs on this thread when the export ends. */
+     * app that stops answering). The thread gets copies of the document,
+     * its compositions, the vector scenes, and the picture bytes, and it
+     * holds the faces those compositions use. It does not borrow the live
+     * stores. Flattened pages are drawn here, between frames, where the
+     * GL context is. `done` runs on this thread when the export ends. */
     struct PdfJob {
         std::atomic<bool> cancel{false};
         std::mutex mu;
@@ -2588,6 +2630,7 @@ public:
     };
     std::shared_ptr<PdfJob> m_pdf_job;
     std::thread m_pdf_thread;
+    bool m_shutting_down = false;
 
     void run_pdf_export(const std::string &path, const PdfSettings &settings,
                         const std::string &title, std::function<void(bool ok, bool cancelled)> done) {
@@ -2601,22 +2644,69 @@ public:
         body->set_layout(new BoxLayout(Orientation::Vertical, Alignment::Fill, 0, 8));
         job->label = new Label(body, "Starting\u2026", "sans");
         job->label->set_fixed_size(Vector2i(420, 0));
+        /* Live, so a cached dialog cannot freeze the status line or the
+         * bar on the frame where the dialog opened. */
+        job->label->set_live(true);
         job->bar = new ProgressBar(body);
         job->bar->set_fixed_size(Vector2i(420, 12));
+        job->bar->set_live(true);
         job->cancel_button = d->add_button("Cancel", [job] {
             job->cancel = true;
             if (job->label)
                 job->label->set_caption("Cancelling\u2026");
-            if (job->cancel_button)
+            if (job->cancel_button) {
                 job->cancel_button->set_enabled(false);
+                job->cancel_button->propagate_cache_dirty();
+            }
         }, ModalDialog::Role::Cancel, false);
         job->dialog = d;
         d->open();
 
+        /* The copies below take a moment on a long publication: the dialog
+         * paints first. Async jobs run before a turn's frame, so it takes
+         * two turns; the first ends with the dialog on screen. */
+        nanogui::async([this, job, path, settings, done] {
+            nanogui::async([this, job, path, settings, done] {
+                start_pdf_job(job, path, settings, done);
+            });
+            glfwPostEmptyEvent();
+        });
+        glfwPostEmptyEvent();
+    }
+
+    /* The second half of run_pdf_export: the copies and the thread. */
+    void start_pdf_job(std::shared_ptr<PdfJob> job, const std::string &path,
+                       const PdfSettings &settings, std::function<void(bool, bool)> done) {
+        if (m_pdf_job != job)
+            return;
+        if (m_shutting_down || job->cancel) {
+            /* Cancelled (or quitting) before it started: nothing to stop */
+            if (job->dialog)
+                job->dialog->close();
+            job->dialog = nullptr;
+            job->label = nullptr;
+            job->bar = nullptr;
+            job->cancel_button = nullptr;
+            m_pdf_job.reset();
+            if (!m_shutting_down)
+                done(false, true);
+            return;
+        }
         auto doc = std::make_shared<const PageDoc>(m_view->document());
         auto comps = std::make_shared<const std::vector<Composition>>(m_view->compositions());
+        /* Taken before the thread starts, on this thread: File > New can
+         * clear the live stores once the dialog is up. */
+        auto faces = std::make_shared<const std::vector<std::shared_ptr<Font>>>(
+            retain_composition_fonts(m_fonts, *comps));
+        auto images = std::make_shared<ImageStore>(m_images.snapshot());
+        auto vectors = std::make_shared<VectorStore>(m_vectors.snapshot());
         NVGcontext *ctx = nvg_context();
-        m_pdf_thread = std::thread([this, job, doc, comps, path, settings, ctx, done] {
+        try {
+        m_pdf_thread = std::thread([this, job, doc, comps, faces, images, vectors, path, settings,
+                                    ctx, done] {
+            (void) faces;                // keeps the faces alive for the run
+            bool ok = false;
+            try {
             PdfExportHooks hooks;
             hooks.progress = [job](float f, const std::string &what) {
                 bool post = false;
@@ -2635,6 +2725,12 @@ public:
                             job->bar->set_value(job->done);
                         if (job->label && !job->cancel)
                             job->label->set_caption(job->what);
+                        /* set_value / set_caption dirty the cached draw
+                         * list. Ask for a frame too: with no refresh timer,
+                         * an empty event alone does not repaint. */
+                        if (job->dialog)
+                            if (Screen *screen = job->dialog->screen())
+                                screen->redraw();
                     });
                     glfwPostEmptyEvent();
                 }
@@ -2656,7 +2752,12 @@ public:
                 glfwPostEmptyEvent();
                 return result.get();
             };
-            const bool ok = export_pdf(path, *doc, *comps, &m_images, &settings, &m_vectors, &hooks);
+            ok = export_pdf(path, *doc, *comps, images.get(), &settings, vectors.get(), &hooks);
+            } catch (const std::exception &ex) {
+                std::fprintf(stderr, "pagemade: PDF export failed: %s\n", ex.what());
+            } catch (...) {
+                std::fprintf(stderr, "pagemade: PDF export failed\n");
+            }
             nanogui::async([this, job, ok, done] {
                 if (m_pdf_thread.joinable())
                     m_pdf_thread.join();
@@ -2668,10 +2769,22 @@ public:
                 job->cancel_button = nullptr;
                 const bool cancelled = job->cancel;
                 m_pdf_job.reset();
-                done(ok, cancelled);
+                if (!m_shutting_down)
+                    done(ok, cancelled);
             });
             glfwPostEmptyEvent();
         });
+        } catch (const std::system_error &ex) {
+            std::fprintf(stderr, "pagemade: couldn't start PDF export: %s\n", ex.what());
+            if (job->dialog)
+                job->dialog->close();
+            job->dialog = nullptr;
+            job->label = nullptr;
+            job->bar = nullptr;
+            job->cancel_button = nullptr;
+            m_pdf_job.reset();
+            done(false, false);
+        }
     }
 
     /* File > Document Setup: page size, margins, columns, bleed, and what

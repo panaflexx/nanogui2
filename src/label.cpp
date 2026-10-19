@@ -131,6 +131,9 @@ void Label::set_caption(const std::string &caption) {
         m_processed_text = caption; // Reset processed text
         m_cache_valid = false; // Invalidate cache
         m_selection_start = m_selection_end = -1; // Clear selection
+        /* Quiet setters used to leave a cached parent's draw list on the
+         * old text. Export and print progress is one of those labels. */
+        propagate_cache_dirty();
     }
 }
 

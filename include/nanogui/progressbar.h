@@ -26,7 +26,13 @@ public:
     ProgressBar(Widget *parent);
 
     float value() { return m_value; }
-    void set_value(float value) { m_value = value; }
+    /* A cached parent keeps the old bar until its draw list is rebuilt. */
+    void set_value(float value) {
+        if (m_value == value)
+            return;
+        m_value = value;
+        propagate_cache_dirty();
+    }
 
     virtual Vector2i preferred_size(NVGcontext *ctx) const override;
     virtual void draw(NVGcontext* ctx) override;

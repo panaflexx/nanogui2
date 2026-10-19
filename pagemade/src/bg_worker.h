@@ -9,6 +9,10 @@
  * A job with a key replaces a queued job with the same key, so the newest
  * request for one thing wins (the picture the user just selected, the
  * display size the view now wants).
+ *
+ * With `threads` above 1, that many threads take jobs from the one queue,
+ * so a slow job doesn't hold up the next. Jobs then run in queue order but
+ * can finish out of it.
  */
 #pragma once
 
@@ -27,7 +31,9 @@ namespace pagemade {
 
 class BackgroundWorker {
 public:
-    BackgroundWorker() : m_state(std::make_shared<State>()) { }
+    explicit BackgroundWorker(int threads = 1) : m_state(std::make_shared<State>()) {
+        m_state->max = threads < 1 ? 1 : threads;
+    }
     ~BackgroundWorker() { stop(); }
     BackgroundWorker(const BackgroundWorker &) = delete;
     BackgroundWorker &operator=(const BackgroundWorker &) = delete;
@@ -36,22 +42,28 @@ public:
         std::lock_guard<std::mutex> lock(m_state->mu);
         if (m_state->stopped)
             return;
+        /* A replace used to return here. If the first std::thread
+         * constructor threw, a later post of the same key replaced the
+         * job and left running false forever: the spawn retry is below. */
+        bool replaced = false;
         if (!key.empty())
             for (auto &q : m_state->queue)
                 if (q.first == key) {
                     q.second = std::move(job);
-                    return;
+                    replaced = true;
+                    break;
                 }
-        m_state->queue.emplace_back(key, std::move(job));
-        if (!m_state->running) {
+        if (!replaced)
+            m_state->queue.emplace_back(key, std::move(job));
+        /* Another thread when none is waiting for work and there is room */
+        if (m_state->idle == 0 && m_state->running < m_state->max) {
             try {
                 std::thread t(run, m_state);
                 t.detach();
-                m_state->running = true;   // only once the thread exists
+                ++m_state->running;        // only once the thread exists
             } catch (const std::system_error &) {
                 /* Out of threads: the job stays queued and the next post()
-                 * tries to spawn the worker again. */
-                return;
+                 * tries to spawn a worker again (a running one still takes it). */
             }
         }
         m_state->cv.notify_one();
@@ -76,7 +88,7 @@ public:
         std::lock_guard<std::mutex> lock(m_state->mu);
         m_state->stopped = true;
         m_state->queue.clear();
-        m_state->cv.notify_one();
+        m_state->cv.notify_all();
     }
 
 private:
@@ -84,13 +96,16 @@ private:
         mutable std::mutex mu;
         std::condition_variable cv;
         std::deque<std::pair<std::string, std::function<void()>>> queue;
-        bool running = false, stopped = false;
+        int running = 0, idle = 0, max = 1;
+        bool stopped = false;
     };
 
     static void run(std::shared_ptr<State> state) {
         std::unique_lock<std::mutex> lock(state->mu);
         for (;;) {
+            ++state->idle;
             state->cv.wait(lock, [&] { return state->stopped || !state->queue.empty(); });
+            --state->idle;
             if (state->stopped)
                 return;
             std::function<void()> job = std::move(state->queue.front().second);

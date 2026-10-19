@@ -571,7 +571,9 @@ public:
         auto alive = m_alive;
         nanogui::async([this, win, alive] {
             if (!*alive) return;
-            if (win && win->parent()) win->dispose();
+            /* By pointer only: a second close of the same window may run
+             * after the first was freed. */
+            if (win && is_live_window(win)) win->dispose();
             sync_taskbar();
             redraw();
         });
@@ -4153,7 +4155,8 @@ public:
                                 "OK", "", false);
                             dlg->center();
                         }
-                        win->dispose();
+                        if (is_live_window(win))   // closed meanwhile: already gone
+                            win->dispose();
                         sync_taskbar();     // drop its taskbar button
                         redraw();
                     } else {

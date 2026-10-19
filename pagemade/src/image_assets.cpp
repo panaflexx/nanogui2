@@ -773,7 +773,8 @@ void ImageAssetsPanel::rebuild() {
         e.key = !e.path.empty()
             ? e.path
             : "asset:" + std::to_string(m_images ? m_images->generation() : 0) + ":" +
-              std::to_string(asset.id);
+              std::to_string(asset.id) + ":" +
+              std::to_string(m_images ? m_images->version(asset.id) : 0);
         m_stash->add_entry(e);
     }
     m_stash->add_section("Library");

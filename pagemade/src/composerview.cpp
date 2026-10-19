@@ -13,7 +13,10 @@
 #include <GLFW/glfw3.h>
 
 #include <algorithm>
+#include <chrono>
 #include <map>
+#include <system_error>
+#include <thread>
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
@@ -3184,6 +3187,9 @@ void ComposerView::place_caret(TextPos p, bool extend) {
     m_typing_on = false;
 }
 
+/* Typing changes one story's text. Its layout is all that moves: a story
+ * depends only on its own frames, and its page markers on which pages
+ * those are, which typing doesn't change. */
 void ComposerView::after_edit() {
     Story *s = edit_story();
     if (s) {
@@ -3191,18 +3197,35 @@ void ComposerView::after_edit() {
         m_anchor = clamp(*s, m_anchor);
     }
     m_goal_x = -1.f;
-    recompose();
+    if (s)
+        recompose_story(m_edit_story);
+    else
+        recompose();
     if (screen())
         screen()->redraw();
 }
 
-bool ComposerView::delete_selection() {
+void ComposerView::recompose_story(StoryId id) {
+    const size_t si = m_doc.story_index(id);
+    if (si == SIZE_MAX || m_comp.size() != m_doc.stories.size()) {
+        recompose();
+        return;
+    }
+    m_pending_stories.erase(si);
+    const StoryEntry &se = m_doc.stories[si];
+    m_comp[si] = compose(se.story, m_doc.thread_frames(se), *m_fonts, m_hyphenator);
+    if (on_recompose)
+        on_recompose();
+}
+
+bool ComposerView::delete_selection(bool compose) {
     Story *s = edit_story();
     if (!s || !has_selection())
         return false;
     m_caret = erase(*s, m_anchor, m_caret);
     m_anchor = m_caret;
-    after_edit();
+    if (compose)
+        after_edit();
     return true;
 }
 
@@ -3212,7 +3235,7 @@ void ComposerView::insert_string(const std::string &utf8, bool burst) {
         return;
     will_edit(burst);
     CharStyle st = m_typing_on ? m_typing : style_at(*s, m_caret);
-    delete_selection();
+    delete_selection(false);             // the insert composes, once
     m_caret = insert_text(*s, m_caret, utf8, st);
     m_anchor = m_caret;
     after_edit();
@@ -3436,7 +3459,7 @@ bool ComposerView::keyboard_event(int key, int, int action, int modifiers) {
             /* Cmd/Ctrl+Return: a frame break, the text goes on in the next
              * text block. */
             will_edit(true);
-            delete_selection();
+            delete_selection(false);
             insert_string("\x0C", true);
             return true;
         }
@@ -3493,13 +3516,13 @@ bool ComposerView::keyboard_event(int key, int, int action, int modifiers) {
     case GLFW_KEY_TAB:
         /* A tab; Shift+Tab a right-indent tab (to the right indent) */
         will_edit(true);
-        delete_selection();
+        delete_selection(false);
         insert_string((modifiers & GLFW_MOD_SHIFT) ? "\xEE\x80\x82" : "\t", true);
         return true;
     case GLFW_KEY_ENTER:
     case GLFW_KEY_KP_ENTER:
         will_edit(true);                 // Return joins the typing run
-        delete_selection();
+        delete_selection(false);         // the split composes
         if (modifiers & GLFW_MOD_SHIFT)
             insert_string("\xE2\x80\xA8", true);  // U+2028: break, same paragraph
         else {
@@ -4219,6 +4242,8 @@ bool ComposerView::replace_picture(ItemId frame, uint32_t asset) {
     if (!a || !it || !it->image() || !m_doc.item_editable(*it))
         return false;
     const ImageMetadata meta = a->meta;
+    m_load_failed.erase(asset);
+    m_load_want.erase(asset);
     push_undo();
     refill_frame(frame, asset, meta);
     m_sel = with_groups({frame});
@@ -4548,7 +4573,7 @@ void ComposerView::finish_probe(uint32_t id, const ImageImport &imported,
         return;
     }
     if (!imported.ok) {
-        m_load_failed.insert(id);        // the frame shows the missing picture
+        note_load_failed(id);            // the frame shows the missing picture
         if (screen())
             screen()->redraw();
         if (done)
@@ -4683,6 +4708,8 @@ void ComposerView::place_image_at(uint32_t asset, size_t page, const Point &at) 
     const ImageAsset *a = m_doc.find_image(asset);
     if (!a || page >= m_doc.pages.size() || !check_active_layer())
         return;
+    m_load_failed.erase(asset);          // placing it again is a reason to try again
+    m_load_want.erase(asset);
     const ImageMetadata meta = a->meta;
     push_undo();
     place_frame(asset, meta, page, &at);
@@ -4702,6 +4729,7 @@ void ComposerView::place_image_at(uint32_t asset, size_t page, const Point &at) 
 
 struct ComposerView::LoadResult {
     bool ok = false;
+    bool shrink = false;                 // a smaller view in place of a larger one
     std::string error;
     ImageStore::Bytes bytes;             // what was read (or the loaded bytes)
     ImageMetadata meta;                  // probed, when read here
@@ -4709,25 +4737,29 @@ struct ComposerView::LoadResult {
     int proxy_w = 0, proxy_h = 0;
 };
 
-void ComposerView::request_display(uint32_t id, int want) {
+void ComposerView::request_display(uint32_t id, int want, bool shrink) {
     if (!m_images)
         return;
     /* One request per size: a finished or failed one is not asked again
-     * (the file may be smaller than its metadata says) */
+     * (the file may be smaller than its metadata says). A shrink asks for
+     * less on purpose, from bytes already loaded. */
     auto asked = m_load_want.find(id);
-    if (asked != m_load_want.end() && asked->second >= want)
+    if (!shrink && asked != m_load_want.end() && asked->second >= want)
         return;
+    if (shrink && asked != m_load_want.end() && asked->second <= want)
+        return;                          // that shrink is already on its way
     ImageStore::Bytes bytes = m_images->source_of(id);
     const std::string path = bytes ? std::string() : m_images->path_of(id);
-    if (!bytes && path.empty())
+    if (!bytes && (shrink || path.empty()))
         return;                          // nothing to read it from
     m_load_want[id] = want;
 
     auto gate = m_load_gate;
     ComposerView *view = this;
     const uint64_t epoch = m_doc_epoch;
-    loader().post([gate, view, epoch, id, want, bytes, path]() {
+    loader().post([gate, view, epoch, id, want, bytes, path, shrink]() {
         auto r = std::make_shared<LoadResult>();
+        r->shrink = shrink;
         r->bytes = bytes;
         if (!r->bytes) {
             ImageImport imported = read_image_import(path);
@@ -4753,7 +4785,15 @@ void ComposerView::finish_display(uint32_t id, const std::string &path, LoadResu
     if (!m_images)
         return;
     if (!r.ok) {
-        m_load_failed.insert(id);        // drawn as missing, not retried
+        note_load_failed(id);            // drawn as missing, tried again later
+        if (screen())
+            screen()->redraw();
+        return;
+    }
+    m_load_failed.erase(id);
+    if (r.shrink) {
+        if (m_images->source_of(id) == r.bytes)
+            m_images->shrink_proxy(id, std::move(r.proxy), r.proxy_w, r.proxy_h);
         if (screen())
             screen()->redraw();
         return;
@@ -4773,6 +4813,41 @@ void ComposerView::finish_display(uint32_t id, const std::string &path, LoadResu
     }
     if (screen())
         screen()->redraw();
+}
+
+void ComposerView::note_load_failed(uint32_t id) {
+    const double now = glfwGetTime();
+    auto it = m_load_failed.find(id);
+    LoadFailure f;
+    if (it != m_load_failed.end())
+        f.wait = std::min(300.0, it->second.wait * 2.0);
+    f.retry_at = now + f.wait;
+    m_load_failed[id] = f;
+}
+
+/* A redraw a little after the zoom stops, so oversized previews shrink
+ * without waiting for the next input. One at a time. */
+void ComposerView::book_settle_redraw() {
+    if (m_settle_redraw)
+        return;
+    m_settle_redraw = true;
+    auto gate = m_load_gate;
+    ComposerView *view = this;
+    try {
+        std::thread([gate, view] {
+            std::this_thread::sleep_for(std::chrono::milliseconds(1100));
+            async([gate, view] {
+                if (!gate->open)
+                    return;
+                view->m_settle_redraw = false;
+                if (view->screen())
+                    view->screen()->redraw();
+            });
+            glfwPostEmptyEvent();
+        }).detach();
+    } catch (const std::system_error &) {
+        m_settle_redraw = false;         // no thread: it shrinks on the next input
+    }
 }
 
 void ComposerView::drop_texture(uint32_t id) {
@@ -5049,14 +5124,28 @@ int ComposerView::texture_for(NVGcontext *ctx, const DrawImage &im, float px) {
     int w = 0, h = 0;
     if (m_probing.count(im.asset))
         return -1;                        // placed, its header still on the way
-    const bool failed = m_load_failed.count(im.asset) != 0;
+    bool failed = false;
+    if (auto f = m_load_failed.find(im.asset); f != m_load_failed.end()) {
+        failed = true;
+        const double now = glfwGetTime();
+        if (now >= f->second.retry_at) {
+            /* Try the file again, in the background; until it answers, the
+             * next try is booked as if this one failed too */
+            f->second.retry_at = now + std::min(300.0, f->second.wait * 2.0);
+            m_load_want.erase(im.asset);
+            request_display(im.asset, want);
+        }
+    }
     const bool have = m_images->cached_display(im.asset, &rgba, &w, &h) && rgba && w > 0 && h > 0;
     if (!failed && (!have || std::max(w, h) < want))
         request_display(im.asset, want);  // a smaller view stands in meanwhile
+    else if (!failed && have && std::max(w, h) > 2 * want && zoom_settled())
+        request_display(im.asset, want, true);   // give back what a zoom-in took
     if (!have)
         return failed ? 0 : -1;           // 0 draws the missing cross, -1 a loading tile
     auto it = m_tex.find(im.asset);
-    if (it != m_tex.end() && it->second.id && it->second.w == w && it->second.h == h)
+    if (it != m_tex.end() && it->second.id && it->second.w == w && it->second.h == h &&
+        it->second.version == e->version)
         return it->second.id;
     if (it != m_tex.end() && it->second.id)
         nvgDeleteImage(ctx, it->second.id);
@@ -5065,13 +5154,22 @@ int ComposerView::texture_for(NVGcontext *ctx, const DrawImage &im, float px) {
         ++g_frame_stats.uploads;
         g_frame_stats.upload_mb += (double) w * h * 4 / (1024.0 * 1024.0);
     }
-    m_tex[im.asset] = {id, w, h};
+    m_tex[im.asset] = {id, w, h, e->version};
     return id;
+}
+
+bool ComposerView::zoom_settled() const {
+    return glfwGetTime() - m_zoom_changed > 1.0;
 }
 
 void ComposerView::draw(NVGcontext *ctx) {
     const double stats_t0 = g_frame_stats.on ? glfwGetTime() : 0.0;
     flush_deferred();                    // a drag's moves since the last frame, once
+    if (zoom() != m_zoom_seen) {
+        m_zoom_seen = zoom();
+        m_zoom_changed = glfwGetTime();
+        book_settle_redraw();
+    }
     float xf[6];
     nvgCurrentTransform(ctx, xf);
     const float scale = std::sqrt(xf[0] * xf[0] + xf[1] * xf[1]);

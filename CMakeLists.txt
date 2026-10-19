@@ -986,6 +986,12 @@ if (NANOGUI_BUILD_EXAMPLES)
     if (NOT LIBHEIF_FOUND)
       message(STATUS "pagemade: libheif not found, HEIC/AVIF pictures disabled.")
     endif()
+    # libjpeg(-turbo) decodes screen views of JPEGs at 1/2, 1/4 or 1/8 size.
+    # Without it they are fully decoded by stb, then shrunk.
+    find_package(JPEG)
+    if (NOT JPEG_FOUND)
+      message(STATUS "pagemade: libjpeg not found, JPEG previews decode at full size.")
+    endif()
 
     add_executable(pagemade_app
         pagemade/src/main.cpp
@@ -1086,6 +1092,11 @@ if (NANOGUI_BUILD_EXAMPLES)
       target_compile_definitions(${_t} PRIVATE
           PAGEMADE_RESOURCE_DIR="${CMAKE_CURRENT_SOURCE_DIR}/resources"
           PAGEMADE_DATA_DIR="${CMAKE_CURRENT_SOURCE_DIR}/pagemade/resources")
+      if (JPEG_FOUND)
+        target_compile_definitions(${_t} PRIVATE PAGEMADE_HAVE_LIBJPEG=1)
+        target_include_directories(${_t} PRIVATE ${JPEG_INCLUDE_DIRS})
+        target_link_libraries(${_t} ${JPEG_LIBRARIES})
+      endif()
       if (LIBHEIF_FOUND)
         target_compile_definitions(${_t} PRIVATE PAGEMADE_HAVE_HEIF=1)
         target_include_directories(${_t} PRIVATE ${LIBHEIF_INCLUDE_DIRS})

@@ -85,6 +85,13 @@ VectorStore &VectorStore::operator=(VectorStore &&o) noexcept {
     return *this;
 }
 
+VectorStore VectorStore::snapshot() const {
+    VectorStore out;
+    out.m_entries = m_entries;
+    out.m_next_id = m_next_id;
+    return out;
+}
+
 void VectorStore::clear() {
     m_entries.clear();
     m_next_id = 0;
