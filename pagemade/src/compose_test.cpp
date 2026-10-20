@@ -14,6 +14,7 @@
 #include "geometry.h"
 #include "image.h"
 #include "image_color.h"
+#include "layout_templates.h"
 #include "page.h"
 #include "setup_adjust.h"
 #include "swatch_library.h"
@@ -4860,6 +4861,224 @@ static void test_system_fonts() {
     }
 }
 
+/* Layout templates: the built-in set, the file, turning, fitting into the
+ * live area, grouping, spreads, and a template made from the page. */
+static void test_layout_templates(const FontLibrary &fonts) {
+    auto near = [](float a, float b) { return std::fabs(a - b) < 0.01f; };
+    auto find = [](const std::vector<LayoutTemplate> &ts, const char *name) -> const LayoutTemplate * {
+        for (const LayoutTemplate &t : ts)
+            if (t.name == name)
+                return &t;
+        return nullptr;
+    };
+
+    const std::vector<LayoutTemplate> defs = default_layout_templates();
+    CHECK(defs.size() == 32, "32 built-in layouts (%zu)", defs.size());
+    std::set<std::string> cats, names;
+    size_t spreads = 0, svgs = 0, texts = 0;
+    bool inside = true, decodes = true;
+    for (const LayoutTemplate &t : defs) {
+        cats.insert(t.category);
+        names.insert(t.name);
+        spreads += t.spread;
+        for (const LayoutElement &e : t.elements) {
+            const float x0 = std::min(e.rect.x, e.rect.x + e.rect.w);
+            const float y0 = std::min(e.rect.y, e.rect.y + e.rect.h);
+            inside = inside && x0 >= -0.01f && y0 >= -0.01f &&
+                     std::max(e.rect.x, e.rect.x + e.rect.w) <= t.width + 0.01f &&
+                     std::max(e.rect.y, e.rect.y + e.rect.h) <= t.height + 0.01f;
+            texts += e.kind == LayoutElement::Kind::Text;
+            if (e.kind == LayoutElement::Kind::Svg) {
+                ++svgs;
+                VectorScene scene;
+                std::string err;
+                decodes = decodes && vector_loader().decode((const uint8_t *) e.svg.data(), e.svg.size(),
+                                                            &scene, &err) && scene.width > 0.f;
+            }
+        }
+    }
+    CHECK(names.size() == defs.size(), "every layout has its own name");
+    CHECK(cats.size() == 7, "seven categories (%zu)", cats.size());
+    CHECK(spreads == 6 && svgs >= 10 && texts >= 10, "spreads %zu, SVGs %zu, text blocks %zu",
+          spreads, svgs, texts);
+    CHECK(inside, "every element lies in its template's box");
+    CHECK(decodes, "every built-in SVG ornament decodes");
+
+    /* The file: written, read back the same; a shorthand file reads too */
+    const std::string json = layout_templates_json(defs);
+    std::vector<LayoutTemplate> back;
+    std::string err;
+    CHECK(layout_templates_from_json(json, back, &err) && back.size() == defs.size(),
+          "layouts.json reads back (%s)", err.c_str());
+    CHECK(layout_templates_json(back) == json, "and writes the same text again");
+    std::vector<LayoutTemplate> hand;
+    CHECK(layout_templates_from_json(R"({"templates": [
+            {"name": "Hand", "size": [100, 200], "margins": 10, "elements": [
+              {"type": "photo", "rect": [10, 10, 80, 80], "stroke": "[Black]"},
+              {"type": "future-thing", "rect": [0, 0, 1, 1]},
+              {"type": "text", "rect": [10, 100, 80, 40],
+               "paragraphs": [{"style": "Caption", "align": "center", "text": "Hi"}]}]},
+            {"name": "No box", "elements": []}]})", hand, &err) &&
+          hand.size() == 1 && hand[0].elements.size() == 2 && near(hand[0].margins.inside, 10) &&
+          hand[0].elements[0].stroke_swatch == "[Black]" &&
+          hand[0].elements[1].paragraphs.size() == 1 &&
+          hand[0].elements[1].paragraphs[0].runs[0].text == "Hi" &&
+          hand[0].elements[1].paragraphs[0].align == Align::Center,
+          "a hand-written file: shorthands, unknown elements and boxless templates skipped");
+    CHECK(!layout_templates_from_json("{\"templates\": [", hand, &err) && !err.empty(),
+          "a broken file says why");
+
+    /* Turning: a quarter turn swaps the box and carries each frame round */
+    LayoutTemplate t;
+    t.width = 100;
+    t.height = 200;
+    t.margins = {1, 2, 3, 4, 4};
+    LayoutElement e;
+    e.rect = {10, 20, 30, 40};
+    t.elements.push_back(e);
+    LayoutElement line;
+    line.kind = LayoutElement::Kind::Shape;
+    line.shape = Shape::Kind::Line;
+    line.rect = {0, 0, 100, 0};          // along the top
+    t.elements.push_back(line);
+    const LayoutTemplate q = rotate_layout(t, 1);
+    CHECK(near(q.width, 200) && near(q.height, 100), "a quarter turn swaps the box");
+    CHECK(near(q.elements[0].rect.x, 140) && near(q.elements[0].rect.y, 10) &&
+          near(q.elements[0].rect.w, 40) && near(q.elements[0].rect.h, 30),
+          "the frame goes round clockwise (%g %g %g %g)", q.elements[0].rect.x,
+          q.elements[0].rect.y, q.elements[0].rect.w, q.elements[0].rect.h);
+    CHECK(near(q.elements[1].rect.x, 200) && near(q.elements[1].rect.y, 0) &&
+          near(q.elements[1].rect.w, 0) && near(q.elements[1].rect.h, 100),
+          "a rule along the top runs down the right side");
+    CHECK(near(q.margins.top, 4) && near(q.margins.right, 1) && near(q.margins.bottom, 2) &&
+          near(q.margins.left, 3), "the margins turn with it");
+    const LayoutTemplate h = rotate_layout(t, 2);
+    CHECK(near(h.elements[0].rect.x, 60) && near(h.elements[0].rect.y, 140),
+          "half a turn mirrors both ways");
+    const LayoutTemplate full = rotate_layout(rotate_layout(t, 3), 1);
+    CHECK(near(full.elements[0].rect.x, 10) && near(full.elements[0].rect.y, 20) &&
+          near(full.width, 100), "four quarter turns come back");
+    const LayoutTemplate *pano = find(defs, "Spread: Panorama");
+    CHECK(pano && !rotate_layout(*pano, 1).spread && rotate_layout(*pano, 2).spread,
+          "a spread on its side is one page; upside down it is still a spread");
+
+    /* Fitting: on the default Letter page a layout lands exactly as drawn */
+    PageDoc doc = new_publication(PageSetup(), 3);
+    const LayoutTemplate *grid = find(defs, "Grid 2 × 2");
+    CHECK(grid != nullptr, "Grid 2 x 2 is built in");
+    if (!grid)
+        return;
+    LayoutFit fit = fit_layout(doc, *grid, 0);
+    CHECK(fit.parts.size() == 1 && near(fit.parts[0].scale, 1) && near(fit.parts[0].dx, 0) &&
+          near(fit.parts[0].dy, 0), "Letter in Letter: scale 1, no offset");
+    LayoutPlacement placed = place_layout(doc, nullptr, *grid, 0);
+    CHECK(placed.items.size() == 4, "four frames (%zu)", placed.items.size());
+    uint32_t group = 0;
+    bool frames = true, grouped = true;
+    for (ItemId id : placed.items) {
+        const Item *it = doc.find_item(id);
+        frames = frames && it && it->image() && it->image()->asset == 0;
+        if (it && !group)
+            group = it->group;
+        grouped = grouped && it && it->group && it->group == group;
+    }
+    CHECK(frames, "photos are empty picture frames");
+    CHECK(grouped, "and grouped together");
+
+    /* A smaller, wider page: fitted inside its margins, centered, scaled */
+    PageSetup small;
+    small.width = 504;
+    small.height = 360;
+    small.margin_top = small.margin_bottom = small.margin_inside = small.margin_outside = 18;
+    PageDoc card = new_publication(small, 1);
+    fit = fit_layout(card, *grid, 0);
+    const float k = std::min(468.f / 504.f, 324.f / 684.f);
+    CHECK(fit.ok() && near(fit.parts[0].scale, k), "scaled to the live area (%g)",
+          fit.ok() ? fit.parts[0].scale : 0.f);
+    const LayoutRect first = layout_rect_on_page(fit.parts[0], grid->elements[0].rect);
+    const float used_w = 504.f * k;
+    CHECK(near(first.x, 18.f + (468.f - used_w) * 0.5f) && near(first.y, 18),
+          "centered across, top at the margin (%g, %g)", first.x, first.y);
+
+    /* Text and SVG: a story in the named style, type scaled with the layout */
+    const LayoutTemplate *title = find(defs, "Title Page");
+    VectorStore vectors;
+    placed = place_layout(card, &vectors, *title, 0);
+    size_t texts_placed = 0, svg_placed = 0;
+    bool headline = false;
+    for (ItemId id : placed.items) {
+        const Item *it = card.find_item(id);
+        if (it && it->vector())
+            svg_placed += vectors.scene(it->vector()->asset) != nullptr;
+        if (it && it->is_text()) {
+            ++texts_placed;
+            const StoryEntry *se = card.story_of(id);
+            if (se && se->story.paragraphs[0].style.name == "Headline")
+                headline = std::fabs(se->story.paragraphs[0].runs[0].style.size -
+                                     std::round(34.f * k * 10.f) / 10.f) < 0.01f;
+        }
+    }
+    CHECK(texts_placed == 2 && svg_placed == 1 && placed.skipped.empty(),
+          "two text blocks and an ornament (%zu, %zu)", texts_placed, svg_placed);
+    CHECK(headline, "the headline keeps its style, its size scaled with the layout");
+    std::vector<Composition> comps;
+    for (const StoryEntry &se : card.stories)
+        comps.push_back(compose(se.story, card.thread_frames(se), fonts));
+    CHECK(comps.size() == 2 && !comps[0].lines.empty(), "the template's text composes");
+
+    /* Spreads: facing pages split at the spine, a group on each page */
+    PageSetup facing;
+    facing.facing = true;
+    PageDoc book = new_publication(facing, 3);
+    const LayoutTemplate *four = find(defs, "Spread: Four Across");
+    fit = fit_layout(book, *four, 2);
+    CHECK(fit.parts.size() == 2 && fit.parts[0].page == 1 && fit.parts[1].page == 2,
+          "page 3 is the right of the 2-3 spread");
+    placed = place_layout(book, nullptr, *four, 1);
+    CHECK(placed.pages.size() == 2 && book.pages[1].items.size() == 3 &&
+          book.pages[2].items.size() == 2, "two photos and a caption left, two photos right");
+    const uint32_t g1 = book.pages[1].items[0].group, g2 = book.pages[2].items[0].group;
+    CHECK(g1 && g2 && g1 != g2, "one group per page");
+    fit = fit_layout(book, *four, 0);
+    CHECK(fit.parts.size() == 1 && fit.parts[0].page == 0, "page 1 has no partner: the whole spread");
+
+    /* From the page: the grid placed on Letter comes back as drawn */
+    PageDoc letter = new_publication(PageSetup(), 1);
+    placed = place_layout(letter, nullptr, *grid, 0);
+    const LayoutTemplate made = layout_from_items(letter, nullptr, 0, placed.items, "Mine", "Custom");
+    bool same = made.elements.size() == grid->elements.size();
+    for (size_t i = 0; same && i < made.elements.size(); ++i)
+        same = near(made.elements[i].rect.x, grid->elements[i].rect.x) &&
+               near(made.elements[i].rect.y, grid->elements[i].rect.y) &&
+               near(made.elements[i].rect.w, grid->elements[i].rect.w) &&
+               made.elements[i].kind == LayoutElement::Kind::Photo;
+    CHECK(same && made.name == "Mine" && near(made.margins.left, 54),
+          "a layout made from the page matches the one placed");
+
+    /* The config file: seeded when missing, kept when broken */
+    const std::string dir = "/tmp/pagemade-layout-test";
+    nanogui::fs::remove_all(dir);
+    const std::string path = dir + "/layouts.json";
+    err.clear();
+    std::vector<LayoutTemplate> loaded = layout_templates_load_or_seed(path, &err);
+    CHECK(loaded.size() == 32 && nanogui::fs::exists(path) && err.empty(),
+          "a missing file is seeded with the built-ins");
+    loaded.push_back(made);
+    CHECK(layout_templates_save(loaded, path, &err), "saved (%s)", err.c_str());
+    CHECK(layout_templates_load_or_seed(path).size() == 33, "and read back with the new one");
+    {
+        std::ofstream broken(path, std::ios::trunc);
+        broken << "{\"templates\": [";
+    }
+    err.clear();
+    loaded = layout_templates_load_or_seed(path, &err);
+    std::ifstream still(path);
+    std::string text((std::istreambuf_iterator<char>(still)), std::istreambuf_iterator<char>());
+    CHECK(loaded.size() == 32 && !err.empty() && text == "{\"templates\": [",
+          "a broken file gives the built-ins and is left for the user");
+    nanogui::fs::remove_all(dir);
+}
+
 int main(int argc, char **argv) {
     bool verbose = argc > 1 && std::strcmp(argv[1], "-v") == 0;
     FontLibrary fonts;
@@ -4923,6 +5142,7 @@ int main(int argc, char **argv) {
     test_type_file(fonts);
     test_font_menu();
     test_swatch_library();
+    test_layout_templates(fonts);
     test_system_fonts();
     if (verbose)
         dump_sample(fonts);

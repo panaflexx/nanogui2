@@ -353,12 +353,9 @@ private:
 };
 
 ImageAssetsPanel::ImageAssetsPanel(Widget *parent, ComposerView *view, ImageStore *images)
-    : DockableWindow(parent, "Image Assets", true), m_view(view), m_images(images) {
+    : ToolPanel(parent), m_view(view), m_images(images) {
     m_probe_gate = std::make_shared<ProbeGate>();
     m_probe_gate->panel = this;
-
-    set_modal(false);
-    set_traffic_lights_mask(0x1);
 
     auto *flex = new FlexLayout(FlexDirection::Column, JustifyContent::FlexStart,
                                 AlignItems::Stretch, 8, 6);
@@ -546,11 +543,6 @@ ImageAssetsPanel::ImageAssetsPanel(Widget *parent, ComposerView *view, ImageStor
     m_meta->set_foreground_color(nanogui::Color(30, 30, 30, 255));
     m_meta->set_background_color(nanogui::Color(248, 248, 248, 255));
 
-    /* Both floors explicit: the layout's own floor counts each scroll panel
-       as half the screen, which would pin the window near full height. */
-    set_min_width(200);
-    set_min_height(440);
-    set_size(Vector2i(350, 780));
     m_split->set_drag_position(m_details_at);
     /* Last session's folders and files. One that is gone (an unmounted
      * share) stays listed, and the scan skips it, so it isn't lost. */

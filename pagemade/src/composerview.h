@@ -68,7 +68,7 @@
 #include <set>
 #include <vector>
 
-namespace pagemade { class BackgroundWorker; }
+namespace pagemade { class BackgroundWorker; struct LayoutTemplate; }
 
 class ComposerView : public nanogui::Widget {
 public:
@@ -206,6 +206,16 @@ public:
     /* The picture frame the right-click menu is about: the one selection,
      * when it is a picture frame; else 0. */
     pagemade::ItemId context_picture_frame() const;
+
+    /* ---- Layout templates (the Layouts tab) ---------------------------- *
+     * A template fitted inside the margins of `page` (a spread across the
+     * facing pages around it), its items grouped, as one undo step; the
+     * items on `page` are then selected. False when nothing was placed.
+     * Dragged in (kLayoutTemplateDragType), the frames it would make are
+     * outlined on the page under the pointer, and it drops there. */
+    bool place_layout(const pagemade::LayoutTemplate &t, size_t page);
+    /* The SVG bytes placed graphics show (a layout made from the page). */
+    const pagemade::VectorStore *vector_store() const { return m_vectors; }
 
     /* Pictures in a frame on screen as of the last draw. Linked pictures
      * are read when they become live, on a background thread. */
@@ -717,6 +727,8 @@ private:
     void frame_size(const pagemade::ImageMetadata &meta, size_t page, float &w, float &h) const;
     /* The asset id a drag offers, 0 if none. */
     uint32_t dragged_asset(const nanogui::DragData &data) const;
+    /* The layout template a drag offers, null if none. */
+    std::shared_ptr<const pagemade::LayoutTemplate> dragged_layout(const nanogui::DragData &data) const;
     /* Where a drag would place its frame: the page under the pointer, the
      * top-left there (snapped), and the frame's size (0 while unknown) */
     void drop_target(const nanogui::DragData &data, pagemade::Point &at, size_t &page,
@@ -876,6 +888,7 @@ private:
      * while unknown: files are only probed on drop) */
     bool m_drop_hover = false;
     pagemade::ItemId m_drop_replace = 0;  // the frame a Ctrl-drop would refill
+    std::shared_ptr<const pagemade::LayoutTemplate> m_drop_layout;   // a layout in hand
     size_t m_drop_page = 0;
     pagemade::Point m_drop_at;
     float m_drop_w = 0.f, m_drop_h = 0.f;

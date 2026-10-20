@@ -2,6 +2,7 @@
  * pagemade/composerview.cpp — see composerview.h.
  */
 #include "composerview.h"
+#include "layout_templates.h"
 #include "render_nvg.h"
 #include "uri.h"
 #include "vector.h"
@@ -4177,6 +4178,49 @@ void ComposerView::place_empty_frame() {
         on_document_change();
 }
 
+bool ComposerView::place_layout(const LayoutTemplate &t, size_t page) {
+    if (page >= m_doc.pages.size() || t.elements.empty() || !fit_layout(m_doc, t, page).ok() ||
+        !check_active_layer())
+        return false;
+    push_undo();
+    const LayoutPlacement placed = pagemade::place_layout(m_doc, m_vectors, t, page);
+    if (placed.items.empty()) {
+        undo();                          // nothing went down: no empty undo step
+        if (on_note)
+            on_note("the layout \"" + t.name + "\" has nothing that could be placed");
+        return false;
+    }
+    recompose();
+    if (page != m_page)
+        show_page(page);
+    std::vector<ItemId> here;
+    for (ItemId id : placed.items) {
+        size_t pg = 0;
+        if (m_doc.find_item(id, &pg) && pg == m_page)
+            here.push_back(id);
+    }
+    m_sel = with_groups(here);
+    m_edit_story = 0;
+    if (m_tool != Tool::Pointer)
+        set_tool(Tool::Pointer);
+    else
+        selection_changed();
+    if (on_note) {
+        std::string note = "placed the layout \"" + t.name + "\"";
+        if (placed.pages.size() > 1)
+            note += " across the spread";
+        if (!placed.skipped.empty())
+            note += " (skipped " + placed.skipped.front() +
+                    (placed.skipped.size() > 1 ? " and more" : "") + ")";
+        on_note(note);
+    }
+    if (on_document_change)
+        on_document_change();
+    if (screen())
+        screen()->redraw();
+    return true;
+}
+
 ItemId ComposerView::picture_frame_at(size_t page, const Point &at) const {
     if (page >= m_doc.pages.size())
         return 0;
@@ -4991,7 +5035,27 @@ ItemId ComposerView::drop_replace_target(const DragEvent &e) {
     return picture_frame_at(m_point_page, at);
 }
 
+std::shared_ptr<const LayoutTemplate> ComposerView::dragged_layout(const DragData &data) const {
+    if (!data.has(kLayoutTemplateDragType))
+        return nullptr;
+    const auto *t = nanogui::any_cast<std::shared_ptr<const LayoutTemplate>>(&data.object);
+    return t ? *t : nullptr;
+}
+
 bool ComposerView::drag_motion_event(const Vector2i &, DragEvent &e) {
+    if (std::shared_ptr<const LayoutTemplate> layout = dragged_layout(e.data)) {
+        if (m_placing || !e.accept(this, DropCopy)) {
+            drag_leave_event();
+            return false;
+        }
+        (void) page_point_from_screen(screen()->mouse_pos());   // the page under the pointer
+        m_drop_page = m_point_page;
+        m_drop_layout = std::move(layout);
+        m_drop_replace = 0;
+        m_drop_hover = true;
+        screen()->redraw();
+        return true;
+    }
     const uint32_t asset = dragged_asset(e.data);
     const bool files = !asset && on_drop_files && e.data.has("text/uri-list");
     if (!(asset || files) || m_placing || !e.accept(this, DropCopy)) {
@@ -5010,12 +5074,22 @@ void ComposerView::drag_leave_event() {
         return;
     m_drop_hover = false;
     m_drop_replace = 0;
+    m_drop_layout.reset();
     if (screen())
         screen()->redraw();
 }
 
 bool ComposerView::drag_drop_event(const Vector2i &, DragEvent &e) {
     drag_leave_event();
+    if (std::shared_ptr<const LayoutTemplate> layout = dragged_layout(e.data)) {
+        if (m_placing)
+            return false;
+        (void) page_point_from_screen(screen()->mouse_pos());
+        if (!place_layout(*layout, m_point_page))
+            return false;
+        request_focus();
+        return e.accept(this, DropCopy);
+    }
     if (const ItemId frame = drop_replace_target(e)) {
         /* Ctrl over a picture frame: its picture is replaced */
         if (const uint32_t asset = dragged_asset(e.data)) {
@@ -5292,6 +5366,35 @@ void ComposerView::draw(NVGcontext *ctx) {
             nvgStroke(ctx);
             nvgRestore(ctx);
         }
+    } else if (m_drop_hover && m_drop_layout) {
+        /* A layout in hand: each frame it would make, on the pages it fits */
+        const LayoutFit fit = fit_layout(m_doc, *m_drop_layout, m_drop_page);
+        for (const LayoutFit::Part &part : fit.parts)
+            for (const PageSlot &sl : slots) {
+                if (sl.index != part.page)
+                    continue;
+                nvgSave(ctx);
+                nvgTranslate(ctx, o.x() + sl.x, o.y() + sl.y);
+                for (size_t ei : part.elements) {
+                    const LayoutElement &el = m_drop_layout->elements[ei];
+                    const LayoutRect r = layout_rect_on_page(part, el.rect);
+                    nvgBeginPath(ctx);
+                    if (el.kind == LayoutElement::Kind::Shape && el.shape == Shape::Kind::Line) {
+                        nvgMoveTo(ctx, r.x, r.y);
+                        nvgLineTo(ctx, r.x + r.w, r.y + r.h);
+                    } else {
+                        nvgRect(ctx, r.x, r.y, r.w, r.h);
+                    }
+                    if (el.kind == LayoutElement::Kind::Photo) {
+                        nvgFillColor(ctx, nvgRGBA(70, 130, 255, 36));
+                        nvgFill(ctx);
+                    }
+                    nvgStrokeColor(ctx, kColumnGuide);
+                    nvgStrokeWidth(ctx, 1.5f * px);
+                    nvgStroke(ctx);
+                }
+                nvgRestore(ctx);
+            }
     } else if (m_drop_hover)
         for (const PageSlot &sl : slots) {
             if (sl.index != m_drop_page)

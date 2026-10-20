@@ -5,7 +5,8 @@
  * PageMaker's (File, Edit, Layout, Element): pages are inserted, removed,
  * reordered and hidden from Layout, and Arrange lives under Element.
  * Element > Image Assets... browses pictures in this publication and in
- * folders, and Remove Unused drops pictures that are not placed.
+ * folders, and Remove Unused drops pictures that are not placed; its
+ * Layouts tab (Element > Layouts...) drags predefined page layouts on.
  * Page icons along the bottom of the window show the document — click one
  * to turn to it, drag to rearrange. Beside them, three buttons show one
  * page, a side-by-side spread, or every page in a stack. File > New Document
@@ -59,6 +60,8 @@
 #include "composerview.h"
 #include "dialogs.h"
 #include "image_assets.h"
+#include "layouts_panel.h"
+#include "tool_tabs.h"
 #include "layers_panel.h"
 #include "ruler.h"
 #include "docfile.h"
@@ -962,18 +965,16 @@ public:
         }
         /* The asset window's thumbnail loader reads m_images. Dispose it
          * before the members die: Screen destroys its children afterwards. */
-        std::vector<ImageAssetsPanel *> panels;
-        for (Widget *child : children())
-            if (auto *panel = dynamic_cast<ImageAssetsPanel *>(child))
-                panels.push_back(panel);
-        for (ImageAssetsPanel *panel : panels) {
-            panel->set_close_callback({});
-            panel->dispose();
+        if (m_assets) {
+            m_assets->set_close_callback({});
+            m_assets->dispose();
         }
         /* dispose() only queues the window; destroy it now, so its grid's
            loader thread is joined while m_images still exists */
         do_widget_cleanup();
         m_assets = nullptr;
+        m_images_panel = nullptr;
+        m_layouts_panel = nullptr;
         if (s_instance == this)
             s_instance = nullptr;
     }
@@ -1478,6 +1479,7 @@ public:
                 });
         new Separator(element->popup());
         add_cmd(element, "Image Assets...", {}, [this] { show_image_assets(); });
+        add_cmd(element, "Layouts...", {}, [this] { show_layouts(); });
         add_cmd(element, "Layers...", {}, [this] { show_layers(); });
         m_caption_item = add_cmd(element, "Caption Placed Pictures", {}, [this] {
             m_view->set_caption_pictures(!m_view->caption_pictures());
@@ -1935,26 +1937,46 @@ public:
     }
 
     /* The Image Assets window is made once and only hidden when closed, so
-     * its folders, library and thumbnails are all there when it reopens. */
-    void show_image_assets() {
-        if (!m_assets) {
-            m_assets = new ImageAssetsPanel(this, m_view, &m_images);
-            m_assets->set_close_callback([this] {
-                if (m_assets) {
-                    m_assets->set_visible(false);
-                    apply_docks();               // a docked one gives its room back
-                    redraw();
-                }
-            });
-            m_assets->on_dock = [this](DockableWindow::Dock side) { dock_window(m_assets, side); };
-            m_assets->on_dock_resize = [this] { apply_docks(); };
-            m_assets->center();
-        } else {
+     * its folders, library and thumbnails are all there when it reopens.
+     * Its tabs are tool panels (tool_tabs.h): Images, then Layouts. */
+    enum class AssetTab { Images, Layouts };
+    void show_image_assets() { show_asset_tab(AssetTab::Images); }
+    void show_layouts() { show_asset_tab(AssetTab::Layouts); }
+
+    void make_assets_window() {
+        if (m_assets)
+            return;
+        m_assets = new ToolTabsWindow(this, "Image Assets");
+        m_images_panel = m_assets->add_panel<ImageAssetsPanel>(m_view, &m_images);
+        m_layouts_panel = m_assets->add_panel<LayoutsPanel>(m_view);
+        m_assets->set_close_callback([this] {
+            if (m_assets) {
+                m_assets->set_visible(false);
+                apply_docks();               // a docked one gives its room back
+                redraw();
+            }
+        });
+        m_assets->on_dock = [this](DockableWindow::Dock side) { dock_window(m_assets, side); };
+        m_assets->on_dock_resize = [this] { apply_docks(); };
+        m_assets->center();
+        m_assets->set_visible(false);    // show_asset_tab puts it up
+    }
+
+    void show_asset_tab(AssetTab which) {
+        const bool fresh = !m_assets;
+        make_assets_window();
+        ToolPanel *tab = which == AssetTab::Layouts ? (ToolPanel *) m_layouts_panel
+                                                    : (ToolPanel *) m_images_panel;
+        if (!m_assets->visible()) {
             m_assets->set_visible(true);
             move_window_to_front(m_assets);
-            apply_docks();               // reopened docked: take the room again
+            if (!fresh)
+                apply_docks();           // reopened docked: take the room again
         }
-        m_assets->refresh();             // catch up on changes made while hidden
+        if (m_assets->current() != tab)
+            m_assets->show_panel(tab);   // the tab catches up as it comes forward
+        else
+            m_assets->shown();           // catch up on changes made while hidden
         m_assets->request_focus();
     }
 
@@ -3123,7 +3145,9 @@ private:
     Dropdown        *m_font = nullptr, *m_face = nullptr;
     Button          *m_specs = nullptr;
     TypeSpecsPanel  *m_type_panel = nullptr;
-    ImageAssetsPanel *m_assets = nullptr;
+    ToolTabsWindow   *m_assets = nullptr;     // Image Assets: its tabs below
+    ImageAssetsPanel *m_images_panel = nullptr;
+    LayoutsPanel     *m_layouts_panel = nullptr;
     LayersPanel      *m_layers = nullptr;
     Window           *m_root_window = nullptr;
     PopupMenu        *m_context_popup = nullptr;   // the page's right-click menu

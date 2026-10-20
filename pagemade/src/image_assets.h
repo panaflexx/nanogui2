@@ -1,7 +1,7 @@
 /*
- * pagemade/image_assets.h — the Image Assets window.
+ * pagemade/image_assets.h — the Images tab of the Image Assets window.
  *
- * A non-modal tool window: folders and files the user is browsing, then an
+ * A tool panel (tool_tabs.h): folders and files the user is browsing, then an
  * image grid in two sections (pictures kept by this publication, and the
  * files under those folders), then metadata for the selected picture.
  * Drag a publication picture onto a page to place it. Drag a library file
@@ -9,14 +9,14 @@
  *
  * Library folders live here, not in the publication, so New and Open leave
  * them alone. They are saved to assets.conf whenever they change and read
- * back when the window is first made. The app hides the window when it is closed rather than
+ * back when the panel is first made. The app hides the window when it is closed rather than
  * destroying it, so the folders, files and thumbnails are kept for the
  * session. Thumbnails of pictures the publication already holds are
  * decoded from the ImageStore on the widget's loader thread.
  */
 #pragma once
 
-#include "dock_window.h"
+#include "tool_tabs.h"
 
 #include "bg_worker.h"
 #include "image.h"
@@ -37,17 +37,19 @@ class Split;
 class TextArea;
 }
 
-class ImageAssetsPanel : public DockableWindow {
+class ImageAssetsPanel : public ToolPanel {
 public:
     ImageAssetsPanel(nanogui::Widget *parent, ComposerView *view, pagemade::ImageStore *images);
     ~ImageAssetsPanel() override;
 
+    std::string title() const override { return "Images"; }
     /* The publication section follows the open document. Called on every
      * document change; the grid is rebuilt only when the picture list
      * itself changed. Badges (use count, missing, modified) redraw either way. */
-    void refresh();
-
-    /* Docking beside the pages: see DockableWindow. */
+    void refresh() override;
+    /* Both floors explicit: the layout's own floor counts each scroll panel
+     * as half the screen, which would pin the window near full height. */
+    nanogui::Vector2i floor_size() const override { return nanogui::Vector2i(200, 440); }
 
 private:
     struct ScanState;
