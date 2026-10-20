@@ -7,7 +7,21 @@ cmake_minimum_required (VERSION 3.13..3.18)
 # check fails. Prefer the MacOSX.sdk symlink, which tracks the installed tools.
 if (CMAKE_HOST_SYSTEM_NAME STREQUAL "Darwin")
   set(_nanogui_macos_sdk "")
+  # The active developer directory's own SDK first. With Xcode selected,
+  # SDKROOT set to the Command Line Tools SDK makes the /usr/bin shims
+  # (make, c++) fail with "unable to find utility ..., not a developer tool".
+  set(_nanogui_dev_sdk "")
+  execute_process(COMMAND xcode-select -p OUTPUT_VARIABLE _nanogui_dev_dir
+                  OUTPUT_STRIP_TRAILING_WHITESPACE ERROR_QUIET RESULT_VARIABLE _nanogui_dev_rc)
+  if (_nanogui_dev_rc EQUAL 0 AND _nanogui_dev_dir)
+    if (_nanogui_dev_dir MATCHES "CommandLineTools$")
+      set(_nanogui_dev_sdk "${_nanogui_dev_dir}/SDKs/MacOSX.sdk")
+    else()
+      set(_nanogui_dev_sdk "${_nanogui_dev_dir}/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk")
+    endif()
+  endif()
   foreach(_cand
+      "${_nanogui_dev_sdk}"
       "/Library/Developer/CommandLineTools/SDKs/MacOSX.sdk"
       "/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk")
     if (IS_DIRECTORY "${_cand}")
@@ -41,6 +55,9 @@ if (CMAKE_HOST_SYSTEM_NAME STREQUAL "Darwin")
     unset(_nanogui_sdk_unusable)
   endif()
   unset(_nanogui_macos_sdk)
+  unset(_nanogui_dev_sdk)
+  unset(_nanogui_dev_dir)
+  unset(_nanogui_dev_rc)
 endif()
 
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON CACHE INTERNAL "")
@@ -223,6 +240,22 @@ if (CMAKE_CXX_COMPILER_ID MATCHES "Clang" AND NOT CMAKE_CXX_FLAGS MATCHES "-stdl
       message(FATAL_ERROR "When Clang is used to compile NanoGUI, libc++ must be available -- GCC's libstdc++ is not supported! (please insteall the libc++ development headers, provided e.g. by the packages 'libc++-dev' and 'libc++abi-dev' on Debian/Ubuntu).")
     endif()
   endif()
+endif()
+
+# A clang that isn't Xcode's (Homebrew's LLVM: an old macOS whose Xcode
+# lacks C++17's <variant> and <optional>) brings its own libc++. Link that
+# one and find it at run time, and drop libc++'s availability checks, which
+# assume the system's copy (std::get would be "unavailable" before 10.14).
+if (APPLE AND CMAKE_CXX_COMPILER_ID STREQUAL "Clang")
+  get_filename_component(_nanogui_llvm_bin "${CMAKE_CXX_COMPILER}" DIRECTORY)
+  get_filename_component(_nanogui_llvm_lib "${_nanogui_llvm_bin}/../lib" ABSOLUTE)
+  if (EXISTS "${_nanogui_llvm_lib}/libc++.dylib")
+    message(STATUS "NanoGUI: using the libc++ in ${_nanogui_llvm_lib}")
+    add_compile_definitions(_LIBCPP_DISABLE_AVAILABILITY)
+    add_link_options("-L${_nanogui_llvm_lib}" "-Wl,-rpath,${_nanogui_llvm_lib}")
+  endif()
+  unset(_nanogui_llvm_bin)
+  unset(_nanogui_llvm_lib)
 endif()
 
 # Compile GLFW (official 3.4+: single `glfw` target, multi-backend).
@@ -408,13 +441,35 @@ if (NANOGUI_USE_FREETYPE)
     include_directories(${FREETYPE_INCLUDE_DIRS})
   endif()
 
+  # A HarfBuzz installed in its own prefix is searched first: its
+  # lib/pkgconfig goes ahead of the system's. On macOS, with no prefix
+  # given, the newest ~/opt/harfbuzz-* is used (Homebrew's can be too old
+  # for hb-subset). Libraries link by full path, so the binaries carry an
+  # rpath to that prefix.
+  set(NANOGUI_HARFBUZZ_PREFIX "" CACHE PATH "Prefix of a HarfBuzz install to prefer (its lib/pkgconfig)")
+  if (NOT NANOGUI_HARFBUZZ_PREFIX AND APPLE AND DEFINED ENV{HOME})
+    file(GLOB _nanogui_hb_prefixes "$ENV{HOME}/opt/harfbuzz-*")
+    if (_nanogui_hb_prefixes)
+      list(SORT _nanogui_hb_prefixes)
+      list(GET _nanogui_hb_prefixes -1 _nanogui_hb_prefix)
+      set(NANOGUI_HARFBUZZ_PREFIX "${_nanogui_hb_prefix}" CACHE PATH
+          "Prefix of a HarfBuzz install to prefer (its lib/pkgconfig)" FORCE)
+    endif()
+    unset(_nanogui_hb_prefixes)
+    unset(_nanogui_hb_prefix)
+  endif()
+  if (NANOGUI_HARFBUZZ_PREFIX)
+    message(STATUS "HarfBuzz: preferring ${NANOGUI_HARFBUZZ_PREFIX}")
+    set(ENV{PKG_CONFIG_PATH} "${NANOGUI_HARFBUZZ_PREFIX}/lib/pkgconfig:$ENV{PKG_CONFIG_PATH}")
+  endif()
+
   find_package(PkgConfig QUIET)
   if (PkgConfig_FOUND)
     pkg_check_modules(HARFBUZZ harfbuzz)
     if (HARFBUZZ_FOUND)
-      message(STATUS "HARFBUZZ_LIBRARIES (pkg-config): ${HARFBUZZ_LIBRARIES}")
+      message(STATUS "HarfBuzz ${HARFBUZZ_VERSION}: ${HARFBUZZ_LINK_LIBRARIES}")
       message(STATUS "HARFBUZZ_INCLUDE_DIRS (pkg-config): ${HARFBUZZ_INCLUDE_DIRS}")
-      list(APPEND NANOGUI_LIBS ${HARFBUZZ_LIBRARIES})
+      list(APPEND NANOGUI_LIBS ${HARFBUZZ_LINK_LIBRARIES})
       include_directories(${HARFBUZZ_INCLUDE_DIRS})
     endif()
   endif()
@@ -973,7 +1028,7 @@ if (NANOGUI_BUILD_EXAMPLES)
     target_include_directories(pagemade_composer PUBLIC
         pagemade/src ${HARFBUZZ_INCLUDE_DIRS})
     target_link_directories(pagemade_composer PUBLIC ${HARFBUZZ_LIBRARY_DIRS})
-    target_link_libraries(pagemade_composer PUBLIC unibreak ${HARFBUZZ_LIBRARIES})
+    target_link_libraries(pagemade_composer PUBLIC unibreak ${HARFBUZZ_LINK_LIBRARIES})
 
     pkg_check_modules(HARFBUZZ_SUBSET harfbuzz-subset)
     if (NOT HARFBUZZ_SUBSET_FOUND)
@@ -1105,13 +1160,13 @@ if (NANOGUI_BUILD_EXAMPLES)
       endif()
     endforeach()
     target_link_libraries(pagemade_app pagemade_composer nanogui miniz
-        ${HARFBUZZ_SUBSET_LIBRARIES} ${NANOGUI_LIBS})
+        ${HARFBUZZ_SUBSET_LINK_LIBRARIES} ${NANOGUI_LIBS})
     target_link_libraries(pagemade_compose_test pagemade_composer miniz
-        ${HARFBUZZ_SUBSET_LIBRARIES})
+        ${HARFBUZZ_SUBSET_LINK_LIBRARIES})
     target_link_libraries(pagemade_book pagemade_composer miniz
-        ${HARFBUZZ_SUBSET_LIBRARIES})
+        ${HARFBUZZ_SUBSET_LINK_LIBRARIES})
     target_link_libraries(pagemade_render_bench pagemade_composer nanogui miniz
-        ${HARFBUZZ_SUBSET_LIBRARIES} ${NANOGUI_LIBS})
+        ${HARFBUZZ_SUBSET_LINK_LIBRARIES} ${NANOGUI_LIBS})
     # Output name "pagemade" would collide with the pagemade/ source directory
     set_target_properties(pagemade_app PROPERTIES OUTPUT_NAME pagemade)
     set_target_properties(pagemade_app pagemade_compose_test pagemade_book pagemade_render_bench PROPERTIES

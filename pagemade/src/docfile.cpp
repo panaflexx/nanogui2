@@ -22,8 +22,18 @@
 #include <cctype>
 #include <cerrno>
 #include <charconv>
+#include <type_traits>
+
+/* Floating-point to_chars came to libc++ in 14 (LLVM 10's, on an old Mac,
+ * has only the integer forms). */
+#if defined(_LIBCPP_VERSION) && _LIBCPP_VERSION < 14000
+#define PAGEMADE_FLOAT_TO_CHARS 0
+#else
+#define PAGEMADE_FLOAT_TO_CHARS 1
+#endif
 #include <cmath>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <map>
 #include <set>
@@ -107,16 +117,46 @@ private:
         if (!std::isfinite(f))
             f = 0.f;
         char buf[32];
+#if PAGEMADE_FLOAT_TO_CHARS
         auto r = std::to_chars(buf, buf + sizeof buf, f);
         text.append(buf, r.ptr);
+#else
+        text.append(buf, shortest_digits(buf, sizeof buf, f));
+#endif
     }
     void number(double d) {
         if (!std::isfinite(d))
             d = 0;
         char buf[64];
+#if PAGEMADE_FLOAT_TO_CHARS
         auto r = std::to_chars(buf, buf + sizeof buf, d, std::chars_format::general);
         text.append(buf, r.ptr);
+#else
+        text.append(buf, shortest_digits(buf, sizeof buf, d));
+#endif
     }
+#if !PAGEMADE_FLOAT_TO_CHARS
+    /* The fewest %g digits that read back to the same value, as to_chars
+     * writes them. The read back uses the current locale, as snprintf
+     * does; the decimal mark is then made a point. */
+    template <typename T> static size_t shortest_digits(char *buf, size_t n, T v) {
+        const int most = std::is_same<T, float>::value ? 9 : 17;
+        int len = 0;
+        for (int digits = 1; digits <= most; ++digits) {
+            len = std::snprintf(buf, n, "%.*g", digits, (double) v);
+            if (len <= 0 || (size_t) len >= n)
+                break;
+            const T back = std::is_same<T, float>::value ? (T) std::strtof(buf, nullptr)
+                                                         : (T) std::strtod(buf, nullptr);
+            if (back == v)
+                break;
+        }
+        for (int i = 0; i < len; ++i)
+            if (buf[i] == ',')
+                buf[i] = '.';
+        return len > 0 ? (size_t) len : 0;
+    }
+#endif
     void quote(const std::string &s) {
         static const char digits[] = "0123456789abcdef";
         text += '"';

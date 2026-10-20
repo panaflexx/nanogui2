@@ -470,19 +470,39 @@ bool jpeg_decode_scaled(const uint8_t *data, size_t n, int long_edge, std::vecto
         denom *= 2;
     cinfo.scale_num = 1;
     cinfo.scale_denom = denom;
+    /* libjpeg-turbo writes RGBA itself; IJG libjpeg (9, as Homebrew has on
+     * an old Mac) writes RGB, widened here a row at a time */
+#ifdef JCS_EXTENSIONS
     cinfo.out_color_space = JCS_EXT_RGBA;
+    const int comps = 4;
+#else
+    cinfo.out_color_space = JCS_RGB;
+    const int comps = 3;
+#endif
     cinfo.dct_method = JDCT_ISLOW;
     jpeg_start_decompress(&cinfo);
     const size_t ow = cinfo.output_width, oh = cinfo.output_height;
     buf = (uint8_t *) std::malloc(ow * oh * 4);
-    if (!buf || cinfo.output_components != 4) {
+    if (!buf || cinfo.output_components != comps) {
         jpeg_destroy_decompress(&cinfo);
         std::free(buf);
         return false;
     }
     while (cinfo.output_scanline < cinfo.output_height) {
-        JSAMPROW row = buf + (size_t) cinfo.output_scanline * ow * 4;
+        uint8_t *dst = buf + (size_t) cinfo.output_scanline * ow * 4;
+        /* An RGB row is read into the tail of its RGBA row, then spread
+         * forward: each RGBA pixel lands at or before its RGB source */
+        JSAMPROW row = comps == 4 ? dst : dst + ow;
         jpeg_read_scanlines(&cinfo, &row, 1);
+        if (comps == 3)
+            for (size_t x = 0; x < ow; ++x) {
+                const uint8_t *src = dst + ow + x * 3;
+                const uint8_t r = src[0], g = src[1], b = src[2];
+                dst[x * 4 + 0] = r;
+                dst[x * 4 + 1] = g;
+                dst[x * 4 + 2] = b;
+                dst[x * 4 + 3] = 255;
+            }
     }
     jpeg_finish_decompress(&cinfo);
     jpeg_destroy_decompress(&cinfo);
