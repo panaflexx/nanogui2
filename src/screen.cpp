@@ -1171,6 +1171,8 @@ void Screen::draw_widgets() {
 
     if (m_dnd) {
         draw_drag_preview(m_nvg_context);
+    } else if (!m_tab_drag_ghost.empty()) {
+        draw_tab_drag_ghost(m_nvg_context);
     } else if (elapsed > 0.5f) {
         /* Draw tooltips */
         const Widget* widget = find_widget(m_mouse_pos);
@@ -1512,13 +1514,26 @@ void Screen::mouse_button_callback_event(int button, int action, int modifiers) 
             return;
         }
 
+        if (action == GLFW_RELEASE && m_suppress_drag_release) {
+            m_suppress_drag_release = false;
+            m_drag_active = false;
+            m_drag_widget = nullptr;
+            return;
+        }
+
         auto drop_widget = find_widget(m_mouse_pos);
         if (m_drag_active && action == GLFW_RELEASE && drop_widget != m_drag_widget) {
             // Check if m_drag_widget is still valid
             if (m_drag_widget && (m_drag_widget->parent() != nullptr || m_drag_widget == this)) {
+                const bool swallow = m_drag_widget->consumes_external_drag_release();
                 m_redraw |= m_drag_widget->mouse_button_event(
                     m_mouse_pos - m_drag_widget->parent()->absolute_position(), button,
                     false, m_modifiers);
+                if (swallow) {
+                    m_drag_active = false;
+                    m_drag_widget = nullptr;
+                    return;
+                }
             } else {
                 m_drag_active = false;
                 m_drag_widget = nullptr;
@@ -1636,6 +1651,18 @@ void Screen::key_callback_event(int key, int scancode, int action, int mods) {
             }
             return;
         }
+        /* A tab dragged off its strip (and any other widget that says the
+         * release belongs to the drag). The mouse button is still down;
+         * that release must not click the widget it lands on. */
+        if (key == GLFW_KEY_ESCAPE && action == GLFW_PRESS && m_drag_active && m_drag_widget
+            && m_drag_widget->consumes_external_drag_release()) {
+            m_drag_widget->drag_cancel_event();
+            m_drag_active = false;
+            m_drag_widget = nullptr;
+            m_suppress_drag_release = true;
+            m_redraw = true;
+            return;
+        }
         m_redraw |= keyboard_event(key, scancode, action, mods);
     }
     catch (const std::exception& e) {
@@ -1750,6 +1777,35 @@ void Screen::end_drag(bool drop) {
     Widget* w = find_widget(m_mouse_pos);
     set_screen_cursor(w ? w->cursor() : Cursor::Arrow);
     redraw();
+}
+
+void Screen::set_tab_drag_ghost(const std::string &caption) {
+    if (m_tab_drag_ghost == caption)
+        return;
+    m_tab_drag_ghost = caption;
+    redraw();
+}
+
+void Screen::draw_tab_drag_ghost(NVGcontext *ctx) {
+    if (m_tab_drag_ghost.empty())
+        return;
+    nvgSave(ctx);
+    nvgResetScissor(ctx);
+    nvgFontFace(ctx, "sans-bold");
+    nvgFontSize(ctx, 14.f);
+    nvgTextAlign(ctx, NVG_ALIGN_LEFT | NVG_ALIGN_TOP);
+    float bounds[4];
+    const float x = (float) m_mouse_pos.x() + 14.f;
+    const float y = (float) m_mouse_pos.y() + 16.f;
+    nvgTextBounds(ctx, x, y, m_tab_drag_ghost.c_str(), nullptr, bounds);
+    nvgBeginPath(ctx);
+    nvgRoundedRect(ctx, bounds[0] - 8.f, bounds[1] - 4.f,
+                   bounds[2] - bounds[0] + 16.f, bounds[3] - bounds[1] + 8.f, 5.f);
+    nvgFillColor(ctx, nvgRGBA(48, 168, 72, 230));
+    nvgFill(ctx);
+    nvgFillColor(ctx, nvgRGBA(255, 255, 255, 255));
+    nvgText(ctx, x, y, m_tab_drag_ghost.c_str(), nullptr);
+    nvgRestore(ctx);
 }
 
 void Screen::set_screen_cursor(Cursor cursor) {

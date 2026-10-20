@@ -885,8 +885,8 @@ public:
         m_view->on_selection_change = [this] {
             sync_palette();
             update_status();
-            if (m_layers && m_layers->visible())
-                m_layers->refresh();     // Move Selection Here follows the selection
+            if (ToolTabsWindow *w = ToolTabsWindow::host_of(m_layers); w && w->visible())
+                w->refresh();            // Move Selection Here follows the selection
         };
         m_view->on_note = [this](const std::string &note) { set_note(note); };
         m_view->on_setup_change = [this] {
@@ -897,14 +897,13 @@ public:
         m_view->on_context_menu = [this](const Vector2i &at) { show_context_menu(at); };
         m_view->on_page_change = [this] { update_status(); };
         m_view->on_document_change = [this] {
-            if (m_layers && m_layers->visible())
-                m_layers->refresh();
+            for (ToolTabsWindow *w : ToolTabsWindow::live())
+                if (w->parent() == this && w->visible())
+                    w->refresh();        // a hidden one catches up when shown
             update_title();
-            if (m_assets && m_assets->visible())   // a hidden one catches up when shown
-                m_assets->refresh();
         };
         m_view->on_live_change = [this] {
-            if (m_assets && m_assets->visible())
+            if (ToolTabsWindow *w = ToolTabsWindow::host_of(m_images_panel); w && w->visible())
                 redraw();                // the asset badges show what is live
         };
         /* Files dropped on a page are placed at once as stand-ins and read
@@ -963,11 +962,19 @@ public:
                 break;
             std::this_thread::sleep_for(std::chrono::milliseconds(2));
         }
-        /* The asset window's thumbnail loader reads m_images. Dispose it
-         * before the members die: Screen destroys its children afterwards. */
-        if (m_assets) {
-            m_assets->set_close_callback({});
-            m_assets->dispose();
+        /* Tool windows' loaders read m_images. Dispose them before the
+         * members die: Screen destroys its children afterwards. A torn-off
+         * tab is its own window, so every live one parented here goes. */
+        ToolTabsWindow::set_on_born({});
+        ToolTabsWindow::set_on_empty({});
+        {
+            std::vector<ToolTabsWindow *> windows = ToolTabsWindow::live();
+            for (ToolTabsWindow *w : windows) {
+                if (w->parent() == this) {
+                    w->set_close_callback({});
+                    w->dispose();
+                }
+            }
         }
         /* dispose() only queues the window; destroy it now, so its grid's
            loader thread is joined while m_images still exists */
@@ -975,6 +982,8 @@ public:
         m_assets = nullptr;
         m_images_panel = nullptr;
         m_layouts_panel = nullptr;
+        m_layers = nullptr;
+        m_type_panel = nullptr;
         if (s_instance == this)
             s_instance = nullptr;
     }
@@ -1943,41 +1952,93 @@ public:
     void show_image_assets() { show_asset_tab(AssetTab::Images); }
     void show_layouts() { show_asset_tab(AssetTab::Layouts); }
 
-    void make_assets_window() {
-        if (m_assets)
+    void ensure_tool_hooks() {
+        if (m_tool_hooks)
             return;
+        m_tool_hooks = true;
+        ToolTabsWindow::set_on_born([this](ToolTabsWindow *w) { wire_tool_window(w); });
+        ToolTabsWindow::set_on_empty([this](ToolTabsWindow *w) { retire_tool_window(w); });
+    }
+
+    void wire_tool_window(ToolTabsWindow *w) {
+        w->set_close_callback([this, w] { close_tool_window(w); });
+        w->on_dock = [this, w](DockableWindow::Dock side) { dock_window(w, side); };
+        w->on_dock_resize = [this] { apply_docks(); };
+    }
+
+    /* Hide a window that still holds a panel which must survive (Images,
+     * Layouts, Layers). A Type-only window is disposed, and reopening it
+     * builds another. An empty shell left by a tear-off goes through
+     * retire_tool_window directly, which does not drop the moved panel. */
+    void close_tool_window(ToolTabsWindow *w) {
+        if (!w)
+            return;
+        if (w->any_persist()) {
+            w->set_visible(false);
+            apply_docks();
+            redraw();
+            return;
+        }
+        if (m_type_panel && w->contains_panel(m_type_panel)) {
+            m_type_dock = w->docked();
+            m_type_dock_w = w->width();
+            auto it = m_float_size.find(w);
+            m_type_float_size = it != m_float_size.end() ? it->second : w->size();
+            m_type_panel = nullptr;
+        }
+        retire_tool_window(w);
+    }
+
+    void retire_tool_window(ToolTabsWindow *w) {
+        if (!w)
+            return;
+        if (w->docked() != DockableWindow::Dock::None)
+            w->set_docked(DockableWindow::Dock::None);
+        m_float_size.erase(w);
+        m_dock_w.erase(w);
+        if (m_assets == w)
+            m_assets = nullptr;
+        w->set_close_callback({});
+        w->on_dock = nullptr;
+        w->on_dock_resize = nullptr;
+        apply_docks();
+        redraw();
+        async([w] {
+            if (w->parent())
+                w->dispose();
+        });
+    }
+
+    void make_assets_window() {
+        if (m_images_panel)
+            return;
+        ensure_tool_hooks();
         m_assets = new ToolTabsWindow(this, "Image Assets");
         m_images_panel = m_assets->add_panel<ImageAssetsPanel>(m_view, &m_images);
         m_layouts_panel = m_assets->add_panel<LayoutsPanel>(m_view);
-        m_assets->set_close_callback([this] {
-            if (m_assets) {
-                m_assets->set_visible(false);
-                apply_docks();               // a docked one gives its room back
-                redraw();
-            }
-        });
-        m_assets->on_dock = [this](DockableWindow::Dock side) { dock_window(m_assets, side); };
-        m_assets->on_dock_resize = [this] { apply_docks(); };
         m_assets->center();
         m_assets->set_visible(false);    // show_asset_tab puts it up
     }
 
     void show_asset_tab(AssetTab which) {
-        const bool fresh = !m_assets;
+        ensure_tool_hooks();
+        const bool fresh = !m_images_panel;
         make_assets_window();
         ToolPanel *tab = which == AssetTab::Layouts ? (ToolPanel *) m_layouts_panel
                                                     : (ToolPanel *) m_images_panel;
-        if (!m_assets->visible()) {
-            m_assets->set_visible(true);
-            move_window_to_front(m_assets);
+        ToolTabsWindow *w = ToolTabsWindow::host_of(tab);
+        if (!w)
+            return;
+        if (!w->visible()) {
+            w->set_visible(true);
+            move_window_to_front(w);
             if (!fresh)
                 apply_docks();           // reopened docked: take the room again
+        } else {
+            move_window_to_front(w);
         }
-        if (m_assets->current() != tab)
-            m_assets->show_panel(tab);   // the tab catches up as it comes forward
-        else
-            m_assets->shown();           // catch up on changes made while hidden
-        m_assets->request_focus();
+        w->show_panel(tab);              // the tab catches up as it comes forward
+        w->request_focus();
     }
 
     /* ---- The page's right-click menu --------------------------------- *
@@ -2146,38 +2207,36 @@ public:
 
     /* The Layers window, like Image Assets: made once, hidden when closed. */
     void show_layers() {
+        ensure_tool_hooks();
         if (!m_layers) {
-            m_layers = new LayersPanel(this, m_view);
-            m_layers->set_close_callback([this] {
-                if (m_layers) {
-                    m_layers->set_visible(false);
-                    apply_docks();
-                    redraw();
-                }
-            });
-            m_layers->on_dock = [this](DockableWindow::Dock side) { dock_window(m_layers, side); };
-            m_layers->on_dock_resize = [this] { apply_docks(); };
-            m_layers->fit_height(240);
-            m_layers->center();
-        } else {
-            m_layers->set_visible(true);
-            move_window_to_front(m_layers);
+            auto *w = new ToolTabsWindow(this, "Layers");
+            m_layers = w->add_panel<LayersPanel>(m_view);
+            w->set_size(Vector2i(240, 360));
+            w->center();
+            w->fit_floating();
+        }
+        ToolTabsWindow *w = ToolTabsWindow::host_of(m_layers);
+        if (!w)
+            return;
+        if (!w->visible()) {
+            w->set_visible(true);
             apply_docks();
         }
-        m_layers->refresh();
-        m_layers->request_focus();
+        move_window_to_front(w);
+        w->show_panel(m_layers);
+        w->request_focus();
     }
 
     /* ---- Docking tool windows beside the pages ---------------------- *
      * A docked window fills a strip the full height of the page area on
      * one side; the rulers and pages give it that room. Two on one side sit
-     * next to each other, Image Assets nearest the edge. Undocked, a window
+     * next to each other, in the order the windows were created. Undocked, a window
      * goes back to the size it had floating, where it is. */
     std::vector<DockableWindow *> docked_windows() const {
         std::vector<DockableWindow *> out;
-        for (DockableWindow *w : {(DockableWindow *) m_assets, (DockableWindow *) m_layers,
-                                  (DockableWindow *) m_type_panel})
-            if (w && w->visible() && w->docked() != DockableWindow::Dock::None)
+        for (ToolTabsWindow *w : ToolTabsWindow::live())
+            if (w && w->parent() == static_cast<const Widget *>(this) && w->visible()
+                && w->docked() != DockableWindow::Dock::None)
                 out.push_back(w);
         return out;
     }
@@ -2252,50 +2311,42 @@ public:
         ComposerView::TypeStyle t;
         if (!m_view || !m_view->type_style(t))
             return;
+        ensure_tool_hooks();
         if (!m_type_panel) {
-            m_type_panel = new TypeSpecsPanel(this, m_fonts, m_font_menu,
-                                              [this](const CharStyle &before, const CharStyle &after) {
-                apply_type_specs(before, after);
-            });
-            m_type_panel->on_dock = [this](DockableWindow::Dock side) {
-                dock_window(m_type_panel, side);
-            };
-            m_type_panel->on_dock_resize = [this] { apply_docks(); };
-            /* The panel is disposed when closed. Its dock side and width
-             * are kept, so it reopens where it was. */
-            m_type_panel->set_close_callback([this] {
-                if (!m_type_panel)
-                    return;
-                m_type_dock = m_type_panel->docked();
-                m_type_dock_w = m_type_panel->width();
-                auto it = m_float_size.find(m_type_panel);
-                m_type_float_size = it != m_float_size.end() ? it->second : m_type_panel->size();
-                m_float_size.erase(m_type_panel);
-                m_dock_w.erase(m_type_panel);
-                m_type_panel = nullptr;
+            auto *w = new ToolTabsWindow(this, "Type");
+            m_type_panel = w->add_panel<TypeSpecsPanel>(
+                m_fonts, m_font_menu,
+                [this](const CharStyle &before, const CharStyle &after) {
+                    apply_type_specs(before, after);
+                });
+            if (m_type_float_size.x() > 0)
+                w->set_size(m_type_float_size);
+            else
+                w->set_size(Vector2i(320, 560));
+            w->center();
+            /* A Type-only close saved the dock. Reopen there. */
+            if (m_type_dock != DockableWindow::Dock::None) {
+                m_float_size[w] = w->size();
+                w->set_size(Vector2i(std::max(150, m_type_dock_w), w->height()));
+                w->set_docked(m_type_dock);
                 apply_docks();
-                redraw();
-            });
-        } else {
-            move_window_to_front(m_type_panel);
+            } else {
+                w->fit_floating();
+            }
+        }
+        ToolTabsWindow *w = ToolTabsWindow::host_of(m_type_panel);
+        if (w) {
+            if (!w->visible()) {
+                w->set_visible(true);
+                apply_docks();
+            }
+            move_window_to_front(w);
+            w->show_panel(m_type_panel);
+            w->request_focus();
         }
         m_type_panel->load(style_from(t), type_is_mixed(t),
                            document_font_families(m_view->document()));
         m_type_panel->set_apply_enabled(true);
-        if (m_type_panel->size() == Vector2i(0, 0)) {
-            if (m_type_float_size.x() > 0) {
-                m_type_panel->set_size(m_type_float_size);
-                m_type_panel->relayout();
-            }
-            m_type_panel->center();
-            if (m_type_dock != DockableWindow::Dock::None) {
-                m_float_size[m_type_panel] = m_type_panel->size();
-                m_type_panel->set_size(Vector2i(m_type_dock_w, m_type_panel->height()));
-                m_type_panel->set_docked(m_type_dock);
-                apply_docks();
-            }
-        }
-        m_type_panel->request_focus();
     }
 
     /* A change from a palette field. The steps of one spin are one undo
@@ -3145,7 +3196,8 @@ private:
     Dropdown        *m_font = nullptr, *m_face = nullptr;
     Button          *m_specs = nullptr;
     TypeSpecsPanel  *m_type_panel = nullptr;
-    ToolTabsWindow   *m_assets = nullptr;     // Image Assets: its tabs below
+    ToolTabsWindow   *m_assets = nullptr;     // Image Assets, until a tab is torn off
+    bool             m_tool_hooks = false;
     ImageAssetsPanel *m_images_panel = nullptr;
     LayoutsPanel     *m_layouts_panel = nullptr;
     LayersPanel      *m_layers = nullptr;

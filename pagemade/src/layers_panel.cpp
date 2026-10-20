@@ -16,11 +16,7 @@ using namespace nanogui;
 using namespace pagemade;
 
 LayersPanel::LayersPanel(Widget *parent, ComposerView *view)
-    : DockableWindow(parent, "Layers", true), m_view(view) {
-    set_modal(false);
-    set_traffic_lights_mask(0x1);
-    set_min_size(Vector2i(150, 120));
-
+    : ToolPanel(parent), m_view(view) {
     auto *flex = new FlexLayout(FlexDirection::Column, JustifyContent::FlexStart,
                                 AlignItems::Stretch, 8, 6);
     set_layout(flex);
@@ -169,25 +165,17 @@ void LayersPanel::rebuild() {
     m_down->set_enabled(ai > 0);
     m_move_here->set_enabled(!m_view->selection().empty());
 
-    /* Floating, the height follows the rows; docked, the app sizes it */
-    if (docked() == Dock::None && size() != Vector2i(0, 0))
-        fit_height();
-    else if (Screen *s = screen())
-        if (NVGcontext *ctx = s->nvg_context())
-            perform_layout(ctx);
+    if (auto *frame = ToolTabsWindow::host_of(this)) {
+        if (frame->docked() == DockableWindow::Dock::None)
+            frame->fit_floating();
+        else if (Screen *s = screen())
+            if (NVGcontext *ctx = s->nvg_context())
+                perform_layout(ctx);
+    }
     if (Screen *s = screen())
         s->redraw();
 }
 
-void LayersPanel::fit_height(int w) {
-    Screen *s = screen();
-    NVGcontext *ctx = s ? s->nvg_context() : nullptr;
-    if (!ctx)
-        return;
-    /* Measured as Window does: the title-bar buttons aren't a row */
-    button_panel()->set_visible(false);
-    const Vector2i pref = Widget::preferred_size(ctx);   // title bar included
-    button_panel()->set_visible(true);
-    set_size(Vector2i(w > 0 ? w : width(), std::max(pref.y(), 120)));
-    perform_layout(ctx);
+int LayersPanel::preferred_content_height(NVGcontext *ctx, int) {
+    return std::max(120, Widget::preferred_size(ctx).y());
 }

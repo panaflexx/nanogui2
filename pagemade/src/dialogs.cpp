@@ -818,21 +818,17 @@ struct TypeSpecsPanel::State {
 /* The Type window's margin and the gap above the Apply row. */
 static const int kTypeMargin = 14, kTypeSpacing = 10;
 
-TypeSpecsPanel::TypeSpecsPanel(Screen *screen, FontLibrary &fonts, FontMenuModel &fonts_menu,
+TypeSpecsPanel::TypeSpecsPanel(Widget *parent, FontLibrary &fonts, FontMenuModel &fonts_menu,
                                std::function<void(const CharStyle &, const CharStyle &)> apply)
-    : DockableWindow(screen, "Type", true) {
+    : ToolPanel(parent) {
     auto st = std::make_shared<State>();
     m_state = st;
     st->fonts = &fonts;
     st->fonts_menu = &fonts_menu;
     st->apply = std::move(apply);
 
-    /* A palette, not a dialog: no dimmer, no traffic lights. The title bar
-       is the drag handle; the dock arrows and the X live in the button panel.
-       The fields scroll inside the window when it is docked short. */
-    set_modal(false);
-    set_traffic_lights(false);
-    set_min_size(Vector2i(150, 160));
+    /* The frame supplies the title, the close button and the dock arrows.
+       The fields scroll inside the page when the frame is short. */
     set_layout(new BoxLayout(Orientation::Vertical, Alignment::Maximum, kTypeMargin, kTypeSpacing));
     st->scroll = new ScrollPanel(this, ScrollPanel::ScrollTypes::Vertical);
     /* The scroll panel stretches its child to its full width, under the
@@ -1237,29 +1233,10 @@ TypeSpecsPanel::TypeSpecsPanel(Screen *screen, FontLibrary &fonts, FontMenuModel
             m_state->apply(before, after);
     });
 
-    Button *close = new Button(button_panel(), "", FA_TIMES);
-    close->set_tooltip("Close");
-    close->set_transparent(true);
-    close->set_callback([this] {
-        std::function<void()> cb = close_callback();
-        if (cb)
-            cb();
-        async([this] {
-            if (parent())
-                dispose();
-        });
-    });
     fit_width();
 }
 
 TypeSpecsPanel::~TypeSpecsPanel() = default;
-
-bool TypeSpecsPanel::mouse_button_event(const Vector2i &p, int button, bool down, int modifiers) {
-    /* A title-bar double-click would maximize the palette. Keep it floating. */
-    const bool handled = Window::mouse_button_event(p, button, down, modifiers);
-    m_last_title_click = 0;
-    return handled;
-}
 
 void TypeSpecsPanel::set_apply_enabled(bool enabled) {
     if (m_state && m_state->apply_btn)
@@ -1342,52 +1319,37 @@ void TypeSpecsPanel::fit_width() {
 void TypeSpecsPanel::perform_layout(NVGcontext *ctx) {
     fit_width();
     if (width() > 0 && height() > 0 && m_state->scroll) {
-        /* The fields take what the title, margins and Apply row leave. */
-        const int header = m_theme ? m_theme->m_window_header_height : 30;
+        /* The frame already took the title and the tab strip. The fields
+         * take what the margins and the Apply row leave. */
         const int actions = m_state->actions->preferred_size(ctx).y();
-        const int h = height() - header - 2 * kTypeMargin - kTypeSpacing - actions;
-        m_state->scroll->set_fixed_size(Vector2i(width() - 2 * kTypeMargin, std::max(40, h)));
+        const int h = height() - 2 * kTypeMargin - kTypeSpacing - actions;
+        m_state->scroll->set_fixed_size(Vector2i(std::max(40, width() - 2 * kTypeMargin),
+                                                 std::max(40, h)));
     }
-    DockableWindow::perform_layout(ctx);
+    Widget::perform_layout(ctx);
+}
+
+int TypeSpecsPanel::preferred_content_height(NVGcontext *ctx, int) {
+    if (!m_state)
+        return -1;
+    fit_width();
+    return 2 * kTypeMargin + kTypeSpacing
+        + m_state->actions->preferred_size(ctx).y()
+        + m_state->form->preferred_size(ctx).y();
 }
 
 void TypeSpecsPanel::relayout() {
-    Screen *s = screen();
-    if (!s || !s->nvg_context() || size() == Vector2i(0, 0))
+    ToolTabsWindow *frame = ToolTabsWindow::host_of(this);
+    if (frame && frame->panel_count() == 1 && frame->docked() == DockableWindow::Dock::None
+        && !frame->split()) {
+        frame->fit_floating();
         return;
-    NVGcontext *ctx = s->nvg_context();
-    if (docked() == Dock::None) {
-        fit_width();
-        const int header = m_theme ? m_theme->m_window_header_height : 30;
-        int h = header + 2 * kTypeMargin + kTypeSpacing +
-                m_state->actions->preferred_size(ctx).y() +
-                m_state->form->preferred_size(ctx).y();
-        /* Taller than the room below it, the fields scroll; only near the
-         * bottom of the screen does it move up to keep a usable height. */
-        if (parent()) {
-            const int room = parent()->height();
-            const int below = room - 16 - position().y();
-            if (h > below && below >= 320)
-                h = below;
-            h = std::min(h, std::max(160, room - 32));
-            if (position().y() + h > room - 16)
-                set_position(Vector2i(position().x(), std::max(16, room - 16 - h)));
-        }
-        if (h != height())
-            set_size(Vector2i(width(), h));
     }
-    perform_layout(ctx);
-    s->redraw();
-}
-
-bool TypeSpecsPanel::mouse_drag_event(const Vector2i &p, const Vector2i &rel, int button,
-                                      int modifiers) {
-    const int before = width();
-    const bool handled = DockableWindow::mouse_drag_event(p, rel, button, modifiers);
-    /* Floating, a new width brings the height that fits it. */
-    if (m_resize && docked() == Dock::None && width() != before)
-        relayout();
-    return handled;
+    if (Screen *s = screen())
+        if (NVGcontext *ctx = s->nvg_context()) {
+            perform_layout(ctx);
+            s->redraw();
+        }
 }
 
 void TypeSpecsPanel::load(const CharStyle &style, bool mixed,

@@ -16,7 +16,7 @@
 
 #include <nanogui/window.h>
 
-#include "dock_window.h"
+#include "tool_tabs.h"
 #include "page.h"
 #include "setup_adjust.h"
 
@@ -129,13 +129,19 @@ struct CharStyle;
  * Apply writes the edited fields onto the current selection; closing drops
  * unapplied edits. `apply` receives the style the panel was loaded from and
  * the edited one. */
-class TypeSpecsPanel : public DockableWindow {
+class TypeSpecsPanel : public ToolPanel {
 public:
-    TypeSpecsPanel(nanogui::Screen *screen, pagemade::FontLibrary &fonts,
+    TypeSpecsPanel(nanogui::Widget *parent, pagemade::FontLibrary &fonts,
                    pagemade::FontMenuModel &fonts_menu,
                    std::function<void(const pagemade::CharStyle &before,
                                       const pagemade::CharStyle &after)> apply);
     ~TypeSpecsPanel() override;
+
+    std::string title() const override { return "Type"; }
+    nanogui::Vector2i floor_size() const override { return nanogui::Vector2i(150, 160); }
+    /* A Type-only window is disposed on close. Shared with a panel that
+     * persists, the window hides and this panel stays. */
+    bool persist_on_close() const override { return false; }
 
     /* Show `style`. A mixed selection leaves the font caption blank until
        the user picks one, and says that Apply changes only edited fields. */
@@ -143,14 +149,11 @@ public:
               const std::vector<std::string> &document_fonts);
     void set_apply_enabled(bool enabled);
 
-    bool mouse_button_event(const nanogui::Vector2i &p, int button, bool down,
-                            int modifiers) override;
-    bool mouse_drag_event(const nanogui::Vector2i &p, const nanogui::Vector2i &rel,
-                          int button, int modifiers) override;
     void perform_layout(NVGcontext *ctx) override;
+    int preferred_content_height(NVGcontext *ctx, int width) override;
 
-    /* Floating: keep the width, fit the height to the fields. Docked: lay
-     * out in the size the app gave it. */
+    /* Alone and floating, the frame grows to the fields. Otherwise the
+     * page lays out in the size the frame gave it. */
     void relayout();
 
 private:

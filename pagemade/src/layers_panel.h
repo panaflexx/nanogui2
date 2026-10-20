@@ -9,7 +9,7 @@
  */
 #pragma once
 
-#include "dock_window.h"
+#include "tool_tabs.h"
 
 #include "page.h"
 
@@ -18,14 +18,15 @@
 class ComposerView;
 namespace nanogui { class Button; class Widget; }
 
-class LayersPanel : public DockableWindow {
+class LayersPanel : public ToolPanel {
 public:
     LayersPanel(nanogui::Widget *parent, ComposerView *view);
 
+    std::string title() const override { return "Layers"; }
+    nanogui::Vector2i floor_size() const override { return nanogui::Vector2i(150, 120); }
     /* Follow the document: rebuilt when the layers changed. */
-    void refresh();
-    /* Floating, as tall as the rows need, at `width` (0 keeps the width). */
-    void fit_height(int width = 0);
+    void refresh() override;
+    int preferred_content_height(NVGcontext *ctx, int width) override;
 
 private:
     void rebuild();

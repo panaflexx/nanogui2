@@ -193,7 +193,7 @@ void TabWidgetBase::draw(NVGcontext* ctx) {
             nvgFontSize(ctx, font_size());
         }
     }
-    if (m_tab_drag_index != -1 && m_tab_drag_start != m_tab_drag_end) {
+    if (!m_tab_drag_outside && m_tab_drag_index != -1 && m_tab_drag_start != m_tab_drag_end) {
         int x_pos = m_pos.x() + m_tab_drag_min + m_tab_drag_end - m_tab_drag_start;
         nvgBeginPath(ctx);
         nvgRoundedRect(ctx, x_pos + 0.5f, m_pos.y() + 1.5f, m_tab_drag_max - m_tab_drag_min,
@@ -297,7 +297,7 @@ bool TabWidgetBase::mouse_button_event(const Vector2i& p, int button, bool down,
                     if (tab_changed)update_visibility();
                 }
                 else if (m_tab_drag_index != -1) {
-                    m_tab_drag_index = -1;
+                    finish_tab_drag(p, false);
                     mouse_motion_event(p, Vector2i(0), 0, 0);
                 }
             }
@@ -307,7 +307,7 @@ bool TabWidgetBase::mouse_button_event(const Vector2i& p, int button, bool down,
         if (!down) {
             handled = m_close_index_pushed != -1 || m_tab_drag_index != -1;
             m_close_index_pushed = -1;
-            m_tab_drag_index = -1;
+            finish_tab_drag(p, false);
         }
 
         handled = true;
@@ -331,23 +331,8 @@ bool TabWidgetBase::mouse_motion_event(const Vector2i& p, const Vector2i& rel,
     int button, int modifiers) {
     auto [index, close] = tab_at_position(p, false);
 
-    if (m_tab_drag_index != -1) {
-        m_tab_drag_end = p.x();
-        if (index != -1 && m_tab_drag_index != index) {
-            int i0 = std::min(m_tab_drag_index, index),
-                i1 = std::max(m_tab_drag_index, index);
-            int mid = (m_tab_offsets[i0] + m_tab_offsets[i1 + 1]) / 2;
-            if ((m_tab_drag_index < index && p.x() - m_pos.y() > mid) ||
-                (m_tab_drag_index > index && p.x() - m_pos.y() < mid)) {
-                std::swap(m_tab_captions[index], m_tab_captions[m_tab_drag_index]);
-                std::swap(m_tab_ids[index], m_tab_ids[m_tab_drag_index]);
-                TabWidgetBase::perform_layout(screen()->nvg_context());
-                m_tab_drag_index = index;
-                m_active_tab = index;
-            }
-        }
+    if (m_tab_drag_index != -1)
         return true;
-    }
 
     if (!close)
         index = -1;
@@ -359,6 +344,87 @@ bool TabWidgetBase::mouse_motion_event(const Vector2i& p, const Vector2i& rel,
     }
 
     return Widget::mouse_motion_event(p, rel, button, modifiers);
+}
+
+int TabWidgetBase::tab_index_at(const Vector2i &p) const {
+    return tab_at_position(p, true).first;
+}
+
+void TabWidgetBase::drag_reorder(const Vector2i &p) {
+    auto [index, close] = tab_at_position(p, false);
+    (void) close;
+    m_tab_drag_end = p.x();
+    if (index == -1 || m_tab_drag_index == index || m_tab_offsets.size() < 2)
+        return;
+    int i0 = std::min(m_tab_drag_index, index),
+        i1 = std::max(m_tab_drag_index, index);
+    int mid = (m_tab_offsets[i0] + m_tab_offsets[i1 + 1]) / 2;
+    /* Left as it has always been: x compared against the widget's y. */
+    if ((m_tab_drag_index < index && p.x() - m_pos.y() > mid) ||
+        (m_tab_drag_index > index && p.x() - m_pos.y() < mid)) {
+        std::swap(m_tab_captions[index], m_tab_captions[m_tab_drag_index]);
+        std::swap(m_tab_ids[index], m_tab_ids[m_tab_drag_index]);
+        if (Screen *s = screen())
+            if (NVGcontext *ctx = s->nvg_context())
+                TabWidgetBase::perform_layout(ctx);
+        m_tab_drag_index = index;
+        m_active_tab = index;
+    }
+}
+
+void TabWidgetBase::finish_tab_drag(const Vector2i &p, bool cancel) {
+    if (m_tab_drag_index < 0)
+        return;
+    const int id = (m_tab_drag_index < (int) m_tab_ids.size()) ? tab_id(m_tab_drag_index) : -1;
+    const bool torn = m_tab_drag_outside;
+    m_tab_drag_index = -1;
+    m_tab_drag_outside = false;
+    m_tab_drag_start = m_tab_drag_end = -1;
+    if (Screen *s = screen())
+        s->set_tab_drag_ghost("");
+    if (torn && id >= 0 && m_tab_drag_callback) {
+        const Vector2i origin = parent() ? parent()->absolute_position() : Vector2i(0);
+        m_tab_drag_callback(id, p + origin, cancel ? TabDragPhase::Cancel : TabDragPhase::Release);
+    }
+}
+
+bool TabWidgetBase::mouse_drag_event(const Vector2i &p, const Vector2i &rel,
+                                     int button, int modifiers) {
+    if (m_tab_drag_index < 0 || (button & (1 << GLFW_MOUSE_BUTTON_1)) == 0)
+        return Widget::mouse_drag_event(p, rel, button, modifiers);
+
+    const int tab_height = m_theme
+        ? font_size() + 2 * m_theme->m_tab_button_vertical_padding
+        : font_size() + 8;
+    const int slop = 12;
+    const bool near = p.y() > m_pos.y() - slop && p.y() <= m_pos.y() + tab_height + slop
+        && p.x() >= m_pos.x() - slop && p.x() < m_pos.x() + m_size.x() + slop;
+    if (!m_tab_drag_outside && near) {
+        drag_reorder(p);
+    } else {
+        m_tab_drag_outside = true;
+        m_tab_drag_end = p.x();
+        if (Screen *s = screen())
+            s->set_tab_drag_ghost(m_tab_captions[m_tab_drag_index]);
+        if (m_tab_drag_callback && m_tab_drag_index < (int) m_tab_ids.size()) {
+            const Vector2i origin = parent() ? parent()->absolute_position() : Vector2i(0);
+            m_tab_drag_callback(tab_id(m_tab_drag_index), p + origin, TabDragPhase::Move);
+        }
+    }
+    (void) rel;
+    (void) modifiers;
+    return true;
+}
+
+bool TabWidgetBase::consumes_external_drag_release() const {
+    return m_tab_drag_index != -1;
+}
+
+void TabWidgetBase::drag_cancel_event() {
+    Vector2i p(0);
+    if (Screen *s = screen())
+        p = parent() ? s->mouse_pos() - parent()->absolute_position() : s->mouse_pos();
+    finish_tab_drag(p, true);
 }
 
 TabWidget::TabWidget(Widget* parent, const std::string& font)
@@ -438,6 +504,50 @@ void TabWidget::remove_tab(int id) {
     m_widgets.erase(id);
     if (m_remove_children)
         remove_child(widget);
+}
+
+Widget *TabWidget::tab_contents(int id) const {
+    auto it = m_widgets.find(id);
+    return it == m_widgets.end() ? nullptr : it->second;
+}
+
+int TabWidget::transfer_tab(int id, TabWidget *dest, int index) {
+    if (!dest || dest == this)
+        return -1;
+    auto it = m_widgets.find(id);
+    if (it == m_widgets.end() || !it->second)
+        return -1;
+    Widget *page = it->second;
+    const int idx = tab_index(id);
+    const bool was_active = idx == m_active_tab;
+    const std::string caption = m_tab_captions[idx];
+
+    m_tab_captions.erase(m_tab_captions.begin() + idx);
+    m_tab_ids.erase(m_tab_ids.begin() + idx);
+    if (idx <= m_active_tab)
+        m_active_tab = std::max(0, m_active_tab - 1);
+    if (m_tab_ids.empty())
+        m_active_tab = 0;
+    m_widgets.erase(it);
+
+    page->reparent(dest);
+    if (index < 0 || index > dest->tab_count())
+        index = dest->tab_count();
+    const int nid = dest->insert_tab(index, caption, page);
+
+    update_visibility();
+    if (was_active && m_callback && tab_count() > 0)
+        m_callback(selected_id());
+
+    auto lay = [](Widget *w) {
+        if (Screen *s = w->screen())
+            if (NVGcontext *ctx = s->nvg_context())
+                w->perform_layout(ctx);
+        w->propagate_cache_dirty();
+    };
+    lay(this);
+    lay(dest);
+    return nid;
 }
 
 NAMESPACE_END(nanogui)

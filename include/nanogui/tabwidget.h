@@ -19,6 +19,9 @@
 
 NAMESPACE_BEGIN(nanogui)
 
+/// A draggable tab that has left its strip: move, the matching release, or Escape.
+enum class TabDragPhase { Move, Release, Cancel };
+
 /**
  * \class TabWidgetBase tabwidget.h nanogui/tabwidget.h
  *
@@ -72,6 +75,16 @@ public:
     bool tabs_draggable() const { return m_tabs_draggable; }
     void set_tabs_draggable(bool value) { m_tabs_draggable = value; }
 
+    /// Index of the tab under `p` (parent coordinates), or -1 off the strip.
+    int tab_index_at(const Vector2i &p) const;
+
+    /// Fired once a drag leaves the strip, on release after that, and on Escape.
+    /// `screen_pos` is in screen coordinates. In-strip reordering does not call it.
+    void set_tab_drag_callback(
+        const std::function<void(int, const Vector2i &, TabDragPhase)> &cb) {
+        m_tab_drag_callback = cb;
+    }
+
     /// Return the padding between the tab widget boundary and child widgets
     int padding() const { return m_padding; }
     void set_padding(int value) { m_padding = value; }
@@ -110,11 +123,17 @@ public:
     virtual bool mouse_enter_event(const Vector2i &p, bool enter) override;
     virtual bool mouse_motion_event(const Vector2i &p, const Vector2i &rel, int button,
                                     int modifiers) override;
+    virtual bool mouse_drag_event(const Vector2i &p, const Vector2i &rel, int button,
+                                  int modifiers) override;
+    bool consumes_external_drag_release() const override;
+    void drag_cancel_event() override;
 
 protected:
     std::pair<int, bool> tab_at_position(const Vector2i &p,
                                          bool test_vertical = true) const;
     virtual void update_visibility();
+    void drag_reorder(const Vector2i &p);
+    void finish_tab_drag(const Vector2i &p, bool cancel);
 
 protected:
     std::string m_font;
@@ -126,6 +145,8 @@ protected:
     int m_tab_drag_index = -1;
     int m_tab_drag_min   = -1, m_tab_drag_max = -1;
     int m_tab_drag_start = -1, m_tab_drag_end = -1;
+    bool m_tab_drag_outside = false;
+    std::function<void(int, const Vector2i &, TabDragPhase)> m_tab_drag_callback;
     int m_close_index = -1, m_close_index_pushed = -1;
     bool m_tabs_draggable = false;
     bool m_tabs_closeable = false;
@@ -192,6 +213,14 @@ public:
 
     /// Removes a tab with the specified ID
     virtual void remove_tab(int id) override;
+
+    /// The page widget for a tab id, or nullptr.
+    Widget *tab_contents(int id) const;
+
+    /// Move the page of `id` onto `dest` at `index` (clamped; `tab_count()` appends).
+    /// The page is reparented. `remove_tab` is not used, so the page is not destroyed
+    /// and the close callback does not run. Returns the id on `dest`, or -1.
+    int transfer_tab(int id, TabWidget *dest, int index);
 
     /// Remove child widgets when the associated tab is closed/removed?
     bool remove_children() const { return m_remove_children; }

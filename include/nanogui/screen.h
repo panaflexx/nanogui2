@@ -131,6 +131,10 @@ public:
     /// Send an event that will cause the screen to be redrawn at the next event loop iteration
     void redraw();
 
+    /// Caption drawn under the cursor while a tab has been dragged off its
+    /// strip. Empty clears it. The strip's own ghost stays inside the strip.
+    void set_tab_drag_ghost(const std::string &caption);
+
     /**
      * \brief Redraw the screen if the redraw flag is set
      *
@@ -380,6 +384,10 @@ protected:
     void end_drag(bool drop);
     void set_screen_cursor(Cursor cursor);
     void draw_drag_preview(NVGcontext* ctx);
+    void draw_tab_drag_ghost(NVGcontext* ctx);
+    std::string m_tab_drag_ghost;
+    /// Escape cancelled a drag: the matching mouse release is not a click.
+    bool m_suppress_drag_release = false;
     bool m_process_events = true;
     Color m_background;
     std::string m_caption;

@@ -381,6 +381,13 @@ public:
     /// Handle a mouse drag event (default implementation: do nothing)
     virtual bool mouse_drag_event(const Vector2i& p, const Vector2i& rel, int button, int modifiers);
 
+    /// A left release outside this widget (the screen delivers it here because
+    /// the press started here) should not also click whatever is underneath.
+    virtual bool consumes_external_drag_release() const { return false; }
+
+    /// Escape while this widget holds the pointer. The default leaves the drag.
+    virtual void drag_cancel_event() {}
+
     /// Handle a mouse enter/leave event (default implementation: record this fact, but do nothing)
     virtual bool mouse_enter_event(const Vector2i& p, bool enter);
 

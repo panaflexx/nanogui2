@@ -583,6 +583,39 @@ void Window::draw(NVGcontext* ctx) {
         }
         nvgRestore(ctx);
     }
+
+    /* Outside Widget::draw, so a cached child list cannot freeze the stroke. */
+    if (m_drop_highlight != DropHighlight::None) {
+        nvgSave(ctx);
+        nvgResetScissor(ctx);
+        const Color green(48, 168, 72, 230);
+        nvgStrokeColor(ctx, green);
+        nvgStrokeWidth(ctx, 2.f);
+        if (m_drop_highlight == DropHighlight::Band) {
+            /* Bottom third of the body, under the title, so the stroke
+             * matches a drop target that measures the body the same way. */
+            const float header = m_title.empty() ? 0.f : (float) hh;
+            const float body = std::max(1.f, fh - header);
+            const float top = fy + header + body * (2.f / 3.f);
+            nvgBeginPath(ctx);
+            nvgRoundedRect(ctx, fx + 1.f, top, fw - 2.f, fy + fh - top - 1.f, (float) cr);
+            nvgFillColor(ctx, Color(48, 168, 72, 70));
+            nvgFill(ctx);
+            nvgStroke(ctx);
+        } else {
+            nvgBeginPath(ctx);
+            nvgRoundedRect(ctx, fx + 1.f, fy + 1.f, fw - 2.f, fh - 2.f, (float) cr);
+            nvgStroke(ctx);
+        }
+        nvgRestore(ctx);
+    }
+}
+
+void Window::set_drop_highlight(DropHighlight highlight) {
+    if (m_drop_highlight == highlight)
+        return;
+    m_drop_highlight = highlight;
+    propagate_cache_dirty();
 }
 
 void Window::dispose() {

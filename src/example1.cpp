@@ -513,6 +513,98 @@ public:
                 });
             });
     }
+
+    /* Two windows whose tabs can be dragged onto each other. The window under
+     * the pointer draws a green outline; a release on empty space tears the
+     * tab into a new window. */
+    void bind_demo_tabs(TabWidget *tabs) {
+        tabs->set_tabs_draggable(true);
+        tabs->set_remove_children(false);
+        tabs->set_tab_drag_callback([this, tabs](int id, const Vector2i &p, TabDragPhase phase) {
+            on_demo_tab_drag(tabs, id, p, phase);
+        });
+    }
+
+    void on_demo_tab_drag(TabWidget *src, int id, const Vector2i &pos, TabDragPhase phase) {
+        for (Widget *c : children())
+            if (auto *w = dynamic_cast<Window *>(c))
+                w->set_drop_highlight(Window::DropHighlight::None);
+        if (phase == TabDragPhase::Cancel || !src)
+            return;
+
+        Window *hit = nullptr;
+        TabWidget *hit_tabs = nullptr;
+        bool over_source = false;
+        /* The front window under the pointer. One that has no draggable
+         * tabs is not a hole onto a group behind it. */
+        Window *top = nullptr;
+        for (Widget *w = find_widget(pos); w && w != this; w = w->parent())
+            if (auto *win = dynamic_cast<Window *>(w))
+                top = win;
+        if (top) {
+            for (Widget *ch : top->children()) {
+                auto *t = dynamic_cast<TabWidget *>(ch);
+                if (!t || !t->tabs_draggable())
+                    continue;
+                if (t == src)
+                    over_source = true;
+                else {
+                    hit = top;
+                    hit_tabs = t;
+                }
+                break;
+            }
+        }
+        if (hit && phase == TabDragPhase::Move)
+            hit->set_drop_highlight(Window::DropHighlight::Outline);
+        if (phase != TabDragPhase::Release)
+            return;
+        if (hit_tabs) {
+            Vector2i local = pos - hit_tabs->parent()->absolute_position();
+            int index = hit_tabs->tab_index_at(local);
+            if (index < 0)
+                index = hit_tabs->tab_count();
+            int nid = src->transfer_tab(id, hit_tabs, index);
+            if (nid >= 0)
+                hit_tabs->set_selected_id(nid);
+            if (nvg_context())
+                perform_layout();
+            return;
+        }
+        if (over_source)
+            return;
+        auto *w = new Window(this, "Tabs", true);
+        w->set_layout(new GroupLayout());
+        w->set_position(pos - Vector2i(36, 14));
+        w->set_size(Vector2i(220, 160));
+        auto *tabs = new TabWidget(w);
+        bind_demo_tabs(tabs);
+        int nid = src->transfer_tab(id, tabs, 0);
+        if (nid >= 0)
+            tabs->set_selected_id(nid);
+        if (nvg_context())
+            w->perform_layout(nvg_context());
+    }
+
+    void CreateDraggableTabs() {
+        auto make = [this](const char *title, Vector2i pos, const char *a, const char *b) {
+            auto *w = new Window(this, title, true);
+            w->set_position(pos);
+            w->set_layout(new GroupLayout());
+            w->set_size(Vector2i(240, 180));
+            auto *tabs = new TabWidget(w);
+            bind_demo_tabs(tabs);
+            for (const char *caption : {a, b}) {
+                auto *page = new Widget(tabs);
+                page->set_layout(new GroupLayout());
+                new Label(page, caption);
+                tabs->append_tab(caption, page);
+            }
+        };
+        make("Tab group A", Vector2i(430, 430), "Alpha", "Beta");
+        make("Tab group B", Vector2i(700, 430), "Gamma", "Delta");
+    }
+
     void CreateSmallWindow()
     {
         GridLayout* layout = new GridLayout(Orientation::Horizontal, 2,
@@ -1093,6 +1185,7 @@ public:
         CreateMainWindow();
         CreateBasicWindow();
         CreateMiscWindow();
+        CreateDraggableTabs();
         CreateSmallWindow();
         //CreateTreeViewWindow();
         CreateControlsDefault();

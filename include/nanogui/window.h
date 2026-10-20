@@ -117,6 +117,11 @@ public:
     void set_close_callback(const std::function<void()> &cb) { m_close_callback = cb; }
     const std::function<void()> &close_callback() const { return m_close_callback; }
 
+    /// Green drop hint drawn over the chrome, outside the cached child list.
+    enum class DropHighlight { None, Outline, Band };
+    void set_drop_highlight(DropHighlight highlight);
+    DropHighlight drop_highlight() const { return m_drop_highlight; }
+
     /// Return the panel used to house window buttons (right side of title bar)
     Widget* button_panel();
 
@@ -198,6 +203,7 @@ protected:
     /// Title-bar double-click timer for maximize toggle.
     double m_last_title_click = 0.0;
     std::function<void()> m_close_callback;
+    DropHighlight m_drop_highlight = DropHighlight::None;
 public:
 #if defined(_DEBUG) || !defined(NDEBUG)
     float m_last_drawtime_ms = 0.0f;
