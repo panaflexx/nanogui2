@@ -570,14 +570,15 @@ void Window::draw(NVGcontext* ctx) {
     if (m_resizable && !m_minimized) {
         nvgSave(ctx);
         nvgResetScissor(ctx);
-        float rx = fx + fw - 3.f;
+        float rx = resize_from_left() ? fx + 3.f : fx + fw - 3.f;
         float ry = fy + fh - 3.f;
+        const float xsign = resize_from_left() ? 1.f : -1.f;
         nvgStrokeWidth(ctx, 1.25f);
         nvgStrokeColor(ctx, m_theme->m_border_medium);
         for (int i = 0; i < 3; ++i) {
             float o = 3.f + i * 3.5f;
             nvgBeginPath(ctx);
-            nvgMoveTo(ctx, rx - o, ry);
+            nvgMoveTo(ctx, rx + xsign * o, ry);
             nvgLineTo(ctx, rx, ry - o);
             nvgStroke(ctx);
         }
@@ -715,10 +716,18 @@ bool Window::mouse_drag_event(const Vector2i& p, const Vector2i& rel, int button
         bool resized = false;
 
 
-        if (m_resize_dir.x() == 1) {
-            if ((rel.x() > 0 && p.x() >= lowerRightCorner.x()) || (rel.x() < 0)) {
-                m_size.x() += rel.x();
-                m_snap_tot_rel.x() += rel.x();
+        if (m_resize_dir.x() != 0) {
+            /* +1 grows to the right, -1 grows to the left. Growing only
+             * while the pointer is past that edge, so a clamped size does
+             * not run away from the cursor. */
+            const int sign = m_resize_dir.x();
+            const int edge = sign < 0 ? m_pos.x() : lowerRightCorner.x();
+            const bool grow = rel.x() * sign > 0;
+            const bool past = sign < 0 ? p.x() <= edge : p.x() >= edge;
+            if ((grow && past) || rel.x() * sign < 0) {
+                const int dx = rel.x() * sign;
+                m_size.x() += dx;
+                m_snap_tot_rel.x() += dx;
                 resized = true;
             }
         }
@@ -765,7 +774,9 @@ bool Window::mouse_drag_event(const Vector2i& p, const Vector2i& rel, int button
                     ((Right >= child_Left) && (Right <= child_Right))
                     || ((Left >= child_Left) && (Left <= child_Right))
                     || ((Left <= child_Left) && (Right >= child_Right));
-                if (CheckX)
+                /* The snap tracks the right edge. A left grip keeps that
+                 * edge still, so the width is whatever the drag asked. */
+                if (CheckX && m_resize_dir.x() > 0)
                 {
                     int RL = abs(Right - child_Left);
                     if (RL < MinRL && RL < m_snap_offset) {
@@ -784,10 +795,12 @@ bool Window::mouse_drag_event(const Vector2i& p, const Vector2i& rel, int button
 
             }
             {// Do a final check for the screen boarders
-                int RL = abs(Right - screen()->size().x());
-                if (RL < MinRL && RL < m_snap_offset) {
-                    MinRL = RL;
-                    m_size.x() = screen()->size().x() - Left;
+                if (m_resize_dir.x() > 0) {
+                    int RL = abs(Right - screen()->size().x());
+                    if (RL < MinRL && RL < m_snap_offset) {
+                        MinRL = RL;
+                        m_size.x() = screen()->size().x() - Left;
+                    }
                 }
                 int BT = abs(Bottom - screen()->size().y());
                 if (BT < MinBT && BT < m_snap_offset) {
@@ -808,6 +821,9 @@ bool Window::mouse_drag_event(const Vector2i& p, const Vector2i& rel, int button
         // Clamp to max size (only enforce non-zero components)
         if (m_max_size.x() > 0) m_size.x() = std::min(m_size.x(), m_max_size.x());
         if (m_max_size.y() > 0) m_size.y() = std::min(m_size.y(), m_max_size.y());
+
+        if (m_resize_dir.x() < 0)
+            m_pos.x() = lowerRightCorner.x() - m_size.x();
 
         if (resized)
             perform_layout(ctx);
@@ -906,7 +922,7 @@ bool Window::mouse_button_event(const Vector2i& p, int button, bool down, int mo
     // Give resize precedence over child widgets.
     if (m_resizable && !m_minimized && down && button == GLFW_MOUSE_BUTTON_1) {
         if (check_horizontal_resize(p) || check_vertical_resize(p)) {
-            m_resize_dir.x() = check_horizontal_resize(p) ? 1 : 0;
+            m_resize_dir.x() = check_horizontal_resize(p) ? (resize_from_left() ? -1 : 1) : 0;
             m_resize_dir.y() = check_vertical_resize(p) ? 1 : 0;
             m_resize = true;
             m_snap_init = size();
@@ -942,7 +958,7 @@ bool Window::mouse_button_event(const Vector2i& p, int button, bool down, int mo
             m_snap_tot_rel = Vector2f(0, 0);
             return true;
         } else if (m_resizable && !m_minimized && down) {
-            m_resize_dir.x() = check_horizontal_resize(p) ? 1 : 0;
+            m_resize_dir.x() = check_horizontal_resize(p) ? (resize_from_left() ? -1 : 1) : 0;
             m_resize_dir.y() = check_vertical_resize(p) ? 1 : 0;
             m_resize = m_resize_dir.x() != 0 || m_resize_dir.y() != 0;
             m_snap_init = size();

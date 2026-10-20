@@ -163,6 +163,8 @@ protected:
     virtual void refresh_relative_placement();
     virtual bool check_horizontal_resize(const Vector2i& mousePos);
     virtual bool check_vertical_resize(const Vector2i& mousePos);
+    /// Width grip on the left edge. The right edge stays put.
+    virtual bool resize_from_left() const { return false; }
 
     /// Traffic-light geometry / hit-test helpers (local to window).
     bool traffic_lights_active() const;

@@ -5,7 +5,8 @@
  * right side (pressed again, back to floating). The window only asks: the
  * app makes the room, places the window and then calls set_docked.
  * Dragging the title bar of a docked window undocks it; resizing one asks
- * for its room again.
+ * for its room again. On the right, the width grip is the left edge so
+ * the window grows into the page.
  */
 #pragma once
 
@@ -29,6 +30,10 @@ public:
 
     bool mouse_drag_event(const nanogui::Vector2i &p, const nanogui::Vector2i &rel,
                           int button, int modifiers) override;
+
+protected:
+    bool check_horizontal_resize(const nanogui::Vector2i &mousePos) override;
+    bool resize_from_left() const override { return m_dock == Dock::Right; }
 
 private:
     nanogui::Button *m_dock_left = nullptr, *m_dock_right = nullptr;

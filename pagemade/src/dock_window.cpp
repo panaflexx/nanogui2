@@ -34,6 +34,19 @@ void DockableWindow::set_docked(Dock side) {
         screen()->redraw();
 }
 
+bool DockableWindow::check_horizontal_resize(const Vector2i &mousePos) {
+    if (m_dock != Dock::Right)
+        return Window::check_horizontal_resize(mousePos);
+    if (!m_theme)
+        return false;
+    const int offset = m_theme->m_resize_area_offset;
+    const Vector2i origin = absolute_position();
+    const int below_title = origin.y() + m_theme->m_window_header_height;
+    return mousePos.y() > below_title
+        && mousePos.x() >= origin.x()
+        && mousePos.x() <= origin.x() + offset;
+}
+
 bool DockableWindow::mouse_drag_event(const Vector2i &p, const Vector2i &rel, int button,
                                       int modifiers) {
     /* Moving a docked window takes it out of the dock first */
