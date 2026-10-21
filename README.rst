@@ -34,7 +34,14 @@ functionality are provided using pybind11_.
 
 **NEW**: Flex Layout (flexdemo.cpp)
 
-**NEW**: Menubar, Dropdown menus 
+**NEW**: Menubar, Dropdown menus
+
+**NEW**: nmail, an IMAP and SMTP mail client. HTML and Markdown mail, compose,
+reply, contacts, and attachments. TLS when the build has OpenSSL.
+
+**NEW**: PageMade, a desktop publisher in the spirit of Aldus PageMaker. Layout
+in points, the same draw list on screen and in PDF, pictures, SVG, styles,
+and a print dialog.
 
 **Note**: This repository contains an improved port of the original NanoGUI_.
 The most visible change to developers is that it no longer relies on Eigen or
@@ -125,6 +132,34 @@ Image Stash example
 .. image:: https://raw.githubusercontent.com/panaflexx/nanogui2/master/resources/screenshot7.png
    :alt: Screenshot of Example 6.
    :align: center
+
+nmail
+
+.. image:: https://raw.githubusercontent.com/panaflexx/nanogui2/master/resources/nmail-screenshot.png
+   :alt: Screenshot of nmail.
+   :align: center
+
+PageMade
+
+.. image:: https://raw.githubusercontent.com/panaflexx/nanogui2/master/resources/pagemade-screenshot.png
+   :alt: Screenshot of PageMade.
+   :align: center
+
+Applications
+----------------------------------------------------------------------------------------
+
+nmail (``nmail/``) is an IMAP and SMTP client. A worker thread fetches folders
+and messages, so the window stays live. Mail renders as HTML or Markdown.
+Compose, reply, forward, contacts, and attachments are in the app. A build
+with OpenSSL speaks TLS.
+
+PageMade (``pagemade/``) lays out pages in points. HarfBuzz shapes the text,
+lines break and hyphenate, and stories thread through frames. The screen and
+PDF export draw the same list. Publications hold pictures (with cropping),
+placed SVG, paragraph and character styles, color swatches, and layout
+templates. File > Print picks a printer, a copy count, and a page range, then
+spools that PDF. Linux and macOS use ``lp``; Windows printing is not available
+yet.
 
 Description
 ----------------------------------------------------------------------------------------
