@@ -27,13 +27,33 @@ using namespace nanogui;
 namespace pagemade {
 namespace {
 
+/* A color chip; `none` is paper white crossed by a red slash. */
+void draw_chip(NVGcontext *ctx, float x, float y, float size, const pagemade::Color &color,
+               bool none) {
+    nvgBeginPath(ctx);
+    nvgRoundedRect(ctx, x, y, size, size, 3.f);
+    nvgFillColor(ctx, none ? nvgRGB(255, 255, 255) : nvgRGBAf(color.r, color.g, color.b, 1.f));
+    nvgFill(ctx);
+    nvgStrokeWidth(ctx, 1.f);
+    nvgStrokeColor(ctx, nvgRGBA(0, 0, 0, 90));
+    nvgStroke(ctx);
+    if (none) {
+        nvgBeginPath(ctx);
+        nvgMoveTo(ctx, x + size - 2.f, y + 2.f);
+        nvgLineTo(ctx, x + 2.f, y + size - 2.f);
+        nvgStrokeWidth(ctx, 1.5f);
+        nvgStrokeColor(ctx, nvgRGB(210, 30, 30));
+        nvgStroke(ctx);
+    }
+}
+
 /* A swatch row: color chip, name, and the CMYK definition right-aligned.
  * Built-ins draw a lock in the mark zone; custom rows a pencil. The mark
  * machinery swallows the press so editing never chooses the row. */
 class SwatchRow : public MenuItem {
 public:
-    SwatchRow(Widget *parent, const Swatch &swatch, bool locked)
-        : MenuItem(parent, swatch.name), m_color(swatch.rgb), m_locked(locked) {}
+    SwatchRow(Widget *parent, const Swatch &swatch, bool locked, bool none = false)
+        : MenuItem(parent, swatch.name), m_color(swatch.rgb), m_locked(locked), m_none(none) {}
 
     void draw(NVGcontext *ctx) override {
         Widget::draw(ctx);
@@ -67,13 +87,7 @@ public:
             nvgText(ctx, cx + 14.f, cy + h * 0.5f, utf8(FA_CHECK).data(), nullptr);
             chip_x += 20.f;
         }
-        nvgBeginPath(ctx);
-        nvgRoundedRect(ctx, chip_x, cy + 5.f, chip, chip, 3.f);
-        nvgFillColor(ctx, nvgRGBAf(m_color.r, m_color.g, m_color.b, 1.f));
-        nvgFill(ctx);
-        nvgStrokeWidth(ctx, 1.f);
-        nvgStrokeColor(ctx, nvgRGBA(0, 0, 0, 90));
-        nvgStroke(ctx);
+        draw_chip(ctx, chip_x, cy + 5.f, chip, m_color, m_none);
 
         nvgFontSize(ctx, (float) font_size);
         nvgFontFace(ctx, "sans");
@@ -92,7 +106,9 @@ public:
         nvgTextAlign(ctx, NVG_ALIGN_RIGHT | NVG_ALIGN_MIDDLE);
         nvgText(ctx, cx + m_size.x() - 30.f, cy + h * 0.5f - 1.f, m_tag.c_str(), nullptr);
 
-        /* Lock or pencil in the mark zone. */
+        /* Lock or pencil in the mark zone; None has nothing to edit. */
+        if (m_none)
+            return;
         const int icon = m_locked ? FA_LOCK : FA_PENCIL_ALT;
         nvgFontSize(ctx, (float) font_size * icon_scale() * 0.9f);
         nvgFontFace(ctx, "icons");
@@ -124,6 +140,7 @@ private:
     pagemade::Color m_color;
     std::string m_tag;
     bool m_locked = false;
+    bool m_none = false;
 };
 
 bool is_builtin(SwatchId id) {
@@ -155,10 +172,18 @@ void ColorDropdown::set_swatch(const std::string &name, const pagemade::Color &c
     set_caption(name);
     m_chip = color;
     m_has_chip = true;
+    m_none = false;
+}
+
+void ColorDropdown::set_none() {
+    set_caption("None");
+    m_has_chip = true;
+    m_none = true;
 }
 
 void ColorDropdown::clear_swatch() {
     m_has_chip = false;
+    m_none = false;
     set_caption("");
 }
 
@@ -228,13 +253,7 @@ void ColorDropdown::draw(NVGcontext *ctx) {
 
         /* The chip. */
         const float chip = (float) m_size.y() - 10.f;
-        nvgBeginPath(ctx);
-        nvgRoundedRect(ctx, m_pos.x() + 8.f, center.y() - chip * 0.5f, chip, chip, 3.f);
-        nvgFillColor(ctx, nvgRGBAf(m_chip.r, m_chip.g, m_chip.b, 1.f));
-        nvgFill(ctx);
-        nvgStrokeWidth(ctx, 1.f);
-        nvgStrokeColor(ctx, nvgRGBA(0, 0, 0, 90));
-        nvgStroke(ctx);
+        draw_chip(ctx, m_pos.x() + 8.f, center.y() - chip * 0.5f, chip, m_chip, m_none);
 
         nvgFontSize(ctx, (float) font_size);
         nvgFontFace(ctx, "sans");
@@ -265,6 +284,22 @@ void refill_swatch_menu(Dropdown *menu, const SwatchMenuView &view,
     menu->clear_items();
     int current_index = -1;
     const Swatch *current = nullptr;
+    if (view.none_row) {
+        Swatch none;
+        none.id = kNoPaint;
+        none.name = "None";
+        auto *row = new SwatchRow(menu->popup(), none, false, true);
+        row->set_flags(Button::RadioButton);
+        const int index = menu->popup()->child_count() - 1;
+        if (view.current == kNoPaint)
+            current_index = index;
+        row->set_callback([menu, pick, index] {
+            if (pick)
+                pick(kNoPaint);
+            menu->set_selected_index(index);
+        });
+        row->set_mark(false, {});
+    }
     for (size_t si = 0; si < view.swatches.size(); ++si) {
         const Swatch &sw = view.swatches[si];
         if (sw.id == kNoPaint)
@@ -301,6 +336,8 @@ void refill_swatch_menu(Dropdown *menu, const SwatchMenuView &view,
     if (auto *colors = dynamic_cast<ColorDropdown *>(menu)) {
         if (current)
             colors->set_swatch(current->name, current->rgb);
+        else if (view.none_row && view.current == kNoPaint)
+            colors->set_none();
         else
             colors->clear_swatch();
     } else if (current) {

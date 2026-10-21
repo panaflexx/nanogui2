@@ -2,7 +2,8 @@
  * pagemade/swatch_menu.h — the Colors ("C") dropdown and the swatch editor.
  *
  * The dropdown lists the open publication's swatches: a color chip, the
- * name, and the CMYK definition. Picking a row paints the selection (fill
+ * name, and the CMYK definition. The control palette's Fill and Stroke
+ * menus are the same dropdown with a "None" row first. Picking a row paints the selection (fill
  * for shapes, ink for text, border for pictures). Custom rows carry an
  * edit mark that opens the editor without choosing; built-ins show a lock
  * and open read-only. A "+" footer row adds a new swatch.
@@ -32,8 +33,11 @@ struct Cmyk;
 struct SwatchMenuView {
     /* The publication's swatches, in table order. */
     std::vector<Swatch> swatches;
-    /* The current paint, for the check mark; kNoPaint hides it. */
+    /* The current paint, for the check mark; kNoPaint hides it, or checks
+     * the None row when there is one. */
     SwatchId current = 0;
+    /* A "None" row first (no fill, no stroke); picking it passes kNoPaint. */
+    bool none_row = false;
 };
 
 /* Rebuild the dropdown from the view. `pick` paints the selection with
@@ -52,6 +56,8 @@ public:
     explicit ColorDropdown(nanogui::Widget *parent);
     /* Show this paint on the button; an empty name clears the chip. */
     void set_swatch(const std::string &name, const Color &color);
+    /* "None", with a slashed chip. */
+    void set_none();
     void clear_swatch();
 
     nanogui::Vector2i preferred_size(NVGcontext *ctx) const override;
@@ -60,6 +66,7 @@ public:
 private:
     Color m_chip{1, 1, 1, 1};
     bool m_has_chip = false;
+    bool m_none = false;                 // the chip is slashed: no paint
 };
 
 struct SwatchEdit {

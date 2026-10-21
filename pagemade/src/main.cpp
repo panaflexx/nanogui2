@@ -1174,24 +1174,58 @@ public:
 
     /* The swatch menus follow the open publication's Colors palette. */
     void rebuild_swatch_menus() {
-        std::vector<std::string> names{"None"};
-        std::vector<SwatchId> ids{kNoPaint};
-        for (const Swatch &sw : m_view->document().swatches) {
-            names.push_back(sw.name);
-            ids.push_back(sw.id);
-        }
-        if (ids == m_swatch_ids || !m_fill)
-            return;
-        m_swatch_ids = ids;
-        for (Dropdown *d : {m_fill, m_stroke}) {
-            while (d->popup()->child_count() > 0)
-                d->remove_item(d->popup()->child_count() - 1);
-            for (const std::string &n : names)
-                d->add_item({n, ""}, 0, {}, {}, true);
-            d->set_selected_index(0);
-        }
+        refill_paint_menus();
         if (m_colors && !m_colors->popup()->visible())
             refill_colors();
+    }
+
+    /* Fill and Stroke on the control palette: the Colors menu with None
+     * first. Rows are rebuilt only while a menu is closed (a pick runs
+     * inside its row); the button face follows the selection either way. */
+    void refill_paint_menus() {
+        if (!m_fill || !m_view)
+            return;
+        const Shape sh = m_view->shape_style();
+        refill_paint_menu(m_fill, sh.fill.swatch, [this](SwatchId id) { pick_fill(id); });
+        refill_paint_menu(m_stroke, sh.stroke.paint.swatch, [this](SwatchId id) { pick_stroke(id); });
+    }
+
+    void refill_paint_menu(ColorDropdown *menu, SwatchId current,
+                           const std::function<void(SwatchId)> &pick) {
+        if (menu->popup()->visible()) {
+            show_paint_face(menu, current);
+            return;
+        }
+        SwatchMenuView view;
+        view.swatches = m_view->document().swatches;
+        view.current = current;
+        view.none_row = true;
+        refill_swatch_menu(menu, view, pick, [this](SwatchId id) { edit_color(id); },
+                           [this] { add_color(); });
+    }
+
+    void show_paint_face(ColorDropdown *menu, SwatchId id) {
+        if (const Swatch *sw = id != kNoPaint ? m_view->document().find_swatch(id) : nullptr)
+            menu->set_swatch(sw->name, sw->rgb);
+        else
+            menu->set_none();
+    }
+
+    /* Pictures take the stroke as a border on the frame; their fill stays
+     * None (the fill tint is their opacity). */
+    void pick_fill(SwatchId id) {
+        m_view->apply_shape_style([id](Shape &sh) { sh.fill.swatch = id; });
+    }
+    void pick_stroke(SwatchId id) {
+        m_view->apply_item_style([id](Shape &sh) { sh.stroke.paint.swatch = id; },
+                                 [id](PlacedImage &im) { im.stroke.paint.swatch = id; });
+    }
+
+    /* The editor is modal: close whichever color menu opened it first. */
+    void close_color_menus() {
+        for (Dropdown *d : {(Dropdown *) m_colors, (Dropdown *) m_fill, (Dropdown *) m_stroke})
+            if (d)
+                d->set_pushed(false);
     }
 
     /* The Colors dropdown lists the publication's swatches. Picking one
@@ -1250,9 +1284,7 @@ public:
         const Swatch *sw = m_view->document().find_swatch(id);
         if (!sw)
             return;
-        /* Close the menu first; the editor is modal. */
-        if (m_colors)
-            m_colors->set_pushed(false);
+        close_color_menus();
         const bool locked = sw->id == kPaper || sw->id == kBlack || sw->id == kRegistration;
         SwatchEdit initial;
         initial.name = sw->name;
@@ -1278,8 +1310,7 @@ public:
     }
 
     void add_color() {
-        if (m_colors)
-            m_colors->set_pushed(false);
+        close_color_menus();
         SwatchEdit initial;
         initial.name = "New color";
         async([this, initial] {
@@ -1316,7 +1347,6 @@ public:
     /* A swatch changed: every menu follows the table, then the palette
      * re-reads the selection. */
     void after_swatch_change() {
-        m_swatch_ids.clear();   // force rebuild_swatch_menus past its guard
         rebuild_swatch_menus();
         refill_colors();
         sync_palette();
@@ -1564,13 +1594,6 @@ public:
         number("H", "pt", 3, 80, 1.f, 0.f, 1e5f);
         number("Rot", "\u00B0", 4, 70, 1.f, -360.f, 360.f);
 
-        /* The Colors palette's swatches, "None" first, in both paint menus. */
-        std::vector<std::string> swatches{"None"};
-        m_swatch_ids = {kNoPaint};
-        for (const Swatch &sw : doc.swatches) {
-            swatches.push_back(sw.name);
-            m_swatch_ids.push_back(sw.id);
-        }
         auto menu = [&](const std::vector<std::string> &items, int width) {
             auto *d = new Dropdown(bar, items, {}, Dropdown::ComboBox, items.front());
             d->set_fixed_size(Vector2i(width, 26));
@@ -1580,11 +1603,20 @@ public:
 
         /* Pictures take the fill tint as their opacity, and the stroke as a
          * border on the frame. Their fill color stays None. */
+        /* Fill and Stroke are the Colors menu (chip, name, CMYK, edit and
+         * add) with None first; refill_paint_menus fills them */
+        auto paint_menu = [&](const char *tip) {
+            auto *d = new ColorDropdown(bar);
+            d->set_fixed_size(Vector2i(124, 26));
+            d->set_max_size(Vector2i(124, 26));
+            d->set_tooltip(tip);
+            return d;
+        };
         new Label(bar, " Fill", "sans-bold");
-        m_fill = menu(swatches, 90);
-        m_fill->set_selected_callback([this](int i) {
-            const SwatchId id = m_swatch_ids[i];
-            m_view->apply_shape_style([id](Shape &sh) { sh.fill.swatch = id; });
+        m_fill = paint_menu("Fill color for shapes (and new shapes); add and edit swatches");
+        m_fill->set_open_callback([this] {
+            refill_paint_menu(m_fill, m_view->shape_style().fill.swatch,
+                              [this](SwatchId id) { pick_fill(id); });
         });
         std::vector<std::string> tints;
         for (float t : kTints)
@@ -1604,11 +1636,10 @@ public:
                 im.stroke.paint = {kBlack, 100.f};
         };
         new Label(bar, " Stroke", "sans-bold");
-        m_stroke = menu(swatches, 90);
-        m_stroke->set_selected_callback([this](int i) {
-            const SwatchId id = m_swatch_ids[i];
-            m_view->apply_item_style([id](Shape &sh) { sh.stroke.paint.swatch = id; },
-                                     [id](PlacedImage &im) { im.stroke.paint.swatch = id; });
+        m_stroke = paint_menu("Stroke color for shapes, or a picture's border; add and edit swatches");
+        m_stroke->set_open_callback([this] {
+            refill_paint_menu(m_stroke, m_view->shape_style().stroke.paint.swatch,
+                              [this](SwatchId id) { pick_stroke(id); });
         });
         m_weight = menu({"Hairline", "0.5 pt", "1 pt", "2 pt", "4 pt", "6 pt", "8 pt", "12 pt"}, 76);
         m_weight->set_selected_callback([this, border](int i) {
@@ -2384,12 +2415,6 @@ public:
                 m_geom[i]->TextBox::set_value("");
         }
         const Shape sh = m_view->shape_style();
-        auto swatch_index = [&](SwatchId id) {
-            for (size_t i = 0; i < m_swatch_ids.size(); ++i)
-                if (m_swatch_ids[i] == id)
-                    return (int) i;
-            return 0;
-        };
         auto nearest = [](const float *v, int n, float x) {
             int best = 0;
             for (int i = 1; i < n; ++i)
@@ -2397,10 +2422,10 @@ public:
                     best = i;
             return best;
         };
-        m_fill->set_selected_index(swatch_index(sh.fill.swatch));
+        show_paint_face(m_fill, sh.fill.swatch);
         m_fill->set_enabled(m_view->shapes_selected() || !m_view->pictures_selected());
         m_fill_tint->set_selected_index(nearest(kTints, (int) std::size(kTints), sh.fill.tint));
-        m_stroke->set_selected_index(swatch_index(sh.stroke.paint.swatch));
+        show_paint_face(m_stroke, sh.stroke.paint.swatch);
         m_weight->set_selected_index(nearest(kWeights, 8, sh.stroke.weight));
         m_style->set_selected_index((int) sh.stroke.style);
         if (!m_sides->focused())
@@ -3240,10 +3265,10 @@ private:
     std::vector<std::pair<ComposerView::Tool, ToolButton *>> m_tool_btns;
     Button          *m_snap_btn = nullptr;
     FloatSpin       *m_geom[5] = {};
-    Dropdown        *m_fill = nullptr, *m_fill_tint = nullptr, *m_stroke = nullptr;
+    ColorDropdown   *m_fill = nullptr, *m_stroke = nullptr;
+    Dropdown        *m_fill_tint = nullptr;
     Dropdown        *m_weight = nullptr, *m_style = nullptr;
     IntSpin         *m_sides = nullptr, *m_star = nullptr;
-    std::vector<SwatchId> m_swatch_ids;
     Button          *m_mode_btn = nullptr;
     Widget          *m_object_box = nullptr, *m_type_box = nullptr;
     bool            m_type_mode = false;

@@ -62,8 +62,28 @@ struct ProbeBox {
     ImageAssetsPanel *panel = nullptr;
 };
 
+/* Dot files are left out: the "._name.heic" AppleDouble files macOS writes
+ * beside every exported photo (its extended attributes) carry a picture's
+ * extension but no picture. */
 bool is_image_file(const std::string &path) {
+    const std::string name = nanogui::fs::filename(path);
+    if (!name.empty() && name[0] == '.')
+        return false;
     return image_extension_supported(nanogui::fs::extension(path));
+}
+
+/* `path` lies in a hidden folder below `root` (.Trashes, .Spotlight-V100,
+ * .thumbnails): skipped by the scan. The root itself may be hidden: the
+ * user chose it. */
+bool in_hidden_folder(const std::string &root, const std::string &path) {
+    if (root.empty() || path.size() <= root.size() || path.compare(0, root.size(), root) != 0)
+        return false;
+    const size_t leaf = path.find_last_of("/\\");
+    /* From the root's last character, so "/photos/" and "/photos" both work */
+    for (size_t i = root.size() - 1; i < leaf && leaf != std::string::npos; ++i)
+        if ((path[i] == '/' || path[i] == '\\') && path[i + 1] == '.')
+            return true;
+    return false;
 }
 
 std::string leaf_name(const std::string &path) {
@@ -973,7 +993,7 @@ void ImageAssetsPanel::scan_main(const std::shared_ptr<ScanState> &state) {
         } else if (fs::is_directory(root)) {
             /* Unreadable directories are skipped silently. */
             fs::walk_files(root, [&](const std::string &path) {
-                if (is_image_file(path))
+                if (is_image_file(path) && !in_hidden_folder(root, path))
                     batch.push_back(path);
                 if ((int) batch.size() >= kScanBatch)
                     flush();
