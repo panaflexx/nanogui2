@@ -1077,11 +1077,13 @@ if (NANOGUI_BUILD_EXAMPLES)
         pagemade/src/dock_window.cpp
         pagemade/src/layers_panel.cpp
         pagemade/src/pdf_dialog.cpp
+        pagemade/src/print_dialog.cpp
         pagemade/src/ruler.cpp
         pagemade/src/paragraph_panel.cpp
         pagemade/src/swatch_library.cpp
         pagemade/src/swatch_menu.cpp
-        pagemade/src/sample.cpp)
+        pagemade/src/sample.cpp
+        $<IF:$<BOOL:${WIN32}>,pagemade/src/print_none.cpp,pagemade/src/print_spool.cpp>)
     add_executable(pagemade_book
         pagemade/src/book_gen.cpp
         pagemade/src/default_fonts.cpp

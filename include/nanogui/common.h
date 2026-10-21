@@ -308,6 +308,8 @@ extern NANOGUI_EXPORT std::mutex g_widgets_to_cleanup_mutex;
 std::vector<std::string>
 mac_file_dialog(const std::vector<std::pair<std::string, std::string>> &filetypes,
             bool save, bool multiple);
+/// A directory, chosen with the native open panel. Empty if cancelled.
+std::string mac_folder_dialog(const std::string &initial);
 #endif
 
 /**

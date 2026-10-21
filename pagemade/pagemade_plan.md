@@ -158,14 +158,17 @@ and its nanovgd renderer. The composer lays out in points and every backend
   the same kind of panel, and a tab can be dragged onto another tool window
   or off into its own. Swatch dialogs stay separate. The last section is the
   detail.
+- **Print dialog** (`print_dialog.h`, File > Print and Ctrl+P): printer, copies,
+  and all, current, or a page range. The dialog does not spool. It returns a
+  `PrintChoice`; the app writes that range to a PDF (trim, no bleed or marks,
+  hidden pages left out) and `print_pdf` (`print.h`) hands the file to the
+  spooler. Linux and macOS use `lp` and `lpstat`. Windows says printing is not
+  available yet.
 
 ## Next, in order
 
 1. **Text wrap**: lines ask which horizontal spans are free at their height,
    from the wrap outlines of items in front of the text.
-2. **Print dialog**: choose the printer, copies and page range. Linux first (the
-   CUPS API with our own dialog, or GTK's), then Mac (NSPrintOperation on the
-   PDF), then Windows. Today printing exports a PDF and hands it to `lp`.
 
 ## Later and known gaps
 
@@ -183,6 +186,7 @@ and its nanovgd renderer. The composer lays out in points and every backend
 - Tool-window tabs, tear-off, the green drop, and a one-level vertical split
   are in the code (the last section). A hand check of that section is still
   open. Swatch dialogs are not part of it.
+- Windows printing. The print dialog is the same one; `print_none.cpp` is the stub that says it is not available yet.
 - Print production: CMYK and spot colors, bleed, crop and registration marks,
   PDF/X.
 - Fonts on macOS and Windows (only Linux paths, then Roboto from `resources/`).

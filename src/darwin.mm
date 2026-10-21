@@ -88,6 +88,27 @@ mac_file_dialog(const std::vector<std::pair<std::string, std::string>> &filetype
     return result;
 }
 
+std::string mac_folder_dialog(const std::string &initial) {
+    NSOpenPanel *panel = [NSOpenPanel openPanel];
+    [panel setCanChooseFiles:NO];
+    [panel setCanChooseDirectories:YES];
+    [panel setAllowsMultipleSelection:NO];
+    [panel setTitle:@"Add Folder"];
+    [panel setPrompt:@"Add"];
+    if (!initial.empty()) {
+        NSString *path = [NSString stringWithUTF8String:initial.c_str()];
+        if (path)
+            [panel setDirectoryURL:[NSURL fileURLWithPath:path isDirectory:YES]];
+    }
+    if ([panel runModal] != NSModalResponseOK)
+        return {};
+    NSString *chosen = [[panel URL] path];
+    if (!chosen)
+        return {};
+    const char *utf8 = [chosen UTF8String];
+    return utf8 ? std::string(utf8) : std::string();
+}
+
 void chdir_to_bundle_parent() {
     NSString *path = [[[NSBundle mainBundle] bundlePath] stringByDeletingLastPathComponent];
     chdir([path fileSystemRepresentation]);

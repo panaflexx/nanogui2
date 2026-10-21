@@ -72,6 +72,8 @@
 #include "paragraph_panel.h"
 #include "pdf.h"
 #include "pdf_dialog.h"
+#include "print.h"
+#include "print_dialog.h"
 #include "raster_nvg.h"
 #include "spinbox.h"
 #include "swatch_library.h"
@@ -733,7 +735,7 @@ public:
         pdf_btn->set_tooltip("Export as PDF");
         pdf_btn->set_callback([this] { export_pdf_dialog(); });
         auto *print_btn = new Button(toolbar, "", FA_PRINT);
-        print_btn->set_tooltip("Print (Ctrl+P, via CUPS lp)");
+        print_btn->set_tooltip("Print (Ctrl+P)");
         print_btn->set_callback([this] { print_document(); });
 
         /* The zoom levels PageMaker keeps in the View menu, as one dropdown.
@@ -2950,37 +2952,103 @@ public:
 #endif
     }
 
-    /* Print through CUPS: export, then hand the PDF to lp. */
+    /* File > Print. The dialog only records the choice. The PDF for that
+     * page range is written here, then print_pdf hands it to the spooler. */
     void print_document() {
-        const std::string path = "/tmp/pagemade-print.pdf";
-        /* The publication's settings, without what a print shop needs:
-         * a desk printer gets every page at its trim */
-        PdfSettings print = m_view->document().pdf;
-        print.all_pages = true;
+        if (!m_view || m_view->document().pages.empty()) {
+            set_note("nothing to print");
+            return;
+        }
+        const int pages = (int) m_view->document().pages.size();
+        const int current = std::clamp((int) m_view->page_index() + 1, 1, pages);
+        PrintChoice initial = m_print_choice;
+        if (!m_print_set) {
+            initial.pages = PrintPages::All;
+            initial.copies = 1;
+            initial.printer.clear();
+            initial.first_page = current;
+            initial.last_page = current;
+        }
+        ask_print(this, list_printers(), pages, current, initial, printing_available(),
+                  printing_unavailable_reason(),
+                  [this](const PrintChoice &choice) { start_print(choice); });
+    }
+
+    void start_print(const PrintChoice &choice) {
+        m_print_choice = choice;
+        m_print_set = true;
+        if (!m_view)
+            return;
+        if (m_pdf_job) {
+            set_note("wait for the PDF that's already being written");
+            return;
+        }
+        const PageDoc &doc = m_view->document();
+        const int n = (int) doc.pages.size();
+        if (n < 1) {
+            set_note("nothing to print");
+            return;
+        }
+        int first = 1, last = n;
+        if (choice.pages != PrintPages::All) {
+            first = std::clamp(choice.first_page, 1, n);
+            last = std::clamp(choice.last_page, first, n);
+        }
+        bool any = false;
+        for (int i = first; i <= last; ++i)
+            if (!doc.pages[(size_t) i - 1].hidden)
+                any = true;
+        if (!any) {
+            set_note("nothing to print: those pages are hidden");
+            return;
+        }
+        /* The publication's picture settings, without what a print shop
+         * needs. A desk printer gets the trim, and hidden pages stay out. */
+        PdfSettings print = doc.pdf;
+        print.all_pages = choice.pages == PrintPages::All;
+        print.include_hidden = false;
         print.bleed = false;
         print.crop_marks = false;
-        run_pdf_export(path, print, "Preparing to Print", [this, path](bool ok, bool cancelled) {
+        if (!print.all_pages) {
+            print.first_page = first;
+            print.last_page = last;
+        }
+#if defined(_WIN32)
+        const std::string path = "pagemade-print.pdf";
+#else
+        const std::string path = "/tmp/pagemade-print-" + std::to_string((int) getpid()) + "-"
+                                 + std::to_string(++m_print_seq) + ".pdf";
+#endif
+        const std::string printer = choice.printer;
+        const int copies = std::clamp(choice.copies, 1, 99);
+        const std::string title = doc_name();
+        run_pdf_export(path, print, "Preparing to Print",
+                       [this, path, printer, copies, title](bool ok, bool cancelled) {
             if (cancelled) {
+                std::remove(path.c_str());
                 set_note("print cancelled");
                 return;
             }
             if (!ok) {
-                set_note("print failed: could not write " + path);
+                std::remove(path.c_str());
+                set_note("print failed: could not write the PDF");
                 return;
             }
-#if defined(_WIN32)
-            set_note("printing is not wired up on Windows yet; use Export PDF");
-#else
-            pid_t pid = fork();
-            if (pid == 0) {
-                setsid();
-                int fd = open("/dev/null", O_RDWR);
-                if (fd >= 0) { dup2(fd, 0); dup2(fd, 1); dup2(fd, 2); if (fd > 2) close(fd); }
-                execlp("lp", "lp", path.c_str(), (char *) nullptr);
-                _exit(127);
-            }
-            set_note(pid > 0 ? "sent to the default printer (lp)" : "print failed (fork)");
-#endif
+            PrintRequest req;
+            req.printer = printer;
+            req.copies = copies;
+            req.title = title;
+            const std::string err = print_pdf(path, req);
+            std::remove(path.c_str());
+            if (!err.empty())
+                set_note("print failed: " + err);
+            else if (printer.empty())
+                set_note(copies > 1
+                             ? "sent " + std::to_string(copies) + " copies to the default printer"
+                             : "sent to the default printer");
+            else
+                set_note(copies > 1 ? "sent " + std::to_string(copies) + " copies to " + printer
+                                    : "sent to " + printer);
         });
     }
 
@@ -3219,6 +3287,10 @@ private:
     MenuItem        *m_group = nullptr, *m_ungroup = nullptr;
     Label           *m_status = nullptr;
     std::string     m_note;
+    /* The last Print dialog choice, for the next time it opens. */
+    PrintChoice     m_print_choice;
+    bool            m_print_set = false;
+    int             m_print_seq = 0;
     std::string     m_doc_path;          // empty: Untitled
     bool            m_embed_assets = false;
     bool            m_quitting = false;

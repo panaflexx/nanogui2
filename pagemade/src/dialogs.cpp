@@ -153,7 +153,7 @@ void ModalDialog::commit_text_boxes(Widget *w) {
 }
 
 void ModalDialog::press(Button *button) {
-    if (m_closing || !button)
+    if (m_closing || !button || !button->enabled())
         return;
     commit_text_boxes(this);
     std::function<void()> fn;

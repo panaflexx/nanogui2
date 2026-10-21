@@ -198,6 +198,8 @@ std::string ask_folder(const std::string &initial) {
 #if defined(_WIN32)
     (void) initial;
     return {};
+#elif defined(__APPLE__)
+    return mac_folder_dialog(initial);
 #else
     std::string cmd = "zenity --file-selection --directory --title='Add Folder'";
     if (!initial.empty()) {
