@@ -305,11 +305,11 @@ extern NANOGUI_EXPORT std::mutex g_widgets_to_cleanup_mutex;
  *     at whatever folder they were in when they close this one.
  */
 #if defined(__APPLE__)
-std::vector<std::string>
+extern NANOGUI_EXPORT std::vector<std::string>
 mac_file_dialog(const std::vector<std::pair<std::string, std::string>> &filetypes,
             bool save, bool multiple);
 /// A directory, chosen with the native open panel. Empty if cancelled.
-std::string mac_folder_dialog(const std::string &initial);
+extern NANOGUI_EXPORT std::string mac_folder_dialog(const std::string &initial);
 #endif
 
 /**
