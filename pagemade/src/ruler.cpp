@@ -7,6 +7,7 @@
 
 #include <GLFW/glfw3.h>
 #include <nanogui/screen.h>
+#include <nanogui/theme.h>
 #include <nanovg.h>
 
 #include <algorithm>
@@ -17,11 +18,19 @@ using namespace nanogui;
 
 namespace {
 
-const NVGcolor kRulerFill   = nvgRGB(236, 236, 236);
-const NVGcolor kRulerPage   = nvgRGB(250, 250, 250);   // the page's extent
-const NVGcolor kRulerEdge   = nvgRGB(150, 150, 150);
-const NVGcolor kRulerTick   = nvgRGB(90, 90, 90);
-const NVGcolor kRulerText   = nvgRGB(50, 50, 50);
+/* The rulers are window chrome: they follow View > Dark Mode (the pages
+ * and pasteboard don't). `page` is the band over the page's extent. */
+struct RulerColors {
+    NVGcolor fill, page, edge, tick, text;
+};
+
+const RulerColors &ruler_colors(const Theme *theme) {
+    static const RulerColors light{nvgRGB(236, 236, 236), nvgRGB(250, 250, 250),
+                                   nvgRGB(150, 150, 150), nvgRGB(90, 90, 90), nvgRGB(50, 50, 50)};
+    static const RulerColors dark{nvgRGB(44, 44, 48), nvgRGB(62, 62, 68),
+                                  nvgRGB(24, 24, 26), nvgRGB(165, 165, 170), nvgRGB(215, 215, 220)};
+    return theme && theme->mode() == ThemeMode::Dark ? dark : light;
+}
 
 /* Inches: the smallest step from this list that is at least `min_px` wide */
 float ruler_step(float px_per_inch, float min_px) {
@@ -49,11 +58,12 @@ Ruler::Ruler(Widget *parent, bool horizontal) : Widget(parent), m_horizontal(hor
 void Ruler::draw(NVGcontext *ctx) {
     const float x = (float) m_pos.x(), y = (float) m_pos.y();
     const float w = (float) m_size.x(), h = (float) m_size.y();
+    const RulerColors &col = ruler_colors(theme());
     nvgSave(ctx);
     nvgIntersectScissor(ctx, x, y, w, h);
     nvgBeginPath(ctx);
     nvgRect(ctx, x, y, w, h);
-    nvgFillColor(ctx, kRulerFill);
+    nvgFillColor(ctx, col.fill);
     nvgFill(ctx);
 
     Vector2f origin;
@@ -73,7 +83,7 @@ void Ruler::draw(NVGcontext *ctx) {
             nvgRect(ctx, zero, y, extent, h);
         else
             nvgRect(ctx, x, zero, w, extent);
-        nvgFillColor(ctx, kRulerPage);
+        nvgFillColor(ctx, col.page);
         nvgFill(ctx);
 
         const float label = ruler_step(ppi, 44.f);
@@ -83,7 +93,7 @@ void Ruler::draw(NVGcontext *ctx) {
 
         nvgFontFace(ctx, "sans");
         nvgFontSize(ctx, 10.f);
-        nvgFillColor(ctx, kRulerText);
+        nvgFillColor(ctx, col.text);
         nvgBeginPath(ctx);
         for (long k = k0; k <= k1; ++k) {
             const double inches = (double) k * minor;
@@ -121,7 +131,7 @@ void Ruler::draw(NVGcontext *ctx) {
                 nvgRestore(ctx);
             }
         }
-        nvgStrokeColor(ctx, kRulerTick);
+        nvgStrokeColor(ctx, col.tick);
         nvgStrokeWidth(ctx, 1.f);
         nvgStroke(ctx);
     }
@@ -135,7 +145,7 @@ void Ruler::draw(NVGcontext *ctx) {
         nvgMoveTo(ctx, x + w - 0.5f, y);
         nvgLineTo(ctx, x + w - 0.5f, y + h);
     }
-    nvgStrokeColor(ctx, kRulerEdge);
+    nvgStrokeColor(ctx, col.edge);
     nvgStrokeWidth(ctx, 1.f);
     nvgStroke(ctx);
     nvgRestore(ctx);
@@ -243,17 +253,18 @@ void RulerFrame::draw(NVGcontext *ctx) {
     if (!m_shown)
         return;
     /* The corner square where the rulers meet */
+    const RulerColors &col = ruler_colors(theme());
     const float t = (float) kThickness;
     const float x = (float) (m_pos.x() + m_inset_left), y = (float) m_pos.y();
     nvgBeginPath(ctx);
     nvgRect(ctx, x, y, t, t);
-    nvgFillColor(ctx, kRulerFill);
+    nvgFillColor(ctx, col.fill);
     nvgFill(ctx);
     nvgBeginPath(ctx);
     nvgMoveTo(ctx, x + t - 0.5f, y);
     nvgLineTo(ctx, x + t - 0.5f, y + t - 0.5f);
     nvgLineTo(ctx, x, y + t - 0.5f);
-    nvgStrokeColor(ctx, kRulerEdge);
+    nvgStrokeColor(ctx, col.edge);
     nvgStrokeWidth(ctx, 1.f);
     nvgStroke(ctx);
 }

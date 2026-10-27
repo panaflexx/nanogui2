@@ -83,6 +83,7 @@
 #include "../../ext/glfw/deps/stb_image_write.h"
 
 #include <algorithm>
+#include <fstream>
 #include <array>
 #include <atomic>
 #include <chrono>
@@ -632,6 +633,47 @@ private:
     std::vector<std::pair<uint32_t, double>> m_appearing;   // new pages growing in
 };
 
+/* View settings kept between sessions (view.conf beside colors.conf):
+ * "key=value" lines, '#' comments. Only dark_mode so far. */
+static std::string view_config_path() {
+    if (const char *xdg = std::getenv("XDG_CONFIG_HOME"))
+        if (xdg[0])
+            return std::string(xdg) + "/pagemade/view.conf";
+    if (const char *home = std::getenv("HOME"))
+        if (home[0])
+            return std::string(home) + "/.config/pagemade/view.conf";
+    return "pagemade-view.conf";
+}
+
+static bool load_dark_mode() {
+    std::ifstream in(view_config_path());
+    std::string line;
+    bool dark = false;
+    while (std::getline(in, line)) {
+        if (!line.empty() && line.back() == '\r')
+            line.pop_back();
+        if (line.rfind("dark_mode=", 0) == 0)
+            dark = line.substr(10) == "1";
+    }
+    return dark;
+}
+
+static void save_dark_mode(bool dark) {
+    const std::string path = view_config_path();
+    try {
+        const std::string dir = nanogui::fs::parent_path(path);
+        if (!dir.empty())
+            nanogui::fs::create_directories(dir);
+    } catch (...) {
+    }
+    std::ofstream out(path, std::ios::trunc);
+    out << "# pagemade view settings\n"
+        << "dark_mode=" << (dark ? 1 : 0) << "\n";
+}
+
+/* The zoom menu's entry for the page at its printed size on this screen. */
+static const char *const kRealSizeCaption = "Real Page Size (approx)";
+
 /* Faces the copied compositions point at. clear_document_fonts() drops
  * the library's shared_ptr; the export thread holds these until it
  * finishes subsetting. */
@@ -669,7 +711,8 @@ public:
             if (!ModalDialog::any_open())
                 s_instance->quit();
         });
-        set_theme_mode(ThemeMode::Light);
+        /* View > Dark Mode: the window chrome only; pages keep their paper */
+        set_theme_mode(load_dark_mode() ? ThemeMode::Dark : ThemeMode::Light);
         register_default_fonts(m_fonts);
         register_system_fonts(m_fonts);
         font_menu_load_or_seed(m_font_menu, font_menu_config_path(), m_fonts.families());
@@ -740,12 +783,18 @@ public:
 
         /* The zoom levels PageMaker keeps in the View menu, as one dropdown.
          * 0 means Fit in Window. The caption follows the actual zoom. */
-        m_zoom_menu = new Dropdown(toolbar, {"Fit", "50%", "100%", "200%", "400%", "800%"},
+        m_zoom_menu = new Dropdown(toolbar, {"Fit", "50%", "100%", kRealSizeCaption, "200%",
+                                             "400%", "800%"},
                                    {}, Dropdown::ComboBox, "Fit");
-        m_zoom_menu->set_tooltip("Zoom (Ctrl+0 fit, Ctrl+5/7/1/2/4/8)");
+        m_zoom_menu->set_tooltip("Zoom (Ctrl+0 fit, Ctrl+5/7/1/2/4/8). Real Page Size measures "
+                                 "the page at its printed size on this screen, as nearly as "
+                                 "the screen reports its own size.");
         m_zoom_menu->set_selected_callback([this](int i) {
-            static const double zv[] = {0, 0.5, 1, 2, 4, 8};
-            zv[i] > 0 ? zoom_to(zv[i]) : fit_page();
+            static const double zv[] = {0, 0.5, 1, -1, 2, 4, 8};
+            if (zv[i] < 0)
+                zoom_real_size();
+            else
+                zv[i] > 0 ? zoom_to(zv[i]) : fit_page();
         });
 
         /* ¶ pops open the Paragraph panel (also Element > Paragraph…). */
@@ -1422,6 +1471,10 @@ public:
         new Separator(view->popup());
         add_cmd(view, "Clear Page Guides", {}, [this] { m_view->clear_guides(false); });
         add_cmd(view, "Clear All-Pages Guides", {}, [this] { m_view->clear_guides(true); });
+        new Separator(view->popup());
+        m_dark_item = add_cmd(view, "Dark Mode", {},
+                              [this] { set_dark_mode(theme_mode() != ThemeMode::Dark); });
+        m_dark_item->set_icon(theme_mode() == ThemeMode::Dark ? FA_CHECK : 0);
 
         Dropdown *type = m_menubar->add_menu("Type");
         m_smart_quotes = add_cmd(type, "Smart Quotes", {}, [this] {
@@ -2573,15 +2626,101 @@ public:
         update_status();
     }
 
+    /* View > Dark Mode. The palette is swapped in place for every window,
+     * menu and panel; the pages, pasteboard and guides are drawn in their
+     * own colors and don't change. Remembered in view.conf. */
+    void set_dark_mode(bool dark) {
+        set_theme_mode(dark ? ThemeMode::Dark : ThemeMode::Light);
+        if (m_dark_item)
+            m_dark_item->set_icon(dark ? FA_CHECK : 0);
+        save_dark_mode(dark);
+        perform_layout();
+        redraw();
+    }
+
+    /* ---- Real page size ------------------------------------------------
+     * The zoom at which the page measures its printed size on the glass:
+     * logical pixels per point, from the monitor the window is mostly on.
+     * GLFW gives the physical size the monitor reports (EDID) and its
+     * video mode. On macOS the mode counts points, the units the UI is laid
+     * out in; elsewhere it counts device pixels, which the framebuffer
+     * maps back to logical ones. A reported size that gives a density no
+     * screen has (TVs and projectors often report nonsense, some nothing)
+     * is not believed: 0, and the caller assumes 96 per inch. */
+    GLFWmonitor *window_monitor() {
+        int count = 0;
+        GLFWmonitor **mons = glfwGetMonitors(&count);
+        if (!mons || count <= 0)
+            return nullptr;
+        /* Wayland keeps window positions from clients: the primary one */
+        if (count == 1 || glfwGetPlatform() == GLFW_PLATFORM_WAYLAND)
+            return count == 1 ? mons[0] : glfwGetPrimaryMonitor();
+        int wx = 0, wy = 0, ww = 0, wh = 0;
+        glfwGetWindowPos(glfw_window(), &wx, &wy);
+        glfwGetWindowSize(glfw_window(), &ww, &wh);
+        GLFWmonitor *best = nullptr;
+        long best_area = 0;
+        for (int i = 0; i < count; ++i) {
+            const GLFWvidmode *mode = glfwGetVideoMode(mons[i]);
+            if (!mode)
+                continue;
+            int mx = 0, my = 0;
+            glfwGetMonitorPos(mons[i], &mx, &my);
+            const long ox = std::max(0, std::min(wx + ww, mx + mode->width) - std::max(wx, mx));
+            const long oy = std::max(0, std::min(wy + wh, my + mode->height) - std::max(wy, my));
+            if (ox * oy > best_area) {
+                best_area = ox * oy;
+                best = mons[i];
+            }
+        }
+        return best ? best : glfwGetPrimaryMonitor();
+    }
+
+    double real_size_zoom() {
+        GLFWmonitor *mon = window_monitor();
+        if (!mon)
+            return 0;
+        int wmm = 0, hmm = 0;
+        glfwGetMonitorPhysicalSize(mon, &wmm, &hmm);
+        const GLFWvidmode *mode = glfwGetVideoMode(mon);
+        if (!mode || wmm <= 0 || mode->width <= 0)
+            return 0;
+        double px_per_mm = (double) mode->width / (double) wmm;
+#if !defined(__APPLE__)
+        int fbw = 0, fbh = 0;
+        glfwGetFramebufferSize(glfw_window(), &fbw, &fbh);
+        if (fbw > 0 && width() > 0)
+            px_per_mm *= (double) width() / (double) fbw;
+#endif
+        const double ppi = px_per_mm * 25.4;
+        if (ppi < 40.0 || ppi > 400.0)
+            return 0;
+        return ppi / 72.0;               // a point is 1/72 in
+    }
+
+    void zoom_real_size() {
+        const double z = real_size_zoom();
+        zoom_to(z > 0 ? z : 96.0 / 72.0);
+        if (z <= 0)
+            set_note("this screen doesn't report a believable size: real size assumes 96 pixels per inch");
+        sync_zoom_menu();
+    }
+
     /* The dropdown mirrors the actual zoom: a preset when it matches one,
      * the plain percentage otherwise. */
     void sync_zoom_menu() {
         if (!m_zoom_menu)
             return;
         const double z = m_scroll->zoom();
-        static const double zv[] = {0.5, 1, 2, 4, 8};
-        for (int i = 0; i < 5; ++i)
-            if (std::fabs(z - zv[i]) < 0.005) {
+        const double real = real_size_zoom();
+        if (std::fabs(z - (real > 0 ? real : 96.0 / 72.0)) < 0.005) {
+            if (m_zoom_menu->selected_index() != 3)
+                m_zoom_menu->set_selected_index(3);
+            return;
+        }
+        static const double zv[] = {0.5, 1, -1, 2, 4, 8};
+        for (int i = 0; i < 6; ++i)
+            if (zv[i] > 0 && std::fabs(z - zv[i]) < 0.005) {
                 if (m_zoom_menu->selected_index() != i + 1)
                     m_zoom_menu->set_selected_index(i + 1);
                 return;
@@ -3257,6 +3396,7 @@ private:
     RulerFrame      *m_rulers = nullptr;
     MenuItem        *m_rulers_item = nullptr, *m_guides_item = nullptr, *m_snap_item = nullptr;
     MenuItem        *m_lock_guides_item = nullptr;
+    MenuItem        *m_dark_item = nullptr;
     ComposerView    *m_view = nullptr;
     PageIconStrip   *m_pages = nullptr;
     Dropdown        *m_zoom_menu = nullptr;
