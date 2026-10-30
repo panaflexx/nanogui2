@@ -5159,7 +5159,113 @@ static void test_svg_ink(const FontLibrary &fonts) {
           "outlines around the picture (%d fills, picture after %d)", fills, fills_at_image);
 }
 
-/* Copy to other programs: the selection as SVG, with editable text. */
+/* With a picture store, the same paste is a group: graphics for the drawing
+ * on either side of the photo, and the photo as its own picture. Ungroup
+ * leaves that picture to crop and resize. A file with no picture stays one
+ * graphic. */
+static void test_svg_group(const FontLibrary &fonts) {
+    const char *png =
+        "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAIAAACQd1PeAAAADUlEQVR4nGP4z8DwHwAFAAH/iZk9HQAAAABJRU5ErkJggg==";
+    const std::string xml =
+        std::string("<svg xmlns=\"http://www.w3.org/2000/svg\" xmlns:xlink=\"http://www.w3.org/1999/xlink\" "
+                    "viewBox=\"0 0 20 20\" width=\"20pt\" height=\"20pt\">"
+                    "<defs><clipPath id=\"c\"><rect x=\"2\" y=\"2\" width=\"6\" height=\"6\"/></clipPath></defs>"
+                    "<rect width=\"4\" height=\"4\" fill=\"#00f\"/>"
+                    "<text x=\"1\" y=\"8\" font-family=\"P052, serif\" font-size=\"10\">Hi</text>"
+                    "<g clip-path=\"url(#c)\"><image x=\"2\" y=\"2\" width=\"6\" height=\"6\" "
+                    "preserveAspectRatio=\"none\" xlink:href=\"data:image/png;base64,") +
+        png +
+        "\"/></g>"
+        "<text x=\"1\" y=\"16\" font-family=\"serif\" font-size=\"8\">Yo</text>"
+        "</svg>";
+    PageDoc doc;
+    VectorStore vectors;
+    ImageStore images;
+    const VectorPlacement placed =
+        place_svg_bytes(doc, vectors, bytes_of(xml), "paste.svg", "", 0, nullptr, &images);
+    CHECK(placed.ok && placed.group != 0 && placed.items.size() == 3, "three grouped pieces (%zu, group %u): %s",
+          placed.items.size(), placed.group, placed.error.c_str());
+    int graphics = 0, photos = 0;
+    bool one_group = true;
+    const Item *photo = nullptr;
+    std::string words, saved_words;
+    for (const Item &it : doc.pages[0].items) {
+        one_group = one_group && it.group == placed.group && it.group != 0;
+        if (const PlacedVector *v = it.vector()) {
+            ++graphics;
+            const VectorScene *scene = vectors.scene(v->asset);
+            CHECK(scene && scene->images.empty(), "a graphic piece draws no picture");
+            if (scene)
+                for (const VectorText &tx : scene->texts)
+                    for (const VectorTextRun &run : tx.runs)
+                        words += run.text;
+            VectorStore::Bytes back = vectors.source_of(v->asset);
+            VectorScene again;
+            std::string err;
+            CHECK(back && vector_loader().decode(back->data(), back->size(), &again, &err) &&
+                      again.images.empty() && near(again.width, 20.f),
+                  "the saved graphic is the piece, not the whole file (%s)", err.c_str());
+            for (const VectorText &tx : again.texts)
+                for (const VectorTextRun &run : tx.runs)
+                    saved_words += run.text;
+        }
+        if (it.image()) {
+            ++photos;
+            photo = &it;
+        }
+    }
+    CHECK(graphics == 2 && photos == 1 && one_group, "two graphics and one picture, one group");
+    CHECK(words.find("Hi") != std::string::npos && words.find("Yo") != std::string::npos,
+          "the words stay in the graphics (%s)", words.c_str());
+    CHECK(saved_words.find("Hi") != std::string::npos && saved_words.find("Yo") != std::string::npos,
+          "opening the file again keeps the words (%s)", saved_words.c_str());
+    if (photo && photo->image()) {
+        CHECK(near(photo->xf.e, 56.f) && near(photo->xf.f, 56.f) && near(photo->w, 6.f) &&
+                  near(photo->h, 6.f),
+              "the picture sits where the SVG put it (%g,%g %g x %g)", photo->xf.e, photo->xf.f, photo->w,
+              photo->h);
+        CHECK(near(photo->image()->x, 0.f) && near(photo->image()->y, 0.f), "it fills its frame");
+        const ImageAsset *asset = doc.find_image(photo->image()->asset);
+        ImageStore::Bytes raw = images.source_of(photo->image()->asset);
+        CHECK(asset && raw && raw->size() >= 8 && (*raw)[0] == 0x89 && (*raw)[1] == 'P',
+              "the picture is a PNG asset");
+    }
+    doc.ungroup_items({placed.item});
+    bool apart = true;
+    for (const Item &it : doc.pages[0].items)
+        apart = apart && it.group == 0;
+    CHECK(apart && doc.pages[0].items.size() == 3, "ungroup leaves the picture and the graphics");
+
+    vectors.realize(fonts);
+    const std::vector<Composition> comps;
+    const DrawList list = build_page(doc, 0, comps, nullptr, false, &vectors);
+    int fills = 0, pictures = 0, fills_at_image = -1;
+    for (const DrawOp &op : list) {
+        if (std::holds_alternative<DrawFill>(op))
+            ++fills;
+        else if (const auto *im = std::get_if<DrawImage>(&op)) {
+            ++pictures;
+            fills_at_image = fills;
+            CHECK(im->asset != 0 && !im->bytes, "the picture is the page item, drawn once");
+        }
+    }
+    CHECK(fills >= 3 && pictures == 1 && fills_at_image >= 2 && fills > fills_at_image,
+          "the photo stays between the two graphics (%d fills, after %d)", fills, fills_at_image);
+
+    const std::string icon =
+        "<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 24 24\" width=\"24\" height=\"24\">"
+        "<rect width=\"24\" height=\"24\" fill=\"#000\"/>"
+        "</svg>";
+    PageDoc plain;
+    VectorStore plain_store;
+    ImageStore plain_images;
+    const VectorPlacement one = place_svg_bytes(plain, plain_store, bytes_of(icon), "icon.svg",
+                                                "file:///tmp/icon.svg", 0, nullptr, &plain_images);
+    CHECK(one.ok && one.group == 0 && plain.pages[0].items.size() == 1 && plain.images.empty(),
+          "no picture, so one graphic and no group");
+    if (const VectorAsset *a = plain.find_vector(one.asset))
+        CHECK(a->source == "file:///tmp/icon.svg", "that graphic keeps its file");
+}
 static void test_svg_export(const FontLibrary &fonts) {
     PageDoc doc = sample_document();
     /* A picture cropped by its frame, and a bulleted list, grouped */
@@ -5297,6 +5403,7 @@ int main(int argc, char **argv) {
     test_images(fonts);
     test_svg(fonts);
     test_svg_ink(fonts);
+    test_svg_group(fonts);
     test_asset_library_config();
     test_fill_windings();
     test_pdf_export_jobs();

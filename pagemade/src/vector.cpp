@@ -713,8 +713,6 @@ bool place_grouped(PageDoc &doc, VectorStore &store, ImageStore &images, const V
             ImageAsset asset;
             asset.id = id;
             asset.name = stem + (pictures > 1 ? "-" + std::to_string(++picture_n) : "") + ext;
-            if (pictures == 1)
-                ++picture_n;
             asset.meta = p.pic.meta;
             asset.source_size = im.bytes->size();
             asset.hash = image_bytes_hash(im.bytes->data(), im.bytes->size());
@@ -740,8 +738,6 @@ bool place_grouped(PageDoc &doc, VectorStore &store, ImageStore &images, const V
         VectorAsset asset;
         asset.id = id;
         asset.name = vectors > 1 ? stem + "-" + std::to_string(++vector_n) + ".svg" : stem + ".svg";
-        if (vectors == 1)
-            ++vector_n;
         asset.width = p.scene.width;
         asset.height = p.scene.height;
         asset.skipped = scene.skipped;
