@@ -1073,6 +1073,7 @@ if (NANOGUI_BUILD_EXAMPLES)
         pagemade/src/image_assets.cpp
         pagemade/src/layout_templates.cpp
         pagemade/src/layouts_panel.cpp
+        pagemade/src/svg_export.cpp
         pagemade/src/tool_tabs.cpp
         pagemade/src/dock_window.cpp
         pagemade/src/layers_panel.cpp
@@ -1106,6 +1107,7 @@ if (NANOGUI_BUILD_EXAMPLES)
     add_executable(pagemade_compose_test
         pagemade/src/compose_test.cpp
         pagemade/src/layout_templates.cpp
+        pagemade/src/svg_export.cpp
         pagemade/src/pdf.cpp
         pagemade/src/default_fonts.cpp
         pagemade/src/system_fonts.cpp

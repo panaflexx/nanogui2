@@ -671,6 +671,7 @@ void _glfwDestroyCursorWayland(_GLFWcursor* cursor);
 void _glfwSetCursorWayland(_GLFWwindow* window, _GLFWcursor* cursor);
 void _glfwSetClipboardStringWayland(const char* string);
 const char* _glfwGetClipboardStringWayland(void);
+void _glfwSetClipboardFormatsWayland(void);
 
 EGLenum _glfwGetEGLPlatformWayland(EGLint** attribs);
 EGLNativeDisplayType _glfwGetEGLNativeDisplayWayland(void);

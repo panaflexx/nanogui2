@@ -1461,7 +1461,136 @@ GLFWAPI void glfwSetClipboardString(GLFWwindow* handle, const char* string)
     assert(string != NULL);
 
     _GLFW_REQUIRE_INIT();
+    _glfwFreeClipboardFormats();
     _glfw.platform.setClipboardString(string);
+}
+
+//////////////////////////////////////////////////////////////////////////
+//////             nanogui2: the clipboard in several formats           //////
+//////////////////////////////////////////////////////////////////////////
+
+GLFWbool _glfwIsPlainTextType(const char* type)
+{
+    return strcmp(type, "text/plain;charset=utf-8") == 0 ||
+           strcmp(type, "text/plain") == 0 ||
+           strcmp(type, "UTF8_STRING") == 0 ||
+           strcmp(type, "STRING") == 0 ||
+           strcmp(type, "TEXT") == 0;
+}
+
+static GLFWbool isTextFormat(const char* type)
+{
+    return strncmp(type, "text/plain", 10) == 0;
+}
+
+int _glfwClipboardFormatIndex(const char* type)
+{
+    for (int i = 0;  i < _glfw.clipFormatCount;  i++)
+    {
+        if (strcmp(_glfw.clipFormats[i].type, type) == 0)
+            return i;
+    }
+
+    if (_glfwIsPlainTextType(type))
+    {
+        for (int i = 0;  i < _glfw.clipFormatCount;  i++)
+        {
+            if (isTextFormat(_glfw.clipFormats[i].type))
+                return i;
+        }
+    }
+
+    return -1;
+}
+
+const char* _glfwClipboardFormatText(void)
+{
+    for (int i = 0;  i < _glfw.clipFormatCount;  i++)
+    {
+        if (isTextFormat(_glfw.clipFormats[i].type))
+            return (const char*) _glfw.clipFormats[i].data;
+    }
+
+    return NULL;
+}
+
+void _glfwFreeClipboardFormats(void)
+{
+    for (int i = 0;  i < _glfw.clipFormatCount;  i++)
+    {
+        _glfw_free((void*) _glfw.clipFormats[i].type);
+        _glfw_free((void*) _glfw.clipFormats[i].data);
+    }
+
+    _glfw_free(_glfw.clipFormats);
+    _glfw.clipFormats = NULL;
+    _glfw.clipFormatCount = 0;
+}
+
+GLFWAPI void glfwSetClipboardFormats(GLFWwindow* handle,
+                                     const GLFWclipboardformat* formats,
+                                     int count)
+{
+    assert(count == 0 || formats != NULL);
+
+    _GLFW_REQUIRE_INIT();
+    _glfwFreeClipboardFormats();
+
+    if (count > 0)
+    {
+        _glfw.clipFormats = _glfw_calloc(count, sizeof(GLFWclipboardformat));
+        if (!_glfw.clipFormats)
+        {
+            _glfwInputError(GLFW_OUT_OF_MEMORY, NULL);
+            return;
+        }
+
+        for (int i = 0;  i < count;  i++)
+        {
+            // A NUL past the bytes, so a text format is also a C string
+            char* data = _glfw_calloc(formats[i].size + 1, 1);
+            char* type = _glfw_strdup(formats[i].type);
+            if (!data || !type)
+            {
+                _glfw_free(data);
+                _glfw_free(type);
+                _glfwFreeClipboardFormats();
+                _glfwInputError(GLFW_OUT_OF_MEMORY, NULL);
+                return;
+            }
+
+            if (formats[i].size)
+                memcpy(data, formats[i].data, formats[i].size);
+
+            _glfw.clipFormats[i].type = type;
+            _glfw.clipFormats[i].data = data;
+            _glfw.clipFormats[i].size = formats[i].size;
+            _glfw.clipFormatCount = i + 1;
+        }
+    }
+
+    if (_glfw.platform.setClipboardFormats)
+        _glfw.platform.setClipboardFormats();
+    else
+    {
+        // This platform takes one string: offer the text, if any. The
+        // formats stay recorded for glfwGetClipboardFormats.
+        const char* text = _glfwClipboardFormatText();
+        _glfw.platform.setClipboardString(text ? text : "");
+    }
+}
+
+GLFWAPI const GLFWclipboardformat* glfwGetClipboardFormats(int* count)
+{
+    assert(count != NULL);
+    *count = 0;
+
+    _GLFW_REQUIRE_INIT_OR_RETURN(NULL);
+    if (_glfw.clipFormatCount == 0)
+        return NULL;
+
+    *count = _glfw.clipFormatCount;
+    return _glfw.clipFormats;
 }
 
 GLFWAPI const char* glfwGetClipboardString(GLFWwindow* handle)

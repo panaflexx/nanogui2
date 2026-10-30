@@ -465,13 +465,14 @@ void draw_list(NVGcontext *ctx, const DrawList &list, float px,
                 nvgIntersectScissor(ctx, 0, 0, s->clip_w, s->clip_h);
             draw_stroke(ctx, *s, px);
         } else if (const auto *im = std::get_if<DrawImage>(&op)) {
-            use_clip(nullptr);
             apply_transform(ctx, im->xf);
+            use_clip(im->clip);
             /* Intersect, so the pasteboard's window clip stays in force.
              * The frame itself is exact, including when the picture is rotated. */
             nvgIntersectScissor(ctx, 0, 0, im->clip_w, im->clip_h);
             int img = texture ? texture(*im) : 0;
-            if (!im->asset) {
+            const bool inline_bytes = im->bytes && !im->bytes->empty();
+            if (!im->asset && !inline_bytes) {
                 if (img == kEmptyFramePlaceholder)
                     draw_empty_frame(ctx, *im, px);
             } else if (img > 0 && im->w != 0.f && im->h != 0.f) {

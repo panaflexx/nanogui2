@@ -550,6 +550,19 @@ typedef struct _GLFWwindowX11
 
 // X11-specific global data
 //
+// nanogui2: one INCR transfer of a clipboard format
+//
+typedef struct _GLFWincrX11
+{
+    Window          requestor;
+    Atom            property;
+    Atom            target;
+    char*           data;
+    size_t          size;
+    size_t          offset;
+    double          started;        // glfwGetTime-style seconds
+} _GLFWincrX11;
+
 typedef struct _GLFWlibraryX11
 {
     Display*        display;
@@ -574,6 +587,15 @@ typedef struct _GLFWlibraryX11
     char*           primarySelectionString;
     // Clipboard string (while the selection is owned)
     char*           clipboardString;
+    // nanogui2: the targets the clipboard formats answer (one atom per
+    // format, then the plain-text names), and the format each one gives
+    Atom*           clipTargets;
+    int*            clipTargetFormats;
+    int             clipTargetCount;
+    // nanogui2: large formats sent in pieces (ICCCM INCR), one per requestor
+    // property; each holds its own copy of the bytes
+    struct _GLFWincrX11* incr;
+    int             incrCount;
     // Key name string
     char            keynames[GLFW_KEY_LAST + 1][5];
     // X11 keycode to GLFW key LUT
@@ -953,6 +975,8 @@ GLFWbool _glfwCreateStandardCursorX11(_GLFWcursor* cursor, int shape);
 void _glfwDestroyCursorX11(_GLFWcursor* cursor);
 void _glfwSetCursorX11(_GLFWwindow* window, _GLFWcursor* cursor);
 void _glfwSetClipboardStringX11(const char* string);
+void _glfwSetClipboardFormatsX11(void);
+void _glfwFreeClipboardTargetsX11(void);
 const char* _glfwGetClipboardStringX11(void);
 
 EGLenum _glfwGetEGLPlatformX11(EGLint** attribs);

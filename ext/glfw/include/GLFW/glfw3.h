@@ -5961,6 +5961,69 @@ GLFWAPI void glfwSetClipboardString(GLFWwindow* window, const char* string);
  */
 GLFWAPI const char* glfwGetClipboardString(GLFWwindow* window);
 
+/*! @brief One representation of the clipboard's contents.
+ *
+ *  nanogui2 addition (not in upstream GLFW). A MIME type
+ *  (`image/svg+xml`, `text/plain;charset=utf-8`, ...) and its bytes.
+ *
+ *  @sa @ref glfwSetClipboardFormats
+ *
+ *  @ingroup input
+ */
+typedef struct GLFWclipboardformat
+{
+    /*! The MIME type, as UTF-8.
+     */
+    const char* type;
+    /*! The bytes in that type.
+     */
+    const void* data;
+    /*! The number of bytes.
+     */
+    size_t size;
+} GLFWclipboardformat;
+
+/*! @brief Offers the clipboard in several formats.
+ *
+ *  nanogui2 addition (not in upstream GLFW). The formats go richest
+ *  first; an application that pastes picks the first one it understands.
+ *  GLFW copies the types and the bytes, so the caller may free them as
+ *  soon as this returns. A `text/plain` format also answers requests for
+ *  plain text in the platform's own names (`UTF8_STRING` and `STRING` on
+ *  X11), and is what @ref glfwGetClipboardString returns while this
+ *  process owns the clipboard. A later @ref glfwSetClipboardString
+ *  replaces all of them.
+ *
+ *  X11 and Wayland offer every format. Other platforms offer only the
+ *  `text/plain` format for now (nothing when there is none).
+ *
+ *  @param[in] window Deprecated. Any valid window or `NULL`.
+ *  @param[in] formats The formats, richest first.
+ *  @param[in] count The number of formats; 0 empties the clipboard.
+ *
+ *  @errors Possible errors include @ref GLFW_NOT_INITIALIZED and @ref
+ *  GLFW_PLATFORM_ERROR.
+ *
+ *  @thread_safety This function must only be called from the main thread.
+ *
+ *  @ingroup input
+ */
+GLFWAPI void glfwSetClipboardFormats(GLFWwindow* window, const GLFWclipboardformat* formats, int count);
+
+/*! @brief Returns the formats this process last offered.
+ *
+ *  nanogui2 addition (not in upstream GLFW). What the last @ref
+ *  glfwSetClipboardFormats offered, or `NULL` when it was replaced by
+ *  @ref glfwSetClipboardString or never called. Whether this process
+ *  still owns the clipboard is the caller's to check. The array is valid
+ *  until the clipboard is set again or the library is terminated.
+ *
+ *  @param[out] count The number of formats.
+ *
+ *  @ingroup input
+ */
+GLFWAPI const GLFWclipboardformat* glfwGetClipboardFormats(int* count);
+
 /*! @brief Returns the GLFW time.
  *
  *  This function returns the current GLFW time, in seconds.  Unless the time

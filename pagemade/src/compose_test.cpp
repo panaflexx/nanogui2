@@ -15,6 +15,7 @@
 #include "image.h"
 #include "image_color.h"
 #include "layout_templates.h"
+#include "svg_export.h"
 #include "page.h"
 #include "setup_adjust.h"
 #include "swatch_library.h"
@@ -4386,8 +4387,8 @@ static std::string join_skipped(const std::vector<std::string> &skipped) {
 }
 
 /* SVG place: one graphic, solids and strokes, the frame at the margin.
- * Gradients paint their middle stop and text is named and skipped. A
- * <clipPath> becomes a clip on the shapes; one that can't be read is named. */
+ * Gradients paint their middle stop. Text is kept and drawn as outlines.
+ * A <clipPath> becomes a clip on the shapes; one that can't be read is named. */
 static void test_svg(const FontLibrary &fonts) {
     const std::string declared =
         "<?xml version=\"1.0\"?>\n"
@@ -4487,7 +4488,10 @@ static void test_svg(const FontLibrary &fonts) {
                   near(g.xf.d, 7.5f) && near(g.xf.b, 0) && near(g.xf.e, 0),
               "a bounding-box gradient spans the rect (%g %g %g %g)", g.xf.a, g.xf.b, g.xf.d, g.xf.e);
     }
-    CHECK(join_skipped(scene.skipped) == "text", "skipped %s", join_skipped(scene.skipped).c_str());
+    CHECK(join_skipped(scene.skipped).empty(), "text is kept, skipped (%s)",
+          join_skipped(scene.skipped).c_str());
+    CHECK(!scene.texts.empty() && scene.texts[0].runs.size() == 1 && scene.texts[0].runs[0].text == "Hi",
+          "the words are kept");
     CHECK(vector_place_note("mark.svg", {"gradients", "clips", "text"}) ==
               "placed mark.svg (gradients, clips, text skipped)",
           "the status names what was skipped");
@@ -5079,6 +5083,178 @@ static void test_layout_templates(const FontLibrary &fonts) {
     nanogui::fs::remove_all(dir);
 }
 
+/* Pasted SVG text becomes outlines, and a data-URI picture is a DrawImage
+ * with the clip that wrapped it. A link is named and left out. */
+static void test_svg_ink(const FontLibrary &fonts) {
+    const char *png =
+        "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAIAAACQd1PeAAAADUlEQVR4nGP4z8DwHwAFAAH/iZk9HQAAAABJRU5ErkJggg==";
+    const std::string xml =
+        std::string("<svg xmlns=\"http://www.w3.org/2000/svg\" xmlns:xlink=\"http://www.w3.org/1999/xlink\" "
+                    "viewBox=\"0 0 20 20\" width=\"20pt\" height=\"20pt\">"
+                    "<defs><clipPath id=\"c\"><rect x=\"2\" y=\"2\" width=\"6\" height=\"6\"/></clipPath></defs>"
+                    "<rect width=\"4\" height=\"4\" fill=\"#00f\"/>"
+                    "<text x=\"1\" y=\"8\" font-family=\"P052, serif\" font-size=\"10\">Hi</text>"
+                    "<g clip-path=\"url(#c)\"><image x=\"2\" y=\"2\" width=\"6\" height=\"6\" "
+                    "preserveAspectRatio=\"none\" xlink:href=\"data:image/png;base64,") +
+        png +
+        "\"/></g>"
+        "<text x=\"1\" y=\"16\" font-family=\"serif\" font-size=\"8\">Yo</text>"
+        "<image href=\"https://example.com/a.png\" width=\"4\" height=\"4\"/>"
+        "</svg>";
+    std::string err;
+    VectorScene scene;
+    CHECK(decode_svg(xml, scene, err), "text and picture: %s", err.c_str());
+    CHECK(scene.texts.size() == 2 && scene.images.size() == 1, "two texts, one picture (%zu, %zu)",
+          scene.texts.size(), scene.images.size());
+    CHECK(join_skipped(scene.skipped) == "images", "the link is the only skip (%s)",
+          join_skipped(scene.skipped).c_str());
+    if (!scene.images.empty()) {
+        const VectorImage &im = scene.images[0];
+        CHECK(im.bytes && im.bytes->size() >= 8 && (*im.bytes)[0] == 0x89 && (*im.bytes)[1] == 'P',
+              "the data URI is a PNG (%zu)", im.bytes ? im.bytes->size() : 0);
+        CHECK(im.clip >= 0 && (size_t) im.clip < scene.clips.size(), "the picture keeps its clip (%d)",
+              im.clip);
+    }
+    bool shape_then_text = false, image_before_last_text = false;
+    int seen_shape = 0, seen_text = 0, seen_image = 0;
+    for (const VectorSlotRef &r : scene.order) {
+        if (r.slot == VectorSlot::Shape)
+            ++seen_shape;
+        if (r.slot == VectorSlot::Text) {
+            shape_then_text = shape_then_text || seen_shape > 0;
+            ++seen_text;
+        }
+        if (r.slot == VectorSlot::Image) {
+            ++seen_image;
+            image_before_last_text = seen_text == 1;
+        }
+    }
+    CHECK(seen_shape == 1 && seen_text == 2 && seen_image == 1 && shape_then_text &&
+              image_before_last_text,
+          "paint order is rect, text, picture, text (%d %d %d)", seen_shape, seen_text, seen_image);
+    realize_vector_text(scene, fonts);
+    CHECK(!scene.texts.empty() && scene.texts[0].runs[0].ink_set && !scene.texts[0].runs[0].ink.empty(),
+          "Hi has an outline");
+    PageDoc doc;
+    VectorStore store;
+    const VectorPlacement placed = place_svg_bytes(doc, store, bytes_of(xml), "paste.svg", "", 0, nullptr);
+    CHECK(placed.ok, "place paste: %s", placed.error.c_str());
+    store.realize(fonts);
+    const std::vector<Composition> comps;
+    const DrawList list = build_page(doc, 0, comps, nullptr, false, &store);
+    int fills = 0, pictures = 0, fills_at_image = -1;
+    for (const DrawOp &op : list) {
+        if (std::holds_alternative<DrawFill>(op)) {
+            ++fills;
+        } else if (const auto *im = std::get_if<DrawImage>(&op)) {
+            ++pictures;
+            fills_at_image = fills;
+            CHECK(im->bytes && !im->bytes->empty() && im->clip && im->w > 0.f && im->h > 0.f,
+                  "the picture is in the draw list");
+            CHECK(near(im->x, 2.f) && near(im->y, 2.f) && near(im->w, 6.f) && near(im->h, 6.f),
+                  "the picture fills its box (%g,%g %g x %g)", im->x, im->y, im->w, im->h);
+        }
+    }
+    CHECK(fills >= 3 && pictures == 1 && fills_at_image >= 2 && fills > fills_at_image,
+          "outlines around the picture (%d fills, picture after %d)", fills, fills_at_image);
+}
+
+/* Copy to other programs: the selection as SVG, with editable text. */
+static void test_svg_export(const FontLibrary &fonts) {
+    PageDoc doc = sample_document();
+    /* A picture cropped by its frame, and a bulleted list, grouped */
+    ImageStore store;
+    const std::vector<uint8_t> jpg = make_jpeg_rgb(64, 48, 200, 40, 40);
+    ImageMetadata meta;
+    std::string err;
+    const uint32_t pid = store.take_id();
+    CHECK(store.add(pid, jpg, &meta, &err), "store jpeg: %s", err.c_str());
+    ImageAsset asset;
+    asset.id = pid;
+    asset.name = "red.jpg";
+    asset.meta = meta;
+    doc.add_image(asset);
+    Item pic;
+    pic.w = 60;
+    pic.h = 40;
+    pic.xf = Transform::translate(400, 640);
+    pic.content = PlacedImage{pid, -10, -5, 80, 60};
+    const ItemId pic_id = doc.add_item(0, pic);
+    Story list;
+    for (const char *t : {"First point", "Second point"}) {
+        Paragraph p;
+        p.style.list = ListKind::Bullet;
+        p.style.left_indent = 18;
+        p.style.first_indent = -18;
+        p.runs.push_back({CharStyle(), t});
+        list.paragraphs.push_back(p);
+    }
+    const ItemId list_id = doc.add_text_frame(0, doc.add_story(list), 200, 60,
+                                              Transform::translate(60, 640));
+    CHECK(doc.group_items({pic_id, list_id}) != 0, "grouped");
+
+    std::vector<Composition> comps;
+    for (const StoryEntry &se : doc.stories)
+        comps.push_back(compose(se.story, doc.thread_frames(se), fonts));
+    std::vector<ItemId> ids;
+    for (const Item &it : doc.pages[0].items)
+        ids.push_back(it.id);
+    const std::string svg = items_svg(doc, 0, ids, comps, &store, nullptr);
+    {
+        std::ofstream out("/tmp/pagemade-copy.svg", std::ios::binary);
+        out << svg;
+    }
+    auto count = [&](const std::string &what) {
+        size_t n = 0;
+        for (size_t at = svg.find(what); at != std::string::npos; at = svg.find(what, at + 1))
+            ++n;
+        return n;
+    };
+    CHECK(svg.rfind("<?xml", 0) == 0 && svg.find("width=\"") != std::string::npos &&
+          svg.find("pt\" height=\"") != std::string::npos, "an SVG measured in points");
+    VectorScene scene;
+    CHECK(vector_loader().decode((const uint8_t *) svg.data(), svg.size(), &scene, &err) &&
+          !scene.shapes.empty(), "it reads back as SVG (%s)", err.c_str());
+    CHECK(svg.find(">WAVE AFTER WAVE OF TYPE</tspan>") != std::string::npos,
+          "the headline is one run of editable text");
+    CHECK(svg.find("font-weight=\"700\" fill=\"#000000\">Desktop </tspan>") != std::string::npos,
+          "bold text, by weight; a justified line's words placed one by one");
+    CHECK(svg.find("letter-spacing=\"1.02\"") != std::string::npos, "the byline's tracking (120/1000 em of 8.5 pt)");
+    CHECK(svg.find("font-family=\"'Serif'") == std::string::npos &&
+          svg.find("font-family=\"'Sans'") == std::string::npos &&
+          svg.find(", serif\"") != std::string::npos,
+          "fonts are named from the font files, with a generic fallback");
+    CHECK(count("<tspan") > count("<text") + 40, "justified lines place each word (%zu spans, %zu lines)",
+          count("<tspan"), count("<text"));
+    CHECK(svg.find("....") != std::string::npos && svg.find(">1</tspan>") != std::string::npos,
+          "contents leaders and page numbers");
+    CHECK(svg.find("•") != std::string::npos && svg.find(">First point</tspan>") != std::string::npos,
+          "list bullets are text");
+    CHECK(svg.find("data:image/jpeg;base64,") != std::string::npos &&
+          svg.find("<rect x=\"0\" y=\"0\" width=\"60\" height=\"40\"/>") != std::string::npos,
+          "the picture goes in, clipped to its frame");
+    CHECK(count("<g id=\"group") == 1, "the group is a group");
+    CHECK(svg.find("\t") == std::string::npos && svg.find("\xC2\xAD") == std::string::npos,
+          "no tabs or soft hyphens in the text");
+    /* Plain text of text blocks, for programs that read only text */
+    std::vector<ItemId> text_ids;
+    for (const Item &it : doc.pages[0].items)
+        if (it.is_text())
+            text_ids.push_back(it.id);
+    const std::string plain = items_text(doc, 0, text_ids, comps);
+    CHECK(plain.rfind("WAVE AFTER WAVE OF TYPE\n", 0) == 0, "headline first, one paragraph a line");
+    CHECK(plain.find("Spacing attributes\t1") != std::string::npos, "tabs stay tabs");
+    CHECK(plain.find("\u2022\tFirst point\n\u2022\tSecond point") != std::string::npos,
+          "list markers lead their paragraphs");
+    CHECK(plain.find("Desktop publishing began with a simple promise") != std::string::npos,
+          "lines of a paragraph run together");
+    CHECK(plain.find("\xC2\xAD") == std::string::npos && plain.back() != '\n',
+          "no soft hyphens, no trailing newline");
+    CHECK(items_text(doc, 0, {pic_id}, comps).empty(), "a picture alone has no text");
+    /* Nothing chosen, nothing written */
+    CHECK(items_svg(doc, 0, {}, comps, &store, nullptr).empty(), "an empty selection writes nothing");
+}
+
 int main(int argc, char **argv) {
     bool verbose = argc > 1 && std::strcmp(argv[1], "-v") == 0;
     FontLibrary fonts;
@@ -5120,6 +5296,7 @@ int main(int argc, char **argv) {
     test_docfile(fonts);
     test_images(fonts);
     test_svg(fonts);
+    test_svg_ink(fonts);
     test_asset_library_config();
     test_fill_windings();
     test_pdf_export_jobs();
@@ -5143,6 +5320,7 @@ int main(int argc, char **argv) {
     test_font_menu();
     test_swatch_library();
     test_layout_templates(fonts);
+    test_svg_export(fonts);
     test_system_fonts();
     if (verbose)
         dump_sample(fonts);

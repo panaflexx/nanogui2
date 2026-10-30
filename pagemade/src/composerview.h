@@ -216,6 +216,7 @@ public:
     bool place_layout(const pagemade::LayoutTemplate &t, size_t page);
     /* The SVG bytes placed graphics show (a layout made from the page). */
     const pagemade::VectorStore *vector_store() const { return m_vectors; }
+    const pagemade::FontLibrary *fonts() const { return m_fonts; }
 
     /* Pictures in a frame on screen as of the last draw. Linked pictures
      * are read when they become live, on a background thread. */
@@ -896,5 +897,8 @@ private:
      * changes, not from the destructor: the screen may already be gone. */
     struct Tex { int id = 0; int w = 0, h = 0; uint64_t version = 0; };
     std::map<uint32_t, Tex> m_tex;
+    /* SVG pictures carried in the draw list, keyed by DrawImage::bytes_key.
+     * `version` is the long edge asked for. */
+    std::map<uint64_t, Tex> m_inline_tex;
     uint64_t m_tex_gen = 0;
 };

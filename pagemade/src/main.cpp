@@ -2938,6 +2938,7 @@ public:
         auto faces = std::make_shared<const std::vector<std::shared_ptr<Font>>>(
             retain_composition_fonts(m_fonts, *comps));
         auto images = std::make_shared<ImageStore>(m_images.snapshot());
+        m_vectors.realize(m_fonts);
         auto vectors = std::make_shared<VectorStore>(m_vectors.snapshot());
         NVGcontext *ctx = nvg_context();
         try {

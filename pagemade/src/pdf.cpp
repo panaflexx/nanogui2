@@ -756,6 +756,40 @@ PdfPicture embed_picture(Writer &w, const ImageStore::Entry &e, const PictureOpt
     return out;
 }
 
+/* An SVG picture has no ImageStore id. Give it one so the page's XObject
+ * dict can name it, the same way an asset is named. The id is only on this
+ * draw list. */
+void claim_inline_images(std::vector<DrawList> &pages) {
+    std::map<uint64_t, uint32_t> ids;
+    uint32_t next = 0x80000000u;
+    for (DrawList &page : pages)
+        for (DrawOp &op : page)
+            if (auto *im = std::get_if<DrawImage>(&op)) {
+                if (im->asset || !im->bytes || im->bytes->empty())
+                    continue;
+                const uint64_t key = im->bytes_key ? im->bytes_key : 1;
+                auto it = ids.find(key);
+                if (it == ids.end()) {
+                    it = ids.emplace(key, next).first;
+                    if (next != 0xffffffffu)
+                        ++next;
+                }
+                im->asset = it->second;
+            }
+}
+
+/* Source bytes for a placement: an inline SVG picture, else the store. */
+bool picture_bytes(const ImageStore *images, const DrawImage &im, ImageStore::Bytes &bytes,
+                   ImageMetadata &meta) {
+    if (im.bytes && !im.bytes->empty()) {
+        bytes = im.bytes;
+        meta = ImageMetadata();
+        image_loader().probe(bytes->data(), bytes->size(), &meta, nullptr);
+        return true;
+    }
+    return picture_source(images, im.asset, bytes, meta);
+}
+
 void emit_missing_image(std::string &s, const DrawImage &im, bool tagged) {
     s += std::string(tagged ? "/CS0 cs 0.9 0.9 0.9 sc" : "0.9 0.9 0.9 rg") + "\n0 0 " +
          num(im.clip_w) + " " + num(im.clip_h) + " re\nf\n";
@@ -1106,7 +1140,7 @@ bool draws_transparency(const DrawList &list, const PageDoc &doc) {
             if (see_through(g->color))
                 return true;
         } else if (const auto *im = std::get_if<DrawImage>(&op)) {
-            if (!im->asset)
+            if (!im->asset && !(im->bytes && !im->bytes->empty()))
                 continue;                // an empty frame draws nothing
             if (im->opacity < 0.999f)
                 return true;
@@ -1143,6 +1177,7 @@ bool export_pdf(const std::string &path, const PageDoc &doc,
         pages.push_back(build_page(doc, i, comps, nullptr, false, vectors));
     if (pages.empty())
         pages.emplace_back();   // a PDF needs a page; a fully hidden document is blank
+    claim_inline_images(pages);
 
     /* Pages to flatten: those that draw anything see-through, when there
      * is a rasterizer to draw them */
@@ -1197,7 +1232,7 @@ bool export_pdf(const std::string &path, const PageDoc &doc,
                             return false;
                         ImageStore::Bytes bytes;
                         ImageMetadata meta;
-                        if (!picture_source(images, im->asset, bytes, meta)) {
+                        if (!picture_bytes(images, *im, bytes, meta)) {
                             image_res[im->asset] = PdfPicture();   // a stand-in, asked once
                             continue;
                         }
@@ -1259,7 +1294,7 @@ bool export_pdf(const std::string &path, const PageDoc &doc,
                 continue;
             ImageStore::Bytes bytes;
             ImageMetadata meta;
-            if (!picture_source(images, im->asset, bytes, meta))
+            if (!picture_bytes(images, *im, bytes, meta))
                 continue;
             const int edge = std::max(1, (int) std::ceil(std::max(std::fabs(im->w), std::fabs(im->h)) *
                                                          fppi / 72.f));
@@ -1293,7 +1328,7 @@ bool export_pdf(const std::string &path, const PageDoc &doc,
                     if (im->asset && !image_res.count(im->asset)) {
                         ImageStore::Bytes bytes;
                         ImageMetadata meta;
-                        if (!picture_source(images, im->asset, bytes, meta)) {
+                        if (!picture_bytes(images, *im, bytes, meta)) {
                             image_res[im->asset] = PdfPicture();
                             continue;
                         }
@@ -1369,7 +1404,8 @@ bool export_pdf(const std::string &path, const PageDoc &doc,
                 emit_path(content, s->path);
                 content += "S\nQ\n";
             } else if (const auto *im = std::get_if<DrawImage>(&op)) {
-                if (!im->asset || !(im->clip_w > 0.f) || !(im->clip_h > 0.f))
+                if ((!im->asset && !(im->bytes && !im->bytes->empty())) || !(im->clip_w > 0.f) ||
+                    !(im->clip_h > 0.f))
                     continue;            // an empty frame prints nothing (its border prints)
                 emit_cm(content, im->xf);
                 auto found = image_res.find(im->asset);
@@ -1381,6 +1417,7 @@ bool export_pdf(const std::string &path, const PageDoc &doc,
                     /* The frame clips in item space; the picture's own matrix
                      * then maps the unit square onto the placement rect. */
                     content += "0 0 " + num(im->clip_w) + " " + num(im->clip_h) + " re W n\n";
+                    emit_clip(content, im->clip);
                     const int orient = found->second.upright ? 1 : found->second.orientation;
                     float m[6];
                     image_pdf_matrix(orient, im->x, im->y, im->w, im->h, m);

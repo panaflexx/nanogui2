@@ -122,6 +122,9 @@ static void terminate(void)
     _glfwTerminateVulkan();
     _glfw.platform.terminateJoysticks();
     _glfw.platform.terminate();
+    // After the platform: X11 hands the clipboard (every format) to the
+    // clipboard manager as it terminates
+    _glfwFreeClipboardFormats();
 
     _glfw.initialized = GLFW_FALSE;
 

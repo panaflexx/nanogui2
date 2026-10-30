@@ -2,14 +2,19 @@
  * pagemade/plugin/svg.cpp — the SVG decoder.
  *
  * Linked into pagemade, not loaded from disk. It draws solid and gradient
- * fills and strokes; text is skipped. A gradient keeps its stops and its
+ * fills and strokes, positioned text (baked to outlines later) and
+ * pictures embedded as data URIs. A gradient keeps its stops and its
  * geometry in the graphic's box, and an href lends it the stops and
- * attributes it leaves out. clip-path naming a <clipPath> becomes a clip on the shapes it
- * covers; a clip this slice cannot read (a basic shape, <use> or text in
- * the clip) is left out and the shapes are drawn whole. Each of those is
- * named once on the scene so Place can say what it left out. Path arcs
- * become cubics. Coordinates are baked into the graphic's point box
- * (96 CSS px = 72 pt), y down.
+ * attributes it leaves out. clip-path naming a <clipPath> becomes a clip on
+ * the shapes, text and pictures it covers; a clip this slice cannot read
+ * (a basic shape, <use> or text in the clip) is left out and the content
+ * is drawn whole. Each of those is named once on the scene so Place can
+ * say what it left out. Path arcs become cubics. Coordinates are baked
+ * into the graphic's point box (96 CSS px = 72 pt), y down.
+ *
+ * A picture goes through the walk as a stand-in rectangle, so the clips
+ * around it apply as they do to shapes, and is taken out of the shapes at
+ * the end. A picture that is not a data URI is named and left out.
  */
 #include "plugin/xml.h"
 #include "vector.h"
@@ -17,6 +22,7 @@
 #include <algorithm>
 #include <cmath>
 #include <cctype>
+#include <cstdlib>
 #include <map>
 #include <string>
 
@@ -61,6 +67,9 @@ struct Viewport {
     Transform map;
 };
 
+/* What a CSS px is in points at the root: 3/4 by the CSS rule, or 1 for a
+ * paste from a drawing program, which writes points without a unit. */
+
 struct Style {
     VectorPaint fill;
     float fill_opacity = 1.f;
@@ -78,6 +87,11 @@ struct Style {
     bool visible = true;
     Color current{0, 0, 0, 1};
     float font_px = 16.f;
+    /* Text, kept for a paste (not drawn) */
+    std::string font_family;
+    int font_weight = 400;
+    bool italic = false, small_caps = false, underline = false, strike = false;
+    float letter_spacing = 0.f;          // user units
     std::string transform;
     std::string clip;
     FillRule clip_rule = FillRule::NonZero;
@@ -371,7 +385,7 @@ bool parse_viewbox(const std::string &s, float &x, float &y, float &w, float &h)
            parse_number(s, i, h) && w > 0.f && h > 0.f;
 }
 
-Viewport make_viewport(const XmlNode &svg, const Viewport *parent) {
+Viewport make_viewport(const XmlNode &svg, const Viewport *parent, float px_to_pt = kPxToPt) {
     Viewport vp;
     const float font_px = 16.f;
     float w_px = 0, h_px = 0, w_pct = 0, h_pct = 0;
@@ -403,8 +417,8 @@ Viewport make_viewport(const XmlNode &svg, const Viewport *parent) {
     vp.vb_h = vh;
     vp.vp_w_px = w_px > 0.f ? w_px : 1.f;
     vp.vp_h_px = h_px > 0.f ? h_px : 1.f;
-    vp.box_w = vp.vp_w_px * kPxToPt;
-    vp.box_h = vp.vp_h_px * kPxToPt;
+    vp.box_w = vp.vp_w_px * px_to_pt;
+    vp.box_h = vp.vp_h_px * px_to_pt;
     vp.map = viewbox_map(vx, vy, vw, vh, vp.box_w, vp.box_h, xml_attr_value(svg, "preserveAspectRatio"));
     return vp;
 }
@@ -925,7 +939,9 @@ const char *kPaintProps[] = {"fill",        "fill-opacity",      "fill-rule",   
                              "stroke-width", "stroke-opacity",    "stroke-linecap",    "stroke-linejoin",
                              "stroke-miterlimit", "stroke-dasharray", "stroke-dashoffset", "opacity",
                              "display",      "visibility",        "color",             "font-size",
-                             "clip-path",    "clip-rule",         "transform"};
+                             "clip-path",    "clip-rule",         "transform",         "font-family",
+                             "font-weight",  "font-style",        "font-variant",      "letter-spacing",
+                             "text-decoration"};
 
 void consider(std::map<std::string, Decl> &best, const std::string &prop, const std::string &value,
               int spec, int order) {
@@ -1056,6 +1072,31 @@ void apply_prop(Style &st, const std::string &prop, const std::string &value, co
         st.clip = value;
     else if (prop == "transform")
         st.transform = value;
+    else if (prop == "font-family")
+        st.font_family = trim(value);
+    else if (prop == "font-weight") {
+        const std::string v = lower(trim(value));
+        if (v == "bold" || v == "bolder")
+            st.font_weight = 700;
+        else if (v == "normal")
+            st.font_weight = 400;
+        else if (v == "lighter")
+            st.font_weight = 300;
+        else if (!v.empty() && std::isdigit((unsigned char) v[0]))
+            st.font_weight = std::clamp(std::atoi(v.c_str()), 100, 900);
+    } else if (prop == "font-style") {
+        const std::string v = lower(trim(value));
+        st.italic = v == "italic" || v.rfind("oblique", 0) == 0;
+    } else if (prop == "font-variant")
+        st.small_caps = lower(value).find("small-caps") != std::string::npos;
+    else if (prop == "letter-spacing") {
+        const std::string v = lower(trim(value));
+        st.letter_spacing = v == "normal" ? 0.f : length_user(value, 0.f, true, vp, st.font_px);
+    } else if (prop == "text-decoration") {
+        const std::string v = lower(value);
+        st.underline = v.find("underline") != std::string::npos;
+        st.strike = v.find("line-through") != std::string::npos;
+    }
 }
 
 Style compute_style(const XmlNode &el, const Style &inherited, const std::vector<Rule> &rules,
@@ -1232,6 +1273,7 @@ void emit_shape(VectorScene &scene, const Path &user, const Transform &xf, const
     if (!shape.fill.none())
         shape.windings = std::make_shared<const std::vector<uint8_t>>(fill_windings(shape.path));
     scene.shapes.push_back(std::move(shape));
+    scene.order.push_back({VectorSlot::Shape, (int) scene.shapes.size() - 1});
 }
 
 float attr_user(const XmlNode &el, const char *name, float fallback, bool horiz, const Viewport &vp,
@@ -1454,13 +1496,38 @@ bool same_clip(const ClipLayers &a, const ClipLayers &b) {
     return true;
 }
 
-/* The shapes drawn for one element, [first, end), get the clip `value`
- * names, in the element's user space `user`. A layer with no paths
- * removes them. */
-void apply_clip(VectorScene &scene, size_t first, const std::string &value, const Transform &user,
-                const Decode &dc) {
+/* Drop paint-order entries for content an empty clip erased. Shape
+ * indices at or after `first` are the tail that is about to be removed.
+ * Text from `text0` and pictures whose stand-in is in that tail go too. */
+void drop_order_tail(VectorScene &scene, size_t first, size_t text0) {
+    std::vector<char> drop_image(scene.images.size(), 0);
+    for (size_t i = first; i < scene.shapes.size(); ++i) {
+        const int img = scene.shapes[i].image;
+        if (img >= 0 && (size_t) img < drop_image.size())
+            drop_image[(size_t) img] = 1;
+    }
+    std::vector<VectorSlotRef> order;
+    order.reserve(scene.order.size());
+    for (const VectorSlotRef &r : scene.order) {
+        if (r.slot == VectorSlot::Shape && r.index >= (int) first)
+            continue;
+        if (r.slot == VectorSlot::Text && r.index >= (int) text0)
+            continue;
+        if (r.slot == VectorSlot::Image && r.index >= 0 && (size_t) r.index < drop_image.size() &&
+            drop_image[(size_t) r.index])
+            continue;
+        order.push_back(r);
+    }
+    scene.order = std::move(order);
+}
+
+/* The shapes drawn for one element, [first, end), and the text from
+ * `text0`, get the clip `value` names, in the element's user space `user`.
+ * A layer with no paths removes them. */
+void apply_clip(VectorScene &scene, size_t first, size_t text0, const std::string &value,
+                const Transform &user, const Decode &dc) {
     const std::string v = lower(trim(value));
-    if (v.empty() || v == "none" || first >= scene.shapes.size())
+    if (v.empty() || v == "none" || (first >= scene.shapes.size() && text0 >= scene.texts.size()))
         return;
     std::string id;
     if (!parse_url_id(value, id)) {
@@ -1497,6 +1564,7 @@ void apply_clip(VectorScene &scene, size_t first, const std::string &value, cons
     }
     for (const auto &layer : add)
         if (layer.empty()) {
+            drop_order_tail(scene, first, text0);
             scene.shapes.erase(scene.shapes.begin() + (std::ptrdiff_t) first, scene.shapes.end());
             return;
         }
@@ -1522,10 +1590,220 @@ void apply_clip(VectorScene &scene, size_t first, const std::string &value, cons
         }
         scene.shapes[i].clip = m->second;
     }
+    auto intern = [&](int old) {
+        ClipLayers layers = old >= 0 && (size_t) old < scene.clips.size() ? scene.clips[(size_t) old]
+                                                                          : ClipLayers();
+        layers.insert(layers.end(), add.begin(), add.end());
+        for (size_t k = 0; k < scene.clips.size(); ++k)
+            if (same_clip(scene.clips[k], layers))
+                return (int) k;
+        scene.clips.push_back(std::move(layers));
+        return (int) scene.clips.size() - 1;
+    };
+    for (size_t i = text0; i < scene.texts.size(); ++i)
+        scene.texts[i].clip = intern(scene.texts[i].clip);
 }
 
 void walk(const XmlNode &el, const Transform &parent, float parent_a, const Style &inherited,
           const Decode &dc, VectorScene &scene);
+
+/* The families of a font-family list, unquoted, in order */
+std::vector<std::string> font_families(const std::string &list) {
+    std::vector<std::string> out;
+    std::string cur;
+    char quote = 0;
+    auto flush = [&] {
+        const std::string t = trim(cur);
+        if (!t.empty())
+            out.push_back(t);
+        cur.clear();
+    };
+    for (char c : list) {
+        if (quote) {
+            if (c == quote)
+                quote = 0;
+            else
+                cur += c;
+        } else if (c == '\'' || c == '"') {
+            quote = c;
+        } else if (c == ',') {
+            flush();
+        } else {
+            cur += c;
+        }
+    }
+    flush();
+    return out;
+}
+
+/* The first number of an x, y, dx or dy list */
+bool first_length(const XmlNode &el, const char *name, bool horiz, const Viewport &vp,
+                  float font_px, float &out) {
+    std::string v = trim(xml_attr_value(el, name));
+    if (v.empty())
+        return false;
+    const size_t sep = v.find_first_of(" ,\t\n");
+    if (sep != std::string::npos)
+        v = v.substr(0, sep);
+    out = length_user(v, 0.f, horiz, vp, font_px);
+    return true;
+}
+
+/* A <text>'s runs, for a paste: its character data and each <tspan>'s,
+ * in order, with the position each one names and its style. A position
+ * not yet used by a run (a <text x y> whose first child is a <tspan>
+ * without one) passes down to the first run inside. Whitespace collapses
+ * unless xml:space is preserve. */
+void collect_text(const XmlNode &el, const Style &st, const Decode &dc, VectorScene &scene,
+                  VectorText &out, bool preserve, VectorTextRun *carry) {
+    const Viewport &vp = *dc.vp;
+    VectorTextRun base;
+    base.families = font_families(st.font_family);
+    base.size = st.font_px;
+    base.weight = st.font_weight;
+    base.italic = st.italic;
+    base.small_caps = st.small_caps;
+    base.underline = st.underline;
+    base.strike = st.strike;
+    base.letter_spacing = st.letter_spacing;
+    base.fill = st.fill.kind == PaintKind::None ? Color{0, 0, 0, 0} : st.fill.color;
+    base.fill.a *= st.fill_opacity * st.opacity;
+    /* This element's position, or one handed down not yet used */
+    VectorTextRun pos;
+    pos.has_x = first_length(el, "x", true, vp, st.font_px, pos.x);
+    pos.has_y = first_length(el, "y", false, vp, st.font_px, pos.y);
+    first_length(el, "dx", true, vp, st.font_px, pos.dx);
+    first_length(el, "dy", false, vp, st.font_px, pos.dy);
+    if (carry) {
+        if (!pos.has_x && carry->has_x) { pos.has_x = true; pos.x = carry->x; }
+        if (!pos.has_y && carry->has_y) { pos.has_y = true; pos.y = carry->y; }
+        pos.dx += carry->dx;
+        pos.dy += carry->dy;
+        *carry = VectorTextRun();        // used up here
+    }
+    bool pending = pos.has_x || pos.has_y || pos.dx != 0.f || pos.dy != 0.f;
+    for (const XmlNode &c : el.children) {
+        if (c.text) {
+            std::string t;
+            if (!preserve) {
+                bool space = false;
+                for (char ch : c.local) {
+                    if (ch == ' ' || ch == '\t' || ch == '\n' || ch == '\r') {
+                        space = true;
+                        continue;
+                    }
+                    if (space)
+                        t += ' ';
+                    space = false;
+                    t += ch;
+                }
+                if (space)
+                    t += ' ';
+            } else {
+                t = c.local;
+                for (char &ch : t)
+                    if (ch == '\n' || ch == '\r' || ch == '\t')
+                        ch = ' ';
+            }
+            if (t.empty())
+                continue;
+            VectorTextRun run = base;
+            if (pending) {
+                run.has_x = pos.has_x;
+                run.has_y = pos.has_y;
+                run.x = pos.x;
+                run.y = pos.y;
+                run.dx = pos.dx;
+                run.dy = pos.dy;
+                pending = false;
+            }
+            run.text = std::move(t);
+            out.runs.push_back(std::move(run));
+            continue;
+        }
+        if (c.local != "tspan" && c.local != "a")
+            continue;
+        const Style cs = compute_style(c, st, *dc.rules, vp, *dc.grads, scene);
+        if (!cs.display)
+            continue;
+        const std::string space = xml_attr_value(c, "space");
+        VectorTextRun hand = pos;
+        collect_text(c, cs, dc, scene, out, space.empty() ? preserve : space == "preserve",
+                     pending ? &hand : nullptr);
+        pending = false;
+    }
+}
+
+int b64_val(char c) {
+    if (c >= 'A' && c <= 'Z')
+        return c - 'A';
+    if (c >= 'a' && c <= 'z')
+        return c - 'a' + 26;
+    if (c >= '0' && c <= '9')
+        return c - '0' + 52;
+    if (c == '+')
+        return 62;
+    if (c == '/')
+        return 63;
+    return -1;
+}
+
+bool b64_decode(const std::string &in, std::vector<uint8_t> &out) {
+    out.clear();
+    int val = 0, bits = 0;
+    for (char c : in) {
+        if (c == '=' || std::isspace((unsigned char) c))
+            continue;
+        const int d = b64_val(c);
+        if (d < 0)
+            return false;
+        val = (val << 6) | d;
+        bits += 6;
+        if (bits >= 8) {
+            bits -= 8;
+            out.push_back((uint8_t) ((val >> bits) & 0xFF));
+        }
+    }
+    return !out.empty();
+}
+
+void percent_decode(const std::string &in, std::vector<uint8_t> &out) {
+    out.clear();
+    for (size_t i = 0; i < in.size(); ++i) {
+        if (in[i] == '%' && i + 2 < in.size() && std::isxdigit((unsigned char) in[i + 1]) &&
+            std::isxdigit((unsigned char) in[i + 2])) {
+            out.push_back((uint8_t) std::strtoul(in.substr(i + 1, 2).c_str(), nullptr, 16));
+            i += 2;
+        } else {
+            out.push_back((uint8_t) in[i]);
+        }
+    }
+}
+
+/* A data:image URI's bytes. False for anything else (a file, a link, SVG). */
+bool data_image(const std::string &href, std::vector<uint8_t> &out) {
+    if (href.size() < 5 || href.compare(0, 5, "data:") != 0)
+        return false;
+    const size_t comma = href.find(',');
+    if (comma == std::string::npos)
+        return false;
+    const std::string meta = lower(href.substr(5, comma - 5));
+    if (meta.find("image/svg") != std::string::npos)
+        return false;
+    const bool b64 = meta.find("base64") != std::string::npos;
+    if (b64) {
+        if (!b64_decode(href.substr(comma + 1), out))
+            return false;
+    } else {
+        percent_decode(href.substr(comma + 1), out);
+    }
+    if (out.size() < 8)
+        return false;
+    const bool jpeg = out[0] == 0xFF && out[1] == 0xD8;
+    const bool png = out[0] == 0x89 && out[1] == 'P' && out[2] == 'N' && out[3] == 'G';
+    const bool typed = meta.find("image/") != std::string::npos;
+    return jpeg || png || typed;
+}
 
 void draw_element(const XmlNode &el, const Transform &world, float alpha, const Style &st,
                   const Decode &dc, VectorScene &scene) {
@@ -1551,7 +1829,42 @@ void draw_element(const XmlNode &el, const Transform &world, float alpha, const 
             walk(c, world * into, alpha, st, inner, scene);
         return;
     }
-    if (el.local == "use" || el.local == "image" || el.local == "foreignObject")
+    if (el.local == "image") {
+        /* A stand-in rectangle walks with the shapes so the clips around
+         * it apply, and is taken out at the end. It is not painted. */
+        const float x = attr_user(el, "x", 0, true, vp, st.font_px);
+        const float y = attr_user(el, "y", 0, false, vp, st.font_px);
+        const float w = attr_user(el, "width", 0, true, vp, st.font_px);
+        const float h = attr_user(el, "height", 0, false, vp, st.font_px);
+        std::string href = xml_attr_value(el, "href");   // xlink:href or href
+        std::vector<uint8_t> bytes;
+        if (!(w > 0.f) || !(h > 0.f) || !data_image(href, bytes)) {
+            note_skip(scene, "images");
+            return;
+        }
+        VectorImage im;
+        im.xf = world;
+        im.x = x;
+        im.y = y;
+        im.w = w;
+        im.h = h;
+        im.href = std::move(href);
+        im.preserve = xml_attr_value(el, "preserveAspectRatio");
+        im.opacity = alpha;
+        im.bytes = std::make_shared<const std::vector<uint8_t>>(std::move(bytes));
+        scene.images.push_back(std::move(im));
+        scene.order.push_back({VectorSlot::Image, (int) scene.images.size() - 1});
+        VectorShape stand_in;
+        stand_in.image = (int) scene.images.size() - 1;
+        const Point a = world.apply({x, y}), b = world.apply({x + w, y}),
+                    c = world.apply({x + w, y + h}), e = world.apply({x, y + h});
+        stand_in.path = {{PathCmd::Move, 0, 0, 0, 0, a.x, a.y}, {PathCmd::Line, 0, 0, 0, 0, b.x, b.y},
+                         {PathCmd::Line, 0, 0, 0, 0, c.x, c.y}, {PathCmd::Line, 0, 0, 0, 0, e.x, e.y},
+                         {PathCmd::Close, 0, 0, 0, 0, 0, 0}};
+        scene.shapes.push_back(std::move(stand_in));
+        return;
+    }
+    if (el.local == "use" || el.local == "foreignObject")
         return;
     Path user;
     bool fill_it = true;
@@ -1564,7 +1877,7 @@ void walk(const XmlNode &el, const Transform &parent, float parent_a, const Styl
           const Decode &dc, VectorScene &scene) {
     if (el.text || is_skippable(el.local))
         return;
-    if (el.local == "text" || el.local == "tspan" || el.local == "textPath") {
+    if (el.local == "tspan" || el.local == "textPath") {
         note_skip(scene, "text");
         return;
     }
@@ -1573,10 +1886,23 @@ void walk(const XmlNode &el, const Transform &parent, float parent_a, const Styl
         return;
     const Transform local = parse_transform(st.transform.empty() ? xml_attr_value(el, "transform") : st.transform);
     const Transform world = parent * local;
+    if (el.local == "text") {
+        const size_t text0 = scene.texts.size();
+        VectorText text;
+        text.xf = world;
+        collect_text(el, st, dc, scene, text, xml_attr_value(el, "space") == "preserve", nullptr);
+        if (!text.runs.empty()) {
+            scene.texts.push_back(std::move(text));
+            scene.order.push_back({VectorSlot::Text, (int) scene.texts.size() - 1});
+        }
+        apply_clip(scene, scene.shapes.size(), text0, st.clip, world, dc);
+        return;
+    }
     const float alpha = parent_a * st.opacity;
     const size_t first = scene.shapes.size();
+    const size_t text0 = scene.texts.size();
     draw_element(el, world, alpha, st, dc, scene);
-    apply_clip(scene, first, st.clip, world, dc);
+    apply_clip(scene, first, text0, st.clip, world, dc);
 }
 
 bool sniff_svg(const uint8_t *data, size_t n) {
@@ -1642,6 +1968,11 @@ public:
         return {{"svg", "SVG"}};
     }
     bool decode(const uint8_t *data, size_t n, VectorScene *out, std::string *error) const override {
+        return decode_with(data, n, out, error, false);
+    }
+
+    static bool decode_with(const uint8_t *data, size_t n, VectorScene *out, std::string *error,
+                            bool unitless_points) {
         if (!out)
             return false;
         *out = VectorScene();
@@ -1658,7 +1989,15 @@ public:
         ClipDefs clips;
         collect(root, rules, grads, clips);
         resolve_gradient_hrefs(grads);
-        const Viewport vp = make_viewport(root, nullptr);
+        /* A paste reads a bare number (or px) at the root as a point */
+        float px_to_pt = kPxToPt;
+        if (unitless_points) {
+            const std::string w = trim(xml_attr_value(root, "width"));
+            const Len L = parse_len(w);
+            if (w.empty() || !L.ok || L.unit == Unit::None || L.unit == Unit::Px)
+                px_to_pt = 1.f;
+        }
+        const Viewport vp = make_viewport(root, nullptr, px_to_pt);
         Decode dc;
         dc.vp = &vp;
         dc.rules = &rules;
@@ -1674,7 +2013,33 @@ public:
         const float alpha = root_style.opacity;
         for (const XmlNode &c : root.children)
             walk(c, world, alpha, root_style, dc, *out);
-        apply_clip(*out, 0, root_style.clip, world, dc);
+        apply_clip(*out, 0, 0, root_style.clip, world, dc);
+        /* Pictures' stand-ins leave the shapes, taking their clips along.
+         * Shape indices in the paint order move with them. */
+        std::vector<int> remap(out->shapes.size(), -1);
+        std::vector<VectorShape> shapes;
+        shapes.reserve(out->shapes.size());
+        for (size_t i = 0; i < out->shapes.size(); ++i) {
+            VectorShape &sh = out->shapes[i];
+            if (sh.image >= 0 && (size_t) sh.image < out->images.size())
+                out->images[(size_t) sh.image].clip = sh.clip;
+            else {
+                remap[i] = (int) shapes.size();
+                shapes.push_back(std::move(sh));
+            }
+        }
+        out->shapes = std::move(shapes);
+        std::vector<VectorSlotRef> order;
+        order.reserve(out->order.size());
+        for (VectorSlotRef r : out->order) {
+            if (r.slot == VectorSlot::Shape) {
+                if (r.index < 0 || (size_t) r.index >= remap.size() || remap[(size_t) r.index] < 0)
+                    continue;
+                r.index = remap[(size_t) r.index];
+            }
+            order.push_back(r);
+        }
+        out->order = std::move(order);
         return true;
     }
 };
@@ -1683,6 +2048,15 @@ public:
 
 void register_svg_decoder(VectorLoader &loader) {
     loader.add(std::make_unique<SvgDecoder>());
+}
+
+bool decode_svg_paste(const uint8_t *data, size_t n, VectorScene *out, std::string *error) {
+    if (!sniff_svg(data, n)) {
+        if (error)
+            *error = "not an SVG";
+        return false;
+    }
+    return SvgDecoder::decode_with(data, n, out, error, true);
 }
 
 } // namespace pagemade

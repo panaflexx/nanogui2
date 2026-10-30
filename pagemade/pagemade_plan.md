@@ -164,6 +164,16 @@ and its nanovgd renderer. The composer lays out in points and every backend
   hidden pages left out) and `print_pdf` (`print.h`) hands the file to the
   spooler. Linux and macOS use `lp` and `lpstat`. Windows says printing is not
   available yet.
+- **Copy to other programs**: Copy with the pointer offers the items as SVG
+  (`image/svg+xml`, `svg_export.h`) at their size in points. Shapes, rules,
+  borders, placed graphics and pictures come from the draw list (pictures as
+  embedded sRGB JPEG or PNG, about 300 ppi as placed, clipped to the frame);
+  text is editable `<text>` per composed line, named by the font file's own
+  family, with tracking, caps, bullets, leaders and break hyphens. Groups are
+  `<g>`. The clipboard holds several formats at once through
+  `glfwSetClipboardFormats`, added to the bundled GLFW (X11 with INCR for
+  large data, and Wayland; macOS and Windows offer the text format only so
+  far). Next: RTF and HTML for text.
 
 ## Next, in order
 

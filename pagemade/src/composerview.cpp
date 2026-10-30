@@ -3,6 +3,7 @@
  */
 #include "composerview.h"
 #include "layout_templates.h"
+#include "svg_export.h"
 #include "render_nvg.h"
 #include "uri.h"
 #include "vector.h"
@@ -152,6 +153,12 @@ void ComposerView::set_document(PageDoc doc) {
     /* Reads and imports asked for by the previous document are dropped when
        they come back: its picture ids mean other pictures now. */
     ++m_doc_epoch;
+    if (NVGcontext *ctx = screen() ? screen()->nvg_context() : nullptr) {
+        for (auto &kv : m_inline_tex)
+            if (kv.second.id)
+                nvgDeleteImage(ctx, kv.second.id);
+    }
+    m_inline_tex.clear();
     if (m_loader)
         m_loader->drop_if([](const std::string &) { return true; });
     m_load_want.clear();
@@ -2642,19 +2649,41 @@ void ComposerView::edit_copy() {
             }
     }
     GLFWwindow *win = screen() ? screen()->glfw_window() : nullptr;
-    m_cb_at_copy = clipboard_now(win);
     m_item_paste = true;
-    /* One placed SVG also goes on the system clipboard, so another program
-     * can paste it. The snapshot matches that string, so the next paste
-     * here still uses the item. */
-    if (win && m_clip.items.size() == 1 && m_clip.items[0].vector() &&
-        m_clip.vectors.size() == 1 && m_clip.vectors[0].bytes &&
-        !m_clip.vectors[0].bytes->empty()) {
-        const auto &b = *m_clip.vectors[0].bytes;
-        std::string xml(b.begin(), b.end());
-        glfwSetClipboardString(win, xml.c_str());
-        m_cb_at_copy = std::move(xml);
+    /* Other programs get the items as SVG (image/svg+xml): paths, pictures
+     * and editable text, at their size (svg_export.h). One placed graphic
+     * with parts this slice doesn't draw goes as its own file, so nothing
+     * is lost. Many programs only read text/plain (arboard-based ones such
+     * as VectorCraft and WordCraft, and anything behind a bridge that
+     * carries only text), so that goes too, as those apps write it: the
+     * text when only text blocks are copied, else the SVG markup unless it
+     * is too large to be text. The snapshot is taken after, so the next
+     * paste here still uses the items. */
+    if (win) {
+        std::string svg;
+        if (m_clip.items.size() == 1 && m_clip.items[0].vector() && m_clip.vectors.size() == 1 &&
+            m_clip.vectors[0].bytes && !m_clip.vectors[0].bytes->empty() &&
+            !m_clip.vectors[0].asset.skipped.empty()) {
+            const auto &b = *m_clip.vectors[0].bytes;
+            svg.assign(b.begin(), b.end());
+        } else {
+            svg = items_svg(m_doc, page, ids, m_comp, m_images, m_vectors);
+        }
+        bool text_only = true;
+        for (const Item &it : m_clip.items)
+            text_only = text_only && it.is_text();
+        constexpr size_t kMaxSvgAsText = (size_t) 3 << 19;   // ~1 MiB of pictures, base64
+        std::string plain = text_only ? items_text(m_doc, page, ids, m_comp)
+                          : svg.size() <= kMaxSvgAsText ? svg : std::string();
+        std::vector<std::pair<std::string, std::string>> formats;
+        if (!svg.empty())
+            formats.emplace_back("image/svg+xml", std::move(svg));
+        if (!plain.empty())
+            formats.emplace_back("text/plain;charset=utf-8", std::move(plain));
+        if (!formats.empty())
+            nanogui::write_clipboard(win, formats);
     }
+    m_cb_at_copy = clipboard_now(win);
     /* Each story with only its copied blocks threaded, in reading order */
     for (StoryId sid : stories) {
         StoryEntry e = *m_doc.find_story(sid);
@@ -2697,7 +2726,7 @@ void ComposerView::edit_paste(const Point *at) {
             return;
         push_undo();
         const VectorPlacement placed = place_svg_bytes(m_doc, *m_vectors, std::move(bytes),
-                                                       "graphic.svg", "", m_page, at);
+                                                       "graphic.svg", "", m_page, at, m_images);
         if (!placed.ok) {
             undo();
             return;
@@ -2705,7 +2734,7 @@ void ComposerView::edit_paste(const Point *at) {
         m_item_paste = false;
         if (m_page < m_doc.pages.size())
             show_page(m_page);
-        m_sel = {placed.item};
+        m_sel = with_groups({placed.item});
         m_edit_story = 0;
         if (m_tool != Tool::Pointer)
             set_tool(Tool::Pointer);
@@ -4428,14 +4457,14 @@ bool ComposerView::place_file(const std::string &path, std::string *error) {
     push_undo();
     const VectorPlacement placed = place_svg_bytes(m_doc, *m_vectors, std::move(bytes),
                                                    image_leaf_name(path), file_uri(path),
-                                                   m_page, nullptr);
+                                                   m_page, nullptr, m_images);
     if (!placed.ok) {
         undo();
         if (error)
             *error = placed.error;
         return false;
     }
-    m_sel = {placed.item};
+    m_sel = with_groups({placed.item});
     m_edit_story = 0;
     if (m_tool != Tool::Pointer)
         set_tool(Tool::Pointer);
@@ -4504,7 +4533,8 @@ void ComposerView::place_file(const std::string &path, size_t page, const Point 
             view->push_undo();
             const VectorPlacement placed =
                 place_svg_bytes(view->m_doc, *view->m_vectors, std::vector<uint8_t>(*bytes),
-                                image_leaf_name(path), file_uri(path), page, has_at ? &drop : nullptr);
+                                image_leaf_name(path), file_uri(path), page, has_at ? &drop : nullptr,
+                                view->m_images);
             if (!placed.ok) {
                 view->undo();
                 if (done)
@@ -4513,7 +4543,7 @@ void ComposerView::place_file(const std::string &path, size_t page, const Point 
             }
             if (page != view->m_page)
                 view->show_page(page);
-            view->m_sel = {placed.item};
+            view->m_sel = view->with_groups({placed.item});
             view->m_edit_story = 0;
             if (view->m_tool != Tool::Pointer)
                 view->set_tool(Tool::Pointer);
@@ -5173,6 +5203,28 @@ void ComposerView::sync_textures(NVGcontext *ctx) {
 }
 
 int ComposerView::texture_for(NVGcontext *ctx, const DrawImage &im, float px) {
+    if (im.bytes && !im.bytes->empty()) {
+        const uint64_t key = im.bytes_key ? im.bytes_key : 1;
+        const float pts = std::max(std::fabs(im.w), std::fabs(im.h));
+        int want = px > 0.f ? (int) std::ceil(pts / px) : 256;
+        int edge = 64;
+        while (edge < want && edge < 4096)
+            edge *= 2;
+        auto it = m_inline_tex.find(key);
+        if (it != m_inline_tex.end() && it->second.id && (int) it->second.version == edge)
+            return it->second.id;
+        std::vector<uint8_t> rgba;
+        int w = 0, h = 0;
+        std::string err;
+        if (!make_display(im.bytes->data(), im.bytes->size(), edge, &rgba, &w, &h, &err) || w <= 0 ||
+            h <= 0)
+            return 0;
+        if (it != m_inline_tex.end() && it->second.id)
+            nvgDeleteImage(ctx, it->second.id);
+        const int id = nvgCreateImageRGBA(ctx, w, h, 0, rgba.data());
+        m_inline_tex[key] = {id, w, h, (uint64_t) edge};
+        return id;
+    }
     if (!im.asset)
         return kEmptyFramePlaceholder;   // an empty frame: shown, not printed
     if (!m_images)
@@ -5320,6 +5372,8 @@ void ComposerView::draw(NVGcontext *ctx) {
         nvgRestore(ctx);
     }
 
+    if (m_vectors && m_fonts)
+        m_vectors->realize(*m_fonts);
     auto paint_items = [&](bool only) {
         for (size_t si = 0; si < slots.size(); ++si) {
             const PageSlot &sl = slots[si];

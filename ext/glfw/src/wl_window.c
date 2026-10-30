@@ -40,6 +40,8 @@
 #include <sys/mman.h>
 #include <sys/timerfd.h>
 #include <poll.h>
+#include <signal.h>
+#include <time.h>
 #include <linux/input-event-codes.h>
 
 #include "wayland-client-protocol.h"
@@ -3082,29 +3084,30 @@ static void dataSourceHandleTarget(void* userData,
     }
 }
 
-static void dataSourceHandleSend(void* userData,
-                                 struct wl_data_source* source,
-                                 const char* mimeType,
-                                 int fd)
+// nanogui2: write all of `data` to the pipe a paste reads. A reader that
+// closes early must not kill us with SIGPIPE: it is blocked for the
+// write, and one left pending is taken before it is unblocked.
+//
+static void writeClipboardPipe(int fd, const char* data, size_t length)
 {
-    // Ignore it if this is an outdated or invalid request
-    if (_glfw.wl.selectionSource != source ||
-        strcmp(mimeType, "text/plain;charset=utf-8") != 0)
-    {
-        close(fd);
-        return;
-    }
+    sigset_t pipeSet, oldSet;
+    sigemptyset(&pipeSet);
+    sigaddset(&pipeSet, SIGPIPE);
+    pthread_sigmask(SIG_BLOCK, &pipeSet, &oldSet);
 
-    char* string = _glfw.wl.clipboardString;
-    size_t length = strlen(string);
-
+    GLFWbool broken = GLFW_FALSE;
     while (length > 0)
     {
-        const ssize_t result = write(fd, string, length);
+        const ssize_t result = write(fd, data, length);
         if (result == -1)
         {
             if (errno == EINTR)
                 continue;
+            if (errno == EPIPE)
+            {
+                broken = GLFW_TRUE;      // the reader went away: not an error
+                break;
+            }
 
             _glfwInputError(GLFW_PLATFORM_ERROR,
                             "Wayland: Error while writing the clipboard: %s",
@@ -3113,9 +3116,51 @@ static void dataSourceHandleSend(void* userData,
         }
 
         length -= result;
-        string += result;
+        data += result;
     }
 
+    if (broken && !sigismember(&oldSet, SIGPIPE))
+    {
+        const struct timespec now = { 0, 0 };
+        sigtimedwait(&pipeSet, NULL, &now);
+    }
+
+    pthread_sigmask(SIG_SETMASK, &oldSet, NULL);
+}
+
+static void dataSourceHandleSend(void* userData,
+                                 struct wl_data_source* source,
+                                 const char* mimeType,
+                                 int fd)
+{
+    if (_glfw.wl.selectionSource != source)
+    {
+        close(fd);
+        return;
+    }
+
+    // nanogui2: the clipboard in several formats
+    if (_glfw.clipFormatCount > 0)
+    {
+        const int index = _glfwClipboardFormatIndex(mimeType);
+        if (index >= 0)
+        {
+            writeClipboardPipe(fd, (const char*) _glfw.clipFormats[index].data,
+                               _glfw.clipFormats[index].size);
+        }
+
+        close(fd);
+        return;
+    }
+
+    // Ignore it if this is an invalid request
+    if (strcmp(mimeType, "text/plain;charset=utf-8") != 0)
+    {
+        close(fd);
+        return;
+    }
+
+    writeClipboardPipe(fd, _glfw.wl.clipboardString, strlen(_glfw.wl.clipboardString));
     close(fd);
 }
 
@@ -3128,6 +3173,8 @@ static void dataSourceHandleCancelled(void* userData,
         return;
 
     _glfw.wl.selectionSource = NULL;
+    // nanogui2: another client took the clipboard; our formats are off it
+    _glfwFreeClipboardFormats();
 }
 
 static const struct wl_data_source_listener dataSourceListener =
@@ -3167,6 +3214,60 @@ void _glfwSetClipboardStringWayland(const char* string)
                                 &dataSourceListener,
                                 NULL);
     wl_data_source_offer(_glfw.wl.selectionSource, "text/plain;charset=utf-8");
+    wl_data_device_set_selection(_glfw.wl.dataDevice,
+                                 _glfw.wl.selectionSource,
+                                 _glfw.wl.serial);
+}
+
+void _glfwSetClipboardFormatsWayland(void)
+{
+    if (_glfw.wl.selectionSource)
+    {
+        wl_data_source_destroy(_glfw.wl.selectionSource);
+        _glfw.wl.selectionSource = NULL;
+    }
+
+    // What glfwGetClipboardString returns while we own the selection
+    const char* text = _glfwClipboardFormatText();
+    _glfw_free(_glfw.wl.clipboardString);
+    _glfw.wl.clipboardString = _glfw_strdup(text ? text : "");
+
+    if (_glfw.clipFormatCount == 0)
+    {
+        wl_data_device_set_selection(_glfw.wl.dataDevice, NULL, _glfw.wl.serial);
+        return;
+    }
+
+    _glfw.wl.selectionSource =
+        wl_data_device_manager_create_data_source(_glfw.wl.dataDeviceManager);
+    if (!_glfw.wl.selectionSource)
+    {
+        _glfwInputError(GLFW_PLATFORM_ERROR,
+                        "Wayland: Failed to create clipboard data source");
+        return;
+    }
+    wl_data_source_add_listener(_glfw.wl.selectionSource,
+                                &dataSourceListener,
+                                NULL);
+
+    for (int i = 0;  i < _glfw.clipFormatCount;  i++)
+        wl_data_source_offer(_glfw.wl.selectionSource, _glfw.clipFormats[i].type);
+
+    // Text also under the plain-text names other clients ask for
+    if (text)
+    {
+        const char* const names[] =
+            { "text/plain;charset=utf-8", "text/plain", "UTF8_STRING", "STRING", "TEXT" };
+        for (size_t i = 0;  i < sizeof(names) / sizeof(names[0]);  i++)
+        {
+            GLFWbool listed = GLFW_FALSE;
+            for (int j = 0;  j < _glfw.clipFormatCount;  j++)
+                listed = listed || strcmp(_glfw.clipFormats[j].type, names[i]) == 0;
+            if (!listed)
+                wl_data_source_offer(_glfw.wl.selectionSource, names[i]);
+        }
+    }
+
     wl_data_device_set_selection(_glfw.wl.dataDevice,
                                  _glfw.wl.selectionSource,
                                  _glfw.wl.serial);

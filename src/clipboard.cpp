@@ -162,8 +162,19 @@ void read_x11(GLFWwindow *window, std::vector<std::pair<std::string, std::string
         return;
     const Atom clipboard = XInternAtom(dpy, "CLIPBOARD", False);
     const XWindow owner = XGetSelectionOwner(dpy, clipboard);
-    if (owner == None || owner_is_helper(dpy, owner))
+    if (owner == None)
         return;
+    if (owner_is_helper(dpy, owner)) {
+        /* A GLFW clipboard owner. Ours while GLFW still holds the formats
+         * write_clipboard offered (it drops them when another client takes
+         * the clipboard); otherwise the caller falls back to the string. */
+        int count = 0;
+        const GLFWclipboardformat *formats = glfwGetClipboardFormats(&count);
+        for (int i = 0; i < count; ++i)
+            out.emplace_back(formats[i].type,
+                             std::string(static_cast<const char *>(formats[i].data), formats[i].size));
+        return;
+    }
     ensure_property_mask(dpy, xwin);
     const Atom property = XInternAtom(dpy, "NANOGUI_SELECTION", False);
     const Atom incr = XInternAtom(dpy, "INCR", False);
@@ -210,6 +221,15 @@ std::vector<std::pair<std::string, std::string>> read_clipboard(GLFWwindow *wind
             if (*text)
                 out.emplace_back("text/plain", std::string(text));
     return out;
+}
+
+void write_clipboard(GLFWwindow *window,
+                     const std::vector<std::pair<std::string, std::string>> &formats) {
+    std::vector<GLFWclipboardformat> list;
+    list.reserve(formats.size());
+    for (const auto &f : formats)
+        list.push_back({f.first.c_str(), f.second.data(), f.second.size()});
+    glfwSetClipboardFormats(window, list.data(), (int) list.size());
 }
 
 NAMESPACE_END(nanogui)

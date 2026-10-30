@@ -531,9 +531,11 @@ private:
                 scene = VectorScene();
             it = m_scenes.emplace(e.svg, std::move(scene)).first;
         }
-        const VectorScene &scene = it->second;
+        VectorScene &scene = it->second;
         if (!m_view || !(scene.width > 0.f) || !(scene.height > 0.f) || !(w > 0.f) || !(h > 0.f))
             return;
+        if (const FontLibrary *fonts = m_view->fonts())
+            realize_vector_text(scene, *fonts);
         /* Its own proportions, centered, as placing it does */
         const float g = std::min(w / scene.width, h / scene.height);
         Item item;

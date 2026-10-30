@@ -4,10 +4,15 @@
  */
 #include "vector.h"
 
+#include "composer/font.h"
 #include "image.h"
 
+#include <hb.h>
+
 #include <algorithm>
+#include <cctype>
 #include <cmath>
+#include <cstdio>
 #include <utility>
 
 namespace pagemade {
@@ -90,6 +95,11 @@ VectorStore VectorStore::snapshot() const {
     out.m_entries = m_entries;
     out.m_next_id = m_next_id;
     return out;
+}
+
+void VectorStore::realize(const FontLibrary &fonts) {
+    for (auto &kv : m_entries)
+        realize_vector_text(kv.second.scene, fonts);
 }
 
 void VectorStore::clear() {
@@ -244,6 +254,156 @@ VectorPlacement place_svg_bytes(PageDoc &doc, VectorStore &store, std::vector<ui
     return r;
 }
 
+namespace {
+
+std::string compact_family(const std::string &s) {
+    std::string o;
+    o.reserve(s.size());
+    for (char c : s) {
+        if (c == ' ' || c == '-' || c == '_' || c == '\'' || c == '"')
+            continue;
+        o.push_back((char) std::tolower((unsigned char) c));
+    }
+    return o;
+}
+
+const Font *face_for_run(const FontLibrary &fonts, const VectorTextRun &run) {
+    auto pick = [&](const char *family) -> const Font * {
+        if (!family || !fonts.has_family(family))
+            return nullptr;
+        return fonts.match(family, run.weight, run.italic, "");
+    };
+    for (const std::string &fam : run.families) {
+        if (const Font *f = pick(fam.c_str()))
+            return f;
+        const std::string key = compact_family(fam);
+        const char *alias = nullptr;
+        if (key == "p052" || key == "p052roman" || key == "serif")
+            alias = "Serif";
+        else if (key == "nimbussans" || key == "nimbussansregular" || key == "sansserif" ||
+                 key == "sans")
+            alias = "Sans";
+        else if (key == "urwgothic" || key == "urwgothicbook" || key == "gothic" || key == "display")
+            alias = "Display";
+        else if (key == "monospace" || key == "mono")
+            alias = fonts.has_family("Display") ? "Display" : "Sans";
+        if (const Font *f = pick(alias))
+            return f;
+    }
+    return fonts.find("Serif", run.weight >= 600, run.italic);
+}
+
+void add_design_outline(Path &dst, const GlyphOutline &o, float gx, float gy, float em,
+                        const Transform &xf) {
+    auto pt = [&](float x, float y) { return xf.apply({gx + x * em, gy - y * em}); };
+    for (const PathCmd &c : o.cmds) {
+        PathCmd ocmd = c;
+        if (c.kind == PathCmd::Quad || c.kind == PathCmd::Cubic) {
+            const Point p = pt(c.cx1, c.cy1);
+            ocmd.cx1 = p.x;
+            ocmd.cy1 = p.y;
+        }
+        if (c.kind == PathCmd::Cubic) {
+            const Point p = pt(c.cx2, c.cy2);
+            ocmd.cx2 = p.x;
+            ocmd.cy2 = p.y;
+        }
+        if (c.kind != PathCmd::Close) {
+            const Point p = pt(c.x, c.y);
+            ocmd.x = p.x;
+            ocmd.y = p.y;
+        }
+        dst.push_back(ocmd);
+    }
+}
+
+void add_user_rect(Path &dst, float x0, float y0, float x1, float y1, const Transform &xf) {
+    const Point a = xf.apply({x0, y0}), b = xf.apply({x1, y0}), c = xf.apply({x1, y1}),
+                d = xf.apply({x0, y1});
+    dst.push_back({PathCmd::Move, 0, 0, 0, 0, a.x, a.y});
+    dst.push_back({PathCmd::Line, 0, 0, 0, 0, b.x, b.y});
+    dst.push_back({PathCmd::Line, 0, 0, 0, 0, c.x, c.y});
+    dst.push_back({PathCmd::Line, 0, 0, 0, 0, d.x, d.y});
+    dst.push_back({PathCmd::Close, 0, 0, 0, 0, 0, 0});
+}
+
+} // namespace
+
+void realize_vector_text(VectorScene &scene, const FontLibrary &fonts) {
+    bool any = false;
+    for (const VectorText &tx : scene.texts)
+        for (const VectorTextRun &run : tx.runs)
+            any = any || !run.ink_set;
+    if (!any)
+        return;
+    hb_buffer_t *buf = hb_buffer_create();
+    for (VectorText &tx : scene.texts) {
+        bool need = false;
+        for (const VectorTextRun &run : tx.runs)
+            need = need || !run.ink_set;
+        if (!need)
+            continue;
+        float pen_x = 0.f, pen_y = 0.f;
+        for (VectorTextRun &run : tx.runs) {
+            if (run.has_x)
+                pen_x = run.x;
+            if (run.has_y)
+                pen_y = run.y;
+            pen_x += run.dx;
+            pen_y += run.dy;
+            run.ink.clear();
+            run.windings.reset();
+            const Font *font = face_for_run(fonts, run);
+            if (!font || run.text.empty() || !(run.size > 0.f)) {
+                run.ink_set = true;
+                continue;
+            }
+            hb_buffer_clear_contents(buf);
+            hb_buffer_set_content_type(buf, HB_BUFFER_CONTENT_TYPE_UNICODE);
+            hb_buffer_add_utf8(buf, run.text.data(), (int) run.text.size(), 0, (int) run.text.size());
+            hb_buffer_set_direction(buf, HB_DIRECTION_LTR);
+            hb_buffer_set_language(buf, hb_language_from_string("en", -1));
+            hb_buffer_guess_segment_properties(buf);
+            hb_feature_t feat;
+            unsigned nfeat = 0;
+            if (run.small_caps && font->has_small_caps()) {
+                feat = {HB_TAG('s', 'm', 'c', 'p'), 1, HB_FEATURE_GLOBAL_START, HB_FEATURE_GLOBAL_END};
+                nfeat = 1;
+            }
+            hb_shape(font->hb(), buf, nfeat ? &feat : nullptr, nfeat);
+            unsigned n = 0;
+            hb_glyph_info_t *info = hb_buffer_get_glyph_infos(buf, &n);
+            hb_glyph_position_t *pos = hb_buffer_get_glyph_positions(buf, &n);
+            const float em = run.size / (float) font->units_per_em();
+            const float x0 = pen_x;
+            const float base = pen_y;
+            for (unsigned i = 0; i < n; ++i) {
+                const float gx = pen_x + pos[i].x_offset * em;
+                const float gy = pen_y - pos[i].y_offset * em;
+                if (info[i].codepoint)
+                    add_design_outline(run.ink, font->outline(info[i].codepoint), gx, gy, em, tx.xf);
+                pen_x += pos[i].x_advance * em + run.letter_spacing;
+                pen_y -= pos[i].y_advance * em;
+            }
+            const float x1 = n ? pen_x - run.letter_spacing : pen_x;
+            if (run.underline) {
+                const float th = std::max(0.25f, font->underline_thickness() * em);
+                const float y = base - font->underline_position() * em;
+                add_user_rect(run.ink, x0, y, x1, y + th, tx.xf);
+            }
+            if (run.strike) {
+                const float th = std::max(0.25f, font->strike_thickness() * em);
+                const float y = base - font->strike_position() * em;
+                add_user_rect(run.ink, x0, y - th * 0.5f, x1, y + th * 0.5f, tx.xf);
+            }
+            if (!run.ink.empty())
+                run.windings = std::make_shared<const std::vector<uint8_t>>(fill_windings(run.ink));
+            run.ink_set = true;
+        }
+    }
+    hb_buffer_destroy(buf);
+}
+
 void append_placed_vector(DrawList &out, const PageDoc &, const Item &it, const VectorScene &scene) {
     const PlacedVector *pv = it.vector();
     if (!pv || !(scene.width > 0.f) || !(scene.height > 0.f))
@@ -306,7 +466,7 @@ void append_placed_vector(DrawList &out, const PageDoc &, const Item &it, const 
         g->spread = p.spread;
         return g;
     };
-    for (const VectorShape &sh : scene.shapes) {
+    auto emit_shape = [&](const VectorShape &sh) {
         const Path path = map_path(sh.path);
         const DrawClip clip = clip_of(sh.clip);
         if (!sh.fill.none()) {
@@ -342,6 +502,79 @@ void append_placed_vector(DrawList &out, const PageDoc &, const Item &it, const 
             s.gradient = gradient_of(sh.stroke.paint);
             out.push_back(std::move(s));
         }
+    };
+    auto emit_text = [&](const VectorText &tx) {
+        const DrawClip clip = clip_of(tx.clip);
+        for (const VectorTextRun &run : tx.runs) {
+            if (!run.ink_set || run.ink.empty() || run.fill.a <= 0.f)
+                continue;
+            DrawFill f;
+            f.path = map_path(run.ink);
+            f.color = run.fill;
+            f.color.a = clamp01(f.color.a * opacity);
+            if (f.color.a <= 0.f)
+                continue;
+            f.xf = it.xf;
+            f.clip_w = it.w;
+            f.clip_h = it.h;
+            f.clip = clip;
+            f.windings = run.windings;
+            out.push_back(std::move(f));
+        }
+    };
+    auto emit_image = [&](const VectorImage &im) {
+        if (!im.bytes || im.bytes->empty() || !(im.w > 0.f) || !(im.h > 0.f))
+            return;
+        const Point p0 = im.xf.apply({im.x, im.y});
+        const Point p1 = im.xf.apply({im.x + im.w, im.y});
+        const Point p2 = im.xf.apply({im.x + im.w, im.y + im.h});
+        const Point p3 = im.xf.apply({im.x, im.y + im.h});
+        const Point c0 = map_pt(p0.x, p0.y), c1 = map_pt(p1.x, p1.y);
+        const Point c2 = map_pt(p2.x, p2.y), c3 = map_pt(p3.x, p3.y);
+        const float minx = std::min(std::min(c0.x, c1.x), std::min(c2.x, c3.x));
+        const float miny = std::min(std::min(c0.y, c1.y), std::min(c2.y, c3.y));
+        const float maxx = std::max(std::max(c0.x, c1.x), std::max(c2.x, c3.x));
+        const float maxy = std::max(std::max(c0.y, c1.y), std::max(c2.y, c3.y));
+        if (!(maxx > minx) || !(maxy > miny))
+            return;
+        DrawImage d;
+        d.x = minx;
+        d.y = miny;
+        d.w = maxx - minx;
+        d.h = maxy - miny;
+        d.clip_w = it.w;
+        d.clip_h = it.h;
+        d.opacity = clamp01(im.opacity * opacity);
+        d.xf = it.xf;
+        d.bytes = im.bytes;
+        d.bytes_key = image_bytes_hash(im.bytes->data(), im.bytes->size());
+        if (!d.bytes_key)
+            d.bytes_key = 1;
+        d.clip = clip_of(im.clip);
+        out.push_back(std::move(d));
+    };
+    auto emit_ref = [&](VectorSlotRef ref) {
+        if (ref.slot == VectorSlot::Shape) {
+            if (ref.index >= 0 && (size_t) ref.index < scene.shapes.size())
+                emit_shape(scene.shapes[(size_t) ref.index]);
+        } else if (ref.slot == VectorSlot::Text) {
+            if (ref.index >= 0 && (size_t) ref.index < scene.texts.size())
+                emit_text(scene.texts[(size_t) ref.index]);
+        } else if (ref.slot == VectorSlot::Image) {
+            if (ref.index >= 0 && (size_t) ref.index < scene.images.size())
+                emit_image(scene.images[(size_t) ref.index]);
+        }
+    };
+    if (scene.order.empty()) {
+        for (const VectorShape &sh : scene.shapes)
+            emit_shape(sh);
+        for (const VectorText &tx : scene.texts)
+            emit_text(tx);
+        for (const VectorImage &im : scene.images)
+            emit_image(im);
+    } else {
+        for (const VectorSlotRef &ref : scene.order)
+            emit_ref(ref);
     }
 }
 

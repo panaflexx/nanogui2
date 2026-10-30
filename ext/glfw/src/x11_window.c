@@ -177,10 +177,38 @@ static int getWindowState(_GLFWwindow* window)
     return result;
 }
 
+// nanogui2: whether the event is a requestor taking a piece of an INCR
+// transfer (it deleted the property we wrote)
+//
+static GLFWbool isIncrEvent(const XEvent* event)
+{
+    if (event->type != PropertyNotify ||
+        event->xproperty.state != PropertyDelete)
+    {
+        return GLFW_FALSE;
+    }
+
+    for (int i = 0;  i < _glfw.x11.incrCount;  i++)
+    {
+        if (_glfw.x11.incr[i].requestor == event->xproperty.window &&
+            _glfw.x11.incr[i].property == event->xproperty.atom)
+        {
+            return GLFW_TRUE;
+        }
+    }
+
+    return GLFW_FALSE;
+}
+
 // Returns whether the event is a selection event
 //
 static Bool isSelectionEvent(Display* display, XEvent* event, XPointer pointer)
 {
+    // A large format being handed to the clipboard manager at exit goes
+    // in pieces: those events must reach the hand-off loop too
+    if (isIncrEvent(event))
+        return True;
+
     if (event->xany.window != _glfw.x11.helperWindowHandle)
         return False;
 
@@ -787,6 +815,161 @@ static GLFWbool createNativeWindow(_GLFWwindow* window,
     return GLFW_TRUE;
 }
 
+//////////////////////////////////////////////////////////////////////////
+//////     nanogui2: the clipboard in several formats, INCR for big ones  //////
+//////////////////////////////////////////////////////////////////////////
+
+// Formats larger than this go in pieces of this size (ICCCM INCR). Well
+// under the core protocol's request size, so no server refuses a piece.
+#define _GLFW_INCR_CHUNK (128 * 1024)
+// A transfer whose requestor stopped asking is dropped after this long
+#define _GLFW_INCR_TIMEOUT 30.0
+
+static double incrNow(void)
+{
+    return (double) _glfwPlatformGetTimerValue() /
+           (double) _glfwPlatformGetTimerFrequency();
+}
+
+static void removeIncr(int index)
+{
+    _glfw_free(_glfw.x11.incr[index].data);
+    _glfw.x11.incr[index] = _glfw.x11.incr[_glfw.x11.incrCount - 1];
+    _glfw.x11.incrCount--;
+}
+
+// Drop transfers whose requestor went quiet (closed, or gave up)
+//
+static void pruneIncr(void)
+{
+    const double now = incrNow();
+    for (int i = _glfw.x11.incrCount - 1;  i >= 0;  i--)
+    {
+        if (now - _glfw.x11.incr[i].started > _GLFW_INCR_TIMEOUT)
+            removeIncr(i);
+    }
+}
+
+// Write `size` bytes of `target` to the requestor's property: at once when
+// small, else announce INCR and send pieces as the requestor takes them
+//
+static void writeFormatToProperty(Window requestor, Atom property, Atom target,
+                                  const char* data, size_t size)
+{
+    if (size <= _GLFW_INCR_CHUNK)
+    {
+        XChangeProperty(_glfw.x11.display, requestor, property, target, 8,
+                        PropModeReplace, (const unsigned char*) data, (int) size);
+        return;
+    }
+
+    pruneIncr();
+
+    _GLFWincrX11* grown = _glfw_realloc(_glfw.x11.incr,
+                                        sizeof(_GLFWincrX11) * (_glfw.x11.incrCount + 1));
+    char* copy = _glfw_calloc(size, 1);
+    if (!grown || !copy)
+    {
+        if (grown)
+            _glfw.x11.incr = grown;
+        _glfw_free(copy);
+        _glfwInputError(GLFW_OUT_OF_MEMORY, NULL);
+        return;
+    }
+
+    memcpy(copy, data, size);
+    _glfw.x11.incr = grown;
+
+    _GLFWincrX11* t = &_glfw.x11.incr[_glfw.x11.incrCount++];
+    t->requestor = requestor;
+    t->property = property;
+    t->target = target;
+    t->data = copy;
+    t->size = size;
+    t->offset = 0;
+    t->started = incrNow();
+
+    // Hear the requestor delete the property, before telling it to
+    _glfwGrabErrorHandlerX11();
+    XSelectInput(_glfw.x11.display, requestor, PropertyChangeMask);
+    const long length = (long) size;
+    XChangeProperty(_glfw.x11.display, requestor, property, _glfw.x11.INCR, 32,
+                    PropModeReplace, (const unsigned char*) &length, 1);
+    _glfwReleaseErrorHandlerX11();
+    if (_glfw.x11.errorCode != Success)
+        removeIncr(_glfw.x11.incrCount - 1);     // the requestor is gone
+}
+
+// The requestor took the last piece (deleted the property): send the next,
+// or the empty piece that ends the transfer
+//
+static void handleIncrEvent(const XEvent* event)
+{
+    for (int i = 0;  i < _glfw.x11.incrCount;  i++)
+    {
+        _GLFWincrX11* t = &_glfw.x11.incr[i];
+        if (t->requestor != event->xproperty.window ||
+            t->property != event->xproperty.atom)
+        {
+            continue;
+        }
+
+        const size_t left = t->size - t->offset;
+        const size_t piece = left < _GLFW_INCR_CHUNK ? left : _GLFW_INCR_CHUNK;
+
+        _glfwGrabErrorHandlerX11();
+        XChangeProperty(_glfw.x11.display, t->requestor, t->property, t->target, 8,
+                        PropModeReplace, (const unsigned char*) t->data + t->offset,
+                        (int) piece);
+        _glfwReleaseErrorHandlerX11();
+
+        t->offset += piece;
+        t->started = incrNow();          // it is still taking pieces
+
+        // The empty piece has gone (or the requestor has): done
+        if (piece == 0 || _glfw.x11.errorCode != Success)
+        {
+            const Window requestor = t->requestor;
+            removeIncr(i);
+
+            GLFWbool more = GLFW_FALSE;
+            for (int j = 0;  j < _glfw.x11.incrCount;  j++)
+                more = more || _glfw.x11.incr[j].requestor == requestor;
+            if (!more)
+            {
+                _glfwGrabErrorHandlerX11();
+                XSelectInput(_glfw.x11.display, requestor, NoEventMask);
+                _glfwReleaseErrorHandlerX11();
+            }
+        }
+
+        return;
+    }
+}
+
+void _glfwFreeClipboardTargetsX11(void)
+{
+    _glfw_free(_glfw.x11.clipTargets);
+    _glfw_free(_glfw.x11.clipTargetFormats);
+    _glfw.x11.clipTargets = NULL;
+    _glfw.x11.clipTargetFormats = NULL;
+    _glfw.x11.clipTargetCount = 0;
+}
+
+// The format a target names, or -1 when the clipboard formats don't
+// answer it (or there are none: a plain string is on the clipboard)
+//
+static int clipboardFormatForTarget(Atom target)
+{
+    for (int i = 0;  i < _glfw.x11.clipTargetCount;  i++)
+    {
+        if (_glfw.x11.clipTargets[i] == target)
+            return _glfw.x11.clipTargetFormats[i];
+    }
+
+    return -1;
+}
+
 // Set the specified property to the selection converted to the requested target
 //
 static Atom writeTargetToProperty(const XSelectionRequestEvent* request)
@@ -805,6 +988,72 @@ static Atom writeTargetToProperty(const XSelectionRequestEvent* request)
         // The requester is a legacy client (ICCCM section 2.2)
         // We don't support legacy clients, so fail here
         return None;
+    }
+
+    // nanogui2: the clipboard in several formats
+    if (request->selection == _glfw.x11.CLIPBOARD && _glfw.x11.clipTargetCount > 0)
+    {
+        if (request->target == _glfw.x11.TARGETS)
+        {
+            Atom* targets = _glfw_calloc(_glfw.x11.clipTargetCount + 3, sizeof(Atom));
+            if (!targets)
+                return None;
+
+            int count = 0;
+            targets[count++] = _glfw.x11.TARGETS;
+            targets[count++] = _glfw.x11.MULTIPLE;
+            targets[count++] = _glfw.x11.SAVE_TARGETS;
+            for (int i = 0;  i < _glfw.x11.clipTargetCount;  i++)
+                targets[count++] = _glfw.x11.clipTargets[i];
+
+            XChangeProperty(_glfw.x11.display, request->requestor, request->property,
+                            XA_ATOM, 32, PropModeReplace,
+                            (unsigned char*) targets, count);
+            _glfw_free(targets);
+            return request->property;
+        }
+
+        if (request->target == _glfw.x11.MULTIPLE)
+        {
+            Atom* pairs;
+            const unsigned long count =
+                _glfwGetWindowPropertyX11(request->requestor,
+                                          request->property,
+                                          _glfw.x11.ATOM_PAIR,
+                                          (unsigned char**) &pairs);
+
+            for (unsigned long i = 0;  i + 1 < count;  i += 2)
+            {
+                const int index = clipboardFormatForTarget(pairs[i]);
+                if (index >= 0)
+                {
+                    const GLFWclipboardformat* f = &_glfw.clipFormats[index];
+                    writeFormatToProperty(request->requestor, pairs[i + 1], pairs[i],
+                                          (const char*) f->data, f->size);
+                }
+                else
+                    pairs[i + 1] = None;
+            }
+
+            XChangeProperty(_glfw.x11.display, request->requestor, request->property,
+                            _glfw.x11.ATOM_PAIR, 32, PropModeReplace,
+                            (unsigned char*) pairs, count);
+            if (pairs)
+                XFree(pairs);
+            return request->property;
+        }
+
+        if (request->target != _glfw.x11.SAVE_TARGETS)
+        {
+            const int index = clipboardFormatForTarget(request->target);
+            if (index < 0)
+                return None;
+
+            const GLFWclipboardformat* f = &_glfw.clipFormats[index];
+            writeFormatToProperty(request->requestor, request->property, request->target,
+                                  (const char*) f->data, f->size);
+            return request->property;
+        }
     }
 
     if (request->target == _glfw.x11.TARGETS)
@@ -1219,6 +1468,25 @@ static void processEvent(XEvent *event)
     if (event->type == SelectionRequest)
     {
         handleSelectionRequest(event);
+        return;
+    }
+
+    // nanogui2: a requestor taking the next piece of a large format. Its
+    // window isn't ours, so this comes before the window lookup.
+    if (isIncrEvent(event))
+    {
+        handleIncrEvent(event);
+        return;
+    }
+
+    // nanogui2: another client took the clipboard. Our formats are no
+    // longer on it (transfers in progress keep their own copies).
+    if (event->type == SelectionClear &&
+        event->xselectionclear.window == _glfw.x11.helperWindowHandle &&
+        event->xselectionclear.selection == _glfw.x11.CLIPBOARD)
+    {
+        _glfwFreeClipboardFormats();
+        _glfwFreeClipboardTargetsX11();
         return;
     }
 
@@ -1896,6 +2164,10 @@ void _glfwPushSelectionToManagerX11(void)
             {
                 case SelectionRequest:
                     handleSelectionRequest(&event);
+                    break;
+
+                case PropertyNotify:
+                    handleIncrEvent(&event);
                     break;
 
                 case SelectionNotify:
@@ -3060,8 +3332,73 @@ void _glfwSetCursorX11(_GLFWwindow* window, _GLFWcursor* cursor)
     }
 }
 
+void _glfwSetClipboardFormatsX11(void)
+{
+    _glfwFreeClipboardTargetsX11();
+
+    // One target per format, then the plain-text names when there is text
+    const char* const textNames[] =
+        { "UTF8_STRING", "STRING", "TEXT", "text/plain;charset=utf-8", "text/plain" };
+    const int textCount = sizeof(textNames) / sizeof(textNames[0]);
+    const int capacity = _glfw.clipFormatCount + textCount;
+
+    _glfw.x11.clipTargets = _glfw_calloc(capacity ? capacity : 1, sizeof(Atom));
+    _glfw.x11.clipTargetFormats = _glfw_calloc(capacity ? capacity : 1, sizeof(int));
+    if (!_glfw.x11.clipTargets || !_glfw.x11.clipTargetFormats)
+    {
+        _glfwFreeClipboardTargetsX11();
+        _glfwInputError(GLFW_OUT_OF_MEMORY, NULL);
+        return;
+    }
+
+    for (int i = 0;  i < _glfw.clipFormatCount;  i++)
+    {
+        const Atom atom = XInternAtom(_glfw.x11.display, _glfw.clipFormats[i].type, False);
+        if (clipboardFormatForTarget(atom) >= 0)
+            continue;
+        _glfw.x11.clipTargets[_glfw.x11.clipTargetCount] = atom;
+        _glfw.x11.clipTargetFormats[_glfw.x11.clipTargetCount] = i;
+        _glfw.x11.clipTargetCount++;
+    }
+
+    for (int i = 0;  i < textCount;  i++)
+    {
+        const int index = _glfwClipboardFormatIndex(textNames[i]);
+        if (index < 0)
+            break;                           // no text format at all
+        const Atom atom = textNames[i][0] == 'S' ? XA_STRING
+            : XInternAtom(_glfw.x11.display, textNames[i], False);
+        if (clipboardFormatForTarget(atom) >= 0)
+            continue;
+        _glfw.x11.clipTargets[_glfw.x11.clipTargetCount] = atom;
+        _glfw.x11.clipTargetFormats[_glfw.x11.clipTargetCount] = index;
+        _glfw.x11.clipTargetCount++;
+    }
+
+    // What glfwGetClipboardString returns while we own the selection
+    const char* text = _glfwClipboardFormatText();
+    _glfw_free(_glfw.x11.clipboardString);
+    _glfw.x11.clipboardString = _glfw_strdup(text ? text : "");
+
+    // With nothing to offer, own nothing: the clipboard stays empty
+    XSetSelectionOwner(_glfw.x11.display,
+                       _glfw.x11.CLIPBOARD,
+                       _glfw.clipFormatCount ? _glfw.x11.helperWindowHandle : None,
+                       CurrentTime);
+
+    if (_glfw.clipFormatCount &&
+        XGetSelectionOwner(_glfw.x11.display, _glfw.x11.CLIPBOARD) !=
+        _glfw.x11.helperWindowHandle)
+    {
+        _glfwInputError(GLFW_PLATFORM_ERROR,
+                        "X11: Failed to become owner of clipboard selection");
+    }
+}
+
 void _glfwSetClipboardStringX11(const char* string)
 {
+    _glfwFreeClipboardTargetsX11();      // a plain string from here on
+
     char* copy = _glfw_strdup(string);
     _glfw_free(_glfw.x11.clipboardString);
     _glfw.x11.clipboardString = copy;

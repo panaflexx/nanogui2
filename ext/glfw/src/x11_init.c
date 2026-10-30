@@ -1182,6 +1182,7 @@ GLFWbool _glfwConnectX11(int platformID, _GLFWplatform* platform)
         .getKeyScancode = _glfwGetKeyScancodeX11,
         .setClipboardString = _glfwSetClipboardStringX11,
         .getClipboardString = _glfwGetClipboardStringX11,
+        .setClipboardFormats = _glfwSetClipboardFormatsX11,
 #if defined(GLFW_BUILD_LINUX_JOYSTICK)
         .initJoysticks = _glfwInitJoysticksLinux,
         .terminateJoysticks = _glfwTerminateJoysticksLinux,
@@ -1573,6 +1574,12 @@ void _glfwTerminateX11(void)
 
     _glfw_free(_glfw.x11.primarySelectionString);
     _glfw_free(_glfw.x11.clipboardString);
+    _glfwFreeClipboardTargetsX11();
+    for (int n = 0;  n < _glfw.x11.incrCount;  n++)
+        _glfw_free(_glfw.x11.incr[n].data);
+    _glfw_free(_glfw.x11.incr);
+    _glfw.x11.incr = NULL;
+    _glfw.x11.incrCount = 0;
 
     XUnregisterIMInstantiateCallback(_glfw.x11.display,
                                      NULL, NULL, NULL,

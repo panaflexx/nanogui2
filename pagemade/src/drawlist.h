@@ -90,14 +90,18 @@ struct DrawGlyphs {
 };
 
 /* A placed picture. The frame (0, 0)–(clip_w, clip_h) in item space clips
- * the picture rectangle (x, y, w, h). The pixels are not here: the screen
- * asks the ImageStore for a display view, and PDF asks it for the source. */
+ * the picture rectangle (x, y, w, h). An asset's pixels live in the
+ * ImageStore. An SVG <image> carries its own bytes (a data URI) and a clip
+ * path in the same space as the rectangle. */
 struct DrawImage {
     uint32_t  asset = 0;
     float     x = 0, y = 0, w = 0, h = 0;
     float     clip_w = 0, clip_h = 0;
     float     opacity = 1.f;             // 0 to 1
     Transform xf;
+    std::shared_ptr<const std::vector<uint8_t>> bytes;
+    uint64_t  bytes_key = 0;             // hash of bytes; 0 when there are none
+    DrawClip  clip{};
 };
 
 using DrawOp = std::variant<DrawFill, DrawStroke, DrawGlyphs, DrawImage>;

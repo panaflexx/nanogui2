@@ -689,6 +689,8 @@ struct _GLFWplatform
     int (*getKeyScancode)(int);
     void (*setClipboardString)(const char*);
     const char* (*getClipboardString)(void);
+    // nanogui2: offer _glfw.clipFormats (NULL: only their text is offered)
+    void (*setClipboardFormats)(void);
     GLFWbool (*initJoysticks)(void);
     void (*terminateJoysticks)(void);
     GLFWbool (*pollJoystick)(_GLFWjoystick*,int);
@@ -759,6 +761,12 @@ struct _GLFWlibrary
     GLFWallocator       allocator;
 
     _GLFWplatform       platform;
+
+    // nanogui2: the formats glfwSetClipboardFormats offered, GLFW's own
+    // copies (each data has a NUL past its size, so text can be used as a
+    // C string). Empty after glfwSetClipboardString.
+    GLFWclipboardformat* clipFormats;
+    int                 clipFormatCount;
 
     struct {
         _GLFWinitconfig init;
@@ -1000,6 +1008,17 @@ size_t _glfwEncodeUTF8(char* s, uint32_t codepoint);
 char** _glfwParseUriList(char* text, int* count);
 
 char* _glfw_strdup(const char* source);
+
+// nanogui2 clipboard formats (input.c)
+// The format answering a request for `type`: the format of that type, or
+// for any plain-text name (text/plain, UTF8_STRING, STRING, TEXT) the first
+// text/plain format. -1 when there is none.
+int _glfwClipboardFormatIndex(const char* type);
+// The first text/plain format's text, NULL when there is none.
+const char* _glfwClipboardFormatText(void);
+// Whether `type` is one of the plain-text names a text/plain format answers.
+GLFWbool _glfwIsPlainTextType(const char* type);
+void _glfwFreeClipboardFormats(void);
 int _glfw_min(int a, int b);
 int _glfw_max(int a, int b);
 

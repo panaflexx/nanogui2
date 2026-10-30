@@ -54,6 +54,48 @@ struct VectorStroke {
     bool none() const { return paint.none() || width <= 0.f; }
 };
 
+/* One run of SVG text, in user units, before VectorText::xf maps it into
+ * the graphic's box. realize_vector_text bakes the glyphs into `ink`
+ * (graphic-box space) so screen and PDF draw the same outlines. */
+struct VectorTextRun {
+    std::string text;
+    std::vector<std::string> families;
+    float size = 16.f;
+    int weight = 400;
+    bool italic = false;
+    bool small_caps = false;
+    bool underline = false;
+    bool strike = false;
+    float letter_spacing = 0.f;
+    Color fill{0, 0, 0, 1};
+    bool has_x = false;
+    bool has_y = false;
+    float x = 0, y = 0, dx = 0, dy = 0;
+    /* Filled by realize_vector_text. Mutable so a const scene (the store's
+     * scene(), a PDF snapshot) can be baked once and reused. */
+    mutable Path ink;
+    mutable std::shared_ptr<const std::vector<uint8_t>> windings;
+    mutable bool ink_set = false;
+};
+
+struct VectorText {
+    Transform xf;
+    std::vector<VectorTextRun> runs;
+    int clip = -1;                       // index into VectorScene::clips, or -1
+};
+
+/* An SVG <image>. x, y, w, h are user units; xf maps them into the box.
+ * `bytes` is the decoded picture when href was a data URI. */
+struct VectorImage {
+    Transform xf;
+    float x = 0, y = 0, w = 0, h = 0;
+    std::string href;
+    std::string preserve;                // preserveAspectRatio
+    float opacity = 1.f;
+    int clip = -1;                       // index into VectorScene::clips, or -1
+    std::shared_ptr<const std::vector<uint8_t>> bytes;
+};
+
 /* One shape in the graphic's box (points, y down). */
 struct VectorShape {
     Path path;
@@ -61,7 +103,19 @@ struct VectorShape {
     VectorPaint fill;
     VectorStroke stroke;
     int clip = -1;                       // index into VectorScene::clips, or -1
+    /* While decoding, a stand-in for VectorScene::images. Gone before the
+     * scene is returned. */
+    int image = -1;
     std::shared_ptr<const std::vector<uint8_t>> windings;   // fill_windings(path)
+};
+
+/* Painter order. A paste draws a picture between two runs of text; the
+ * three vectors alone would paint every shape first. */
+enum class VectorSlot { Shape, Text, Image };
+
+struct VectorSlotRef {
+    VectorSlot slot = VectorSlot::Shape;
+    int index = 0;
 };
 
 struct VectorScene {
@@ -69,8 +123,13 @@ struct VectorScene {
     std::vector<VectorShape> shapes;
     /* Clip paths in the graphic's box, shared by the shapes that name them. */
     std::vector<ClipLayers> clips;
+    std::vector<VectorText> texts;
+    std::vector<VectorImage> images;
+    /* Shape, text and image indices in the order the file paints them.
+     * Empty on a scene built by hand: shapes, then text, then images. */
+    std::vector<VectorSlotRef> order;
     /* Features this slice did not draw, each named once ("gradients",
-     * "clips", "text"), in the order they were first seen. */
+     * "clips"), in the order they were first seen. */
     std::vector<std::string> skipped;
 };
 
@@ -101,6 +160,8 @@ std::vector<std::pair<std::string, std::string>> vector_file_types();
 
 /* "placed name" or "placed name (gradients, clips skipped)". */
 std::string vector_place_note(const std::string &name, const std::vector<std::string> &skipped);
+
+class FontLibrary;
 
 /* The session's vector files, keyed by VectorAsset::id. Ids come from
  * take_id and only move forward, including across undo. */
@@ -141,6 +202,10 @@ public:
     Bytes source_of(uint32_t id) const;
     const VectorScene *scene(uint32_t id) const;
 
+    /* Bake SVG text into outlines. Call on the UI thread before drawing
+     * and before snapshot(), so the PDF worker does not shape. */
+    void realize(const FontLibrary &fonts);
+
 private:
     std::map<uint32_t, Entry> m_entries;
     uint32_t m_next_id = 0;
@@ -154,22 +219,35 @@ private:
 void vector_frame(const PageSetup &setup, size_t page, float gw, float gh, const Point *at,
                   float &x, float &y, float &w, float &h);
 
+class ImageStore;
+
 struct VectorPlacement {
     bool ok = false;
     std::string error;
     std::string note;
-    uint32_t asset = 0;
-    ItemId item = 0;
+    uint32_t asset = 0;                  // the first graphic; 0 when there is none
+    ItemId item = 0;                     // one placed piece (a member of `group`)
+    std::vector<ItemId> items;           // every piece, back to front
+    uint32_t group = 0;                  // set when two or more pieces were placed
 };
 
-/* One asset and one frame on `page`. A second call adds another; it does
- * not replace the first. The caller records undo. `source` is the file:
- * URI the bytes came from (empty when they were pasted). */
+/* One graphic on `page`, or a group when the file embeds pictures and
+ * `images` is set. Each embedded picture is placed on its own, and the
+ * drawing before and after it stays a graphic, so Ungroup separates the
+ * photo. Text stays outlines in those graphics. Without `images`, or with
+ * no picture this slice can separate, this is one graphic, as before.
+ * The caller records undo. `source` is the file: URI (empty when pasted);
+ * a group stores each piece itself and does not keep that link. */
 VectorPlacement place_svg_bytes(PageDoc &doc, VectorStore &store, std::vector<uint8_t> bytes,
                                 const std::string &name, const std::string &source,
-                                size_t page, const Point *at);
+                                size_t page, const Point *at, ImageStore *images = nullptr);
 
-/* The graphic's shapes, mapped into the frame, clipped to it. */
+/* Glyph outlines for scene.texts, in graphic-box space. A run already
+ * baked is left alone. No font: the run stays empty and is not retried. */
+void realize_vector_text(VectorScene &scene, const FontLibrary &fonts);
+
+/* The graphic, mapped into the frame and clipped to it: shapes, baked
+ * text and pictures, in paint order. Text is empty until realize_vector_text. */
 void append_placed_vector(DrawList &out, const PageDoc &doc, const Item &it,
                           const VectorScene &scene);
 
