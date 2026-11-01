@@ -1296,8 +1296,11 @@ bool export_pdf(const std::string &path, const PageDoc &doc,
             ImageMetadata meta;
             if (!picture_bytes(images, *im, bytes, meta))
                 continue;
+            /* w and h are in the picture's space; its transform's scale
+             * makes them points (an SVG picture is drawn in its own space) */
+            const float k = std::sqrt(std::fabs(im->xf.a * im->xf.d - im->xf.b * im->xf.c));
             const int edge = std::max(1, (int) std::ceil(std::max(std::fabs(im->w), std::fabs(im->h)) *
-                                                         fppi / 72.f));
+                                                         (k > 0.f ? k : 1.f) * fppi / 72.f));
             PdfRasterPicture rp;
             std::string err;
             if (make_display(bytes->data(), bytes->size(), edge, &rp.rgba, &rp.width, &rp.height, &err))

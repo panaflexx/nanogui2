@@ -479,7 +479,8 @@ std::string tspan(const Segment &s, const PageDoc &doc, std::map<const Font *, F
     std::string out = "<tspan";
     if (positioned)
         out += " x=\"" + num(s.x) + "\" y=\"" + num(s.y) + "\"";
-    out += " font-family=\"'" + xml_escape(face.family) + "', " +
+    /* Double quotes (&quot;) survive a family named with an apostrophe */
+    out += " font-family=\"&quot;" + xml_escape(face.family) + "&quot;, " +
            generic_family(cs ? cs->family : std::string()) + "\"";
     out += " font-size=\"" + num(run.size) + "\"";
     if (face.weight != 400)

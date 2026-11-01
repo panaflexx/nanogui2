@@ -23,12 +23,19 @@ struct GLFWwindow;
 NAMESPACE_BEGIN(nanogui)
 
 /* Each entry is a MIME type and its bytes (UTF-8 text for the text
- * targets). Empty when nobody owns the clipboard. The wait is short, and
- * there is no wait at all when the selection has no owner, so a menu can
- * call this. On X11 the targets asked for are image/svg+xml, image/svg,
+ * targets). Empty when nobody owns the clipboard, or the owner doesn't
+ * start answering within `timeout_ms`; a large answer sent in pieces keeps
+ * going while pieces arrive. For a paste; a menu asks clipboard_types.
+ * On X11 the targets asked for are image/svg+xml, image/svg,
  * text/xml, text/plain and the UTF-8 string. */
 NANOGUI_EXPORT std::vector<std::pair<std::string, std::string>>
-read_clipboard(GLFWwindow *window);
+read_clipboard(GLFWwindow *window, int timeout_ms = 3000);
+
+/* The MIME types (and X11 target names) the clipboard offers, without
+ * reading any of them: one small round trip, for menus deciding what to
+ * enable. Empty when nobody owns the clipboard or the owner doesn't answer
+ * within `timeout_ms`. */
+NANOGUI_EXPORT std::vector<std::string> clipboard_types(GLFWwindow *window, int timeout_ms = 100);
 
 /* Put several representations on the clipboard, richest first: MIME type
  * and bytes. A paste in another application takes the first one it

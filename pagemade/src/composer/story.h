@@ -146,6 +146,16 @@ struct ParaStyle {
     bool  hyphenate = true;
     int   hyphen_limit = 0;
     float hyphen_zone = 36.f;
+
+    /* Snap every baseline to the publication's baseline grid (the frame's
+     * grid_step); the first line's baseline moves down to the next grid
+     * line, and each line's pitch rounds up to a multiple of the step. */
+    bool  align_to_grid = false;
+
+    /* Optical margin alignment: edge punctuation (quotes, hyphens, periods
+     * and commas) hangs a little past the measure, so the text edge stays
+     * visually straight. */
+    bool  optical_margins = false;
 };
 
 constexpr float kMinLineSpacing = 0.1f, kMaxLineSpacing = 3.f;

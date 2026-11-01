@@ -268,6 +268,24 @@ void draw_para_icon(NVGcontext *ctx, ParaIcon icon, float x, float y, float w, f
         stroke();
         lines4(5, 19, 4.5f, 3.5f, -1, 0);
         break;
+    case ParaIcon::AlignToGrid:
+        /* Even text lines pinned to a column of grid dots. */
+        lines4(1, 14, 2, 4, -1, 0);
+        for (int i = 0; i < 4; ++i) {
+            nvgBeginPath(ctx);
+            nvgCircle(ctx, ox + 17.5f, oy + 2 + i * 4, 1.1f);
+            nvgFill(ctx);
+        }
+        break;
+    case ParaIcon::OpticalMargins:
+        /* A quote hanging left of the text edge. */
+        lines4(5, 19, 2, 4, -1, 0);
+        for (int i = 0; i < 2; ++i) {
+            nvgBeginPath(ctx);
+            nvgCircle(ctx, ox + 1.4f + i * 2.4f, oy + 2, 1.1f);
+            nvgFill(ctx);
+        }
+        break;
     case ParaIcon::SpaceBefore:
     case ParaIcon::SpaceAfter: {
         const bool before = icon == ParaIcon::SpaceBefore;
@@ -683,6 +701,10 @@ ParagraphPanel::ParagraphPanel(Widget *parent, Hooks hooks)
          "Keep with next: end in the text block where the next paragraph starts"},
         {ParaIcon::StartNewFrame, &P::start_new_frame,
          "Start in the next text block (Ctrl+Return inside text breaks there too)"},
+        {ParaIcon::AlignToGrid, &P::align_to_grid,
+         "Align to the baseline grid (its start and step are in Document Setup)"},
+        {ParaIcon::OpticalMargins, &P::optical_margins,
+         "Optical margin alignment: edge punctuation hangs a little past the margin"},
     };
     for (const F &f : flags) {
         auto *b = new IconButton(switches, f.icon, f.tip, Align::Left, f.flag);

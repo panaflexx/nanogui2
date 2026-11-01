@@ -159,6 +159,8 @@ void ComposerView::set_document(PageDoc doc) {
                 nvgDeleteImage(ctx, kv.second.id);
     }
     m_inline_tex.clear();
+    m_inline_want.clear();
+    m_inline_ready.clear();
     if (m_loader)
         m_loader->drop_if([](const std::string &) { return true; });
     m_load_want.clear();
@@ -1733,6 +1735,35 @@ void ComposerView::apply_shape_style(const std::function<void(Shape &)> &fn) {
     apply_item_style(fn, nullptr);
 }
 
+bool ComposerView::text_frame_options(TextFrame &out) const {
+    for (ItemId id : m_sel)
+        if (const Item *it = m_doc.find_item(id))
+            if (const TextFrame *tf = it->text_frame()) {
+                out = *tf;
+                return true;
+            }
+    return false;
+}
+
+void ComposerView::apply_text_frame_options(const std::function<void(TextFrame &)> &fn) {
+    bool any = false;
+    for (ItemId id : m_sel)
+        if (const Item *it = m_doc.find_item(id))
+            if (it->text_frame())
+                any = true;
+    if (!any)
+        return;
+    push_undo();
+    for (ItemId id : m_sel)
+        if (Item *it = m_doc.find_item(id))
+            if (TextFrame *tf = it->text_frame())
+                fn(*tf);
+    recompose();
+    selection_changed();
+    if (screen())
+        screen()->redraw();
+}
+
 void ComposerView::apply_item_style(const std::function<void(Shape &)> &shape,
                                     const std::function<void(PlacedImage &)> &image) {
     const bool pictures = image && pictures_selected();
@@ -2593,6 +2624,49 @@ std::vector<uint8_t> read_file_prefix(const std::string &path, size_t cap) {
 
 } // namespace
 
+/* The formats the clipboard offers, asked once for a burst of questions
+ * (a menu asks several while it is built). Only the list: reading the
+ * data can take a while, and a menu must not wait for it. */
+const std::vector<std::string> &ComposerView::clipboard_types_cached() const {
+    const double now = glfwGetTime();
+    if (now - m_cb_cache_time > 0.5) {
+        GLFWwindow *win = screen() ? screen()->glfw_window() : nullptr;
+        m_cb_types = win ? nanogui::clipboard_types(win) : std::vector<std::string>();
+        m_cb_cache_time = now;
+    }
+    return m_cb_types;
+}
+
+namespace {
+
+bool svg_type(const std::string &t) {
+    return t == "image/svg+xml" || t == "image/svg";
+}
+
+bool text_type(const std::string &t) {
+    return t.rfind("text/plain", 0) == 0 || t == "UTF8_STRING" || t == "STRING" || t == "TEXT";
+}
+
+} // namespace
+
+bool ComposerView::clipboard_has_svg() const {
+    if (editing())
+        return false;
+    for (const std::string &t : clipboard_types_cached())
+        if (svg_type(t))
+            return true;
+    return false;
+}
+
+bool ComposerView::clipboard_has_text() const {
+    if (editing())
+        return false;
+    for (const std::string &t : clipboard_types_cached())
+        if (svg_type(t) || text_type(t))
+            return true;
+    return false;
+}
+
 bool ComposerView::can_paste() const {
     if (editing()) {
         GLFWwindow *win = screen() ? screen()->glfw_window() : nullptr;
@@ -2601,8 +2675,7 @@ bool ComposerView::can_paste() const {
     }
     if (!m_clip.items.empty())
         return true;
-    GLFWwindow *win = screen() ? screen()->glfw_window() : nullptr;
-    return clipboard_is_svg(clipboard_now(win));
+    return clipboard_has_text();
 }
 
 void ComposerView::edit_copy() {
@@ -2684,6 +2757,7 @@ void ComposerView::edit_copy() {
             nanogui::write_clipboard(win, formats);
     }
     m_cb_at_copy = clipboard_now(win);
+    m_cb_cache_time = -1e9;              // the clipboard just changed
     /* Each story with only its copied blocks threaded, in reading order */
     for (StoryId sid : stories) {
         StoryEntry e = *m_doc.find_story(sid);
@@ -2708,15 +2782,110 @@ void ComposerView::edit_cut() {
     delete_selection_items();            // its own undo step
 }
 
-void ComposerView::edit_paste(const Point *at) {
+/* Paste as Text of plain text: a new text block in the type a new block
+ * gets, a column wide, as deep as the text (to the bottom margin), at the
+ * point asked for or the margin. One undo step, selected. */
+bool ComposerView::paste_plain_text(const std::string &text, const Point *at) {
+    std::string clean;
+    for (char ch : text)
+        if (ch != '\r')
+            clean += ch;
+    while (!clean.empty() && clean.back() == '\n')
+        clean.pop_back();
+    if (clean.empty() || m_page >= m_doc.pages.size() || !check_active_layer())
+        return false;
+    Paragraph base;
+    base.style.name = "Body text";
+    if (const StyleDef *def = m_doc.find_style("Body text")) {
+        base.runs.push_back(Run{m_default_type, ""});
+        pagemade::apply_style(base, *def, m_doc.char_styles);
+    }
+    const CharStyle type = base.runs.empty() ? m_default_type : base.runs.front().style;
+    Story story;
+    for (size_t at_ = 0;;) {
+        const size_t nl = clean.find('\n', at_);
+        Paragraph p;
+        p.style = base.style;
+        p.runs.push_back(Run{type, clean.substr(at_, nl == std::string::npos ? nl : nl - at_)});
+        story.paragraphs.push_back(std::move(p));
+        if (nl == std::string::npos)
+            break;
+        at_ = nl + 1;
+    }
+    const PageSetup &s = m_doc.setup;
+    float col_x, col_w;
+    column_at(m_page, at ? &at->x : nullptr, col_x, col_w);
+    const float x = at ? at->x : col_x;
+    const float y = at ? at->y : s.margin_top;
+    const float room = std::max(24.f, s.height - s.margin_bottom - y);
+    float h = room;
+    if (m_fonts) {
+        const Composition comp = compose(story, {Frame{0.f, 0.f, col_w, 100000.f}}, *m_fonts, m_hyphenator);
+        if (!comp.lines.empty())
+            h = std::min(room, comp.lines.back().top + comp.lines.back().leading + 1.f);
+    }
+    push_undo();
+    const StoryId sid = m_doc.add_story(std::move(story));
+    const ItemId id = m_doc.add_text_frame(m_page, sid, col_w, h, Transform::translate(x, y));
+    recompose();
+    m_item_paste = false;
+    m_sel = {id};
+    m_edit_story = 0;
+    if (m_tool != Tool::Pointer)
+        set_tool(Tool::Pointer);
+    else
+        selection_changed();
+    if (on_note)
+        on_note("pasted the text as a new text block");
+    if (on_document_change)
+        on_document_change();
+    if (screen())
+        screen()->redraw();
+    return true;
+}
+
+void ComposerView::edit_paste(const Point *at, PasteAs how) {
     if (editing()) {
         text_clipboard(GLFW_KEY_V);
         return;
     }
     GLFWwindow *win = screen() ? screen()->glfw_window() : nullptr;
     const std::string now = clipboard_now(win);
-    const bool own_items = m_item_paste && !m_clip.items.empty() && now == m_cb_at_copy;
-    if (!own_items && clipboard_is_svg(now)) {
+    const bool is_svg = clipboard_is_svg(now);
+    m_cb_cache_time = -1e9;              // a menu asks again after a paste
+    /* This publication's own items, only while the clipboard still holds
+     * what was copied from them (Paste). Anything else on the clipboard is
+     * pasted as what it is; the items copied before it are never a
+     * stand-in for a clipboard that couldn't be read. */
+    const bool own_items = how == PasteAs::Normal && m_item_paste && !m_clip.items.empty() &&
+                           now == m_cb_at_copy;
+    const bool as_text = how == PasteAs::Text;
+    if (!own_items && !is_svg) {
+        if (now.empty()) {
+            /* Nothing read. With nothing on the clipboard at all, Paste
+             * still has the items copied here; an owner that didn't answer
+             * in time is reported, not papered over. */
+            const bool empty = !win || nanogui::clipboard_types(win, 300).empty();
+            if (how == PasteAs::Normal && empty && m_item_paste && !m_clip.items.empty()) {
+                paste_items(at);
+                return;
+            }
+            if (on_note)
+                on_note(empty ? std::string("the clipboard is empty")
+                              : std::string("the clipboard couldn't be read (the program that copied "
+                                            "didn't answer in time); try Paste again"));
+            return;
+        }
+        if (how == PasteAs::Svg) {
+            if (on_note)
+                on_note("there is no SVG on the clipboard");
+            return;
+        }
+        if (!paste_plain_text(now, at) && on_note)   // plain text: a new text block
+            on_note("the clipboard's text couldn't be pasted");
+        return;
+    }
+    if (!own_items && is_svg) {
         if (!check_active_layer() || !m_vectors)
             return;
         std::vector<uint8_t> bytes(now.begin(), now.end());
@@ -2725,8 +2894,11 @@ void ComposerView::edit_paste(const Point *at) {
         if (!vector_loader().decode(bytes.data(), bytes.size(), &scene, &err))
             return;
         push_undo();
-        const VectorPlacement placed = place_svg_bytes(m_doc, *m_vectors, std::move(bytes),
-                                                       "graphic.svg", "", m_page, at, m_images);
+        const VectorPlacement placed =
+            place_svg_bytes(m_doc, *m_vectors, std::move(bytes), "graphic.svg", "", m_page, at, m_images,
+                            as_text ? SvgPaste::Text : SvgPaste::Drawing, m_fonts, true);
+        if (as_text)
+            recompose();
         if (!placed.ok) {
             undo();
             return;
@@ -2748,6 +2920,12 @@ void ComposerView::edit_paste(const Point *at) {
             screen()->redraw();
         return;
     }
+    paste_items(at);
+}
+
+/* The items copied in this publication: new ids and groups, their stories
+ * and assets, at `at` or a step from where they were. */
+void ComposerView::paste_items(const Point *at) {
     if (m_clip.items.empty() || !check_active_layer())
         return;
     push_undo();
@@ -3411,7 +3589,7 @@ bool ComposerView::keyboard_event(int key, int, int action, int modifiers) {
         if (action == GLFW_PRESS) {
             if (key == GLFW_KEY_C) edit_copy();
             else if (key == GLFW_KEY_X) edit_cut();
-            else edit_paste();
+            else edit_paste(nullptr, (modifiers & GLFW_MOD_SHIFT) ? PasteAs::Text : PasteAs::Normal);
         }
         return true;
     }
@@ -5204,26 +5382,54 @@ void ComposerView::sync_textures(NVGcontext *ctx) {
 
 int ComposerView::texture_for(NVGcontext *ctx, const DrawImage &im, float px) {
     if (im.bytes && !im.bytes->empty()) {
+        /* An SVG picture carried in the draw list. It is decoded on the
+         * loader, as placed pictures are; the texture it had stays on
+         * screen until the new size arrives. w, h are in the picture's own
+         * space: the transform's scale makes them points. */
         const uint64_t key = im.bytes_key ? im.bytes_key : 1;
-        const float pts = std::max(std::fabs(im.w), std::fabs(im.h));
-        int want = px > 0.f ? (int) std::ceil(pts / px) : 256;
+        const float k = std::sqrt(std::fabs(im.xf.a * im.xf.d - im.xf.b * im.xf.c));
+        const float pts = std::max(std::fabs(im.w), std::fabs(im.h)) * (k > 0.f ? k : 1.f);
+        const int want = px > 0.f ? (int) std::ceil(pts / px) : 256;
         int edge = 64;
         while (edge < want && edge < 4096)
             edge *= 2;
+        auto ready = m_inline_ready.find(key);
+        if (ready != m_inline_ready.end()) {
+            InlinePixels &p = ready->second;
+            auto old = m_inline_tex.find(key);
+            if (old != m_inline_tex.end() && old->second.id)
+                nvgDeleteImage(ctx, old->second.id);
+            const int id = p.w > 0 && p.h > 0 ? nvgCreateImageRGBA(ctx, p.w, p.h, 0, p.rgba.data()) : 0;
+            m_inline_tex[key] = {id, p.w, p.h, (uint64_t) p.edge};
+            m_inline_ready.erase(ready);
+        }
         auto it = m_inline_tex.find(key);
-        if (it != m_inline_tex.end() && it->second.id && (int) it->second.version == edge)
-            return it->second.id;
-        std::vector<uint8_t> rgba;
-        int w = 0, h = 0;
-        std::string err;
-        if (!make_display(im.bytes->data(), im.bytes->size(), edge, &rgba, &w, &h, &err) || w <= 0 ||
-            h <= 0)
-            return 0;
-        if (it != m_inline_tex.end() && it->second.id)
-            nvgDeleteImage(ctx, it->second.id);
-        const int id = nvgCreateImageRGBA(ctx, w, h, 0, rgba.data());
-        m_inline_tex[key] = {id, w, h, (uint64_t) edge};
-        return id;
+        const bool have = it != m_inline_tex.end() && it->second.id;
+        auto asked = m_inline_want.find(key);
+        if ((!have || (int) it->second.version != edge) &&
+            (asked == m_inline_want.end() || asked->second != edge)) {
+            m_inline_want[key] = edge;
+            auto gate = m_load_gate;
+            ComposerView *view = this;
+            const uint64_t epoch = m_doc_epoch;
+            const auto bytes = im.bytes;
+            loader().post([gate, view, epoch, key, edge, bytes]() {
+                auto px_out = std::make_shared<InlinePixels>();
+                px_out->edge = edge;
+                std::string err;
+                if (!make_display(bytes->data(), bytes->size(), edge, &px_out->rgba, &px_out->w,
+                                  &px_out->h, &err))
+                    px_out->w = px_out->h = 0;
+                async([gate, view, epoch, key, px_out]() {
+                    if (!gate->open || epoch != view->m_doc_epoch)
+                        return;
+                    view->m_inline_ready[key] = std::move(*px_out);
+                    if (view->screen())
+                        view->screen()->redraw();
+                });
+            }, "inline:" + std::to_string(key));
+        }
+        return have ? it->second.id : -1;    // -1: a plain tile while it loads
     }
     if (!im.asset)
         return kEmptyFramePlaceholder;   // an empty frame: shown, not printed

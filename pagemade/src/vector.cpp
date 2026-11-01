@@ -13,6 +13,7 @@
 #include <cctype>
 #include <cmath>
 #include <cstdio>
+#include <map>
 #include <utility>
 
 namespace pagemade {
@@ -158,8 +159,38 @@ const VectorScene *VectorStore::scene(uint32_t id) const {
     return e && e->loaded() ? &e->scene : nullptr;
 }
 
+void vector_image_view(const VectorImage &im, float &x, float &y, float &w, float &h) {
+    x = im.x;
+    y = im.y;
+    w = im.w;
+    h = im.h;
+    if (im.px_w <= 0 || im.px_h <= 0 || !(im.w > 0.f) || !(im.h > 0.f))
+        return;                          // size unknown: the viewport
+    std::string p;
+    for (char c : im.preserve)
+        if (!std::isspace((unsigned char) c) || (!p.empty() && p.back() != ' '))
+            p += std::isspace((unsigned char) c) ? ' ' : (char) std::tolower((unsigned char) c);
+    if (p.rfind("defer", 0) == 0)
+        p = p.size() > 6 ? p.substr(6) : std::string();
+    if (p.rfind("none", 0) == 0)
+        return;                          // stretched to the viewport
+    float ax = 0.5f, ay = 0.5f;          // xMidYMid
+    if (p.size() >= 8 && p[0] == 'x' && p[4] == 'y') {
+        const std::string hx = p.substr(1, 3), hy = p.substr(5, 3);
+        ax = hx == "min" ? 0.f : hx == "max" ? 1.f : 0.5f;
+        ay = hy == "min" ? 0.f : hy == "max" ? 1.f : 0.5f;
+    }
+    const bool slice = p.find("slice") != std::string::npos;
+    const float kx = im.w / (float) im.px_w, ky = im.h / (float) im.px_h;
+    const float k = slice ? std::max(kx, ky) : std::min(kx, ky);
+    w = (float) im.px_w * k;
+    h = (float) im.px_h * k;
+    x = im.x + (im.w - w) * ax;
+    y = im.y + (im.h - h) * ay;
+}
+
 void vector_frame(const PageSetup &s, size_t page, float gw, float gh, const Point *at,
-                  float &x, float &y, float &w, float &h) {
+                  float &x, float &y, float &w, float &h, bool to_column) {
     float left = 0.f, right = 0.f;
     page_side_margins(s, page, left, right);
     const int n = std::max(1, s.columns);
@@ -182,23 +213,32 @@ void vector_frame(const PageSetup &s, size_t page, float gw, float gh, const Poi
     w = gw > 0.f ? gw : 36.f;
     h = gh > 0.f ? gh : 36.f;
     const float stated_w = w;
-    if (w > col_w && w > 0.f) {
-        h *= col_w / w;
-        w = col_w;
+    /* A paste shrinks only past the page's edge (a drawing padded for its
+     * strokes may be a little wider than the live area) */
+    const float fit_w = to_column ? col_w : std::max(live, s.width - (at ? std::max(0.f, at->x) : left));
+    if (w > fit_w && w > 0.f) {
+        h *= fit_w / w;
+        w = fit_w;
     }
-    const float live_h = std::max(36.f, s.height - s.margin_top - s.margin_bottom);
+    const float live_h = to_column ? std::max(36.f, s.height - s.margin_top - s.margin_bottom)
+                                   : std::max(36.f, s.height - s.margin_top);
     if (h > live_h && h > 0.f) {
         w *= live_h / h;
         h = live_h;
     }
     const bool fitted = w < stated_w - 0.01f;
-    x = fitted ? col_x + (col_w - w) * 0.5f : (at ? at->x : left);
+    x = !fitted ? (at ? at->x : left) : to_column ? col_x + (col_w - w) * 0.5f : left + (live - w) * 0.5f;
     const float y0 = at ? at->y : s.margin_top;
     const float lowest = s.height - s.margin_bottom - h;
     y = std::max(s.margin_top, std::min(y0, std::max(s.margin_top, lowest)));
 }
 
 namespace {
+
+const Font *face_for_run(const FontLibrary &fonts, const VectorTextRun &run);
+float measure_text(const FontLibrary *fonts, const VectorTextRun &style, const std::string &text);
+std::string compact_family(const std::string &s);
+std::string resolve_family(const FontLibrary *fonts, const VectorTextRun &run);
 
 std::string svg_num(double v) {
     if (!std::isfinite(v))
@@ -394,7 +434,8 @@ std::string scene_svg(const VectorScene &scene) {
                 for (size_t i = 0; i < run.families.size(); ++i) {
                     if (i)
                         o.body += ", ";
-                    o.body += "'" + svg_escape(run.families[i]) + "'";
+                    /* Double quotes (&quot;) survive a family named with an apostrophe */
+                    o.body += "&quot;" + svg_escape(run.families[i]) + "&quot;";
                 }
                 o.body += "\"";
             }
@@ -425,23 +466,45 @@ std::string scene_svg(const VectorScene &scene) {
         o.body += "</text>";
         close_clip(n);
     };
+    /* A picture that stays in the drawing (turned, or not a picture this
+     * slice can place on its own) keeps its data URI */
+    auto emit_image = [&](const VectorImage &im) {
+        if (im.href.empty() || !(im.w > 0.f) || !(im.h > 0.f))
+            return;
+        int n = open_clip(im.clip);
+        o.body += "<image x=\"" + svg_num(im.x) + "\" y=\"" + svg_num(im.y) + "\" width=\"" +
+                  svg_num(im.w) + "\" height=\"" + svg_num(im.h) + "\"";
+        if (!(im.xf == Transform()))
+            o.body += " transform=\"matrix(" + svg_matrix(im.xf) + ")\"";
+        if (!im.preserve.empty())
+            o.body += " preserveAspectRatio=\"" + svg_escape(im.preserve) + "\"";
+        if (im.opacity < 0.999f)
+            o.body += " opacity=\"" + svg_num(im.opacity) + "\"";
+        o.body += " xlink:href=\"" + svg_escape(im.href) + "\"/>";
+        close_clip(n);
+    };
     if (scene.order.empty()) {
         for (const VectorShape &sh : scene.shapes)
             emit_shape(sh);
         for (const VectorText &tx : scene.texts)
             emit_text(tx);
+        for (const VectorImage &im : scene.images)
+            emit_image(im);
     } else {
         for (const VectorSlotRef &ref : scene.order) {
-            if (ref.slot == VectorSlot::Shape && ref.index >= 0 &&
-                (size_t) ref.index < scene.shapes.size())
+            if (ref.index < 0)
+                continue;
+            if (ref.slot == VectorSlot::Shape && (size_t) ref.index < scene.shapes.size())
                 emit_shape(scene.shapes[(size_t) ref.index]);
-            else if (ref.slot == VectorSlot::Text && ref.index >= 0 &&
-                     (size_t) ref.index < scene.texts.size())
+            else if (ref.slot == VectorSlot::Text && (size_t) ref.index < scene.texts.size())
                 emit_text(scene.texts[(size_t) ref.index]);
+            else if (ref.slot == VectorSlot::Image && (size_t) ref.index < scene.images.size())
+                emit_image(scene.images[(size_t) ref.index]);
         }
     }
     const std::string w = svg_num(scene.width), h = svg_num(scene.height);
-    std::string svg = "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"" + w + "pt\" height=\"" + h +
+    std::string svg = "<svg xmlns=\"http://www.w3.org/2000/svg\" "
+                      "xmlns:xlink=\"http://www.w3.org/1999/xlink\" width=\"" + w + "pt\" height=\"" + h +
                       "pt\" viewBox=\"0 0 " + w + " " + h + "\" preserveAspectRatio=\"none\">";
     if (!o.defs.empty())
         svg += "<defs>" + o.defs + "</defs>";
@@ -449,26 +512,52 @@ std::string scene_svg(const VectorScene &scene) {
     return svg;
 }
 
-/* The picture's rectangle in the graphic's box, when it is upright and
- * axis-aligned. A rotation or a flip stays inside the graphic. */
-bool image_box(const VectorImage &im, float &x, float &y, float &w, float &h) {
-    if (!(im.w > 0.f) || !(im.h > 0.f))
+bool cut_rect(float &x, float &y, float &w, float &h, float x2, float y2, float w2, float h2) {
+    const float x1 = std::max(x, x2), y1 = std::max(y, y2);
+    const float xh = std::min(x + w, x2 + w2), yh = std::min(y + h, y2 + h2);
+    if (!(xh > x1) || !(yh > y1))
         return false;
-    const Point p0 = im.xf.apply({im.x, im.y});
-    const Point p1 = im.xf.apply({im.x + im.w, im.y});
-    const Point p2 = im.xf.apply({im.x + im.w, im.y + im.h});
-    const Point p3 = im.xf.apply({im.x, im.y + im.h});
+    x = x1;
+    y = y1;
+    w = xh - x1;
+    h = yh - y1;
+    return true;
+}
+
+/* A user-space rectangle in the graphic's box, when it stays upright and
+ * axis-aligned there. */
+bool upright_rect(const Transform &xf, float x, float y, float w, float h, float &bx, float &by,
+                  float &bw, float &bh) {
+    const Point p0 = xf.apply({x, y});
+    const Point p1 = xf.apply({x + w, y});
+    const Point p2 = xf.apply({x + w, y + h});
+    const Point p3 = xf.apply({x, y + h});
     const float eps = 0.05f;
     if (std::fabs(p0.y - p1.y) > eps || std::fabs(p2.y - p3.y) > eps || std::fabs(p0.x - p3.x) > eps ||
         std::fabs(p1.x - p2.x) > eps)
         return false;
     if (!(p1.x > p0.x + eps) || !(p3.y > p0.y + eps))
         return false;
-    x = p0.x;
-    y = p0.y;
-    w = p1.x - p0.x;
-    h = p3.y - p0.y;
+    bx = p0.x;
+    by = p0.y;
+    bw = p1.x - p0.x;
+    bh = p3.y - p0.y;
     return true;
+}
+
+/* The picture in the graphic's box, when it is upright and axis-aligned:
+ * where its pixels go (i), and the part of that its viewport shows (v; a
+ * "slice" overflows the viewport). A rotation or a flip stays in a graphic. */
+bool image_box(const VectorImage &im, float &ix, float &iy, float &iw, float &ih, float &vx,
+               float &vy, float &vw, float &vh) {
+    if (!(im.w > 0.f) || !(im.h > 0.f))
+        return false;
+    float dx, dy, dw, dh;
+    vector_image_view(im, dx, dy, dw, dh);
+    if (!upright_rect(im.xf, dx, dy, dw, dh, ix, iy, iw, ih) ||
+        !upright_rect(im.xf, im.x, im.y, im.w, im.h, vx, vy, vw, vh))
+        return false;
+    return cut_rect(vx, vy, vw, vh, ix, iy, iw, ih);
 }
 
 bool clip_box(const ClipLayers &layers, float &x, float &y, float &w, float &h) {
@@ -500,18 +589,6 @@ bool clip_box(const ClipLayers &layers, float &x, float &y, float &w, float &h) 
     return true;
 }
 
-bool cut_rect(float &x, float &y, float &w, float &h, float x2, float y2, float w2, float h2) {
-    const float x1 = std::max(x, x2), y1 = std::max(y, y2);
-    const float xh = std::min(x + w, x2 + w2), yh = std::min(y + h, y2 + h2);
-    if (!(xh > x1) || !(yh > y1))
-        return false;
-    x = x1;
-    y = y1;
-    w = xh - x1;
-    h = yh - y1;
-    return true;
-}
-
 std::string file_stem(std::string name) {
     const size_t slash = name.find_last_of("/\\");
     if (slash != std::string::npos)
@@ -534,7 +611,7 @@ VectorScene slice_shell(const VectorScene &src) {
 /* The whole graphic as one item. `bytes` are the file that was decoded. */
 VectorPlacement place_whole(PageDoc &doc, VectorStore &store, std::vector<uint8_t> bytes,
                             VectorScene scene, const std::string &name, const std::string &source,
-                            size_t page, const Point *at) {
+                            size_t page, const Point *at, bool paste) {
     VectorPlacement r;
     const uint32_t id = store.take_id();
     const std::string leaf = name.empty() ? std::string("graphic.svg") : name;
@@ -555,7 +632,7 @@ VectorPlacement place_whole(PageDoc &doc, VectorStore &store, std::vector<uint8_
         asset.hash = image_bytes_hash(kept->data(), kept->size());
     doc.add_vector(asset);
     float x, y, w, h;
-    vector_frame(doc.setup, page, scene.width, scene.height, at, x, y, w, h);
+    vector_frame(doc.setup, page, scene.width, scene.height, at, x, y, w, h, !paste);
     Item it;
     it.w = w;
     it.h = h;
@@ -577,7 +654,8 @@ VectorPlacement place_whole(PageDoc &doc, VectorStore &store, std::vector<uint8_
  * a graphic, in the same paint order, and the pieces are one group. False
  * leaves the document alone: the caller places the file as one graphic. */
 bool place_grouped(PageDoc &doc, VectorStore &store, ImageStore &images, const VectorScene &scene,
-                   const std::string &name, size_t page, const Point *at, VectorPlacement &r) {
+                   const std::string &name, size_t page, const Point *at, bool paste,
+                   VectorPlacement &r) {
     struct Pic {
         int index = -1;
         float ix = 0, iy = 0, iw = 0, ih = 0;   // the whole picture, graphic box
@@ -592,14 +670,13 @@ bool place_grouped(PageDoc &doc, VectorStore &store, ImageStore &images, const V
         if (!im.bytes || im.bytes->empty())
             continue;
         ++embedded;
-        float ix, iy, iw, ih;
-        if (!image_box(im, ix, iy, iw, ih))
+        float ix, iy, iw, ih, vx, vy, vw, vh;
+        if (!image_box(im, ix, iy, iw, ih, vx, vy, vw, vh))
             return false;
         ImageMetadata meta;
         std::string err;
         if (!image_loader().probe(im.bytes->data(), im.bytes->size(), &meta, &err))
             return false;
-        float vx = ix, vy = iy, vw = iw, vh = ih;
         if (im.clip >= 0 && (size_t) im.clip < scene.clips.size()) {
             float cx, cy, cw, ch;
             if (!clip_box(scene.clips[(size_t) im.clip], cx, cy, cw, ch) ||
@@ -688,7 +765,7 @@ bool place_grouped(PageDoc &doc, VectorStore &store, ImageStore &images, const V
         return false;
 
     float fx, fy, fw, fh;
-    vector_frame(doc.setup, page, scene.width, scene.height, at, fx, fy, fw, fh);
+    vector_frame(doc.setup, page, scene.width, scene.height, at, fx, fy, fw, fh, !paste);
     const float sx = fw / scene.width, sy = fh / scene.height;
     const std::string stem = file_stem(name);
     int vectors = 0, pictures = 0;
@@ -771,11 +848,576 @@ bool place_grouped(PageDoc &doc, VectorStore &store, ImageStore &images, const V
     return true;
 }
 
+void shift_path(Path &p, float dx, float dy) {
+    for (PathCmd &c : p) {
+        if (c.kind == PathCmd::Quad || c.kind == PathCmd::Cubic) {
+            c.cx1 += dx;
+            c.cy1 += dy;
+        }
+        if (c.kind == PathCmd::Cubic) {
+            c.cx2 += dx;
+            c.cy2 += dy;
+        }
+        if (c.kind != PathCmd::Close) {
+            c.x += dx;
+            c.y += dy;
+        }
+    }
+}
+
+/* The type of one run at page scale `k` (the text's transform taken out of
+ * the frame and into the sizes), in `family`. */
+CharStyle text_style(const VectorTextRun &run, float k, const std::string &family) {
+    CharStyle st;
+    st.family = family;
+    st.bold = run.weight >= 600;
+    st.italic = run.italic;
+    st.caps = run.small_caps ? Caps::Small : Caps::Normal;
+    st.underline = run.underline;
+    st.strike = run.strike;
+    const float size = run.size > 0.f ? run.size : 12.f;
+    st.size = size * k;
+    st.tracking = run.letter_spacing / size * 1000.f;   // a ratio: the scale cancels
+    st.color = run.fill;
+    st.swatch = 0;
+    return st;
+}
+
+bool same_linear(const Transform &a, const Transform &b) {
+    const float tol = 1e-3f * std::max(1.f, std::fabs(a.a) + std::fabs(a.b) + std::fabs(a.c) + std::fabs(a.d));
+    return std::fabs(a.a - b.a) <= tol && std::fabs(a.b - b.b) <= tol && std::fabs(a.c - b.c) <= tol &&
+           std::fabs(a.d - b.d) <= tol;
+}
+
+/* One SVG text element, read for Paste as Text */
+struct PasteLine {
+    Transform M;                         // its text space -> the page
+    float k = 1.f;                       // M's uniform scale
+    float left = 0, right = 0, baseline = 0, size = 0;   // text space
+    bool justified = false;              // its words were placed one by one
+    std::vector<Run> runs;               // the type, at page scale
+    std::string text;
+    float qx = 0, qy = 0, qr = 0;        // left, baseline, right in the block's space
+    /* A jump in the pen, or a run of only leader dots, is a tab: its stop,
+     * at page scale from the line's left (or from the right, for text that
+     * ends the line) */
+    std::vector<TabStop> tabs;
+};
+
+/* A run that is only leader characters (". . . .", "____") */
+bool leader_run(const std::string &t, std::string &leader) {
+    size_t n = 0;
+    std::string first;
+    for (size_t i = 0; i < t.size();) {
+        const unsigned char c = (unsigned char) t[i];
+        if (c == ' ') {
+            ++i;
+            continue;
+        }
+        std::string ch;
+        if (c == '.' || c == '_' || c == '-')
+            ch = t.substr(i, 1);
+        else if (c == 0xC2 && i + 1 < t.size() && (unsigned char) t[i + 1] == 0xB7)
+            ch = t.substr(i, 2);         // middle dot
+        else if (c == 0xE2 && i + 2 < t.size() && (unsigned char) t[i + 1] == 0x80 &&
+                 (unsigned char) t[i + 2] == 0xA6)
+            ch = t.substr(i, 3);         // ellipsis
+        else
+            return false;
+        if (first.empty())
+            first = ch;
+        i += ch.size();
+        ++n;
+    }
+    if (n < 3)
+        return false;
+    leader = first;
+    return true;
+}
+
+/* Editable text frames, a picture for each embedded image, and the paths
+ * in a graphic fitted to themselves. Consecutive lines that share a left
+ * edge, a line spacing and their type become one frame, its paragraphs
+ * broken where a justified line falls short or the next line is indented.
+ * Each frame is composed and widened until nothing in it is overset, and
+ * set so its first baseline lands where the SVG put it. False leaves the
+ * document alone. */
+bool place_as_text(PageDoc &doc, VectorStore &store, ImageStore *images, const FontLibrary *fonts,
+                   const VectorScene &scene, const std::string &name, size_t page, const Point *at,
+                   bool paste, VectorPlacement &r) {
+    if (scene.texts.empty() && scene.shapes.empty() && scene.images.empty())
+        return false;
+    struct Pic {
+        float ix = 0, iy = 0, iw = 0, ih = 0;
+        float vx = 0, vy = 0, vw = 0, vh = 0;
+        ImageMetadata meta;
+    };
+    std::vector<Pic> pics(scene.images.size());
+    std::vector<char> pull(scene.images.size(), 0);
+    if (images) {
+        for (size_t i = 0; i < scene.images.size(); ++i) {
+            const VectorImage &im = scene.images[i];
+            if (!im.bytes || im.bytes->empty())
+                continue;
+            float ix, iy, iw, ih, vx, vy, vw, vh;
+            if (!image_box(im, ix, iy, iw, ih, vx, vy, vw, vh))
+                continue;                // turned or flipped: it stays in the drawing
+            ImageMetadata meta;
+            std::string err;
+            if (!image_loader().probe(im.bytes->data(), im.bytes->size(), &meta, &err))
+                continue;                // not a picture pagemade reads: in the drawing
+            if (im.clip >= 0 && (size_t) im.clip < scene.clips.size()) {
+                float cx, cy, cw, ch;
+                if (!clip_box(scene.clips[(size_t) im.clip], cx, cy, cw, ch) ||
+                    !cut_rect(vx, vy, vw, vh, cx, cy, cw, ch))
+                    continue;
+            }
+            if (!cut_rect(vx, vy, vw, vh, 0.f, 0.f, scene.width, scene.height))
+                continue;
+            pics[i] = {ix, iy, iw, ih, vx, vy, vw, vh, meta};
+            pull[i] = 1;
+        }
+    }
+
+    float fx, fy, fw, fh;
+    vector_frame(doc.setup, page, scene.width, scene.height, at, fx, fy, fw, fh, !paste);
+    const float sx = fw / scene.width, sy = fh / scene.height;
+    const Transform page_map{sx, 0, 0, sy, fx, fy};
+    const std::string stem = file_stem(name);
+    int drawing_n = 0;
+
+    /* ---- The drawing: shapes, and pictures that can't stand alone ---- */
+    std::vector<VectorSlotRef> drawing;
+    auto flush_drawing = [&] {
+        if (drawing.empty())
+            return;
+        Bounds box;
+        float pad = 0.5f;
+        for (const VectorSlotRef &ref : drawing) {
+            if (ref.slot == VectorSlot::Shape) {
+                const VectorShape &sh = scene.shapes[(size_t) ref.index];
+                box.add(path_bounds(sh.path));
+                if (!sh.stroke.none())
+                    pad = std::max(pad, sh.stroke.width);
+            } else {
+                const VectorImage &im = scene.images[(size_t) ref.index];
+                for (Point p : {Point{im.x, im.y}, Point{im.x + im.w, im.y}, Point{im.x + im.w, im.y + im.h},
+                                Point{im.x, im.y + im.h}})
+                    box.add(Bounds{im.xf.apply(p).x, im.xf.apply(p).y, im.xf.apply(p).x, im.xf.apply(p).y});
+            }
+        }
+        if (box.empty() || !(box.x1 > box.x0) || !(box.y1 > box.y0)) {
+            drawing.clear();
+            return;
+        }
+        const float bx = box.x0 - pad, by = box.y0 - pad;
+        const float bw = box.x1 - box.x0 + pad * 2.f, bh = box.y1 - box.y0 + pad * 2.f;
+        const Transform shift = Transform::translate(-bx, -by);
+        VectorScene slice;
+        slice.width = bw;
+        slice.height = bh;
+        std::map<int, int> clips;
+        auto clip_into = [&](int c) {
+            if (c < 0 || (size_t) c >= scene.clips.size())
+                return -1;
+            auto have = clips.find(c);
+            if (have != clips.end())
+                return have->second;
+            ClipLayers layers = scene.clips[(size_t) c];
+            for (auto &layer : layers)
+                for (ClipPath &cp : layer)
+                    shift_path(cp.path, -bx, -by);
+            clips[c] = (int) slice.clips.size();
+            slice.clips.push_back(std::move(layers));
+            return clips[c];
+        };
+        for (const VectorSlotRef &ref : drawing) {
+            if (ref.slot == VectorSlot::Shape) {
+                VectorShape sh = scene.shapes[(size_t) ref.index];
+                shift_path(sh.path, -bx, -by);
+                if (sh.fill.gradient())
+                    sh.fill.xf = shift * sh.fill.xf;
+                if (sh.stroke.paint.gradient())
+                    sh.stroke.paint.xf = shift * sh.stroke.paint.xf;
+                sh.clip = clip_into(sh.clip);
+                sh.windings.reset();
+                slice.order.push_back({VectorSlot::Shape, (int) slice.shapes.size()});
+                slice.shapes.push_back(std::move(sh));
+            } else {
+                VectorImage im = scene.images[(size_t) ref.index];
+                im.xf = shift * im.xf;
+                im.clip = clip_into(im.clip);
+                slice.order.push_back({VectorSlot::Image, (int) slice.images.size()});
+                slice.images.push_back(std::move(im));
+            }
+        }
+        drawing.clear();
+        const std::string svg = scene_svg(slice);
+        std::vector<uint8_t> bytes(svg.begin(), svg.end());
+        const uint32_t id = store.take_id();
+        VectorAsset asset;
+        asset.id = id;
+        asset.name = stem + "-drawing" + (drawing_n ? "-" + std::to_string(drawing_n + 1) : "") + ".svg";
+        ++drawing_n;
+        asset.width = bw;
+        asset.height = bh;
+        asset.source_size = bytes.size();
+        asset.hash = image_bytes_hash(bytes.data(), bytes.size());
+        if (!store.add(id, std::move(bytes), std::move(slice))) {
+            r.error = "couldn't keep the drawing";
+            return;
+        }
+        doc.add_vector(asset);
+        if (r.asset == 0)
+            r.asset = id;
+        Item it;
+        it.w = bw * sx;
+        it.h = bh * sy;
+        it.xf = Transform::translate(fx + bx * sx, fy + by * sy);
+        PlacedVector pv;
+        pv.asset = id;
+        pv.w = it.w;
+        pv.h = it.h;
+        it.content = pv;
+        r.items.push_back(doc.add_item(page, std::move(it)));
+    };
+
+    /* ---- Text ---- */
+    auto read_line = [&](const VectorText &tx, PasteLine &L) {
+        L.M = page_map * tx.xf;
+        L.k = std::sqrt(std::fabs(L.M.a * L.M.d - L.M.b * L.M.c));
+        if (!(L.k > 1e-6f))
+            return false;
+        /* Runs in reading order: when every run is placed, by position
+         * (a writer may put leader dots after the number they lead to) */
+        std::vector<const VectorTextRun *> runs;
+        bool all_x = true;
+        for (const VectorTextRun &run : tx.runs)
+            if (!run.text.empty()) {
+                runs.push_back(&run);
+                all_x = all_x && run.has_x;
+            }
+        if (all_x)
+            std::stable_sort(runs.begin(), runs.end(), [](const VectorTextRun *a, const VectorTextRun *b) {
+                return a->x < b->x;
+            });
+        float pen = 0.f;
+        bool have_left = false, have_y = false, tab = false;
+        std::string leader;
+        int placed = 0;
+        for (const VectorTextRun *rp : runs) {
+            const VectorTextRun &run = *rp;
+            const float before = pen;
+            if (run.has_x) {
+                pen = run.x;
+                ++placed;
+            }
+            pen += run.dx;
+            if (!have_left || pen < L.left) {
+                L.left = pen;
+                have_left = true;
+            }
+            if (run.has_y && !have_y) {
+                L.baseline = run.y + run.dy;
+                have_y = true;
+            }
+            const float w = measure_text(fonts, run, run.text);
+            L.right = std::max(L.right, pen + w);
+            L.size = std::max(L.size, run.size);
+            /* A jump of more than an em and a half after text is a tab */
+            if (!L.text.empty() && L.text.back() != ' ' && pen - before > run.size * 1.5f)
+                tab = true;
+            std::string dots;
+            if (leader_run(run.text, dots)) {
+                tab = true;              // the dots become the tab's leader
+                leader = dots;
+                pen += w;
+                continue;
+            }
+            const float start = pen;
+            pen += w;
+            if (run.fill.a <= 0.f)
+                continue;                // fill="none": nothing to see, nothing to edit
+            std::string text = run.text;
+            if (tab && !L.text.empty()) {
+                TabStop stop;
+                stop.leader = leader;
+                stop.pos = (start - L.left) * L.k;
+                L.tabs.push_back(stop);
+                text = "\t" + text;
+                tab = false;
+                leader.clear();
+            }
+            const CharStyle st = text_style(run, L.k, resolve_family(fonts, run));
+            if (!L.runs.empty() && L.runs.back().style == st)
+                L.runs.back().text += text;
+            else
+                L.runs.push_back(Run{st, text});
+            L.text += text;
+        }
+        /* A tab whose text ends the line sits against the right edge: a
+         * right stop measured from the right, as a contents line has */
+        if (!L.tabs.empty()) {
+            const size_t last_tab = L.text.rfind('\t');
+            const std::string after = last_tab == std::string::npos ? std::string() : L.text.substr(last_tab + 1);
+            if (!after.empty() && after.size() <= 8) {
+                TabStop &stop = L.tabs.back();
+                stop.align = TabAlign::Right;
+                stop.from_right = true;
+                stop.pos = 0.f;
+            }
+        }
+        L.justified = placed > 1 && L.tabs.empty();
+        return !L.runs.empty() && L.size > 0.f;
+    };
+
+    const StyleDef *normal = doc.find_style("Normal");
+    std::vector<PasteLine> block;        // lines of one frame, in the first line's space
+    Transform block_space, block_inv;
+    float block_left = 0, block_gap = 0;
+    auto flush_block = [&] {
+        if (block.empty())
+            return;
+        const PasteLine &first = block.front();
+        bool justified = false;
+        float right = first.qr;
+        for (const PasteLine &L : block) {
+            justified = justified || L.justified;
+            right = std::max(right, L.qr);
+        }
+        const float measure = right - block_left;
+        /* Paragraphs: one ends where the next line is indented, or (justified
+         * text) where a line falls short of the measure */
+        Story story;
+        Paragraph para;
+        auto start_para = [&] {
+            para = Paragraph();
+            if (normal)
+                para.style = normal->para;
+            para.style.name = normal ? normal->name : std::string();
+            para.style.align = justified ? Align::Justify : Align::Left;
+            para.style.hyphenate = false;
+            para.style.first_indent = para.style.left_indent = para.style.right_indent = 0.f;
+            para.style.space_before = para.style.space_after = 0.f;
+        };
+        start_para();
+        for (size_t i = 0; i < block.size(); ++i) {
+            const PasteLine &L = block[i];
+            if (!L.tabs.empty() && !para.runs.empty()) {
+                story.paragraphs.push_back(std::move(para));   // a tabbed line stands alone
+                start_para();
+            }
+            if (!L.tabs.empty()) {
+                para.style.tabs = L.tabs;
+                para.style.align = Align::Left;
+            }
+            if (para.runs.empty() && L.qx > block_left + 1.f)
+                para.style.first_indent = L.qx - block_left;
+            std::vector<Run> runs = L.runs;
+            if (block.size() > 1)
+                for (Run &run : runs)
+                    run.style.leading = block_gap;     // the SVG's own line spacing
+            if (!para.runs.empty()) {
+                /* Join with the line before: a break hyphen goes, else a space */
+                std::string &prev = para.runs.back().text;
+                const bool hyphen = !prev.empty() && prev.back() == '-' && !L.text.empty() &&
+                                    std::islower((unsigned char) L.text[0]);
+                if (hyphen)
+                    prev.pop_back();
+                else if (!prev.empty() && prev.back() != ' ')
+                    prev += ' ';
+            }
+            for (Run &run : runs) {
+                if (!para.runs.empty() && para.runs.back().style == run.style)
+                    para.runs.back().text += run.text;
+                else
+                    para.runs.push_back(std::move(run));
+            }
+            const bool last = i + 1 == block.size();
+            const bool next_indented = !last && block[i + 1].qx > block_left + 1.f;
+            const bool short_line = justified && (L.qr - L.qx) < (right - L.qx) * 0.95f;
+            const bool next_tabbed = !last && !block[i + 1].tabs.empty();
+            if (last || next_indented || short_line || !L.tabs.empty() || next_tabbed) {
+                while (!para.runs.empty() && !para.runs.back().text.empty() &&
+                       para.runs.back().text.back() == ' ')
+                    para.runs.back().text.pop_back();
+                story.paragraphs.push_back(std::move(para));
+                start_para();
+            }
+        }
+        /* The frame: as wide as the lines (a little more for ragged text),
+         * widened until the composer sets it all; as deep as what it set */
+        float w = std::max(4.f, measure + (justified ? 0.5f : 2.f));
+        float h = 0.f, baseline0 = 0.f;
+        if (fonts) {
+            Composition c;
+            for (int tries = 0; tries < 16; ++tries) {
+                c = compose(story, {Frame{0.f, 0.f, w, 100000.f}}, *fonts);
+                if (!c.overset && c.lines.size() <= block.size())
+                    break;
+                w = w * 1.02f + 1.f;
+            }
+            if (!c.lines.empty()) {
+                const ComposedLine &l0 = c.lines.front(), &ln = c.lines.back();
+                h = ln.top + ln.leading - l0.top + 0.5f;
+                baseline0 = l0.baseline;
+            }
+        }
+        if (!(h > 0.f)) {
+            const float lead = block.size() > 1 ? block_gap : first.size * first.k * 1.2f;
+            h = lead * (float) block.size() + 0.5f;
+            baseline0 = lead * (2.f / 3.f);
+        }
+        const Transform xf = block_space * Transform::translate(block_left, first.qy - baseline0);
+        const StoryId sid = doc.add_story(std::move(story));
+        r.items.push_back(doc.add_text_frame(page, sid, w, h, xf));
+        block.clear();
+    };
+    auto add_line = [&](PasteLine L) {
+        if (!block.empty()) {
+            const PasteLine &first = block.front();
+            const PasteLine &prev = block.back();
+            bool joins = same_linear(L.M, first.M) &&
+                         std::fabs(L.size * L.k - first.size * first.k) <= 0.5f &&
+                         !L.runs.empty() && !first.runs.empty() &&
+                         L.runs.front().style.family == first.runs.front().style.family;
+            if (joins) {
+                const Point a = block_inv.apply(L.M.apply({L.left, L.baseline}));
+                const Point b = block_inv.apply(L.M.apply({L.right, L.baseline}));
+                L.qx = a.x;
+                L.qy = a.y;
+                L.qr = b.x;
+                const float size = L.size * L.k;
+                const float gap = L.qy - prev.qy;
+                joins = gap > size * 0.9f && gap < size * 2.2f &&
+                        (block.size() < 2 || std::fabs(gap - block_gap) <= block_gap * 0.12f);
+                /* The same left edge; or a justified paragraph whose first
+                 * line (indented) began the block */
+                const bool same_left = std::fabs(L.qx - block_left) <= 1.f;
+                const bool under_indent = block.size() == 1 && (L.justified || prev.justified) &&
+                                          L.qx < block_left && block_left - L.qx <= size * 4.f;
+                const bool indented = (L.justified || prev.justified) && L.qx > block_left &&
+                                      L.qx - block_left <= size * 4.f;
+                joins = joins && (same_left || under_indent || indented);
+                if (joins) {
+                    if (block.size() == 1)
+                        block_gap = gap;
+                    block_left = std::min(block_left, L.qx);
+                    block.push_back(std::move(L));
+                    return;
+                }
+            }
+            flush_block();
+        }
+        /* The first line sets the block's space: its own, the scale taken out */
+        block_space = L.M * Transform::scale(1.f / L.k, 1.f / L.k);
+        block_inv = block_space.inverse();
+        const Point a = block_inv.apply(L.M.apply({L.left, L.baseline}));
+        const Point b = block_inv.apply(L.M.apply({L.right, L.baseline}));
+        L.qx = a.x;
+        L.qy = a.y;
+        L.qr = b.x;
+        block_left = L.qx;
+        block_gap = 0.f;
+        block.push_back(std::move(L));
+    };
+
+    /* ---- Pictures ---- */
+    auto add_picture = [&](int index) {
+        const Pic &p = pics[(size_t) index];
+        const VectorImage &im = scene.images[(size_t) index];
+        const uint32_t id = images->take_id();
+        std::string err;
+        if (!images->add(id, std::vector<uint8_t>(*im.bytes), nullptr, &err)) {
+            r.error = err.empty() ? "couldn't keep the picture" : err;
+            return;
+        }
+        const std::string ext = p.meta.format == "jpeg" ? ".jpg"
+                                : p.meta.format == "png" ? ".png"
+                                : p.meta.format == "tiff" ? ".tif"
+                                                          : ".img";
+        ImageAsset asset;
+        asset.id = id;
+        asset.name = stem + ext;
+        asset.meta = p.meta;
+        asset.source_size = im.bytes->size();
+        asset.hash = image_bytes_hash(im.bytes->data(), im.bytes->size());
+        doc.add_image(asset);
+        Item it;
+        it.w = p.vw * sx;
+        it.h = p.vh * sy;
+        it.xf = Transform::translate(fx + p.vx * sx, fy + p.vy * sy);
+        PlacedImage pi;
+        pi.asset = id;
+        pi.x = (p.ix - p.vx) * sx;
+        pi.y = (p.iy - p.vy) * sy;
+        pi.w = p.iw * sx;
+        pi.h = p.ih * sy;
+        pi.opacity = std::clamp(im.opacity, 0.f, 1.f) * 100.f;
+        it.content = pi;
+        r.items.push_back(doc.add_item(page, std::move(it)));
+    };
+
+    std::vector<VectorSlotRef> order = scene.order;
+    if (order.empty()) {
+        for (size_t i = 0; i < scene.shapes.size(); ++i)
+            order.push_back({VectorSlot::Shape, (int) i});
+        for (size_t i = 0; i < scene.texts.size(); ++i)
+            order.push_back({VectorSlot::Text, (int) i});
+        for (size_t i = 0; i < scene.images.size(); ++i)
+            order.push_back({VectorSlot::Image, (int) i});
+    }
+    /* Paint order holds: a run of text lines becomes frames before the
+     * next drawing or picture, and a drawing ends at the next text or
+     * picture that stands alone */
+    for (const VectorSlotRef &ref : order) {
+        if (ref.index < 0)
+            continue;
+        const size_t i = (size_t) ref.index;
+        if (ref.slot == VectorSlot::Text) {
+            if (i >= scene.texts.size())
+                continue;
+            flush_drawing();
+            PasteLine L;
+            if (read_line(scene.texts[i], L))
+                add_line(std::move(L));
+        } else if (ref.slot == VectorSlot::Shape) {
+            if (i >= scene.shapes.size())
+                continue;
+            flush_block();
+            drawing.push_back(ref);
+        } else if (i < scene.images.size()) {
+            flush_block();
+            if (pull[i]) {
+                flush_drawing();
+                add_picture(ref.index);
+            } else if (scene.images[i].bytes && !scene.images[i].bytes->empty()) {
+                drawing.push_back(ref);  // turned, or unreadable here: drawn as it was
+            }
+        }
+        if (!r.error.empty())
+            return true;
+    }
+    flush_block();
+    flush_drawing();
+    if (!r.error.empty())
+        return true;
+    if (r.items.empty())
+        return false;
+    if (r.items.size() >= 2)
+        r.group = doc.group_items(r.items);
+    r.item = r.items.front();
+    r.note = "placed " + (name.empty() ? std::string("graphic") : name) + " as text";
+    r.ok = true;
+    return true;
+}
+
 } // namespace
 
 VectorPlacement place_svg_bytes(PageDoc &doc, VectorStore &store, std::vector<uint8_t> bytes,
                                 const std::string &name, const std::string &source,
-                                size_t page, const Point *at, ImageStore *images) {
+                                size_t page, const Point *at, ImageStore *images, SvgPaste how,
+                                const FontLibrary *fonts, bool paste) {
     VectorPlacement r;
     if (page >= doc.pages.size()) {
         r.error = "no such page";
@@ -786,7 +1428,9 @@ VectorPlacement place_svg_bytes(PageDoc &doc, VectorStore &store, std::vector<ui
         return r;
     }
     VectorScene scene;
-    if (!vector_loader().decode(bytes.data(), bytes.size(), &scene, &r.error)) {
+    const bool read = paste ? decode_svg_paste(bytes.data(), bytes.size(), &scene, &r.error)
+                            : vector_loader().decode(bytes.data(), bytes.size(), &scene, &r.error);
+    if (!read) {
         if (r.error.empty())
             r.error = "couldn't read the SVG";
         return r;
@@ -795,9 +1439,12 @@ VectorPlacement place_svg_bytes(PageDoc &doc, VectorStore &store, std::vector<ui
         r.error = "the SVG has no size";
         return r;
     }
-    if (images && place_grouped(doc, store, *images, scene, name, page, at, r))
+    if (how == SvgPaste::Text &&
+        place_as_text(doc, store, images, fonts, scene, name, page, at, paste, r))
         return r;
-    return place_whole(doc, store, std::move(bytes), std::move(scene), name, source, page, at);
+    if (images && place_grouped(doc, store, *images, scene, name, page, at, paste, r))
+        return r;
+    return place_whole(doc, store, std::move(bytes), std::move(scene), name, source, page, at, paste);
 }
 
 namespace {
@@ -813,30 +1460,60 @@ std::string compact_family(const std::string &s) {
     return o;
 }
 
-const Font *face_for_run(const FontLibrary &fonts, const VectorTextRun &run) {
-    auto pick = [&](const char *family) -> const Font * {
-        if (!family || !fonts.has_family(family))
-            return nullptr;
-        return fonts.match(family, run.weight, run.italic, "");
-    };
+/* The family a run's text names here: the first of its families the
+ * library has, else the pagemade family a well-known name stands for
+ * (P052 for Serif, and so on). Paste as Text names this family in its
+ * frames and measures with it, so the frame widths and the composer agree. */
+std::string resolve_family(const FontLibrary *fonts, const VectorTextRun &run) {
     for (const std::string &fam : run.families) {
-        if (const Font *f = pick(fam.c_str()))
-            return f;
+        if (fonts && fonts->has_family(fam))
+            return fam;
         const std::string key = compact_family(fam);
         const char *alias = nullptr;
         if (key == "p052" || key == "p052roman" || key == "serif")
             alias = "Serif";
         else if (key == "nimbussans" || key == "nimbussansregular" || key == "sansserif" ||
-                 key == "sans")
+                 key == "sans" || key == "monospace" || key == "mono")
             alias = "Sans";
         else if (key == "urwgothic" || key == "urwgothicbook" || key == "gothic" || key == "display")
             alias = "Display";
-        else if (key == "monospace" || key == "mono")
-            alias = fonts.has_family("Display") ? "Display" : "Sans";
-        if (const Font *f = pick(alias))
-            return f;
+        if (alias && (!fonts || fonts->has_family(alias)))
+            return alias;
     }
+    return "Serif";
+}
+
+const Font *face_for_run(const FontLibrary &fonts, const VectorTextRun &run) {
+    const std::string family = resolve_family(&fonts, run);
+    if (fonts.has_family(family))
+        if (const Font *f = fonts.match(family, run.weight, run.italic, ""))
+            return f;
     return fonts.find("Serif", run.weight >= 600, run.italic);
+}
+
+float measure_text(const FontLibrary *fonts, const VectorTextRun &style, const std::string &text) {
+    if (text.empty() || !(style.size > 0.f))
+        return 0.f;
+    const float guess = (float) text.size() * style.size * 0.5f;
+    if (!fonts)
+        return guess;
+    const Font *font = face_for_run(*fonts, style);
+    if (!font || !font->hb())
+        return guess;
+    hb_buffer_t *buf = hb_buffer_create();
+    hb_buffer_add_utf8(buf, text.data(), (int) text.size(), 0, (int) text.size());
+    hb_buffer_set_direction(buf, HB_DIRECTION_LTR);
+    hb_buffer_set_script(buf, HB_SCRIPT_LATIN);
+    hb_buffer_set_language(buf, hb_language_from_string("en", -1));
+    hb_shape(font->hb(), buf, nullptr, 0);
+    unsigned n = 0;
+    hb_glyph_position_t *pos = hb_buffer_get_glyph_positions(buf, &n);
+    const float em = style.size / (float) std::max(1, font->units_per_em());
+    float adv = 0.f;
+    for (unsigned i = 0; i < n; ++i)
+        adv += pos[i].x_advance * em + style.letter_spacing;
+    hb_buffer_destroy(buf);
+    return adv > 0.f ? adv : guess;
 }
 
 void add_design_outline(Path &dst, const GlyphOutline &o, float gx, float gy, float em,
@@ -1071,32 +1748,66 @@ void append_placed_vector(DrawList &out, const PageDoc &, const Item &it, const 
     auto emit_image = [&](const VectorImage &im) {
         if (!im.bytes || im.bytes->empty() || !(im.w > 0.f) || !(im.h > 0.f))
             return;
-        const Point p0 = im.xf.apply({im.x, im.y});
-        const Point p1 = im.xf.apply({im.x + im.w, im.y});
-        const Point p2 = im.xf.apply({im.x + im.w, im.y + im.h});
-        const Point p3 = im.xf.apply({im.x, im.y + im.h});
-        const Point c0 = map_pt(p0.x, p0.y), c1 = map_pt(p1.x, p1.y);
-        const Point c2 = map_pt(p2.x, p2.y), c3 = map_pt(p3.x, p3.y);
-        const float minx = std::min(std::min(c0.x, c1.x), std::min(c2.x, c3.x));
-        const float miny = std::min(std::min(c0.y, c1.y), std::min(c2.y, c3.y));
-        const float maxx = std::max(std::max(c0.x, c1.x), std::max(c2.x, c3.x));
-        const float maxy = std::max(std::max(c0.y, c1.y), std::max(c2.y, c3.y));
-        if (!(maxx > minx) || !(maxy > miny))
+        /* The picture's own space: its viewport's top-left at the origin and
+         * its axes, so a turn, a skew or a flip draws as one. The frame and
+         * the SVG's clips come along as clip paths in that space. */
+        const Transform T = box_to_item * im.xf * Transform::translate(im.x, im.y);
+        if (!(std::fabs(T.a * T.d - T.b * T.c) > 1e-12f))
             return;
+        const Transform inv = T.inverse();
+        auto into = [&](const Path &p) {
+            Path q;
+            q.reserve(p.size());
+            for (PathCmd c : p) {
+                if (c.kind == PathCmd::Quad || c.kind == PathCmd::Cubic) {
+                    const Point c1 = inv.apply({c.cx1, c.cy1});
+                    c.cx1 = c1.x;
+                    c.cy1 = c1.y;
+                }
+                if (c.kind == PathCmd::Cubic) {
+                    const Point c2 = inv.apply({c.cx2, c.cy2});
+                    c.cx2 = c2.x;
+                    c.cy2 = c2.y;
+                }
+                if (c.kind != PathCmd::Close) {
+                    const Point p2 = inv.apply({c.x, c.y});
+                    c.x = p2.x;
+                    c.y = p2.y;
+                }
+                q.push_back(c);
+            }
+            return q;
+        };
+        auto layers = std::make_shared<ClipLayers>();
+        Path frame;
+        frame.push_back({PathCmd::Move, 0, 0, 0, 0, 0.f, 0.f});
+        frame.push_back({PathCmd::Line, 0, 0, 0, 0, it.w, 0.f});
+        frame.push_back({PathCmd::Line, 0, 0, 0, 0, it.w, it.h});
+        frame.push_back({PathCmd::Line, 0, 0, 0, 0, 0.f, it.h});
+        frame.push_back({PathCmd::Close, 0, 0, 0, 0, 0, 0});
+        layers->push_back({ClipPath{into(frame), FillRule::NonZero}});
+        if (const DrawClip c = clip_of(im.clip))
+            for (const auto &layer : *c) {
+                layers->emplace_back();
+                for (const ClipPath &cp : layer)
+                    layers->back().push_back({into(cp.path), cp.rule});
+            }
+        float dx, dy, dw, dh;
+        vector_image_view(im, dx, dy, dw, dh);   // preserveAspectRatio
         DrawImage d;
-        d.x = minx;
-        d.y = miny;
-        d.w = maxx - minx;
-        d.h = maxy - miny;
-        d.clip_w = it.w;
-        d.clip_h = it.h;
+        d.x = dx - im.x;
+        d.y = dy - im.y;
+        d.w = dw;
+        d.h = dh;
+        d.clip_w = im.w;                 // the viewport: a "slice" is cut to it
+        d.clip_h = im.h;
         d.opacity = clamp01(im.opacity * opacity);
-        d.xf = it.xf;
+        d.xf = it.xf * T;
         d.bytes = im.bytes;
         d.bytes_key = image_bytes_hash(im.bytes->data(), im.bytes->size());
         if (!d.bytes_key)
             d.bytes_key = 1;
-        d.clip = clip_of(im.clip);
+        d.clip = std::move(layers);
         out.push_back(std::move(d));
     };
     auto emit_ref = [&](VectorSlotRef ref) {

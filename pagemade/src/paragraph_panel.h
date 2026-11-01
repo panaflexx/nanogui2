@@ -4,8 +4,8 @@
  * spacing and extra spacing, the four indents, space before and after,
  * bullets and numbering, the drop cap (lines, size, characters), keep options
  * (orphans, widows, keep together, keep with next, start in the next text
- * block), with Remove (delete the style) and Add (new style from the
- * selection) below.
+ * block), align to the baseline grid and optical margin alignment, with
+ * Remove (delete the style) and Add (new style from the selection) below.
  *
  * The panel edits the selected paragraphs through Hooks and shows them
  * through load(); it owns no document state. Its number fields spin
@@ -36,7 +36,7 @@ enum class ParaIcon {
     SpaceBefore, SpaceAfter,
     DropCap, DropSize, DropChars,
     Orphans, Widows, KeepTogether, KeepWithNext, StartNewFrame,
-    List, ListStart,
+    List, ListStart, AlignToGrid, OpticalMargins,
 };
 void draw_para_icon(NVGcontext *ctx, ParaIcon icon, float x, float y, float w, float h,
                     const nanogui::Color &color);

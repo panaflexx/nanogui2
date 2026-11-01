@@ -142,6 +142,256 @@ static void test_line_spacing(const FontLibrary &fonts) {
           "empty paragraph line is double spaced");
 }
 
+/* Text frame options: the insets shrink the box the composer sees (applied
+ * in PageDoc::thread_frames), and vertical alignment shifts or spreads the
+ * block's lines once composition is done (Frame::valign). */
+static void test_frame_options(const FontLibrary &fonts) {
+    CharStyle cs;
+    ParaStyle ps;
+    const char *one_line = "A single line of text.";
+
+    Frame f{0, 0, 200, 200};
+    Composition top_c = compose(one_para(one_line, cs, ps), {f}, fonts);
+    CHECK(top_c.lines.size() == 1, "a short paragraph is one line");
+    const float leading = top_c.lines[0].leading;
+    CHECK(std::fabs(top_c.lines[0].top) < 1e-3f, "top aligned: at the top (%g)",
+          top_c.lines[0].top);
+    /* The x positions and width are untouched by alignment. */
+    const float x_start = top_c.lines[0].x_start;
+
+    f.valign = VAlign::Center;
+    Composition c = compose(one_para(one_line, cs, ps), {f}, fonts);
+    CHECK(std::fabs(c.lines[0].top - (200.f - leading) * 0.5f) < 1e-3f,
+          "centered: the slug's middle is the block's (%g)", c.lines[0].top);
+    CHECK(std::fabs(c.lines[0].x_start - x_start) < 1e-3f, "centering moves only y");
+    bool glyphs_moved = false;
+    for (const GlyphRun &r : c.lines[0].runs)
+        for (const PlacedGlyph &g : r.glyphs)
+            glyphs_moved |= std::fabs(g.y - c.lines[0].baseline) < 20.f;
+    CHECK(glyphs_moved, "the glyphs moved with the line");
+
+    f.valign = VAlign::Bottom;
+    c = compose(one_para(one_line, cs, ps), {f}, fonts);
+    CHECK(std::fabs(c.lines[0].top - (200.f - leading)) < 1e-3f,
+          "bottom: the slug ends at the bottom (%g)", c.lines[0].top);
+
+    /* Justified: the first line stays at the top, the last slug ends at the
+     * bottom, and the gaps between lines are even. */
+    f.valign = VAlign::Justify;
+    c = compose(one_para(kLong, cs, ps), {f}, fonts);
+    CHECK(c.lines.size() > 2 && !c.overset, "several lines, all fitting (%zu)", c.lines.size());
+    CHECK(std::fabs(c.lines[0].top) < 1e-3f, "justified: the first line stays at the top");
+    const ComposedLine &jl = c.lines.back();
+    CHECK(std::fabs(jl.top + jl.leading - 200.f) < 1e-2f,
+          "justified: the last line reaches the bottom (%g)", jl.top + jl.leading);
+    const float gap = c.lines[1].top - c.lines[0].top;
+    bool even = true;
+    for (size_t i = 2; i < c.lines.size(); ++i)
+        even &= std::fabs((c.lines[i].top - c.lines[i - 1].top) - gap) < 1e-2f;
+    CHECK(even, "justified: even gaps between lines");
+    /* One line alone is not spread. */
+    c = compose(one_para(one_line, cs, ps), {f}, fonts);
+    CHECK(std::fabs(c.lines[0].top) < 1e-3f, "justified: a single line stays at the top");
+
+    /* Overset still aligns the lines that fit (the frame needn't be exactly
+     * full: the next line didn't fit the slack). */
+    f.valign = VAlign::Center;
+    f.h = 30;
+    c = compose(one_para(kLong, cs, ps), {f}, fonts);
+    CHECK(c.overset, "the small block is overset");
+    {
+        const ComposedLine &ov0 = c.lines.front(), &ovN = c.lines.back();
+        const float content = ovN.top + ovN.leading - ov0.top;
+        CHECK(std::fabs(ov0.top - (30.f - content) * 0.5f) < 1e-3f,
+              "overset: the lines that fit still center (%g)", ov0.top);
+    }
+
+    /* Insets: thread_frames hands the composer the inset box, in item space. */
+    PageDoc doc = sample_document();
+    StoryEntry &body = doc.stories[1];
+    Item *col1 = doc.find_item(body.thread[0]);
+    TextFrame tf;
+    tf.inset_left = 12;
+    tf.inset_top = 18;
+    tf.inset_right = 6;
+    col1->content = tf;
+    std::vector<Frame> fr = doc.thread_frames(body);
+    CHECK(fr.size() == 2 && fr[0].x == 12 && fr[0].y == 18 && fr[0].w == col1->w - 18 &&
+          fr[0].h == col1->h - 18 && fr[1].x == 0,
+          "the composer sees the inset box (%g %g %g %g)", fr[0].x, fr[0].y, fr[0].w, fr[0].h);
+    Composition in = compose(body.story, fr, fonts);
+    bool inside = !in.lines.empty() && std::fabs(in.lines[0].top - 18.f) < 1e-3f;
+    for (const ComposedLine &l : in.lines)
+        if (l.frame == 0)
+            inside &= l.left >= 12.f - 1e-3f && l.top >= 18.f - 1e-3f;
+    CHECK(inside, "the text sits inside the insets");
+
+    /* ... and the options survive the file. */
+    tf.valign = VAlign::Bottom;
+    col1->content = tf;
+    std::string err;
+    const std::string path = "/tmp/pagemade_test_frame_options.pagemade";
+    CHECK(save_document(doc, fonts, path, SaveOptions{false}, &err),
+          "save frame options: %s", err.c_str());
+    OpenResult back = open_document(path, fonts);
+    const Item *again = back.ok ? back.doc.find_item(col1->id) : nullptr;
+    const TextFrame *rtf = again ? again->text_frame() : nullptr;
+    CHECK(rtf && rtf->inset_left == 12 && rtf->inset_top == 18 && rtf->inset_right == 6 &&
+          rtf->inset_bottom == 0 && rtf->valign == VAlign::Bottom,
+          "insets and vertical alignment round-trip");
+}
+
+/* The baseline grid: a paragraph with align_to_grid puts every baseline on
+ * the frame's grid (Frame::grid_origin/grid_step, from PageSetup through
+ * PageDoc::thread_frames), each line's pitch a multiple of the step. */
+static void test_baseline_grid(const FontLibrary &fonts) {
+    CharStyle cs;                        // 12pt, auto leading 14.4
+    ParaStyle ps;
+    ps.align_to_grid = true;
+    Frame f{0, 0, 200, 400};
+    f.grid_origin = 0.f;
+    f.grid_step = 14.4f;
+
+    Composition c = compose(one_para(kLong, cs, ps), {f}, fonts);
+    CHECK(c.lines.size() > 3 && !c.overset, "grid: several lines fit (%zu)", c.lines.size());
+    bool on_grid = true, even = true;
+    for (size_t i = 0; i < c.lines.size(); ++i) {
+        const float b = c.lines[i].baseline;
+        on_grid &= std::fabs(b / 14.4f - std::round(b / 14.4f)) < 1e-3f;
+        if (i)
+            even &= std::fabs(c.lines[i].baseline - c.lines[i - 1].baseline - 14.4f) < 1e-3f;
+    }
+    CHECK(on_grid, "every baseline is on the grid");
+    CHECK(even, "the pitch is one grid step");
+    /* The first natural baseline (9.6) snaps down to the grid, never up. */
+    CHECK(std::fabs(c.lines[0].baseline - 14.4f) < 1e-3f,
+          "the first baseline snaps down (%g)", c.lines[0].baseline);
+
+    /* Without the paragraph flag, or without a grid on the frame, nothing
+     * snaps. */
+    ParaStyle plain;
+    Composition u = compose(one_para(kLong, cs, plain), {f}, fonts);
+    CHECK(std::fabs(u.lines[0].baseline - 9.6f) < 1e-3f, "no snap without the flag (%g)",
+          u.lines[0].baseline);
+    Frame g0{0, 0, 200, 400};
+    Composition n = compose(one_para(kLong, cs, ps), {g0}, fonts);
+    CHECK(std::fabs(n.lines[0].baseline - 9.6f) < 1e-3f, "no grid on the frame, no snap");
+
+    /* A leading over one step takes two. */
+    CharStyle wide = cs;
+    wide.leading = 20.f;
+    Composition w = compose(one_para(kLong, wide, ps), {f}, fonts);
+    bool two = w.lines.size() > 2;
+    for (size_t i = 1; i < w.lines.size(); ++i)
+        two &= std::fabs(w.lines[i].baseline - w.lines[i - 1].baseline - 28.8f) < 1e-3f;
+    CHECK(two, "a 20pt leading takes two 14.4pt steps");
+
+    /* Snapping costs a line when the frame is tight: 3 x 14.4 = 43.2 fits
+     * ungridded; gridded, the baselines at 14.4/28.8/43.2 want tops at
+     * 4.8/19.2/33.6 and slugs to 48, so only two fit in 44. */
+    Frame tight{0, 0, 200, 44};
+    tight.grid_origin = 0.f;
+    tight.grid_step = 14.4f;
+    Composition t = compose(one_para(kLong, cs, ps), {tight}, fonts);
+    CHECK(t.lines.size() == 2 && t.overset, "gridded, two lines fit in 44pt (%zu)",
+          t.lines.size());
+
+    /* thread_frames carries the document's grid into item space. */
+    PageDoc doc = sample_document();
+    doc.setup.grid_start = 100.f;
+    doc.setup.grid_step = 16.f;
+    StoryEntry &body = doc.stories[1];
+    const Item *col1 = doc.find_item(body.thread[0]);
+    std::vector<Frame> fr = doc.thread_frames(body);
+    CHECK(fr.size() == 2 && fr[0].grid_step == 16.f &&
+          std::fabs(fr[0].grid_origin - (100.f - col1->xf.f)) < 1e-3f && fr[1].grid_step == 16.f,
+          "the grid reaches the frames in item space (%g)", fr[0].grid_origin);
+
+    /* ... and the file keeps the grid and the flag. */
+    body.story.paragraphs[0].style.align_to_grid = true;
+    std::string err;
+    const std::string path = "/tmp/pagemade_test_grid.pagemade";
+    CHECK(save_document(doc, fonts, path, SaveOptions{false}, &err), "save grid: %s",
+          err.c_str());
+    OpenResult back = open_document(path, fonts);
+    CHECK(back.ok && back.doc.setup.grid_start == 100.f && back.doc.setup.grid_step == 16.f,
+          "the setup's grid round-trips");
+    bool flag = false;
+    for (const StoryEntry &se : back.doc.stories)
+        for (const Paragraph &p : se.story.paragraphs)
+            flag |= p.style.align_to_grid;
+    CHECK(flag, "align_to_grid round-trips");
+}
+
+/* Optical margin alignment (ParaStyle::optical_margins): edge punctuation
+ * hangs past the measure — opening quotes at a line's start, periods,
+ * commas and hyphens at its end — so the text edge stays straight. */
+static void test_optical_margins(const FontLibrary &fonts) {
+    CharStyle cs;
+    const std::vector<Frame> wide = {{0, 0, 200, 400}};
+
+    /* A justified line ending in a comma lets the comma hang past the right
+     * margin; without the switch the line ends at the margin. */
+    ParaStyle j;
+    j.align = Align::Justify;
+    j.optical_margins = true;
+    Composition c = compose(one_para("Hello,\u2028World goes on here", cs, j), wide, fonts);
+    CHECK(c.lines.size() == 2, "a forced break makes two lines (%zu)", c.lines.size());
+    CHECK(c.lines[0].x_end > c.lines[0].left + c.lines[0].width + 0.5f,
+          "the comma hangs past the right margin (%g past)",
+          c.lines[0].x_end - (c.lines[0].left + c.lines[0].width));
+    j.optical_margins = false;
+    Composition o = compose(one_para("Hello,\u2028World goes on here", cs, j), wide, fonts);
+    CHECK(std::fabs(o.lines[0].x_end - (o.lines[0].left + o.lines[0].width)) < 0.5f,
+          "off: the justified line ends at the margin");
+    CHECK(c.lines[0].x_end > o.lines[0].x_end + 0.5f, "hanging adds the comma's width");
+
+    /* Right-aligned: the period protrudes; the text edge stays on the
+     * margin. */
+    ParaStyle r;
+    r.align = Align::Right;
+    r.optical_margins = true;
+    Composition rr = compose(one_para("The end.", cs, r), wide, fonts);
+    CHECK(rr.lines[0].x_end > 200.5f, "the period hangs past the right margin (%g)",
+          rr.lines[0].x_end);
+    r.optical_margins = false;
+    Composition ro = compose(one_para("The end.", cs, r), wide, fonts);
+    CHECK(std::fabs(ro.lines[0].x_end - 200.f) < 1e-3f, "off: flush with the margin");
+
+    /* An opening quote at the line start hangs left of the margin. */
+    ParaStyle l;
+    l.optical_margins = true;
+    Composition q = compose(one_para("\"Quoted\" text here", cs, l), wide, fonts);
+    CHECK(q.lines[0].x_start < q.lines[0].left - 0.5f, "the opening quote hangs left (%g)",
+          q.lines[0].x_start - q.lines[0].left);
+    l.optical_margins = false;
+    Composition qp = compose(one_para("\"Quoted\" text here", cs, l), wide, fonts);
+    CHECK(std::fabs(qp.lines[0].x_start - qp.lines[0].left) < 1e-3f,
+          "off: the quote starts at the margin");
+
+    /* Text without edge punctuation is untouched. */
+    l.optical_margins = true;
+    Composition p = compose(one_para(kLong, cs, l), wide, fonts);
+    bool inside = true;
+    for (const ComposedLine &ln : p.lines)
+        inside &= ln.x_start >= ln.left - 1e-3f;
+    CHECK(inside, "plain text doesn't move");
+
+    /* The file keeps the switch. */
+    PageDoc doc = sample_document();
+    doc.stories[1].story.paragraphs[0].style.optical_margins = true;
+    std::string err;
+    const std::string path = "/tmp/pagemade_test_optical.pagemade";
+    CHECK(save_document(doc, fonts, path, SaveOptions{false}, &err), "save optical: %s",
+          err.c_str());
+    OpenResult back = open_document(path, fonts);
+    bool flag = false;
+    for (const StoryEntry &se : back.doc.stories)
+        for (const Paragraph &para : se.story.paragraphs)
+            flag |= para.style.optical_margins;
+    CHECK(flag, "optical_margins round-trips");
+}
+
 /* The Paragraph panel's attributes: last-line alignment of justified
  * text, extra spacing and the last-line indent. */
 static void test_paragraph_attributes(const FontLibrary &fonts) {
@@ -5151,8 +5401,14 @@ static void test_svg_ink(const FontLibrary &fonts) {
             fills_at_image = fills;
             CHECK(im->bytes && !im->bytes->empty() && im->clip && im->w > 0.f && im->h > 0.f,
                   "the picture is in the draw list");
-            CHECK(near(im->x, 2.f) && near(im->y, 2.f) && near(im->w, 6.f) && near(im->h, 6.f),
-                  "the picture fills its box (%g,%g %g x %g)", im->x, im->y, im->w, im->h);
+            /* Drawn in its own space: its corners land on its box in the frame */
+            const Item *gi = doc.find_item(placed.item);
+            const Point o = im->xf.apply({im->x, im->y});
+            const Point e = im->xf.apply({im->x + im->w, im->y + im->h});
+            const Point wo = gi ? gi->xf.apply({2.f, 2.f}) : Point{};
+            const Point we = gi ? gi->xf.apply({8.f, 8.f}) : Point{};
+            CHECK(gi && near(o.x, wo.x) && near(o.y, wo.y) && near(e.x, we.x) && near(e.y, we.y),
+                  "the picture fills its box (%g,%g to %g,%g)", o.x, o.y, e.x, e.y);
         }
     }
     CHECK(fills >= 3 && pictures == 1 && fills_at_image >= 2 && fills > fills_at_image,
@@ -5361,6 +5617,146 @@ static void test_svg_export(const FontLibrary &fonts) {
     CHECK(items_svg(doc, 0, {}, comps, &store, nullptr).empty(), "an empty selection writes nothing");
 }
 
+/* Pasting SVG from a drawing program: sizes, Paste as Text, pictures. */
+static void test_svg_paste(const FontLibrary &fonts) {
+    auto near = [](float a, float b, float tol = 0.05f) { return std::fabs(a - b) < tol; };
+    auto bytes = [](const std::string &s) { return std::vector<uint8_t>(s.begin(), s.end()); };
+
+    /* Bare units are points, and a paste fits the live area, not a column */
+    const std::string wide = "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"400\" height=\"100\" "
+                             "viewBox=\"0 0 400 100\"><rect width=\"400\" height=\"100\" fill=\"#f00\"/></svg>";
+    PageDoc doc;
+    VectorStore store;
+    VectorPlacement p = place_svg_bytes(doc, store, bytes(wide), "w.svg", "", 0, nullptr, nullptr,
+                                        SvgPaste::Drawing, nullptr, true);
+    const Item *it = p.ok ? doc.find_item(p.item) : nullptr;
+    CHECK(it && near(it->w, 400.f) && near(it->h, 100.f), "a pasted 400-unit drawing is 400 pt (%g)",
+          it ? it->w : 0.f);
+    p = place_svg_bytes(doc, store, bytes(wide), "w.svg", "", 0, nullptr);
+    it = p.ok ? doc.find_item(p.item) : nullptr;
+    CHECK(it && it->w < 300.f, "Place still reads CSS px and fits a column (%g)", it ? it->w : 0.f);
+
+    /* Paste as Text: the scale goes into the type, nothing is overset */
+    const std::string scaled =
+        "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"300\" height=\"100\" viewBox=\"0 0 300 100\">"
+        "<text transform=\"matrix(2 0 0 2 10 40)\" font-family=\"P052, serif\" font-size=\"10\">"
+        "<tspan x=\"0\" y=\"0\">Hello there</tspan></text></svg>";
+    PageDoc tdoc;
+    VectorStore tstore;
+    p = place_svg_bytes(tdoc, tstore, bytes(scaled), "s.svg", "", 0, nullptr, nullptr, SvgPaste::Text,
+                        &fonts, true);
+    const Item *frame = p.ok ? tdoc.find_item(p.item) : nullptr;
+    const StoryEntry *se = frame ? tdoc.story_of(frame->id) : nullptr;
+    CHECK(frame && frame->is_text() && se, "a text frame (%s)", p.error.c_str());
+    if (frame && se) {
+        CHECK(near(frame->xf.a, 1.f, 1e-3f) && near(frame->xf.d, 1.f, 1e-3f),
+              "the frame is not scaled (%g, %g)", frame->xf.a, frame->xf.d);
+        CHECK(near(se->story.paragraphs[0].runs[0].style.size, 20.f),
+              "the type is 20 pt, as it shows (%g)", se->story.paragraphs[0].runs[0].style.size);
+        const Composition c = compose(se->story, tdoc.thread_frames(*se), fonts);
+        CHECK(!c.overset && c.lines.size() == 1, "one line, nothing overset (%zu)", c.lines.size());
+        /* Its baseline sits where the SVG put it: y 40, after the margin */
+        if (!c.lines.empty()) {
+            const Point base = frame->xf.apply({0.f, c.lines[0].baseline});
+            CHECK(near(base.y, 54.f + 40.f, 0.5f), "the baseline lands at y 40 of the drawing (%g)", base.y);
+        }
+    }
+
+    /* Lines that share a left edge and a spacing are one frame */
+    const std::string para =
+        "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"300\" height=\"100\" viewBox=\"0 0 300 100\">"
+        "<text x=\"10\" y=\"20\" font-family=\"serif\" font-size=\"10\">The first line of text</text>"
+        "<text x=\"10\" y=\"32\" font-family=\"serif\" font-size=\"10\">and the second line</text>"
+        "<text x=\"10\" y=\"44\" font-family=\"serif\" font-size=\"10\">and the third.</text>"
+        "<text x=\"150\" y=\"90\" font-family=\"serif\" font-size=\"10\">Apart</text></svg>";
+    PageDoc mdoc;
+    VectorStore mstore;
+    p = place_svg_bytes(mdoc, mstore, bytes(para), "p.svg", "", 0, nullptr, nullptr, SvgPaste::Text,
+                        &fonts, true);
+    size_t frames = 0, merged_lines = 0;
+    for (ItemId id : p.items)
+        if (const Item *fi = mdoc.find_item(id))
+            if (fi->is_text()) {
+                ++frames;
+                if (const StoryEntry *ms = mdoc.story_of(id)) {
+                    const Composition c = compose(ms->story, mdoc.thread_frames(*ms), fonts);
+                    CHECK(!c.overset, "no merged frame is overset");
+                    merged_lines = std::max(merged_lines, c.lines.size());
+                    if (ms->story.paragraphs[0].runs[0].text.rfind("The first", 0) == 0)
+                        CHECK(near(ms->story.paragraphs[0].runs[0].style.leading, 12.f),
+                              "the block keeps its 12 pt spacing (%g)",
+                              ms->story.paragraphs[0].runs[0].style.leading);
+                }
+            }
+    CHECK(frames == 2, "three lines make one frame, the stray one another (%zu)", frames);
+
+    /* A contents line: the leader dots (written after the number) and the
+     * jump become a right tab with a dot leader */
+    const std::string toc =
+        "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"300\" height=\"60\" viewBox=\"0 0 300 60\">"
+        "<text font-family=\"serif\" font-size=\"10\"><tspan x=\"10\" y=\"20\">Chapter one</tspan>"
+        "<tspan x=\"200\" y=\"20\">7</tspan><tspan x=\"80\" y=\"20\">...............</tspan></text></svg>";
+    PageDoc cdoc;
+    VectorStore cstore;
+    p = place_svg_bytes(cdoc, cstore, bytes(toc), "t.svg", "", 0, nullptr, nullptr, SvgPaste::Text,
+                        &fonts, true);
+    const StoryEntry *cse = p.ok ? cdoc.story_of(p.item) : nullptr;
+    const Paragraph *cp = cse && !cse->story.paragraphs.empty() ? &cse->story.paragraphs[0] : nullptr;
+    std::string ctext;
+    if (cp)
+        for (const Run &r : cp->runs)
+            ctext += r.text;
+    CHECK(cp && ctext == "Chapter one\t7" && cp->style.tabs.size() == 1 &&
+              cp->style.tabs[0].align == TabAlign::Right && cp->style.tabs[0].from_right &&
+              cp->style.tabs[0].leader == ".",
+          "a contents line keeps its tab and leader (%s)", ctext.c_str());
+
+    /* A turned picture can't be a frame: it stays in the drawing, drawn */
+    const char *png =
+        "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAIAAACQd1PeAAAADUlEQVR4nGP4z8DwHwAFAAH/iZk9HQAAAABJRU5ErkJggg==";
+    const std::string turned =
+        std::string("<svg xmlns=\"http://www.w3.org/2000/svg\" xmlns:xlink=\"http://www.w3.org/1999/xlink\" "
+                    "width=\"100\" height=\"100\" viewBox=\"0 0 100 100\">"
+                    "<image x=\"20\" y=\"20\" width=\"40\" height=\"40\" transform=\"rotate(30 40 40)\" "
+                    "xlink:href=\"data:image/png;base64,") + png + "\"/></svg>";
+    PageDoc rdoc;
+    VectorStore rstore;
+    ImageStore rimages;
+    p = place_svg_bytes(rdoc, rstore, bytes(turned), "r.svg", "", 0, nullptr, &rimages, SvgPaste::Text,
+                        &fonts, true);
+    bool in_drawing = false, as_picture = false;
+    for (ItemId id : p.items)
+        if (const Item *ri = rdoc.find_item(id)) {
+            as_picture = as_picture || ri->is_image();
+            if (const PlacedVector *pv = ri->vector())
+                if (const VectorScene *sc = rstore.scene(pv->asset))
+                    in_drawing = in_drawing || sc->images.size() == 1;
+        }
+    CHECK(p.ok && in_drawing && !as_picture, "the turned picture is kept in the drawing");
+    if (p.ok) {
+        const std::vector<Composition> none;
+        const DrawList list = build_page(rdoc, 0, none, nullptr, false, &rstore);
+        bool drawn = false;
+        for (const DrawOp &op : list)
+            if (const auto *im = std::get_if<DrawImage>(&op))
+                drawn = drawn || (im->bytes && std::fabs(im->xf.b) > 0.1f);   // turned in its own space
+        CHECK(drawn, "and drawn turned, not as its bounding box");
+    }
+
+    /* preserveAspectRatio: meet centers, slice covers, none stretches */
+    VectorImage vi;
+    vi.x = 0; vi.y = 0; vi.w = 100; vi.h = 100; vi.px_w = 200; vi.px_h = 100;
+    float x, y, w, h;
+    vector_image_view(vi, x, y, w, h);
+    CHECK(near(x, 0) && near(y, 25) && near(w, 100) && near(h, 50), "meet: centered (%g %g %g %g)", x, y, w, h);
+    vi.preserve = "xMinYMax slice";
+    vector_image_view(vi, x, y, w, h);
+    CHECK(near(x, 0) && near(y, 0) && near(w, 200) && near(h, 100), "slice: covers, from the left");
+    vi.preserve = "none";
+    vector_image_view(vi, x, y, w, h);
+    CHECK(near(w, 100) && near(h, 100), "none: stretched");
+}
+
 int main(int argc, char **argv) {
     bool verbose = argc > 1 && std::strcmp(argv[1], "-v") == 0;
     FontLibrary fonts;
@@ -5380,6 +5776,9 @@ int main(int argc, char **argv) {
     test_breaks(fonts);
     test_outline_cache(fonts);
     test_line_spacing(fonts);
+    test_frame_options(fonts);
+    test_baseline_grid(fonts);
+    test_optical_margins(fonts);
     test_paragraph_attributes(fonts);
     test_drop_caps(fonts);
     test_keeps(fonts);
@@ -5428,6 +5827,7 @@ int main(int argc, char **argv) {
     test_swatch_library();
     test_layout_templates(fonts);
     test_svg_export(fonts);
+    test_svg_paste(fonts);
     test_system_fonts();
     if (verbose)
         dump_sample(fonts);

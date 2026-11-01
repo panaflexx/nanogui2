@@ -1444,6 +1444,9 @@ public:
         add_cmd(edit, "Cut", {{SYSTEM_COMMAND_MOD, GLFW_KEY_X}}, [this] { m_view->edit_cut(); });
         add_cmd(edit, "Copy", {{SYSTEM_COMMAND_MOD, GLFW_KEY_C}}, [this] { m_view->edit_copy(); });
         add_cmd(edit, "Paste", {{SYSTEM_COMMAND_MOD, GLFW_KEY_V}}, [this] { m_view->edit_paste(); });
+        add_cmd(edit, "Paste as Text", {{SYSTEM_COMMAND_MOD | GLFW_MOD_SHIFT, GLFW_KEY_V}},
+                [this] { m_view->edit_paste(nullptr, ComposerView::PasteAs::Text); });
+        add_cmd(edit, "Paste as SVG", {}, [this] { m_view->edit_paste(nullptr, ComposerView::PasteAs::Svg); });
 
         /* Type: typographer's quotes, and the characters a keyboard lacks.
          * Shortcuts follow InDesign's where it has them. Line and frame
@@ -1561,6 +1564,9 @@ public:
                           [this] { m_view->group_selection(); });
         m_ungroup = add_cmd(element, "Ungroup", {{SYSTEM_COMMAND_MOD | GLFW_MOD_SHIFT, GLFW_KEY_G}},
                             [this] { m_view->ungroup_selection(); });
+        new Separator(element->popup());
+        m_frame_opts = add_cmd(element, "Text Frame Options...", {},
+                               [this] { text_frame_options_dialog(); });
         new Separator(element->popup());
         add_cmd(element, "Type Specs...", {{SYSTEM_COMMAND_MOD, GLFW_KEY_T}},
                 [this] { type_specs(); });
@@ -2240,10 +2246,22 @@ public:
             item("Paste", FA_PASTE, v->can_paste(), {{C, GLFW_KEY_V}}, [v] { v->edit_paste(); });
         } else if (v->selection().empty()) {
             item("Paste Here", FA_PASTE, v->can_paste(), {}, [v, here] { v->edit_paste(&here); });
+            if (v->clipboard_has_text())
+                item("Paste as Text", FA_PASTE, true, {{C | S, GLFW_KEY_V}},
+                     [v, here] { v->edit_paste(&here, ComposerView::PasteAs::Text); });
+            if (v->clipboard_has_svg())
+                item("Paste as SVG", FA_PASTE, true, {},
+                     [v, here] { v->edit_paste(&here, ComposerView::PasteAs::Svg); });
         } else {
             item("Cut", FA_CUT, true, {{C, GLFW_KEY_X}}, [v] { v->edit_cut(); });
             item("Copy", FA_COPY, true, {{C, GLFW_KEY_C}}, [v] { v->edit_copy(); });
             item("Paste Here", FA_PASTE, v->can_paste(), {}, [v, here] { v->edit_paste(&here); });
+            if (v->clipboard_has_text())
+                item("Paste as Text", FA_PASTE, true, {{C | S, GLFW_KEY_V}},
+                     [v, here] { v->edit_paste(&here, ComposerView::PasteAs::Text); });
+            if (v->clipboard_has_svg())
+                item("Paste as SVG", FA_PASTE, true, {},
+                     [v, here] { v->edit_paste(&here, ComposerView::PasteAs::Svg); });
             item("Remove", FA_TRASH_ALT, true, {}, [v] { v->remove_selection(); });
             section();
             if (v->can_group())
@@ -2820,6 +2838,8 @@ public:
             m_to_back->set_enabled(can);
             m_group->set_enabled(m_view->can_group());
             m_ungroup->set_enabled(m_view->can_ungroup());
+            TextFrame tf;
+            m_frame_opts->set_enabled(m_view->text_frame_options(tf));
         }
         sync_zoom_menu();
         m_undo_btn->set_enabled(m_view->can_undo());
@@ -2845,6 +2865,9 @@ public:
                                 std::vector<uint8_t> &rgba) {
             return rasterize_page(ctx, list, pictures, x, y, w_pt, h_pt, width, height, rgba);
         };
+        /* SVG text is drawn as outlines baked on this thread; a scripted
+         * export can come before the view has ever drawn */
+        m_vectors.realize(m_fonts);
         return export_pdf(path, m_view->document(), m_view->compositions(), &m_images, settings,
                           &m_vectors, &hooks);
     }
@@ -3037,6 +3060,20 @@ public:
             set_note(how == SetupAdjust::Adjust ? "document setup changed; layout adjusted"
                      : how == SetupAdjust::Scale ? "document setup changed; layout scaled"
                      : "document setup changed");
+        });
+    }
+
+    /* Element > Text Frame Options: insets and vertical alignment of the
+     * selected text blocks. */
+    void text_frame_options_dialog() {
+        TextFrame cur;
+        if (!m_view->text_frame_options(cur)) {
+            set_note("select a text block first");
+            return;
+        }
+        ask_text_frame_options(this, cur, [this](const TextFrame &tf) {
+            m_view->apply_text_frame_options([&tf](TextFrame &t) { t = tf; });
+            set_note("text frame options set");
         });
     }
 
@@ -3451,6 +3488,7 @@ private:
     MenuItem        *m_hide_page = nullptr;
     MenuItem        *m_to_front = nullptr, *m_forward = nullptr, *m_backward = nullptr, *m_to_back = nullptr;
     MenuItem        *m_group = nullptr, *m_ungroup = nullptr;
+    MenuItem        *m_frame_opts = nullptr;
     Label           *m_status = nullptr;
     std::string     m_note;
     /* The last Print dialog choice, for the next time it opens. */

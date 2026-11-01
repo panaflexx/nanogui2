@@ -218,13 +218,16 @@ and its nanovgd renderer. The composer lays out in points and every backend
     Superscript and subscript from sups/subs, synthesized (PageMaker's size
     and position percents) when the face has neither.
   - Manual kerning at the caret with keyboard nudges; tracking shortcuts.
-  - Optical margin alignment (hanging punctuation), and glyph scaling
-    (about ±3%) as a third justification tool after word and letter spacing.
+  - Optical margin alignment (hanging punctuation) is done (a paragraph
+    switch in the panel). Still to come: glyph scaling (about ±3%) as a
+    third justification tool after word and letter spacing.
   - Paragraph-at-a-time (Knuth-Plass) composer (see above).
   - Underline and strikethrough options: weight, offset, color, dashes.
-  - Text frame options: inset, vertical alignment (top, center, bottom,
-    justified), first-baseline offset, columns inside one frame, paragraphs
-    that span columns; a baseline grid with align to grid.
+  - Text frame options: inset and vertical alignment (top, center, bottom,
+    justified) are done (Element > Text Frame Options), as is the baseline
+    grid (Document Setup start/step, Paragraph panel's align-to-grid).
+    Still to come: first-baseline offset, columns inside one frame,
+    paragraphs that span columns.
   - Inline graphics anchored in the text flow (they share plumbing with
     text wrap).
   - Find and Change, including formatting; spell check (Hunspell) with a

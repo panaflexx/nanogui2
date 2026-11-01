@@ -79,6 +79,11 @@ struct PageSetup {
      * past the trim, on every side (0 when nothing bleeds). The PDF can
      * include it (PdfSettings::bleed). */
     float bleed = 0.f;
+    /* The baseline grid paragraphs can align to (ParaStyle::align_to_grid):
+     * lines every grid_step points, the first grid_start points from the
+     * page's top. grid_step 0 turns the grid off. */
+    float grid_start = 0.f;
+    float grid_step = 12.f;
 };
 
 /* How a PDF is written (File > Export PDF). Kept with the publication, so
@@ -194,9 +199,14 @@ struct Stroke {
     bool none() const { return weight <= 0.f || paint.none(); }
 };
 
-/* A text block. Its story is the one whose thread lists it. Per-block
- * text options (inset, vertical alignment, columns) will live here. */
-struct TextFrame {};
+/* A text block. Its story is the one whose thread lists it. The text sits
+ * inside the insets, and when it doesn't fill the block `valign` sets it at
+ * the top, center or bottom, or spreads it to fill (Element > Text Frame
+ * Options). In-frame columns are not done yet. */
+struct TextFrame {
+    float  inset_left = 0.f, inset_top = 0.f, inset_right = 0.f, inset_bottom = 0.f;
+    VAlign valign = VAlign::Top;
+};
 
 /* PageMaker's drawn elements, filling the item's box. A line runs from
  * (0, 0) to (w, h) in item space, so either may be negative. A polygon is
@@ -273,6 +283,8 @@ struct Item {
     bool is_text() const { return std::holds_alternative<TextFrame>(content); }
     bool is_image() const { return std::holds_alternative<PlacedImage>(content); }
     bool is_vector() const { return std::holds_alternative<PlacedVector>(content); }
+    const TextFrame *text_frame() const { return std::get_if<TextFrame>(&content); }
+    TextFrame *text_frame() { return std::get_if<TextFrame>(&content); }
     const Shape *shape() const { return std::get_if<Shape>(&content); }
     Shape *shape() { return std::get_if<Shape>(&content); }
     const PlacedImage *image() const { return std::get_if<PlacedImage>(&content); }

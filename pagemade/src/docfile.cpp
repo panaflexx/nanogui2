@@ -43,6 +43,20 @@ TabAlign tab_from(const std::string &s) {
            s == "decimal" ? TabAlign::Decimal : TabAlign::Left;
 }
 
+const char *valign_name(VAlign v) {
+    switch (v) {
+    case VAlign::Top: return "top";
+    case VAlign::Center: return "center";
+    case VAlign::Bottom: return "bottom";
+    case VAlign::Justify: return "justify";
+    }
+    return "top";
+}
+VAlign valign_from(const std::string &s) {
+    return s == "center" ? VAlign::Center : s == "bottom" ? VAlign::Bottom :
+           s == "justify" ? VAlign::Justify : VAlign::Top;
+}
+
 /* ---- Model -> JSON (only what differs from the defaults) ------------------ */
 
 void write_color(JsonOut &j, const char *key, const Color &c) {
@@ -128,6 +142,8 @@ void write_para_style(JsonOut &j, const ParaStyle &ps) {
     if (ps.hyphenate != d.hyphenate) j.key("hyphenate").value(ps.hyphenate);
     if (ps.hyphen_limit != d.hyphen_limit) j.key("hyphen_limit").value(ps.hyphen_limit);
     if (ps.hyphen_zone != d.hyphen_zone) j.key("hyphen_zone").value(ps.hyphen_zone);
+    if (ps.align_to_grid) j.key("align_to_grid").value(true);
+    if (ps.optical_margins) j.key("optical_margins").value(true);
     j.end_object();
 }
 
@@ -206,8 +222,14 @@ void write_item(JsonOut &j, const Item &it) {
             j.key("stroke");
             write_stroke(j, pv->stroke);
         }
-    } else {
+    } else if (const TextFrame *tf = it.text_frame()) {
         j.key("type").value("text");
+        if (tf->inset_left != 0.f || tf->inset_top != 0.f || tf->inset_right != 0.f ||
+            tf->inset_bottom != 0.f)
+            j.key("inset").numbers(
+                {tf->inset_left, tf->inset_top, tf->inset_right, tf->inset_bottom});
+        if (tf->valign != VAlign::Top)
+            j.key("valign").value(valign_name(tf->valign));
     }
     j.end_object();
 }
@@ -464,6 +486,9 @@ std::string make_json(const PageDoc &doc, const SaveOptions &opts, const std::ve
     j.key("facing").value(s.facing);
     if (s.bleed > 0.f)
         j.key("bleed").value(s.bleed);
+    const PageSetup ds;
+    if (s.grid_start != ds.grid_start || s.grid_step != ds.grid_step)
+        j.key("grid").numbers({s.grid_start, s.grid_step});
     j.end_object();
 
     /* PDF export settings: only what differs from the defaults */
@@ -765,6 +790,8 @@ ParaStyle read_para_style(const DictValue *o) {
     get(o, "hyphenate", ps.hyphenate);
     get(o, "hyphen_limit", ps.hyphen_limit);
     get(o, "hyphen_zone", ps.hyphen_zone);
+    get(o, "align_to_grid", ps.align_to_grid);
+    get(o, "optical_margins", ps.optical_margins);
     return ps;
 }
 
@@ -812,7 +839,18 @@ bool read_item(const DictValue *o, Item &it) {
     std::string type;
     get(o, "type", type);
     if (type == "text") {
-        it.content = TextFrame{};
+        TextFrame tf;
+        float in[4] = {0, 0, 0, 0};
+        if (floats(o, "inset", in, 4) == 4) {
+            tf.inset_left = std::max(0.f, in[0]);
+            tf.inset_top = std::max(0.f, in[1]);
+            tf.inset_right = std::max(0.f, in[2]);
+            tf.inset_bottom = std::max(0.f, in[3]);
+        }
+        std::string va;
+        get(o, "valign", va);
+        tf.valign = valign_from(va);
+        it.content = tf;
         return true;
     }
     if (type == "image") {
@@ -1164,6 +1202,11 @@ OpenResult open_document(const std::string &path, const FontLibrary &installed,
     get(setup, "facing", d.setup.facing);
     get(setup, "bleed", d.setup.bleed);
     d.setup.bleed = std::clamp(d.setup.bleed, 0.f, 72.f);
+    float g[2] = {d.setup.grid_start, d.setup.grid_step};
+    if (floats(setup, "grid", g, 2) == 2) {
+        d.setup.grid_start = std::max(0.f, g[0]);
+        d.setup.grid_step = std::clamp(g[1], 0.f, 288.f);
+    }
 
     if (const DictValue *o = field(root, "pdf")) {
         PdfSettings &ps = d.pdf;

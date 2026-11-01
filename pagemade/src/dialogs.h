@@ -115,6 +115,11 @@ void ask_document_setup(nanogui::Screen *screen, const pagemade::PageSetup &curr
                         size_t page_count,
                         std::function<void(const pagemade::PageSetup &, pagemade::SetupAdjust)> done);
 
+/* Element > Text Frame Options: the selected text blocks' insets and
+ * vertical alignment. `done` runs on OK with the new options. */
+void ask_text_frame_options(nanogui::Screen *screen, const pagemade::TextFrame &current,
+                            std::function<void(const pagemade::TextFrame &)> done);
+
 namespace pagemade {
 class FontLibrary;
 class FontMenuModel;

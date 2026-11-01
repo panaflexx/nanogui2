@@ -183,6 +183,7 @@ int main(int argc, char **argv) {
     for (const StoryEntry &s : r.doc.stories)
         comps.push_back(compose(s.story, r.doc.thread_frames(s), fonts, &hyph));
     std::printf("compose: %.0f ms, %zu stories\n", ms_since(t0), comps.size());
+    r.vectors.realize(fonts);            // SVG text as outlines, as the app draws it
 
     NVGcontext *ctx = null_context();
     const float scale = page_px / r.doc.setup.width;     // screen px per point

@@ -94,7 +94,13 @@ struct VectorImage {
     float opacity = 1.f;
     int clip = -1;                       // index into VectorScene::clips, or -1
     std::shared_ptr<const std::vector<uint8_t>> bytes;
+    int px_w = 0, px_h = 0;              // the picture's own size (upright); 0 unknown
 };
+
+/* Where an <image> draws its pixels, in its user space: its viewport
+ * (x, y, w, h) fitted by preserveAspectRatio (default xMidYMid meet).
+ * With "slice" the result overflows the viewport, which clips it. */
+void vector_image_view(const VectorImage &im, float &x, float &y, float &w, float &h);
 
 /* One shape in the graphic's box (points, y down). */
 struct VectorShape {
@@ -215,11 +221,23 @@ private:
  * column under the drop (the first column when `at` is null) shrinks to
  * that column's width; taller than the live area shrinks to that, and the
  * aspect stays. The top-left is the margin, or `at`, and is kept inside
- * the live area. */
+ * the live area. `to_column` false (a paste) fits the live area's width
+ * instead of a column's, so a page-wide drawing keeps its size. */
 void vector_frame(const PageSetup &setup, size_t page, float gw, float gh, const Point *at,
-                  float &x, float &y, float &w, float &h);
+                  float &x, float &y, float &w, float &h, bool to_column = true);
+
+/* Decode an SVG pasted from another program: as the SVG decoder does,
+ * except that a root width and height without a unit (or in px) are
+ * points, the way Illustrator and its kin (VectorCraft) write them. */
+bool decode_svg_paste(const uint8_t *data, size_t n, VectorScene *out, std::string *error);
 
 class ImageStore;
+class FontLibrary;
+
+/* Drawing keeps the file as graphics. Text turns each SVG text line into
+ * an editable text frame, each picture into a picture, and the paths into
+ * a graphic of their own. */
+enum class SvgPaste { Drawing, Text };
 
 struct VectorPlacement {
     bool ok = false;
@@ -234,13 +252,19 @@ struct VectorPlacement {
 /* One graphic on `page`, or a group when the file embeds pictures and
  * `images` is set. Each embedded picture is placed on its own, and the
  * drawing before and after it stays a graphic, so Ungroup separates the
- * photo. Text stays outlines in those graphics. Without `images`, or with
- * no picture this slice can separate, this is one graphic, as before.
- * The caller records undo. `source` is the file: URI (empty when pasted);
- * a group stores each piece itself and does not keep that link. */
+ * photo. `SvgPaste::Text` instead makes a text frame for each SVG text
+ * line (the characters, editable) and a graphic for the paths, sized to
+ * those paths. Without `images`, or with no picture this slice can
+ * separate, a drawing paste is one graphic. The caller records undo.
+ * `source` is the file: URI (empty when pasted); a group stores each
+ * piece itself and does not keep that link. `fonts` measures Paste as Text.
+ * `paste`: the bytes came from the clipboard (decode_svg_paste's units, and
+ * fitted to the live area rather than a column). */
 VectorPlacement place_svg_bytes(PageDoc &doc, VectorStore &store, std::vector<uint8_t> bytes,
                                 const std::string &name, const std::string &source,
-                                size_t page, const Point *at, ImageStore *images = nullptr);
+                                size_t page, const Point *at, ImageStore *images = nullptr,
+                                SvgPaste how = SvgPaste::Drawing,
+                                const FontLibrary *fonts = nullptr, bool paste = false);
 
 /* Glyph outlines for scene.texts, in graphic-box space. A run already
  * baked is left alone. No font: the run stays empty and is not retried. */

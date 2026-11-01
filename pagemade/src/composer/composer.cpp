@@ -103,6 +103,44 @@ float leading_of(const CharStyle &cs, const ParaStyle &ps) {
     return cs.leading > 0 ? cs.leading : cs.size * ps.autoleading * 0.01f;
 }
 
+/* ---- Optical margins (hanging punctuation) --------------------------------
+ *
+ * The fraction of its advance an edge glyph may protrude past the measure.
+ * Periods and commas hang whole, hyphens mostly, quotes and brackets half,
+ * dashes half. Left is for opening quotes and brackets at a line's start. */
+float protrude_right(uint32_t cp) {
+    switch (cp) {
+    case '.': case ',': case 0x2026: return 1.f;                  // . , …
+    case '-': case 0x2010: case 0x2011: return 0.75f;             // hyphens
+    case ':': case ';': return 0.5f;
+    case '\'': case '"': return 0.5f;                             // straight quotes
+    case 0x2019: case 0x201D: return 0.5f;                        // ’ ”
+    case 0x00BB: case 0x203A: return 0.5f;                        // » ›
+    case ')': case ']': case '}': return 0.5f;
+    case 0x2013: case 0x2014: return 0.5f;                        // en/em dash
+    case '!': case '?': return 0.25f;
+    }
+    return 0.f;
+}
+
+float protrude_left(uint32_t cp) {
+    switch (cp) {
+    case '\'': case '"': return 0.5f;
+    case 0x2018: case 0x201C: return 0.5f;                        // ‘ “
+    case 0x00AB: case 0x2039: return 0.5f;                        // « ‹
+    case '(': case '[': case '{': return 0.25f;
+    }
+    return 0.f;
+}
+
+/* The character a line glyph stands for; an inserted break hyphen is '-'
+ * (its cluster names the byte it was shaped onto, not its own text). */
+uint32_t glyph_char(const std::string &text, const PGlyph &g) {
+    if (g.inserted)
+        return '-';
+    return utf8_decode(text, g.cluster);
+}
+
 /* ---- Shaping ------------------------------------------------------------ */
 
 class Shaper {
@@ -564,10 +602,15 @@ public:
                 flat.insert(flat.end(), extra->glyphs.begin(), extra->glyphs.end());
                 hang = flat.size() - (extra->glyphs.size() - hang_start(extra->glyphs));
             }
+            /* Optical margins: the last glyph's protrusion is free. */
+            float protrude = 0;
+            if (ps.optical_margins && hang > 0 && flat[hang - 1].kind == Kind::Glyph)
+                protrude = protrude_right(glyph_char(m_sh.text, flat[hang - 1])) *
+                           flat[hang - 1].adv;
             const Measure m = measure(flat, hang, x0, lc, m_xs);
             flat.resize(base);
             const float shrink = (justify && !m.has_tab) ? m.word_shrink + m.letter_shrink : 0.f;
-            return m.natural - shrink <= avail + kEps;
+            return m.natural - shrink - protrude <= avail + kEps;
         };
         auto accept = [&](Piece p) {
             flat.insert(flat.end(), p.glyphs.begin(), p.glyphs.end());
@@ -870,20 +913,32 @@ void place_line(Shaper &sh, const Paragraph &para, const LineCandidate &c, float
     line.natural = m.natural;
     line.hyphenated = !c.pieces.empty() && c.pieces.back().hyphen;
 
+    /* Optical margins: an edge glyph's protrusion doesn't count toward the
+     * measure. The line shifts left by the opening hang; the closing hang
+     * joins the alignment budget, so the last glyph protrudes. */
+    float hang_l = 0, hang_r = 0;
+    if (ps.optical_margins && !m.has_tab && hang > 0) {
+        if (g[0].kind == Kind::Glyph)
+            hang_l = protrude_left(glyph_char(sh.text, g[0])) * g[0].adv;
+        if (g[hang - 1].kind == Kind::Glyph)
+            hang_r = protrude_right(glyph_char(sh.text, g[hang - 1])) * g[hang - 1].adv;
+    }
+    const float natural = m.natural - hang_l - hang_r;
+
     /* Lines with tabs are set flush left. The last line of a justified
      * paragraph is set left, centered or right (by the alignment) unless
      * it only fits by tightening; force justify stretches it as well. */
     const bool justify = !m.has_tab &&
         (ps.align == Align::ForceJustify ||
-         (is_justified(ps.align) && (!last_line || m.natural > avail + kEps)));
+         (is_justified(ps.align) && (!last_line || natural > avail + kEps)));
     const bool right = ps.align == Align::Right || ps.align == Align::JustifyRight;
     const bool center = ps.align == Align::Center || ps.align == Align::JustifyCenter;
 
     Spacing sp{ps.word_desired, ps.letter_desired};
-    float x0 = line.left;
+    float x0 = line.left - hang_l;
     if (justify) {
         float word_r = 0, letter_r = 0;
-        float diff = avail - m.natural;
+        float diff = avail - natural;
         if (diff >= 0) {
             line.word_loose = diff > m.word_stretch + kEps;
             if (m.word_stretch > 0 && diff <= m.word_stretch) {
@@ -923,10 +978,10 @@ void place_line(Shaper &sh, const Paragraph &para, const LineCandidate &c, float
                            : letter_r * (ps.letter_desired - ps.letter_min));
     } else {
         if (!m.has_tab && right)
-            x0 += avail - m.natural;
+            x0 += avail - natural;
         else if (!m.has_tab && center)
-            x0 += (avail - m.natural) * 0.5f;
-        if (m.natural > avail + kEps)
+            x0 += (avail - natural) * 0.5f;
+        if (natural > avail + kEps)
             line.tight = line.word_tight = true;
     }
 
@@ -1083,6 +1138,51 @@ Composition compose(const Story &story, const std::vector<Frame> &frames,
     bool at_frame_top = true;
 
     auto finish = [&] {
+        /* Vertical alignment. Composition is top-down; center, bottom and
+         * justified shift or spread each block's lines once they are known.
+         * The overset decision above always used the top-aligned height. */
+        for (size_t f = 0; f < frames.size(); ++f) {
+            const Frame &fr = frames[f];
+            if (fr.valign == VAlign::Top)
+                continue;
+            size_t first = SIZE_MAX, last = SIZE_MAX;
+            int nlines = 0;
+            for (size_t i = 0; i < out.lines.size(); ++i)
+                if (out.lines[i].frame == f) {
+                    if (first == SIZE_MAX)
+                        first = i;
+                    last = i;
+                    ++nlines;
+                }
+            if (first == SIZE_MAX)
+                continue;
+            const float content = out.lines[last].top + out.lines[last].leading -
+                                  out.lines[first].top;
+            const float extra = fr.y + fr.h - (out.lines[first].top + content);
+            if (!(extra > kEps))
+                continue;
+            float dy = 0, spread = 0;
+            if (fr.valign == VAlign::Center)
+                dy = extra * 0.5f;
+            else if (fr.valign == VAlign::Bottom)
+                dy = extra;
+            else if (nlines > 1)                 // Justify: even gaps between lines
+                spread = extra / (float) (nlines - 1);
+            else
+                continue;
+            int k = 0;
+            for (size_t i = first; i <= last; ++i) {
+                ComposedLine &l = out.lines[i];
+                if (l.frame != f)
+                    continue;
+                const float d = dy + spread * (float) k++;
+                l.top += d;
+                l.baseline += d;
+                for (GlyphRun &r : l.runs)
+                    for (PlacedGlyph &g : r.glyphs)
+                        g.y += d;
+            }
+        }
         out.compose_ms = std::chrono::duration<double, std::milli>(
             std::chrono::steady_clock::now() - t0).count();
         return out;
@@ -1312,6 +1412,15 @@ Composition compose(const Story &story, const std::vector<Frame> &frames,
                 if (leading == 0)
                     leading = leading_of(empty_style, st);
                 leading = slug(leading);
+
+                /* Align to grid: the baseline moves down to the next grid
+                 * line, so each line's pitch is a multiple of the step. */
+                if (st.align_to_grid && f.grid_step > 0.f) {
+                    const float b = y + leading * (2.f / 3.f);
+                    const float snapped = f.grid_origin +
+                        std::ceil((b - f.grid_origin) / f.grid_step - kEps) * f.grid_step;
+                    y = snapped - leading * (2.f / 3.f);
+                }
 
                 if (y + leading > f.y + f.h + kEps) {
                     next_frame();

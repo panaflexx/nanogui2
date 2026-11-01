@@ -14,6 +14,7 @@
 #include <GLFW/glfw3.h>
 
 #include <chrono>
+#include <cstdio>
 #include <cstring>
 #include <string>
 #include <vector>
@@ -39,6 +40,7 @@ struct SelWant {
     XWindow window;
     Atom selection;
     Atom target;
+    Atom property;                       // ours for this read only
 };
 
 struct PropWant {
@@ -48,8 +50,11 @@ struct PropWant {
 
 extern "C" Bool selection_is(Display *, XEvent *event, XPointer arg) {
     const SelWant *want = reinterpret_cast<const SelWant *>(arg);
+    /* The property tells this read's answer from a late one to an earlier
+     * read that gave up (refusals come back as None) */
     return event->type == SelectionNotify && event->xselection.requestor == want->window &&
-           event->xselection.selection == want->selection && event->xselection.target == want->target;
+           event->xselection.selection == want->selection && event->xselection.target == want->target &&
+           (event->xselection.property == want->property || event->xselection.property == None);
 }
 
 extern "C" Bool property_is(Display *, XEvent *event, XPointer arg) {
@@ -142,11 +147,21 @@ void ensure_property_mask(Display *dpy, XWindow window) {
     XSelectInput(dpy, window, attr.your_event_mask | PropertyChangeMask);
 }
 
+/* A property of our own for each read, in rotation, so pieces of a read
+ * that timed out never land in the next one */
+Atom next_property(Display *dpy) {
+    static unsigned n = 0;
+    char name[40];
+    std::snprintf(name, sizeof name, "NANOGUI_SELECTION_%u", n++ % 16u);
+    return XInternAtom(dpy, name, False);
+}
+
 std::string read_target(Display *dpy, XWindow window, Atom selection, Atom target, Atom property,
                         Atom incr, int timeout_ms) {
+    XDeleteProperty(dpy, window, property);
     XConvertSelection(dpy, selection, target, property, window, CurrentTime);
     XFlush(dpy);
-    SelWant want{window, selection, target};
+    SelWant want{window, selection, target, property};
     XEvent event;
     if (!wait_for(dpy, selection_is, reinterpret_cast<XPointer>(&want), &event, timeout_ms))
         return {};
@@ -155,19 +170,31 @@ std::string read_target(Display *dpy, XWindow window, Atom selection, Atom targe
     return property_bytes(dpy, window, event.xselection.property, incr, timeout_ms);
 }
 
-void read_x11(GLFWwindow *window, std::vector<std::pair<std::string, std::string>> &out) {
+/* The clipboard's owner, and whether that is our own GLFW helper window
+ * (GLFW then holds the formats, or a plain string) */
+XWindow clipboard_owner(Display *dpy, bool &ours) {
+    const Atom clipboard = XInternAtom(dpy, "CLIPBOARD", False);
+    const XWindow owner = XGetSelectionOwner(dpy, clipboard);
+    ours = false;
+    if (owner != None && owner_is_helper(dpy, owner)) {
+        int count = 0;
+        ours = glfwGetClipboardFormats(&count) != nullptr;
+    }
+    return owner;
+}
+
+void read_x11(GLFWwindow *window, std::vector<std::pair<std::string, std::string>> &out, int budget_ms) {
     Display *dpy = glfwGetX11Display();
     const XWindow xwin = (XWindow) glfwGetX11Window(window);
     if (!dpy || !xwin)
         return;
     const Atom clipboard = XInternAtom(dpy, "CLIPBOARD", False);
-    const XWindow owner = XGetSelectionOwner(dpy, clipboard);
+    bool ours = false;
+    const XWindow owner = clipboard_owner(dpy, ours);
     if (owner == None)
         return;
-    if (owner_is_helper(dpy, owner)) {
-        /* A GLFW clipboard owner. Ours while GLFW still holds the formats
-         * write_clipboard offered (it drops them when another client takes
-         * the clipboard); otherwise the caller falls back to the string. */
+    if (ours) {
+        /* Ours: the formats write_clipboard offered, as they were */
         int count = 0;
         const GLFWclipboardformat *formats = glfwGetClipboardFormats(&count);
         for (int i = 0; i < count; ++i)
@@ -175,11 +202,23 @@ void read_x11(GLFWwindow *window, std::vector<std::pair<std::string, std::string
                              std::string(static_cast<const char *>(formats[i].data), formats[i].size));
         return;
     }
+    /* Another GLFW program's helper answers on its own; our own helper
+     * holding a plain string is read by the caller with glfwGetClipboardString */
+    if (owner_is_helper(dpy, owner)) {
+        int count = 0;
+        if (!glfwGetClipboardFormats(&count)) {
+            const char *s = glfwGetClipboardString(window);   // GLFW's own read
+            if (s && *s)
+                out.emplace_back("text/plain", s);
+            return;
+        }
+    }
     ensure_property_mask(dpy, xwin);
-    const Atom property = XInternAtom(dpy, "NANOGUI_SELECTION", False);
     const Atom incr = XInternAtom(dpy, "INCR", False);
-    const char *names[] = {"image/svg+xml", "image/svg", "text/xml", "text/plain", "UTF8_STRING"};
-    const int budget_ms = 80;
+    const char *names[] = {"image/svg+xml", "image/svg", "text/xml", "text/plain;charset=utf-8",
+                           "text/plain", "UTF8_STRING"};
+    /* The budget is for the first answer; a large one sent in pieces keeps
+     * going while pieces arrive (each piece has the same wait) */
     const auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(budget_ms);
     for (const char *name : names) {
         const auto left = std::chrono::duration_cast<std::chrono::milliseconds>(
@@ -188,38 +227,123 @@ void read_x11(GLFWwindow *window, std::vector<std::pair<std::string, std::string
         if (left <= 0)
             break;
         const Atom target = XInternAtom(dpy, name, False);
-        std::string bytes = read_target(dpy, xwin, clipboard, target, property, incr, (int) left);
+        std::string bytes = read_target(dpy, xwin, clipboard, target, next_property(dpy), incr,
+                                        (int) std::max<long long>(left, 250));
         if (!bytes.empty()) {
             out.emplace_back(name, std::move(bytes));
             return;                      // the first target that answers is enough
         }
     }
-    const Atom string_atom = XA_STRING;
     const auto left = std::chrono::duration_cast<std::chrono::milliseconds>(
                           deadline - std::chrono::steady_clock::now())
                           .count();
     if (left > 0) {
-        std::string bytes = read_target(dpy, xwin, clipboard, string_atom, property, incr, (int) left);
+        std::string bytes = read_target(dpy, xwin, clipboard, XA_STRING, next_property(dpy), incr, (int) left);
         if (!bytes.empty())
             out.emplace_back("STRING", std::move(bytes));
     }
+}
+
+/* The clipboard's TARGETS: the names of the formats it offers. */
+void types_x11(GLFWwindow *window, std::vector<std::string> &out, int budget_ms) {
+    Display *dpy = glfwGetX11Display();
+    const XWindow xwin = (XWindow) glfwGetX11Window(window);
+    if (!dpy || !xwin)
+        return;
+    bool ours = false;
+    const XWindow owner = clipboard_owner(dpy, ours);
+    if (owner == None)
+        return;
+    if (ours) {
+        int count = 0;
+        const GLFWclipboardformat *formats = glfwGetClipboardFormats(&count);
+        for (int i = 0; i < count; ++i)
+            out.emplace_back(formats[i].type);
+        return;
+    }
+    if (owner_is_helper(dpy, owner)) {
+        int count = 0;
+        if (!glfwGetClipboardFormats(&count)) {
+            const char *s = glfwGetClipboardString(window);
+            if (s && *s)
+                out.emplace_back("text/plain");
+            return;
+        }
+    }
+    ensure_property_mask(dpy, xwin);
+    const Atom clipboard = XInternAtom(dpy, "CLIPBOARD", False);
+    const Atom targets = XInternAtom(dpy, "TARGETS", False);
+    const Atom property = next_property(dpy);
+    XDeleteProperty(dpy, xwin, property);
+    XConvertSelection(dpy, clipboard, targets, property, xwin, CurrentTime);
+    XFlush(dpy);
+    SelWant want{xwin, clipboard, targets, property};
+    XEvent event;
+    if (!wait_for(dpy, selection_is, reinterpret_cast<XPointer>(&want), &event, budget_ms) ||
+        event.xselection.property == None)
+        return;
+    Atom type = None;
+    int format = 0;
+    unsigned long count = 0, rest = 0;
+    unsigned char *data = nullptr;
+    if (XGetWindowProperty(dpy, xwin, property, 0, 4096, True, XA_ATOM, &type, &format, &count, &rest,
+                           &data) != Success || !data) {
+        return;
+    }
+    if (format == 32) {
+        const Atom *atoms = reinterpret_cast<const Atom *>(data);
+        std::vector<char *> names(count, nullptr);
+        if (count && XGetAtomNames(dpy, const_cast<Atom *>(atoms), (int) count, names.data())) {
+            for (char *n : names)
+                if (n) {
+                    out.emplace_back(n);
+                    XFree(n);
+                }
+        }
+    }
+    XFree(data);
 }
 
 #endif
 
 } // namespace
 
-std::vector<std::pair<std::string, std::string>> read_clipboard(GLFWwindow *window) {
+std::vector<std::pair<std::string, std::string>> read_clipboard(GLFWwindow *window, int timeout_ms) {
     std::vector<std::pair<std::string, std::string>> out;
     if (!window)
         return out;
 #if defined(__linux__)
-    read_x11(window, out);
+    read_x11(window, out, timeout_ms);
+#else
+    (void) timeout_ms;
 #endif
     if (out.empty())
         if (const char *text = glfwGetClipboardString(window))
             if (*text)
                 out.emplace_back("text/plain", std::string(text));
+    return out;
+}
+
+std::vector<std::string> clipboard_types(GLFWwindow *window, int timeout_ms) {
+    std::vector<std::string> out;
+    if (!window)
+        return out;
+#if defined(__linux__)
+    if (glfwGetPlatform() == GLFW_PLATFORM_X11) {
+        types_x11(window, out, timeout_ms);
+        return out;
+    }
+#endif
+    (void) timeout_ms;
+    int count = 0;
+    if (const GLFWclipboardformat *formats = glfwGetClipboardFormats(&count)) {
+        for (int i = 0; i < count; ++i)
+            out.emplace_back(formats[i].type);
+        return out;
+    }
+    if (const char *text = glfwGetClipboardString(window))
+        if (*text)
+            out.emplace_back("text/plain");
     return out;
 }
 

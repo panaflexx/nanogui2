@@ -493,8 +493,22 @@ std::vector<Frame> PageDoc::thread_frames(const StoryEntry &s) const {
         if (it) {
             f.w = it->w;
             f.h = it->h;
+            if (const TextFrame *tf = it->text_frame()) {
+                /* The composer sees the inset box, still in item space. */
+                f.x = tf->inset_left;
+                f.y = tf->inset_top;
+                f.w = std::max(1.f, it->w - tf->inset_left - tf->inset_right);
+                f.h = std::max(1.f, it->h - tf->inset_top - tf->inset_bottom);
+                f.valign = tf->valign;
+            }
             f.page = (int) pg + 1;
             f.pages = (int) pages.size();
+            /* The document's baseline grid, in the frame's item space
+             * (exact for upright frames). */
+            if (setup.grid_step > 0.f) {
+                f.grid_step = setup.grid_step;
+                f.grid_origin = setup.grid_start - it->xf.f;
+            }
         }
         out.push_back(f);
     }

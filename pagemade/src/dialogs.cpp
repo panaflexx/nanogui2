@@ -438,6 +438,7 @@ struct DocForm {
     int columns = 1;
     float gutter = 12.f;          // 0.167 in
     float bleed = 0.f;
+    float grid_start = 0.f, grid_step = 12.f;   // the baseline grid, points
     bool syncing = false;
     Dropdown *sizes = nullptr;
     FloatSpin *width_box = nullptr, *height_box = nullptr;
@@ -582,6 +583,18 @@ static void build_page_form(Widget *form, const std::shared_ptr<DocForm> &st, In
                            "trim. Most printers want 0.125 in (3 mm); Prodigi wants none.");
     Label *hint = new Label(bl, "0 when nothing runs off the page", "sans", 14);
     hint->set_color(Color(110, 110, 110, 255));
+
+    Label *gridl = new Label(form, "Baseline Grid", "sans-bold", 16);
+    gridl->set_fixed_size(Vector2i(200, 0));
+    Widget *gr = form_row(form);
+    form_label(gr, "Start", 88);
+    inch_box(gr, st->grid_start / kPt, 0.05f, 0.f, 20.f,
+             [st](float v) { st->grid_start = std::max(0.f, v * kPt); });
+    form_label(gr, "Every", 64);
+    FloatSpin *step_box = inch_box(gr, st->grid_step / kPt, 0.01f, 0.f, 2.f,
+                                   [st](float v) { st->grid_step = std::max(0.f, v * kPt); });
+    step_box->set_tooltip("Paragraphs set to Align to Grid (Paragraph panel) put every\n"
+                          "baseline on a grid line. 0 turns the grid off.");
     refresh_size(st);
 }
 
@@ -598,6 +611,8 @@ static pagemade::PageSetup form_setup(const DocForm &st) {
     s.gutter = std::max(0.f, st.gutter);
     s.facing = st.facing;
     s.bleed = std::clamp(st.bleed, 0.f, 72.f);
+    s.grid_start = std::max(0.f, st.grid_start);
+    s.grid_step = std::clamp(st.grid_step, 0.f, 288.f);
     return s;
 }
 
@@ -635,6 +650,8 @@ void ask_document_setup(Screen *screen, const pagemade::PageSetup &current, size
     st->columns = current.columns;
     st->gutter = current.gutter;
     st->bleed = current.bleed;
+    st->grid_start = current.grid_start;
+    st->grid_step = current.grid_step;
 
     auto *d = new ModalDialog(screen, "Document Setup");
     Widget *form = d->body();
@@ -668,6 +685,61 @@ void ask_document_setup(Screen *screen, const pagemade::PageSetup &current, size
                             : *choice == 2 ? SetupAdjust::Leave : SetupAdjust::Adjust;
         if (done)
             done(form_setup(*st), a);
+    }, ModalDialog::Role::Default);
+    d->open();
+}
+
+/* Element > Text Frame Options: the selected text blocks' insets and how
+ * their text sits vertically. Inches, like the Document Setup margins. */
+void ask_text_frame_options(Screen *screen, const pagemade::TextFrame &current,
+                            std::function<void(const pagemade::TextFrame &)> done) {
+    auto st = std::make_shared<pagemade::TextFrame>(current);
+    auto *d = new ModalDialog(screen, "Text Frame Options");
+    Widget *form = d->body();
+    form->set_fixed_size(Vector2i(430, 0));
+
+    Label *inset = new Label(form, "Text Inset", "sans-bold", 16);
+    inset->set_fixed_size(Vector2i(200, 0));
+    Widget *tb = form_row(form);
+    form_label(tb, "Left", 64);
+    inch_box(tb, st->inset_left / kPt, 0.01f, 0.f, 5.f,
+             [st](float v) { st->inset_left = std::max(0.f, v * kPt); });
+    form_label(tb, "Top", 48);
+    inch_box(tb, st->inset_top / kPt, 0.01f, 0.f, 5.f,
+             [st](float v) { st->inset_top = std::max(0.f, v * kPt); });
+    Widget *br = form_row(form);
+    form_label(br, "Right", 64);
+    inch_box(br, st->inset_right / kPt, 0.01f, 0.f, 5.f,
+             [st](float v) { st->inset_right = std::max(0.f, v * kPt); });
+    form_label(br, "Bottom", 48);
+    inch_box(br, st->inset_bottom / kPt, 0.01f, 0.f, 5.f,
+             [st](float v) { st->inset_bottom = std::max(0.f, v * kPt); });
+
+    Label *va = new Label(form, "Vertical Alignment", "sans-bold", 16);
+    va->set_fixed_size(Vector2i(200, 0));
+    Widget *vr = form_row(form);
+    form_label(vr, "Align", 64);
+    static const pagemade::VAlign kinds[] = {pagemade::VAlign::Top, pagemade::VAlign::Center,
+                                             pagemade::VAlign::Bottom, pagemade::VAlign::Justify};
+    int sel = 0;
+    for (int i = 0; i < 4; ++i)
+        if (kinds[i] == st->valign)
+            sel = i;
+    auto *how = new Dropdown(vr, {"Top", "Center", "Bottom", "Justified"}, {},
+                             Dropdown::ComboBox, "Top");
+    how->set_fixed_size(Vector2i(180, 28));
+    how->set_tooltip("Where the text sits when it doesn't fill the block. Justified spreads\n"
+                     "the lines so the first and last reach the block's edges.");
+    how->set_selected_index(sel);
+    how->set_selected_callback([st](int i) {
+        if (i >= 0 && i < 4)
+            st->valign = kinds[i];
+    });
+
+    d->add_button("Cancel", {}, ModalDialog::Role::Cancel);
+    d->add_button("OK", [st, done] {
+        if (done)
+            done(*st);
     }, ModalDialog::Role::Default);
     d->open();
 }

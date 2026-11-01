@@ -17,6 +17,7 @@
  * the end. A picture that is not a data URI is named and left out.
  */
 #include "plugin/xml.h"
+#include "image.h"
 #include "vector.h"
 
 #include <algorithm>
@@ -1851,6 +1852,12 @@ void draw_element(const XmlNode &el, const Transform &world, float alpha, const 
         im.href = std::move(href);
         im.preserve = xml_attr_value(el, "preserveAspectRatio");
         im.opacity = alpha;
+        /* Its own size, for preserveAspectRatio: the header is enough */
+        ImageMetadata meta;
+        if (image_loader().probe(bytes.data(), bytes.size(), &meta, nullptr)) {
+            im.px_w = meta.width_px;
+            im.px_h = meta.height_px;
+        }
         im.bytes = std::make_shared<const std::vector<uint8_t>>(std::move(bytes));
         scene.images.push_back(std::move(im));
         scene.order.push_back({VectorSlot::Image, (int) scene.images.size() - 1});

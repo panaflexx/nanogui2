@@ -35,11 +35,25 @@ namespace pagemade {
 
 class Hyphenator;
 
+/* Where a text block's text sits when it doesn't fill the block: at the
+ * top, centered, at the bottom, or spread so the first and last lines
+ * reach the block's edges (PageMaker's vertical justification). */
+enum class VAlign : uint8_t { Top, Center, Bottom, Justify };
+
 /* A text block's rectangle in page points (y down), and the page it is on
- * (1-based) out of `pages`, for the page markers. 0 shows them as "#". */
+ * (1-based) out of `pages`, for the page markers. 0 shows them as "#".
+ * The rectangle is the block's inset box: x, y, w, h already have the
+ * block's text insets taken out.
+ *
+ * grid_origin / grid_step are the publication's baseline grid seen from
+ * this frame: the grid's zero line sits at grid_origin in item space and
+ * lines repeat every grid_step. Step 0 means no grid. Only paragraphs
+ * with align_to_grid snap to it. */
 struct Frame {
     float x = 0, y = 0, w = 0, h = 0;
     int page = 0, pages = 0;
+    VAlign valign = VAlign::Top;
+    float grid_origin = 0, grid_step = 0;
 };
 
 struct PlacedGlyph {

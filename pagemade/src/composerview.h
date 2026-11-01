@@ -334,9 +334,25 @@ public:
     void edit_copy();
     /* Delete the selected items (Remove), one undo step. */
     void remove_selection() { delete_selection_items(); }
-    void edit_paste(const pagemade::Point *at = nullptr);
+    /* Normal pastes this publication's own copied items when the clipboard
+     * still holds them, else an SVG on the clipboard as a drawing, else
+     * plain text as a new text block. Text
+     * places an SVG as editable text frames (pictures as pictures, paths
+     * as a drawing), or plain text as a new text block. Svg places the
+     * clipboard's SVG as a drawing even when it came from these items.
+     * Neither Text nor Svg falls back to items copied earlier. */
+    enum class PasteAs { Normal, Text, Svg };
+    void edit_paste(const pagemade::Point *at = nullptr, PasteAs how = PasteAs::Normal);
+    /* The clipboard is an SVG, and a text story is not being edited. */
+    bool clipboard_has_svg() const;
+    /* The clipboard holds text (or an SVG), and no story is being edited. */
+    bool clipboard_has_text() const;
     bool can_copy() const;
     bool can_paste() const;
+    /* Plain text from the clipboard as a new text block (Paste as Text). */
+    bool paste_plain_text(const std::string &text, const pagemade::Point *at);
+    /* The items copied in this publication (Paste of its own copy). */
+    void paste_items(const pagemade::Point *at);
 
     /* ---- Align (the selection's items and groups, each as a unit) --- */
     enum class AlignTo { Left, Center, Right, Top, Middle, Bottom };
@@ -380,6 +396,12 @@ public:
      * for both). With neither selected, `shape` sets the shape defaults. */
     void apply_item_style(const std::function<void(pagemade::Shape &)> &shape,
                           const std::function<void(pagemade::PlacedImage &)> &image);
+    /* The selected text blocks' options (TextFrame: insets, vertical
+     * alignment). text_frame_options reads the first selected block's;
+     * false when no text block is selected. apply_text_frame_options
+     * changes every selected text block's, as one undo step. */
+    bool text_frame_options(pagemade::TextFrame &out) const;
+    void apply_text_frame_options(const std::function<void(pagemade::TextFrame &)> &fn);
     /* The Colors palette (PageDoc::swatches), each one undo step.
      * add_doc_swatch appends a swatch and returns its id. update_doc_swatch
      * renames and recolors one in place: everything painted with it follows.
@@ -857,6 +879,10 @@ private:
      * SVG from the clipboard only when those bytes have changed since, so a
      * copy inside the publication is not replaced by a stale SVG. */
     std::string m_cb_at_copy;
+    /* One list of the clipboard's formats serves a burst of questions */
+    const std::vector<std::string> &clipboard_types_cached() const;
+    mutable std::vector<std::string> m_cb_types;
+    mutable double m_cb_cache_time = -1e9;
     bool m_item_paste = false;
     /* Cleared in the destructor so a load still in flight does not touch
      * the view after it is gone; m_doc_epoch drops one meant for a
@@ -900,5 +926,9 @@ private:
     /* SVG pictures carried in the draw list, keyed by DrawImage::bytes_key.
      * `version` is the long edge asked for. */
     std::map<uint64_t, Tex> m_inline_tex;
+    /* Decoded off the UI thread, waiting for the next draw to upload */
+    struct InlinePixels { int edge = 0, w = 0, h = 0; std::vector<uint8_t> rgba; };
+    std::map<uint64_t, InlinePixels> m_inline_ready;
+    std::map<uint64_t, int> m_inline_want;        // the edge asked for, per picture
     uint64_t m_tex_gen = 0;
 };
