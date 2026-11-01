@@ -19,7 +19,7 @@ and its nanovgd renderer. The composer lays out in points and every backend
   clipboard, bold/italic, grapheme and word movement; threading gestures (pick
   up the overset arrow, merge back).
 - **Undo/redo**: whole-document snapshots, 100 deep, one step per action.
-- **PDF export and printing** (`src/pdf.cpp`): the draw list's second
+- **PDF export and printing** (`src/plugin/pdf_export.cpp`): the draw list's second
   backend. Every page at trim size, paths and strokes (native PDF dashes),
   text as real text — each used face subset with hb-subset (glyph ids
   retained, so character codes are glyph ids under Identity-H), embedded as
@@ -174,6 +174,25 @@ and its nanovgd renderer. The composer lays out in points and every backend
   `glfwSetClipboardFormats`, added to the bundled GLFW (X11 with INCR for
   large data, and Wayland; macOS and Windows offer the text format only so
   far). Next: RTF and HTML for text.
+- **Import/export plugins** (`src/plugin/`, see `plugin.h`): one file per
+  format and direction. `svg_import`, `svg_place` (placing a decoded graphic
+  whole, in pieces, or as text), `svg_export` (Copy), `pdf_parse` (a PDF's
+  objects), `pdf_import`, `pdf_export`, and the shared `xml` reader.
+  Decoders register in `register_vector_plugins`; Place's file types come
+  from them.
+- **Placing PDFs** (`plugin/pdf_import.cpp`, first slice): a page as a placed
+  graphic, through Place, drag and drop, and reopening. Cross-reference
+  tables and streams, object streams, /Prev updates, a scan when the xref is
+  damaged; Flate, LZW, ASCIIHex, ASCII85, RunLength and predictors. Paths,
+  clips, dashes, every common color space (tint functions 0, 2, 3), constant
+  alpha, forms, image XObjects and inline images (JPEG passed through, the
+  rest to PNG, stencil and soft masks), text from embedded TrueType, CFF
+  and Type 1 fonts as outlines through FreeType. The standard 14, not
+  embedded, are drawn in the installed URW faces at the PDF's widths. Plain
+  C++ on FreeType and miniz on every platform.
+  Next: a page chooser for multi-page files; PDF export that embeds the
+  placed page as a form (text stays text); shadings and patterns; type 4
+  functions; Type 3 fonts; encrypted files; JPEG 2000.
 
 ## Next, in order
 

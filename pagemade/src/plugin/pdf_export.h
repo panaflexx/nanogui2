@@ -1,5 +1,5 @@
 /*
- * pagemade/pdf.h — the draw list's second backend: a PDF document.
+ * pagemade/plugin/pdf_export.h — the draw list's second backend: a PDF document.
  *
  * export_pdf() writes every page of the document at its trim size in
  * points, with fills, strokes and text drawn by the same positioned glyph

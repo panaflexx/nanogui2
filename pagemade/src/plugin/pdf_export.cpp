@@ -1,7 +1,7 @@
 /*
- * pagemade/pdf.cpp — see pdf.h.
+ * pagemade/plugin/pdf_export.cpp — see pdf_export.h.
  */
-#include "pdf.h"
+#include "plugin/pdf_export.h"
 
 #include "composer/font.h"
 #include "composer/utf8.h"

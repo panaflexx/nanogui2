@@ -126,6 +126,9 @@ struct VectorSlotRef {
 
 struct VectorScene {
     float width = 0, height = 0;         // the graphic's box, points
+    /* The decoder that made it ("svg", "pdf"): placement splits an SVG's
+     * embedded pictures into frames, but keeps a PDF page whole. */
+    std::string format;
     std::vector<VectorShape> shapes;
     /* Clip paths in the graphic's box, shared by the shapes that name them. */
     std::vector<ClipLayers> clips;
@@ -137,6 +140,9 @@ struct VectorScene {
     /* Features this slice did not draw, each named once ("gradients",
      * "clips"), in the order they were first seen. */
     std::vector<std::string> skipped;
+    /* What was drawn differently from the file, not left out ("fonts not
+     * embedded, drawn in installed faces") */
+    std::vector<std::string> remarks;
 };
 
 class VectorDecoder {
@@ -154,18 +160,20 @@ public:
     void add(std::unique_ptr<VectorDecoder> decoder);
     const VectorDecoder *match(const uint8_t *data, size_t n) const;
     bool decode(const uint8_t *data, size_t n, VectorScene *out, std::string *error) const;
+    /* Every decoder's file types (extension, description), for Place. */
+    std::vector<std::pair<std::string, std::string>> types() const;
 
 private:
     std::vector<std::unique_ptr<VectorDecoder>> m_decoders;
 };
 
-/* The SVG decoder, linked from plugin/svg.cpp. */
-void register_svg_decoder(VectorLoader &loader);
+/* The loader with the built-in decoders (plugin/plugin.h). */
 VectorLoader &vector_loader();
 std::vector<std::pair<std::string, std::string>> vector_file_types();
 
 /* "placed name" or "placed name (gradients, clips skipped)". */
-std::string vector_place_note(const std::string &name, const std::vector<std::string> &skipped);
+std::string vector_place_note(const std::string &name, const std::vector<std::string> &skipped,
+                              const std::vector<std::string> &remarks = {});
 
 class FontLibrary;
 
@@ -226,45 +234,13 @@ private:
 void vector_frame(const PageSetup &setup, size_t page, float gw, float gh, const Point *at,
                   float &x, float &y, float &w, float &h, bool to_column = true);
 
-/* Decode an SVG pasted from another program: as the SVG decoder does,
- * except that a root width and height without a unit (or in px) are
- * points, the way Illustrator and its kin (VectorCraft) write them. */
-bool decode_svg_paste(const uint8_t *data, size_t n, VectorScene *out, std::string *error);
-
-class ImageStore;
-class FontLibrary;
-
-/* Drawing keeps the file as graphics. Text turns each SVG text line into
- * an editable text frame, each picture into a picture, and the paths into
- * a graphic of their own. */
-enum class SvgPaste { Drawing, Text };
-
-struct VectorPlacement {
-    bool ok = false;
-    std::string error;
-    std::string note;
-    uint32_t asset = 0;                  // the first graphic; 0 when there is none
-    ItemId item = 0;                     // one placed piece (a member of `group`)
-    std::vector<ItemId> items;           // every piece, back to front
-    uint32_t group = 0;                  // set when two or more pieces were placed
-};
-
-/* One graphic on `page`, or a group when the file embeds pictures and
- * `images` is set. Each embedded picture is placed on its own, and the
- * drawing before and after it stays a graphic, so Ungroup separates the
- * photo. `SvgPaste::Text` instead makes a text frame for each SVG text
- * line (the characters, editable) and a graphic for the paths, sized to
- * those paths. Without `images`, or with no picture this slice can
- * separate, a drawing paste is one graphic. The caller records undo.
- * `source` is the file: URI (empty when pasted); a group stores each
- * piece itself and does not keep that link. `fonts` measures Paste as Text.
- * `paste`: the bytes came from the clipboard (decode_svg_paste's units, and
- * fitted to the live area rather than a column). */
-VectorPlacement place_svg_bytes(PageDoc &doc, VectorStore &store, std::vector<uint8_t> bytes,
-                                const std::string &name, const std::string &source,
-                                size_t page, const Point *at, ImageStore *images = nullptr,
-                                SvgPaste how = SvgPaste::Drawing,
-                                const FontLibrary *fonts = nullptr, bool paste = false);
+/* The family a run's text resolves to in `fonts`: the first of its
+ * families the library has, else the pagemade family a well-known name
+ * stands for ("P052" is Serif), else Serif. And the face for the run's
+ * weight and slant there. Drawing (realize_vector_text) and Paste as Text
+ * use the same answer, so text measures the way it is drawn. */
+std::string vector_run_family(const FontLibrary *fonts, const VectorTextRun &run);
+const Font *vector_run_face(const FontLibrary &fonts, const VectorTextRun &run);
 
 /* Glyph outlines for scene.texts, in graphic-box space. A run already
  * baked is left alone. No font: the run stays empty and is not retried. */

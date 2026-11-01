@@ -1,5 +1,5 @@
 /*
- * pagemade/svg_export.h — items as an SVG document (Copy to other apps).
+ * pagemade/plugin/svg_export.h — items as an SVG document (Copy to other apps).
  *
  * The selection keeps its place and size: the SVG is measured in points
  * (width and height in pt) and its viewBox is the items' bounds in page

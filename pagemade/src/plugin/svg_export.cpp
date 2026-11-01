@@ -1,5 +1,5 @@
 /*
- * pagemade/svg_export.cpp — see svg_export.h.
+ * pagemade/plugin/svg_export.cpp — see svg_export.h.
  *
  * Graphics come from build_page's draw list, one item at a time so the
  * stacking order and groups are kept. Text does not: a draw list has glyph
@@ -7,7 +7,7 @@
  * composed lines and the story, the way the PDF's ToUnicode map does: each
  * glyph's cluster is a byte offset into its paragraph's text.
  */
-#include "svg_export.h"
+#include "plugin/svg_export.h"
 
 #include "composer/utf8.h"
 #include "drawlist.h"
@@ -33,7 +33,7 @@
 #pragma GCC diagnostic ignored "-Wunused-function"
 #pragma GCC diagnostic ignored "-Wmissing-field-initializers"
 #endif
-#include "../../ext/glfw/deps/stb_image_write.h"
+#include "../../../ext/glfw/deps/stb_image_write.h"
 #if defined(__GNUC__)
 #pragma GCC diagnostic pop
 #endif

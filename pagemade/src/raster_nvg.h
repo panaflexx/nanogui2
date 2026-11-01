@@ -11,7 +11,7 @@
  */
 #pragma once
 
-#include "pdf.h"
+#include "plugin/pdf_export.h"
 
 struct NVGcontext;
 

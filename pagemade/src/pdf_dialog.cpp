@@ -4,7 +4,7 @@
 #include "pdf_dialog.h"
 
 #include "dialogs.h"
-#include "pdf.h"
+#include "plugin/pdf_export.h"
 #include "spinbox.h"
 
 #include <nanogui/button.h>

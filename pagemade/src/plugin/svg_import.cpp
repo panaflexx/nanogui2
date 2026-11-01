@@ -1,5 +1,5 @@
 /*
- * pagemade/plugin/svg.cpp — the SVG decoder.
+ * pagemade/plugin/svg_import.cpp — the SVG decoder.
  *
  * Linked into pagemade, not loaded from disk. It draws solid and gradient
  * fills and strokes, positioned text (baked to outlines later) and
@@ -17,7 +17,9 @@
  * the end. A picture that is not a data URI is named and left out.
  */
 #include "plugin/xml.h"
+#include "plugin/svg_place.h"
 #include "image.h"
+#include "plugin/plugin.h"
 #include "vector.h"
 
 #include <algorithm>
@@ -2010,6 +2012,7 @@ public:
         dc.rules = &rules;
         dc.grads = &grads;
         dc.clips = &clips;
+        out->format = "svg";
         out->width = vp.box_w;
         out->height = vp.box_h;
         Style base;

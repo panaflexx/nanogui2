@@ -15,11 +15,13 @@
 #include "image.h"
 #include "image_color.h"
 #include "layout_templates.h"
-#include "svg_export.h"
+#include "plugin/svg_export.h"
+#include "plugin/svg_place.h"
+#include "plugin/pdf_parse.h"
 #include "page.h"
 #include "setup_adjust.h"
 #include "swatch_library.h"
-#include "pdf.h"
+#include "plugin/pdf_export.h"
 #include "docfile.h"
 #include "uri.h"
 #include "vector.h"
@@ -5757,6 +5759,104 @@ static void test_svg_paste(const FontLibrary &fonts) {
     CHECK(near(w, 100) && near(h, 100), "none: stretched");
 }
 
+/* Placing a PDF: the parser, the filters and the page interpreter. */
+static void test_pdf_import(const FontLibrary &fonts) {
+    /* Filters on their own */
+    std::string out;
+    CHECK(pdf::ascii85_decode("87cURD]i,\"Ebo80~>", out) && out == "Hello World!", "ASCII85 (%s)", out.c_str());
+    CHECK(pdf::ascii_hex_decode("48 65 6c6C6f>", out) && out == "Hello", "ASCIIHex");
+    CHECK(pdf::run_length_decode(std::string("\x02" "abc" "\xfd" "z" "\x80", 7), out) && out == "abczzzz",
+          "RunLength (%s)", out.c_str());
+    std::string rows = std::string("\x02\x01\x02\x02\x01\x01", 6);   // PNG Up filter, two rows of two
+    pdf::unpredict(rows, 12, 1, 8, 2);
+    CHECK(rows == std::string("\x01\x02\x02\x03", 4), "PNG predictor (Up)");
+
+    /* Our own export, read back: the sample page, every glyph embedded */
+    PageDoc doc = sample_document();
+    std::vector<Composition> comps;
+    for (const StoryEntry &se : doc.stories)
+        comps.push_back(compose(se.story, doc.thread_frames(se), fonts));
+    const std::string path = "/tmp/pagemade-import.pdf";
+    CHECK(export_pdf(path, doc, comps, nullptr), "export the sample");
+    const std::string pdf_text = read_bin(path);
+    const std::vector<uint8_t> bytes(pdf_text.begin(), pdf_text.end());
+    VectorScene scene;
+    std::string err;
+    CHECK(vector_loader().decode(bytes.data(), bytes.size(), &scene, &err), "decode our PDF: %s", err.c_str());
+    CHECK(scene.format == "pdf" && std::fabs(scene.width - 612.f) < 0.01f && std::fabs(scene.height - 792.f) < 0.01f,
+          "Letter, in points (%g x %g)", scene.width, scene.height);
+    CHECK(scene.shapes.size() > 100 && scene.texts.empty() && scene.skipped.empty(),
+          "text as outlines from the embedded fonts (%zu shapes, %zu fallback texts)", scene.shapes.size(),
+          scene.texts.size());
+    /* The rule sits where it was drawn: y 54 + 162 - 7 down the page */
+    bool rule = false;
+    for (const VectorShape &sh : scene.shapes)
+        if (!sh.stroke.none() && sh.path.size() == 2 && std::fabs(sh.path[0].y - 209.f) < 0.6f &&
+            std::fabs(sh.path[1].y - 209.f) < 0.6f)
+            rule = true;
+    CHECK(rule, "the rule lands at y 209, y down");
+    PageDoc placed;
+    VectorStore store;
+    ImageStore images;
+    const VectorPlacement pl = place_svg_bytes(placed, store, bytes, "sample.pdf", "", 0, nullptr, &images);
+    CHECK(pl.ok && pl.items.size() == 1, "a PDF is placed as one graphic (%zu)", pl.items.size());
+
+    /* A hand-written PDF: a clipped fill, a dashed stroke, an inline image,
+     * and Helvetica, which it doesn't embed. Its xref offsets are wrong on
+     * purpose: the reader finds the objects by scanning. */
+    /* The image's samples hold NULs: the literal keeps its length */
+    static const char kContent[] =
+        "q 10 10 50 50 re W n 1 0 0 rg 0 0 100 100 re f Q\n"
+        "0 0 1 RG 2 w [4 2] 0 d 10 80 m 90 80 l S\n"
+        "q 20 0 0 20 70 10 cm BI /W 2 /H 2 /CS /RGB /BPC 8 ID \xff\x00\x00\x00\xff\x00\x00\x00\xff\xff\xff\xff EI Q\n"
+        "BT /F1 12 Tf 10 30 Td (Hi) Tj ET\n";
+    const std::string content(kContent, sizeof kContent - 1);
+    std::string pdfsrc = "%PDF-1.4\n";
+    pdfsrc += "1 0 obj << /Type /Catalog /Pages 2 0 R >> endobj\n";
+    pdfsrc += "2 0 obj << /Type /Pages /Kids [3 0 R] /Count 1 /MediaBox [0 0 100 100] >> endobj\n";
+    pdfsrc += "3 0 obj << /Type /Page /Parent 2 0 R /Resources << /Font << /F1 4 0 R >> >> /Contents 5 0 R >> endobj\n";
+    pdfsrc += "4 0 obj << /Type /Font /Subtype /Type1 /BaseFont /Helvetica /Encoding /WinAnsiEncoding >> endobj\n";
+    pdfsrc += "5 0 obj << /Length " + std::to_string(content.size()) + " >> stream\n" + content + "\nendstream endobj\n";
+    pdfsrc += "xref\n0 6\n0000000000 65535 f \n0000000999 00000 n \n0000000999 00000 n \n0000000999 00000 n \n"
+              "0000000999 00000 n \n0000000999 00000 n \ntrailer << /Size 6 /Root 1 0 R >>\nstartxref\n12345\n%%EOF\n";
+    const std::vector<uint8_t> hand(pdfsrc.begin(), pdfsrc.end());
+    VectorScene hs;
+    CHECK(vector_loader().decode(hand.data(), hand.size(), &hs, &err), "a damaged xref still opens: %s", err.c_str());
+    size_t fills = 0, strokes = 0;
+    bool clipped = false, dashed = false;
+    for (const VectorShape &sh : hs.shapes) {
+        if (!sh.fill.none()) {
+            ++fills;
+            clipped = clipped || (sh.clip >= 0 && std::fabs(sh.fill.color.r - 1.f) < 0.01f);
+        }
+        if (!sh.stroke.none()) {
+            ++strokes;
+            dashed = dashed || sh.stroke.dash.size() == 2;
+        }
+    }
+    CHECK(fills == 1 && clipped, "the red square is clipped (%zu fills)", fills);
+    CHECK(strokes == 1 && dashed, "the blue line is dashed (%zu strokes)", strokes);
+    CHECK(hs.images.size() == 1 && hs.images[0].px_w == 2 && hs.images[0].bytes &&
+              (*hs.images[0].bytes)[1] == 'P',
+          "the inline image is a 2 x 2 PNG (%zu)", hs.images.size());
+    if (!hs.images.empty()) {
+        /* The unit square under cm 20 0 0 20 70 10: x 70..90, y up 10..30, so 70..90 down */
+        const Point o = hs.images[0].xf.apply({0.f, 0.f}), e = hs.images[0].xf.apply({1.f, 1.f});
+        CHECK(std::fabs(o.x - 70.f) < 0.01f && std::fabs(o.y - 70.f) < 0.01f && std::fabs(e.x - 90.f) < 0.01f &&
+                  std::fabs(e.y - 90.f) < 0.01f,
+              "the image's top row is at the top (%g,%g to %g,%g)", o.x, o.y, e.x, e.y);
+    }
+    CHECK(hs.texts.size() == 1 && hs.texts[0].runs.size() == 2 && hs.texts[0].runs[0].text == "H",
+          "Helvetica, not embedded, is two glyph runs to outline later (%zu)", hs.texts.size());
+    if (!hs.texts.empty() && hs.texts[0].runs.size() == 2) {
+        CHECK(hs.texts[0].runs[0].families.size() > 1 && hs.texts[0].runs[0].families[1] == "Nimbus Sans",
+              "drawn in Nimbus Sans");
+        realize_vector_text(hs, fonts);
+        CHECK(hs.texts[0].runs[0].ink_set && !hs.texts[0].runs[0].ink.empty(), "and outlined on this thread");
+    }
+    CHECK(!vector_loader().decode((const uint8_t *) "%PDF-1.4\nnothing", 16, &hs, &err), "junk is refused");
+}
+
 int main(int argc, char **argv) {
     bool verbose = argc > 1 && std::strcmp(argv[1], "-v") == 0;
     FontLibrary fonts;
@@ -5828,6 +5928,7 @@ int main(int argc, char **argv) {
     test_layout_templates(fonts);
     test_svg_export(fonts);
     test_svg_paste(fonts);
+    test_pdf_import(fonts);
     test_system_fonts();
     if (verbose)
         dump_sample(fonts);

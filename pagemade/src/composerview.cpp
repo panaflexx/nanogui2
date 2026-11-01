@@ -3,7 +3,8 @@
  */
 #include "composerview.h"
 #include "layout_templates.h"
-#include "svg_export.h"
+#include "plugin/svg_export.h"
+#include "plugin/svg_place.h"
 #include "render_nvg.h"
 #include "uri.h"
 #include "vector.h"
@@ -2736,7 +2737,12 @@ void ComposerView::edit_copy() {
         std::string svg;
         if (m_clip.items.size() == 1 && m_clip.items[0].vector() && m_clip.vectors.size() == 1 &&
             m_clip.vectors[0].bytes && !m_clip.vectors[0].bytes->empty() &&
-            !m_clip.vectors[0].asset.skipped.empty()) {
+            !m_clip.vectors[0].asset.skipped.empty() &&
+            [&] {                        // only an SVG goes out as its own file
+                const auto &b = *m_clip.vectors[0].bytes;
+                const VectorDecoder *d = vector_loader().match(b.data(), b.size());
+                return d && std::string(d->id()) == "svg";
+            }()) {
             const auto &b = *m_clip.vectors[0].bytes;
             svg.assign(b.begin(), b.end());
         } else {

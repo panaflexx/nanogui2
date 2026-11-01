@@ -70,7 +70,7 @@
 #include "system_fonts.h"
 #include "page.h"
 #include "paragraph_panel.h"
-#include "pdf.h"
+#include "plugin/pdf_export.h"
 #include "pdf_dialog.h"
 #include "print.h"
 #include "print_dialog.h"
@@ -968,6 +968,26 @@ public:
                 where.y += 12.f * (float) i;
                 const std::string path = paths[i];
                 const std::string name = nanogui::fs::filename(path);
+                /* A vector file (SVG, PDF) is read and sniffed by place_file;
+                 * pictures go down at once as stand-ins */
+                std::string ext = nanogui::fs::extension(path);
+                if (!ext.empty() && ext[0] == '.')
+                    ext.erase(0, 1);
+                for (char &c : ext)
+                    c = (char) std::tolower((unsigned char) c);
+                bool vector_file = false;
+                for (const auto &t : vector_file_types())
+                    vector_file = vector_file || t.first == ext;
+                if (vector_file) {
+                    m_view->place_file(path, page, &where,
+                                       [this, name](const std::string &error, const std::string &note) {
+                        if (!error.empty())
+                            show_alert(this, "\u201C" + name + "\u201D couldn't be placed.", error);
+                        else
+                            set_note(note.empty() ? "placed " + name : note);
+                    });
+                    continue;
+                }
                 m_view->place_image_file(path, page, &where, [this, name](const std::string &error) {
                     if (!error.empty())
                         show_alert(this, "The picture couldn't be placed.", error);
