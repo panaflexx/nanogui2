@@ -710,59 +710,133 @@ void ask_document_setup(Screen *screen, const pagemade::PageSetup &current, size
     d->open();
 }
 
+void commit_text_boxes(Widget *w) {
+    for (Widget *child : w->children()) {
+        if (auto *tb = dynamic_cast<TextBox *>(child))
+            if (tb->focused())
+                tb->focus_event(false);
+        commit_text_boxes(child);
+    }
+}
+
+/* Enable or disable every field under `w`. */
+static void set_fields_enabled(Widget *w, bool on) {
+    for (Widget *child : w->children()) {
+        if (dynamic_cast<TextBox *>(child) || dynamic_cast<Button *>(child) ||
+            dynamic_cast<CheckBox *>(child))
+            child->set_enabled(on);
+        set_fields_enabled(child, on);
+    }
+}
+
 /* Element > Text Frame Options: the selected text blocks' insets and how
  * their text sits vertically. Inches, like the Document Setup margins. */
-void ask_text_frame_options(Screen *screen, const pagemade::TextFrame &current,
-                            std::function<void(const pagemade::TextFrame &)> done) {
-    auto st = std::make_shared<pagemade::TextFrame>(current);
-    auto *d = new ModalDialog(screen, "Text Frame Options");
-    Widget *form = d->body();
-    form->set_fixed_size(Vector2i(430, 0));
+struct TextFramePanel::State {
+    pagemade::TextFrame frame, before;
+    FloatSpin *box[4] = {};              // left, top, right, bottom
+    Dropdown *valign = nullptr;
+    Widget *content = nullptr;
+    Button *defaults = nullptr;
+    bool enabled = false, loading = false;
+    std::function<void(const pagemade::TextFrame &, const pagemade::TextFrame &, const void *)> apply;
+};
 
-    Label *inset = new Label(form, "Text Inset", "sans-bold", 16);
-    inset->set_fixed_size(Vector2i(200, 0));
-    Widget *tb = form_row(form);
-    form_label(tb, "Left", 64);
-    inch_box(tb, st->inset_left / kPt, 0.01f, 0.f, 5.f,
-             [st](float v) { st->inset_left = std::max(0.f, v * kPt); });
-    form_label(tb, "Top", 48);
-    inch_box(tb, st->inset_top / kPt, 0.01f, 0.f, 5.f,
-             [st](float v) { st->inset_top = std::max(0.f, v * kPt); });
-    Widget *br = form_row(form);
-    form_label(br, "Right", 64);
-    inch_box(br, st->inset_right / kPt, 0.01f, 0.f, 5.f,
-             [st](float v) { st->inset_right = std::max(0.f, v * kPt); });
-    form_label(br, "Bottom", 48);
-    inch_box(br, st->inset_bottom / kPt, 0.01f, 0.f, 5.f,
-             [st](float v) { st->inset_bottom = std::max(0.f, v * kPt); });
+static const pagemade::VAlign kVAligns[] = {pagemade::VAlign::Top, pagemade::VAlign::Center,
+                                            pagemade::VAlign::Bottom, pagemade::VAlign::Justify};
 
-    Label *va = new Label(form, "Vertical Alignment", "sans-bold", 16);
-    va->set_fixed_size(Vector2i(200, 0));
-    Widget *vr = form_row(form);
-    form_label(vr, "Align", 64);
-    static const pagemade::VAlign kinds[] = {pagemade::VAlign::Top, pagemade::VAlign::Center,
-                                             pagemade::VAlign::Bottom, pagemade::VAlign::Justify};
-    int sel = 0;
-    for (int i = 0; i < 4; ++i)
-        if (kinds[i] == st->valign)
-            sel = i;
-    auto *how = new Dropdown(vr, {"Top", "Center", "Bottom", "Justified"}, {},
-                             Dropdown::ComboBox, "Top");
-    how->set_fixed_size(Vector2i(180, 28));
-    how->set_tooltip("Where the text sits when it doesn't fill the block. Justified spreads\n"
-                     "the lines so the first and last reach the block's edges.");
-    how->set_selected_index(sel);
-    how->set_selected_callback([st](int i) {
-        if (i >= 0 && i < 4)
-            st->valign = kinds[i];
+TextFramePanel::TextFramePanel(
+    Widget *parent,
+    std::function<void(const pagemade::TextFrame &, const pagemade::TextFrame &, const void *)> apply)
+    : ToolPanel(parent) {
+    auto st = std::make_shared<State>();
+    m_state = st;
+    st->apply = std::move(apply);
+    set_layout(new BoxLayout(Orientation::Vertical, Alignment::Minimum, 14, 0));
+    Widget *form = new Widget(this);
+    st->content = form;
+    form->set_layout(new BoxLayout(Orientation::Vertical, Alignment::Minimum, 0, 8));
+
+    /* Hand the edit on: before and after, and the box being spun */
+    auto commit = [st](const void *merge) {
+        if (st->loading || !st->enabled || !st->apply)
+            return;
+        const pagemade::TextFrame before = st->before, after = st->frame;
+        st->before = after;
+        st->apply(before, after, merge);
+    };
+
+    new Label(form, "Text Inset", "sans-bold", 16);
+    Widget *grid = new Widget(form);
+    auto *layout = new GridLayout(Orientation::Horizontal, 2, Alignment::Middle, 0, 8);
+    layout->set_col_alignment({Alignment::Maximum, Alignment::Fill});
+    grid->set_layout(layout);
+    static const char *kSides[] = {"Left", "Top", "Right", "Bottom"};
+    for (int i = 0; i < 4; ++i) {
+        form_label(grid, kSides[i], 56);
+        FloatSpin *box = inch_box(grid, 0.f, 0.01f, 0.f, 5.f, {});
+        box->set_callback([st, commit, box, i](float v) {
+            float *side[] = {&st->frame.inset_left, &st->frame.inset_top, &st->frame.inset_right,
+                             &st->frame.inset_bottom};
+            *side[i] = std::max(0.f, v * kPt);
+            commit(box->spinning() ? box : nullptr);
+        });
+        st->box[i] = box;
+    }
+
+    new Label(form, "Vertical Alignment", "sans-bold", 16);
+    st->valign = new Dropdown(form, {"Top", "Center", "Bottom", "Justified"}, {},
+                              Dropdown::ComboBox, "Top");
+    st->valign->set_fixed_size(Vector2i(172, 28));
+    st->valign->set_tooltip("Where the text sits when it doesn't fill the block. Justified spreads\n"
+                            "the lines so the first and last reach the block's edges.");
+    st->valign->set_selected_callback([st, commit](int i) {
+        if (i < 0 || i >= 4)
+            return;
+        st->frame.valign = kVAligns[i];
+        commit(nullptr);
     });
 
-    d->add_button("Cancel", {}, ModalDialog::Role::Cancel);
-    d->add_button("OK", [st, done] {
-        if (done)
-            done(*st);
-    }, ModalDialog::Role::Default);
-    d->open();
+    Widget *actions = new Widget(form);
+    actions->set_layout(new BoxLayout(Orientation::Horizontal, Alignment::Middle, 0, 0));
+    st->defaults = new Button(actions, "Default");
+    st->defaults->set_fixed_size(Vector2i(88, 28));
+    st->defaults->set_tooltip("No insets, text at the top");
+    st->defaults->set_callback([this, commit] {
+        commit_text_boxes(this);
+        /* Every field, not only those that differ from the first block's:
+         * a `before` unlike the defaults in each field */
+        pagemade::TextFrame unlike{-1.f, -1.f, -1.f, -1.f, pagemade::VAlign::Center};
+        m_state->before = unlike;
+        m_state->frame = pagemade::TextFrame{};
+        commit(nullptr);
+    });
+    load(nullptr);
+}
+
+TextFramePanel::~TextFramePanel() = default;
+
+int TextFramePanel::preferred_content_height(NVGcontext *ctx, int) {
+    return m_state ? m_state->content->preferred_size(ctx).y() + 2 * 14 : -1;
+}
+
+void TextFramePanel::load(const pagemade::TextFrame *frame) {
+    State &st = *m_state;
+    if (st.valign->popup() && st.valign->popup()->visible())
+        return;
+    st.loading = true;
+    st.enabled = frame != nullptr;
+    st.frame = st.before = frame ? *frame : pagemade::TextFrame{};
+    const float sides[] = {st.frame.inset_left, st.frame.inset_top, st.frame.inset_right,
+                           st.frame.inset_bottom};
+    for (int i = 0; i < 4; ++i)
+        if (!st.box[i]->focused() && !st.box[i]->spinning())
+            st.box[i]->set_value(sides[i] / kPt);
+    for (int i = 0; i < 4; ++i)
+        if (kVAligns[i] == st.frame.valign)
+            st.valign->set_selected_index(i);
+    set_fields_enabled(st.content, st.enabled);
+    st.valign->set_enabled(st.enabled);
+    st.loading = false;
 }
 
 namespace {
@@ -874,15 +948,6 @@ struct WeightRow {
 
 } // namespace
 
-void commit_text_boxes(Widget *w) {
-    for (Widget *child : w->children()) {
-        if (auto *tb = dynamic_cast<TextBox *>(child))
-            if (tb->focused())
-                tb->focus_event(false);
-        commit_text_boxes(child);
-    }
-}
-
 struct TypeSpecsPanel::State {
     CharStyle style, before;
     FontLibrary *fonts = nullptr;
@@ -890,17 +955,21 @@ struct TypeSpecsPanel::State {
     TypePreview *preview = nullptr;
     Label *hint = nullptr, *face_name = nullptr;
     Dropdown *family = nullptr, *weight = nullptr, *slant = nullptr, *caps = nullptr;
-    FloatBox<float> *size_box = nullptr, *leading = nullptr;
-    FloatBox<float> *hscale = nullptr, *tracking = nullptr, *baseline = nullptr;
+    FloatSpin *size_box = nullptr, *leading = nullptr;
+    FloatSpin *hscale = nullptr, *tracking = nullptr, *baseline = nullptr;
     CheckBox *underline = nullptr, *strike = nullptr, *kerning = nullptr, *ligatures = nullptr;
     CheckBox *no_break = nullptr;
-    Button *apply_btn = nullptr;
+    Button *reset_btn = nullptr;
+    /* The style when the selection was chosen (Reset), and the edit hook */
+    CharStyle origin;
+    std::function<void()> commit;
+    bool enabled = true, loading = false, committing = false;
     /* The parts that rearrange with the width (fit_width). */
     ScrollPanel *scroll = nullptr;
     Widget *form = nullptr, *grid = nullptr, *ws = nullptr, *pair = nullptr;
     Widget *checks = nullptr, *actions = nullptr;
     int arranged_for = -1;                // inner width last arranged for
-    std::function<void(const CharStyle &, const CharStyle &)> apply;
+    std::function<void(const CharStyle &, const CharStyle &, const void *)> apply;
     std::vector<std::string> document, slants;
     std::string query;
     std::vector<WeightRow> rows;
@@ -908,11 +977,11 @@ struct TypeSpecsPanel::State {
     bool family_unset = false;
 };
 
-/* The Type window's margin and the gap above the Apply row. */
+/* The Type window's margin and the gap above the Reset row. */
 static const int kTypeMargin = 14, kTypeSpacing = 10;
 
 TypeSpecsPanel::TypeSpecsPanel(Widget *parent, FontLibrary &fonts, FontMenuModel &fonts_menu,
-                               std::function<void(const CharStyle &, const CharStyle &)> apply)
+                               std::function<void(const CharStyle &, const CharStyle &, const void *)> apply)
     : ToolPanel(parent) {
     auto st = std::make_shared<State>();
     m_state = st;
@@ -933,7 +1002,7 @@ TypeSpecsPanel::TypeSpecsPanel(Widget *parent, FontLibrary &fonts, FontMenuModel
     form->set_layout(new BoxLayout(Orientation::Vertical, Alignment::Fill, 0, 8));
 
     st->hint = new Label(form,
-                         "The selection uses more than one style. Apply changes only what you edit.",
+                         "The selection uses more than one style. An edit changes only that field.",
                          "sans", 14);
     st->hint->set_fixed_size(Vector2i(460, 0));
     st->hint->set_color(Color(110, 110, 110, 255));
@@ -947,12 +1016,18 @@ TypeSpecsPanel::TypeSpecsPanel(Widget *parent, FontLibrary &fonts, FontMenuModel
     Widget *grid = new Widget(form);
     st->grid = grid;
 
-    auto refresh_preview = [st] {
+    auto show_preview = [st] {
         std::string name = st->style.family;
         if (!st->style.face.empty())
             name += "   " + st->style.face;
         st->face_name->set_caption(name);
         st->preview->set_style(st->style);
+    };
+    /* An edit: the preview, then the selection */
+    auto refresh_preview = [st, show_preview] {
+        show_preview();
+        if (st->commit)
+            st->commit();
     };
     auto describe_now = [st](int &weight, bool &italic, std::string &width) {
         weight = st->style.bold ? 700 : 400;
@@ -1169,7 +1244,7 @@ TypeSpecsPanel::TypeSpecsPanel(Widget *parent, FontLibrary &fonts, FontMenuModel
     st->pair = pair;
     auto small_metric = [&](const char *label, float value, float step, float lo, float hi,
                             const char *tip,
-                            const std::function<void(float)> &set) -> FloatBox<float> * {
+                            const std::function<void(float)> &set) -> FloatSpin * {
         new Label(pair, label, "sans-bold");
         auto *box = new FloatSpin(pair, value, step, lo, hi);
         box->number_format("%.2f");
@@ -1304,26 +1379,43 @@ TypeSpecsPanel::TypeSpecsPanel(Widget *parent, FontLibrary &fonts, FontMenuModel
         refresh_preview();
     });
 
-    m_refresh = [refill_holder, rebuild_weights, rebuild_slants, refresh_preview] {
+    m_refresh = [refill_holder, rebuild_weights, rebuild_slants, show_preview] {
         (*refill_holder)();
         rebuild_weights();
         rebuild_slants();
-        refresh_preview();
+        show_preview();
+    };
+
+    st->commit = [st] {
+        if (st->loading || !st->enabled || !st->apply || st->style == st->before)
+            return;
+        /* A spin's steps fold into one undo step */
+        const void *merge = nullptr;
+        for (FloatSpin *b : {st->size_box, st->leading, st->hscale, st->tracking, st->baseline})
+            if (b && b->spinning())
+                merge = b;
+        /* Copy first: the edit restyles the selection, which reloads this panel. */
+        const CharStyle before = st->before, after = st->style;
+        st->before = after;
+        st->committing = true;
+        st->apply(before, after, merge);
+        st->committing = false;
+        if (st->reset_btn)
+            st->reset_btn->set_enabled(st->enabled && !(st->style == st->origin));
     };
 
     Widget *actions = new Widget(this);
     st->actions = actions;
     actions->set_layout(new BoxLayout(Orientation::Horizontal, Alignment::Middle, 0, 0));
-    st->apply_btn = new Button(actions, "Apply");
-    st->apply_btn->set_fixed_size(Vector2i(88, 28));
-    st->apply_btn->set_tooltip("Change the selected text");
-    st->apply_btn->set_callback([this] {
-        commit_text_boxes(this);
-        /* Copy first. Apply restyles the selection, which reloads this panel. */
-        const CharStyle before = m_state->before;
-        const CharStyle after = m_state->style;
-        if (m_state->apply)
-            m_state->apply(before, after);
+    st->reset_btn = new Button(actions, "Reset");
+    st->reset_btn->set_fixed_size(Vector2i(88, 28));
+    st->reset_btn->set_tooltip("Put back the type the selection had when you chose it");
+    st->reset_btn->set_enabled(false);
+    st->reset_btn->set_callback([this] {
+        State &s = *m_state;
+        s.style = s.origin;
+        if (s.commit)
+            s.commit();          // the selection reloads the panel
     });
 
     fit_width();
@@ -1332,8 +1424,13 @@ TypeSpecsPanel::TypeSpecsPanel(Widget *parent, FontLibrary &fonts, FontMenuModel
 TypeSpecsPanel::~TypeSpecsPanel() = default;
 
 void TypeSpecsPanel::set_apply_enabled(bool enabled) {
-    if (m_state && m_state->apply_btn)
-        m_state->apply_btn->set_enabled(enabled);
+    if (!m_state || m_state->enabled == enabled)
+        return;
+    m_state->enabled = enabled;
+    set_fields_enabled(m_state->form, enabled);
+    for (Dropdown *d : {m_state->family, m_state->weight, m_state->slant, m_state->caps})
+        d->set_enabled(enabled);
+    m_state->reset_btn->set_enabled(enabled && !(m_state->style == m_state->origin));
 }
 
 /* The widths the fields are designed for. Below kTypeWide the fields keep
@@ -1458,8 +1555,11 @@ void TypeSpecsPanel::load(const CharStyle &style, bool mixed,
         return;
 
     st.updating = true;
+    st.loading = true;
     st.before = style;
     st.style = style;
+    if (!st.committing)
+        st.origin = style;
     st.family_unset = mixed;
     st.document = document_fonts;
     st.query.clear();
@@ -1495,5 +1595,8 @@ void TypeSpecsPanel::load(const CharStyle &style, bool mixed,
     st.updating = false;
     if (m_refresh)
         m_refresh();
+    st.loading = false;
+    if (st.reset_btn)
+        st.reset_btn->set_enabled(st.enabled && !(st.style == st.origin));
     relayout();
 }

@@ -120,11 +120,6 @@ void ask_document_setup(nanogui::Screen *screen, const pagemade::PageSetup &curr
                         size_t page_count,
                         std::function<void(const pagemade::PageSetup &, pagemade::SetupAdjust)> done);
 
-/* Element > Text Frame Options: the selected text blocks' insets and
- * vertical alignment. `done` runs on OK with the new options. */
-void ask_text_frame_options(nanogui::Screen *screen, const pagemade::TextFrame &current,
-                            std::function<void(const pagemade::TextFrame &)> done);
-
 namespace pagemade {
 class FontLibrary;
 class FontMenuModel;
@@ -136,15 +131,17 @@ struct CharStyle;
  * and the panel can be dragged by its title bar or docked beside the pages.
  * It resizes down to 150 px wide: narrower, the fields stack under their
  * labels, and a docked panel scrolls. Floating, its height fits the fields.
- * Apply writes the edited fields onto the current selection; closing drops
- * unapplied edits. `apply` receives the style the panel was loaded from and
- * the edited one. */
+ * Each edit goes onto the selection at once: `apply` receives the style
+ * before the edit and after it, and `merge` (the field being spun, else
+ * null) folds a spin's steps into one undo step. Reset puts back the style
+ * the selection had when it was chosen. */
 class TypeSpecsPanel : public ToolPanel {
 public:
     TypeSpecsPanel(nanogui::Widget *parent, pagemade::FontLibrary &fonts,
                    pagemade::FontMenuModel &fonts_menu,
                    std::function<void(const pagemade::CharStyle &before,
-                                      const pagemade::CharStyle &after)> apply);
+                                      const pagemade::CharStyle &after,
+                                      const void *merge)> apply);
     ~TypeSpecsPanel() override;
 
     std::string title() const override { return "Type"; }
@@ -154,9 +151,10 @@ public:
     bool persist_on_close() const override { return false; }
 
     /* Show `style`. A mixed selection leaves the font caption blank until
-       the user picks one, and says that Apply changes only edited fields. */
+       the user picks one, and says that an edit changes only that field. */
     void load(const pagemade::CharStyle &style, bool mixed,
               const std::vector<std::string> &document_fonts);
+    /* False while there is no text to restyle: the fields are disabled. */
     void set_apply_enabled(bool enabled);
 
     void perform_layout(NVGcontext *ctx) override;
@@ -172,4 +170,31 @@ private:
     std::function<void()> m_refresh;
     /* Arrange the fields for a width (wide, two columns, or stacked). */
     void fit_width();
+};
+
+/* Element > Text Frame Options, as a tool panel beside the Type panel: the
+ * selected text blocks' insets and vertical alignment. Not modal; each edit
+ * goes onto the selection at once (`apply` as in TypeSpecsPanel: before,
+ * after, and the spun field to merge undo steps on). Default sets no
+ * insets and top alignment. */
+class TextFramePanel : public ToolPanel {
+public:
+    TextFramePanel(nanogui::Widget *parent,
+                   std::function<void(const pagemade::TextFrame &before,
+                                      const pagemade::TextFrame &after,
+                                      const void *merge)> apply);
+    ~TextFramePanel() override;
+
+    std::string title() const override { return "Text Frame"; }
+    nanogui::Vector2i floor_size() const override { return nanogui::Vector2i(200, 250); }
+    bool persist_on_close() const override { return false; }
+    int preferred_content_height(NVGcontext *ctx, int width) override;
+
+    /* The first selected block's options; null when no text block is
+     * selected (the fields are disabled). */
+    void load(const pagemade::TextFrame *frame);
+
+private:
+    struct State;
+    std::shared_ptr<State> m_state;
 };

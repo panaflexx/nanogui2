@@ -21,7 +21,7 @@
  * stroke; with nothing selected, the defaults for new shapes) and the
  * type view (font, size, style, leading and baseline). T on the toolbar,
  * and Element > Type Specs…, open the Type panel: weight, style, caps and
- * the other character attributes. Apply writes them onto the selection.
+ * the other character attributes. Each edit goes onto the selection at once.
  * PageMaker's zoom shortcuts: Ctrl/Cmd + 0 fit, 5 50%, 7 75%, 1 actual
  * size, 2 200%, 4 400%, 8 800%.
  *
@@ -935,6 +935,7 @@ public:
         };
         m_view->on_selection_change = [this] {
             sync_palette();
+            sync_frame_panel();
             update_status();
             if (ToolTabsWindow *w = ToolTabsWindow::host_of(m_layers); w && w->visible())
                 w->refresh();            // Move Selection Here follows the selection
@@ -951,6 +952,7 @@ public:
             for (ToolTabsWindow *w : ToolTabsWindow::live())
                 if (w->parent() == this && w->visible())
                     w->refresh();        // a hidden one catches up when shown
+            sync_frame_panel();
             update_title();
         };
         m_view->on_live_change = [this] {
@@ -1060,6 +1062,7 @@ public:
         m_layouts_panel = nullptr;
         m_layers = nullptr;
         m_type_panel = nullptr;
+        m_frame_panel = nullptr;
         if (s_instance == this)
             s_instance = nullptr;
     }
@@ -2039,9 +2042,10 @@ public:
                t.mix_hscale || t.mix_kerning || t.mix_ligatures || t.mix_no_break;
     }
 
-    void apply_type_specs(const CharStyle &before, const CharStyle &after) {
+    void apply_type_specs(const CharStyle &before, const CharStyle &after, const void *merge) {
         if (!m_view || after == before)
             return;
+        m_view->set_undo_merge(merge);
         m_view->apply_type([&](CharStyle &cs) {
             if (after.family != before.family) cs.family = after.family;
             if (after.face != before.face) cs.face = after.face;
@@ -2060,6 +2064,7 @@ public:
             if (after.ligatures != before.ligatures) cs.ligatures = after.ligatures;
             if (after.no_break != before.no_break) cs.no_break = after.no_break;
         });
+        m_view->set_undo_merge(nullptr);
     }
 
     /* The Image Assets window is made once and only hidden when closed, so
@@ -2102,6 +2107,13 @@ public:
             auto it = m_float_size.find(w);
             m_type_float_size = it != m_float_size.end() ? it->second : w->size();
             m_type_panel = nullptr;
+        }
+        if (m_frame_panel && w->contains_panel(m_frame_panel)) {
+            m_frame_dock = w->docked();
+            m_frame_dock_w = w->width();
+            auto it = m_float_size.find(w);
+            m_frame_float_size = it != m_float_size.end() ? it->second : w->size();
+            m_frame_panel = nullptr;
         }
         retire_tool_window(w);
     }
@@ -2445,8 +2457,8 @@ public:
             auto *w = new ToolTabsWindow(this, "Type");
             m_type_panel = w->add_panel<TypeSpecsPanel>(
                 m_fonts, m_font_menu,
-                [this](const CharStyle &before, const CharStyle &after) {
-                    apply_type_specs(before, after);
+                [this](const CharStyle &before, const CharStyle &after, const void *merge) {
+                    apply_type_specs(before, after, merge);
                 });
             if (m_type_float_size.x() > 0)
                 w->set_size(m_type_float_size);
@@ -3089,17 +3101,58 @@ public:
     }
 
     /* Element > Text Frame Options: insets and vertical alignment of the
-     * selected text blocks. */
+     * selected text blocks, in a tool panel like Type's. An edit changes
+     * only that field of each selected block. */
     void text_frame_options_dialog() {
         TextFrame cur;
         if (!m_view->text_frame_options(cur)) {
             set_note("select a text block first");
             return;
         }
-        ask_text_frame_options(this, cur, [this](const TextFrame &tf) {
-            m_view->apply_text_frame_options([&tf](TextFrame &t) { t = tf; });
-            set_note("text frame options set");
-        });
+        ensure_tool_hooks();
+        if (!m_frame_panel) {
+            auto *w = new ToolTabsWindow(this, "Text Frame");
+            m_frame_panel = w->add_panel<TextFramePanel>(
+                [this](const TextFrame &before, const TextFrame &after, const void *merge) {
+                    m_view->set_undo_merge(merge);
+                    m_view->apply_text_frame_options([&](TextFrame &t) {
+                        if (after.inset_left != before.inset_left) t.inset_left = after.inset_left;
+                        if (after.inset_top != before.inset_top) t.inset_top = after.inset_top;
+                        if (after.inset_right != before.inset_right) t.inset_right = after.inset_right;
+                        if (after.inset_bottom != before.inset_bottom) t.inset_bottom = after.inset_bottom;
+                        if (after.valign != before.valign) t.valign = after.valign;
+                    });
+                    m_view->set_undo_merge(nullptr);
+                });
+            w->set_size(m_frame_float_size.x() > 0 ? m_frame_float_size : Vector2i(260, 330));
+            w->center();
+            if (m_frame_dock != DockableWindow::Dock::None) {
+                m_float_size[w] = w->size();
+                w->set_size(Vector2i(std::max(200, m_frame_dock_w), w->height()));
+                w->set_docked(m_frame_dock);
+                apply_docks();
+            } else {
+                w->fit_floating();
+            }
+        }
+        if (ToolTabsWindow *w = ToolTabsWindow::host_of(m_frame_panel)) {
+            if (!w->visible()) {
+                w->set_visible(true);
+                apply_docks();
+            }
+            move_window_to_front(w);
+            w->show_panel(m_frame_panel);
+            w->request_focus();
+        }
+        m_frame_panel->load(&cur);
+    }
+
+    /* The Text Frame panel follows the selection and undo. */
+    void sync_frame_panel() {
+        if (!m_frame_panel)
+            return;
+        TextFrame tf;
+        m_frame_panel->load(m_view->text_frame_options(tf) ? &tf : nullptr);
     }
 
     /* File > PDF Settings: kept with the publication, no export */
@@ -3492,6 +3545,7 @@ private:
     Dropdown        *m_font = nullptr, *m_face = nullptr;
     Button          *m_specs = nullptr;
     TypeSpecsPanel  *m_type_panel = nullptr;
+    TextFramePanel  *m_frame_panel = nullptr;
     ToolTabsWindow   *m_assets = nullptr;     // Image Assets, until a tab is torn off
     bool             m_tool_hooks = false;
     ImageAssetsPanel *m_images_panel = nullptr;
@@ -3506,6 +3560,10 @@ private:
     DockableWindow::Dock m_type_dock = DockableWindow::Dock::None;
     int              m_type_dock_w = 0;
     Vector2i         m_type_float_size{0, 0};
+    /* The Text Frame panel's place, kept across a close like Type's */
+    DockableWindow::Dock m_frame_dock = DockableWindow::Dock::None;
+    int              m_frame_dock_w = 0;
+    Vector2i         m_frame_float_size{0, 0};
     FloatSpin       *m_size = nullptr, *m_leading = nullptr, *m_baseline = nullptr;
     FloatSpin       *m_spacing = nullptr;
     MenuItem        *m_dup_spread = nullptr;

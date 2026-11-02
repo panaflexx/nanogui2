@@ -41,7 +41,8 @@ and its nanovgd renderer. The composer lays out in points and every backend
   the face. A text selection is restyled; a caret changes what is typed
   next; text blocks selected with the pointer restyle the type in those
   blocks; with nothing selected, the fields are the defaults for a new
-  text block. OK in Type Specs changes only the fields that were edited.
+  text block. Type Specs applies each edit at once, only to the field
+  edited; Reset puts back the type the selection had when chosen.
   Line spacing (0.1–3, a paragraph attribute) multiplies each line's slug,
   auto or fixed leading alike.
 - **Paragraph panel**: the ¶ button on the toolbar (or Element > Paragraph…,
@@ -154,8 +155,8 @@ and its nanovgd renderer. The composer lays out in points and every backend
   the file.
 - **Tool windows as tabs** (`tool_tabs.h`): a `ToolTabsWindow` (dockable) holds
   `ToolPanel`s as tabs; only the panel in front refreshes, the others catch up
-  in `shown()`. Image Assets is Images + Layouts. Layers and Type Specs are
-  the same kind of panel, and a tab can be dragged onto another tool window
+  in `shown()`. Image Assets is Images + Layouts. Layers, Type Specs and Text
+  Frame Options (live, with Default) are the same kind of panel, and a tab can be dragged onto another tool window
   or off into its own. Swatch dialogs stay separate. The last section is the
   detail.
 - **Print dialog** (`print_dialog.h`, File > Print and Ctrl+P): printer, copies,
