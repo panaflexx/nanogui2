@@ -238,6 +238,11 @@ bool ScrollPanel::mouse_button_event(const Vector2i& p, int button, bool down, i
 }
 
 bool ScrollPanel::scroll_event(const Vector2i& p, const Vector2f& rel) {
+    /* A focused widget under the pointer (a number field being edited)
+     * takes the wheel before the panel scrolls. */
+    if (Widget *w = find_widget(p); w && w != this && w->focused() &&
+        Widget::scroll_event(p, rel))
+        return true;
     bool used = false;
     if (!m_children.empty() && m_child_preferred_size.y() > m_size.y() && VScrollable() && rel.y() != 0.f) {
         m_vel_y = std::clamp(m_vel_y - rel.y() * (float)m_size.y() * 0.6f, -3500.f, 3500.f);

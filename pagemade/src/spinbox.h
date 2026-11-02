@@ -46,16 +46,26 @@ public:
         return step([&] { return Box::mouse_drag_event(p, rel, button, modifiers); }, false);
     }
     bool scroll_event(const nanogui::Vector2i &p, const nanogui::Vector2f &rel) override {
+        if (this->enabled() && this->spinnable() && this->focused()) {
+            /* The wheel steps the value being typed. A word ("Auto") steps
+             * from blank_value, and the steps fold into one undo step. */
+            if (m_blank_value && !is_number(this->m_value_temp))
+                Box::set_value(m_blank_value());
+            m_spinning = true;
+            const bool handled = Box::scroll_event(p, rel);
+            m_spinning = false;
+            return handled;
+        }
         return step([&] { return Box::scroll_event(p, rel); }, true);
     }
 
 private:
-    bool shows_number() const {
-        const std::string &s = nanogui::TextBox::value();
+    static bool is_number(const std::string &s) {
         char *end = nullptr;
         std::strtod(s.c_str(), &end);
         return end != s.c_str();
     }
+    bool shows_number() const { return is_number(nanogui::TextBox::value()); }
 
     template <typename F> bool step(F &&event, bool starting) {
         if (!this->enabled())

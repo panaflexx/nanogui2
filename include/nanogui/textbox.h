@@ -271,12 +271,25 @@ public:
         if (Widget::scroll_event(p, rel))
             return true;
 
-        if (m_spinnable && !focused()) {
-              int value_delta = (rel.y() > 0) ? 1 : -1;
-              set_value(value() + value_delta*m_value_increment);
-              if (m_callback)
-                  m_callback(m_value);
-              return true;
+        if (m_spinnable) {
+            /* Focused, the wheel steps the text being typed; the edit
+             * stays open with the caret at the end. */
+            Scalar base = value();
+            const bool editing = focused();
+            if (editing && !m_value_temp.empty() && check_format(m_value_temp, m_format)) {
+                std::istringstream iss(m_value_temp);
+                iss >> base;
+            }
+            int value_delta = (rel.y() > 0) ? 1 : -1;
+            set_value(base + value_delta*m_value_increment);
+            if (editing) {
+                m_valid_format = true;
+                m_cursor_pos = kCursorEnd;
+                m_selection_pos = kNoCursor;
+            }
+            if (m_callback)
+                m_callback(m_value);
+            return true;
         }
         return false;
     }
@@ -392,9 +405,20 @@ public:
         if (Widget::scroll_event(p, rel))
             return true;
 
-        if (m_spinnable && !focused()) {
+        if (m_spinnable) {
+            /* Focused, the wheel steps the text being typed; the edit
+             * stays open with the caret at the end. */
+            Scalar base = value();
+            const bool editing = focused();
+            if (editing && !m_value_temp.empty() && check_format(m_value_temp, m_format))
+                base = (Scalar) std::strtod(m_value_temp.c_str(), nullptr);
             int value_delta = (rel.y() > 0) ? 1 : -1;
-            set_value(value() + value_delta*m_value_increment);
+            set_value(base + value_delta*m_value_increment);
+            if (editing) {
+                m_valid_format = true;
+                m_cursor_pos = kCursorEnd;
+                m_selection_pos = kNoCursor;
+            }
             if (m_callback)
                 m_callback(m_value);
             return true;
