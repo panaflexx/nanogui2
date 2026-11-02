@@ -333,17 +333,23 @@ static void test_optical_margins(const FontLibrary &fonts) {
     const std::vector<Frame> wide = {{0, 0, 200, 400}};
 
     /* A justified line ending in a comma lets the comma hang past the right
-     * margin; without the switch the line ends at the margin. */
+     * margin; without the switch the line ends at the margin. Every word
+     * ends in a comma, so the first line, wrapped (not a last line, which
+     * a forced break would make it), ends in one. */
     ParaStyle j;
     j.align = Align::Justify;
     j.optical_margins = true;
-    Composition c = compose(one_para("Hello,\u2028World goes on here", cs, j), wide, fonts);
-    CHECK(c.lines.size() == 2, "a forced break makes two lines (%zu)", c.lines.size());
+    std::string commas;
+    for (int i = 0; i < 40; ++i)
+        commas += "word, ";
+    commas += "end";
+    Composition c = compose(one_para(commas, cs, j), wide, fonts);
+    CHECK(c.lines.size() > 1, "the paragraph wraps (%zu lines)", c.lines.size());
     CHECK(c.lines[0].x_end > c.lines[0].left + c.lines[0].width + 0.5f,
           "the comma hangs past the right margin (%g past)",
           c.lines[0].x_end - (c.lines[0].left + c.lines[0].width));
     j.optical_margins = false;
-    Composition o = compose(one_para("Hello,\u2028World goes on here", cs, j), wide, fonts);
+    Composition o = compose(one_para(commas, cs, j), wide, fonts);
     CHECK(std::fabs(o.lines[0].x_end - (o.lines[0].left + o.lines[0].width)) < 0.5f,
           "off: the justified line ends at the margin");
     CHECK(c.lines[0].x_end > o.lines[0].x_end + 0.5f, "hanging adds the comma's width");
@@ -5855,6 +5861,84 @@ static void test_pdf_import(const FontLibrary &fonts) {
         CHECK(hs.texts[0].runs[0].ink_set && !hs.texts[0].runs[0].ink.empty(), "and outlined on this thread");
     }
     CHECK(!vector_loader().decode((const uint8_t *) "%PDF-1.4\nnothing", 16, &hs, &err), "junk is refused");
+
+    /* Gradients and spot colors: an axial shading painted with sh, a
+     * radial shading pattern as a fill, and a Separation whose tint
+     * transform is a PostScript calculator function */
+    const std::string body2 =
+        "q 0 0 50 50 re W n /Sh1 sh Q\n"
+        "/Pattern cs /P1 scn 50 0 50 50 re f\n"
+        "/CS1 cs 0.5 scn 0 50 50 50 re f\n";
+    const std::string calc = "{ 0 exch dup 0 exch }";   // tint t -> CMYK (0, t, 0, t)
+    std::string p2 = "%PDF-1.4\n";
+    p2 += "1 0 obj << /Type /Catalog /Pages 2 0 R >> endobj\n";
+    p2 += "2 0 obj << /Type /Pages /Kids [3 0 R] /Count 1 >> endobj\n";
+    p2 += "3 0 obj << /Type /Page /Parent 2 0 R /MediaBox [0 0 100 100] /Contents 4 0 R /Resources << "
+          "/Shading << /Sh1 5 0 R >> /Pattern << /P1 << /PatternType 2 /Shading 6 0 R >> >> "
+          "/ColorSpace << /CS1 [/Separation /Spot /DeviceCMYK 7 0 R] >> >> >> endobj\n";
+    p2 += "4 0 obj << /Length " + std::to_string(body2.size()) + " >> stream\n" + body2 + "\nendstream endobj\n";
+    p2 += "5 0 obj << /ShadingType 2 /ColorSpace /DeviceRGB /Coords [0 0 50 0] "
+          "/Function << /FunctionType 2 /Domain [0 1] /C0 [1 0 0] /C1 [0 0 1] /N 1 >> >> endobj\n";
+    p2 += "6 0 obj << /ShadingType 3 /ColorSpace /DeviceGray /Coords [75 25 0 75 25 25] "
+          "/Function << /FunctionType 2 /Domain [0 1] /C0 [1] /C1 [0] /N 1 >> >> endobj\n";
+    p2 += "7 0 obj << /FunctionType 4 /Domain [0 1] /Range [0 1 0 1 0 1 0 1] /Length " +
+          std::to_string(calc.size()) + " >> stream\n" + calc + "\nendstream endobj\n";
+    p2 += "trailer << /Root 1 0 R >>\n%%EOF\n";
+    VectorScene gs;
+    CHECK(vector_loader().decode((const uint8_t *) p2.data(), p2.size(), &gs, &err), "gradients: %s", err.c_str());
+    int linear = 0, radial = 0, spot = 0;
+    for (const VectorShape &sh : gs.shapes) {
+        if (sh.fill.kind == PaintKind::Linear && sh.fill.stops.size() > 2 && sh.clip >= 0 &&
+            sh.fill.stops.front().color.r > 0.99f && sh.fill.stops.back().color.b > 0.99f)
+            ++linear;
+        if (sh.fill.kind == PaintKind::Radial && sh.fill.stops.front().color.r > 0.99f &&
+            sh.fill.stops.back().color.r < 0.01f)
+            ++radial;
+        if (sh.fill.kind == PaintKind::Solid) {
+            const Color want = cmyk_to_rgb({0, 50, 0, 50});
+            spot += std::fabs(sh.fill.color.r - want.r) < 0.01f && std::fabs(sh.fill.color.g - want.g) < 0.01f;
+        }
+    }
+    CHECK(linear == 1, "the axial shading is a red-to-blue gradient in its clip");
+    CHECK(radial == 1, "the radial shading pattern fills the square, white to black");
+    CHECK(spot == 1, "the spot color goes through its PostScript tint transform");
+    CHECK(gs.skipped.empty(), "nothing skipped (%s)", gs.skipped.empty() ? "" : gs.skipped[0].c_str());
+
+    /* Two pages: a red square on the first, a wider blue one on the
+     * second. The placement keeps the page it shows, through save and open. */
+    const std::string pg1 = "1 0 0 rg 0 0 10 10 re f\n", pg2 = "0 0 1 rg 0 0 40 10 re f\n";
+    std::string p3 = "%PDF-1.4\n";
+    p3 += "1 0 obj << /Type /Catalog /Pages 2 0 R >> endobj\n";
+    p3 += "2 0 obj << /Type /Pages /Kids [3 0 R 4 0 R] /Count 2 /MediaBox [0 0 100 50] >> endobj\n";
+    p3 += "3 0 obj << /Type /Page /Parent 2 0 R /Contents 5 0 R >> endobj\n";
+    p3 += "4 0 obj << /Type /Page /Parent 2 0 R /MediaBox [0 0 200 80] /Contents 6 0 R >> endobj\n";
+    p3 += "5 0 obj << /Length " + std::to_string(pg1.size()) + " >> stream\n" + pg1 + "\nendstream endobj\n";
+    p3 += "6 0 obj << /Length " + std::to_string(pg2.size()) + " >> stream\n" + pg2 + "\nendstream endobj\n";
+    p3 += "trailer << /Root 1 0 R >>\n%%EOF\n";
+    const std::vector<uint8_t> two(p3.begin(), p3.end());
+    CHECK(vector_loader().page_count(two.data(), two.size()) == 2, "the PDF has two pages");
+    CHECK(vector_loader().page_count(hand.data(), hand.size()) == 1, "the first test PDF has one");
+    VectorScene second;
+    CHECK(vector_loader().decode(two.data(), two.size(), &second, &err, 1) && near(second.width, 200.f) &&
+              second.shapes.size() == 1 && second.shapes[0].fill.color.b > 0.99f,
+          "page 2 is its own size and drawing (%g)", second.width);
+    CHECK(!vector_loader().decode(two.data(), two.size(), &second, &err, 2), "there is no page 3");
+    PageDoc pdoc;
+    VectorStore pstore;
+    const VectorPlacement pp =
+        place_svg_bytes(pdoc, pstore, two, "two.pdf", "", 0, nullptr, nullptr, SvgPaste::Drawing, nullptr, false, 1);
+    CHECK(pp.ok && pdoc.vectors.size() == 1 && pdoc.vectors[0].page == 1 && near(pdoc.vectors[0].width, 200.f),
+          "the placement shows page 2 (%s)", pp.error.c_str());
+    CHECK(pp.note.find("page 2") != std::string::npos, "the note says which page (%s)", pp.note.c_str());
+    const std::string ppath = "/tmp/pagemade-pdf-page.pagemade";
+    CHECK(save_document(pdoc, fonts, ppath, SaveOptions{false}, &err, nullptr, &pstore), "save: %s", err.c_str());
+    OpenResult popen = open_document(ppath, fonts);
+    CHECK(popen.ok && popen.doc.vectors.size() == 1 && popen.doc.vectors[0].page == 1,
+          "the page is saved with it (%s)", popen.error.c_str());
+    if (popen.ok && !popen.doc.vectors.empty()) {
+        const VectorScene *ps = popen.vectors.scene(popen.doc.vectors[0].id);
+        CHECK(ps && near(ps->width, 200.f), "and opening decodes that page again");
+    }
 }
 
 int main(int argc, char **argv) {

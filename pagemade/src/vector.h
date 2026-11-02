@@ -153,13 +153,22 @@ public:
     virtual bool decode(const uint8_t *data, size_t n, VectorScene *out,
                         std::string *error) const = 0;
     virtual std::vector<std::pair<std::string, std::string>> types() const { return {}; }
+    /* Formats with pages (PDF): how many, and one of them. Others have one. */
+    virtual int page_count(const uint8_t *, size_t) const { return 1; }
+    virtual bool decode_page(const uint8_t *data, size_t n, int page, VectorScene *out,
+                             std::string *error) const {
+        return page == 0 && decode(data, n, out, error);
+    }
 };
 
 class VectorLoader {
 public:
     void add(std::unique_ptr<VectorDecoder> decoder);
     const VectorDecoder *match(const uint8_t *data, size_t n) const;
-    bool decode(const uint8_t *data, size_t n, VectorScene *out, std::string *error) const;
+    /* `page` (0-based) of a format with pages; the only page otherwise */
+    bool decode(const uint8_t *data, size_t n, VectorScene *out, std::string *error, int page = 0) const;
+    /* Pages in the file: 1 for formats without pages, 0 when it isn't readable */
+    int page_count(const uint8_t *data, size_t n) const;
     /* Every decoder's file types (extension, description), for Place. */
     std::vector<std::pair<std::string, std::string>> types() const;
 
@@ -201,7 +210,7 @@ public:
 
     /* Decode, keep the bytes and the scene. False leaves the store
      * unchanged apart from an id already taken by the caller. */
-    bool add(uint32_t id, std::vector<uint8_t> bytes, std::string *error);
+    bool add(uint32_t id, std::vector<uint8_t> bytes, std::string *error, int page = 0);
     /* The same with a scene the caller already decoded. */
     bool add(uint32_t id, std::vector<uint8_t> bytes, VectorScene scene);
     void set_path(uint32_t id, const std::string &path);

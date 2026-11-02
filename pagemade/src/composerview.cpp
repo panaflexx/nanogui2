@@ -2962,7 +2962,7 @@ void ComposerView::paste_items(const Point *at) {
                     id = m_vectors->take_id();
                 else
                     m_vectors->note_id(id);
-                if (!m_vectors->add(id, std::vector<uint8_t>(*v.bytes), nullptr))
+                if (!m_vectors->add(id, std::vector<uint8_t>(*v.bytes), nullptr, v.asset.page))
                     continue;
             }
         }
@@ -4680,6 +4680,7 @@ void ComposerView::place_file(const std::string &path, size_t page, const Point 
         bool svg = !image && vector_loader().match(prefix.data(), prefix.size());
         auto bytes = std::make_shared<std::vector<uint8_t>>();
         std::string err;
+        int pages = 1;
         if (!image) {
             svg = false;
             if (!read_file_bytes(path, bytes.get()))
@@ -4690,8 +4691,10 @@ void ComposerView::place_file(const std::string &path, size_t page, const Point 
                 svg = true;
             else
                 err = "the file isn't a picture or an SVG";
+            if (svg)
+                pages = vector_loader().page_count(bytes->data(), bytes->size());
         }
-        async([gate, view, epoch, path, page, has_at, drop, done, image, svg, bytes, err]() {
+        async([gate, view, epoch, path, page, has_at, drop, done, image, svg, bytes, err, pages]() {
             if (!gate->open || epoch != view->m_doc_epoch)
                 return;
             if (image) {
@@ -4707,40 +4710,50 @@ void ComposerView::place_file(const std::string &path, size_t page, const Point 
                     done(!view->m_vectors && err.empty() ? "graphics aren't available" : err, "");
                 return;
             }
-            std::string error;
-            VectorScene scene;
-            if (!vector_loader().decode(bytes->data(), bytes->size(), &scene, &error)) {
-                if (done)
-                    done(error.empty() ? "couldn't read the SVG" : error, "");
-                return;
-            }
-            view->push_undo();
-            const VectorPlacement placed =
-                place_svg_bytes(view->m_doc, *view->m_vectors, std::vector<uint8_t>(*bytes),
-                                image_leaf_name(path), file_uri(path), page, has_at ? &drop : nullptr,
-                                view->m_images);
-            if (!placed.ok) {
-                view->undo();
-                if (done)
-                    done(placed.error, "");
-                return;
-            }
-            if (page != view->m_page)
-                view->show_page(page);
-            view->m_sel = view->with_groups({placed.item});
-            view->m_edit_story = 0;
-            if (view->m_tool != Tool::Pointer)
-                view->set_tool(Tool::Pointer);
+            /* Placed once the page is known; the document may have closed
+             * while the page was being chosen */
+            auto place = [gate, view, epoch, path, page, has_at, drop, done, bytes](int pdf_page) {
+                if (!gate->open || epoch != view->m_doc_epoch || !view->m_vectors)
+                    return;
+                if (page >= view->m_doc.pages.size() || !view->check_active_layer())
+                    return;
+                view->place_vector_bytes(*bytes, path, page, has_at ? &drop : nullptr, pdf_page, done);
+            };
+            if (pages > 1 && view->on_choose_page)
+                view->on_choose_page(image_leaf_name(path), pages, place);
             else
-                view->selection_changed();
-            if (view->on_document_change)
-                view->on_document_change();
-            if (view->screen())
-                view->screen()->redraw();
-            if (done)
-                done("", placed.note);
+                place(0);
         });
     });
+}
+
+void ComposerView::place_vector_bytes(const std::vector<uint8_t> &bytes, const std::string &path,
+                                      size_t page, const Point *at, int pdf_page,
+                                      const std::function<void(const std::string &, const std::string &)> &done) {
+    push_undo();
+    const VectorPlacement placed =
+        place_svg_bytes(m_doc, *m_vectors, std::vector<uint8_t>(bytes), image_leaf_name(path),
+                        file_uri(path), page, at, m_images, SvgPaste::Drawing, nullptr, false, pdf_page);
+    if (!placed.ok) {
+        undo();
+        if (done)
+            done(placed.error, "");
+        return;
+    }
+    if (page != m_page)
+        show_page(page);
+    m_sel = with_groups({placed.item});
+    m_edit_story = 0;
+    if (m_tool != Tool::Pointer)
+        set_tool(Tool::Pointer);
+    else
+        selection_changed();
+    if (on_document_change)
+        on_document_change();
+    if (screen())
+        screen()->redraw();
+    if (done)
+        done("", placed.note);
 }
 
 bool ComposerView::place_image_file(const std::string &path, std::string *error) {

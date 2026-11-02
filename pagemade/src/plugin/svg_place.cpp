@@ -421,7 +421,7 @@ VectorScene slice_shell(const VectorScene &src) {
 /* The whole graphic as one item. `bytes` are the file that was decoded. */
 VectorPlacement place_whole(PageDoc &doc, VectorStore &store, std::vector<uint8_t> bytes,
                             VectorScene scene, const std::string &name, const std::string &source,
-                            size_t page, const Point *at, bool paste) {
+                            size_t page, const Point *at, bool paste, int pdf_page) {
     VectorPlacement r;
     const uint32_t id = store.take_id();
     const std::string leaf = name.empty() ? std::string("graphic.svg") : name;
@@ -436,6 +436,7 @@ VectorPlacement place_whole(PageDoc &doc, VectorStore &store, std::vector<uint8_
     asset.width = scene.width;
     asset.height = scene.height;
     asset.skipped = scene.skipped;
+    asset.page = pdf_page;
     asset.source_size = store.source_of(id) ? store.source_of(id)->size() : 0;
     asset.hash = 0;
     if (VectorStore::Bytes kept = store.source_of(id))
@@ -455,7 +456,8 @@ VectorPlacement place_whole(PageDoc &doc, VectorStore &store, std::vector<uint8_
     r.item = doc.add_item(page, std::move(it));
     r.items = {r.item};
     r.asset = id;
-    r.note = vector_place_note(leaf, scene.skipped, scene.remarks);
+    r.note = vector_place_note(pdf_page > 0 ? leaf + " page " + std::to_string(pdf_page + 1) : leaf,
+                               scene.skipped, scene.remarks);
     r.ok = true;
     return r;
 }
@@ -1227,7 +1229,7 @@ bool place_as_text(PageDoc &doc, VectorStore &store, ImageStore *images, const F
 VectorPlacement place_svg_bytes(PageDoc &doc, VectorStore &store, std::vector<uint8_t> bytes,
                                 const std::string &name, const std::string &source,
                                 size_t page, const Point *at, ImageStore *images, SvgPaste how,
-                                const FontLibrary *fonts, bool paste) {
+                                const FontLibrary *fonts, bool paste, int pdf_page) {
     VectorPlacement r;
     if (page >= doc.pages.size()) {
         r.error = "no such page";
@@ -1239,7 +1241,7 @@ VectorPlacement place_svg_bytes(PageDoc &doc, VectorStore &store, std::vector<ui
     }
     VectorScene scene;
     const bool read = paste ? decode_svg_paste(bytes.data(), bytes.size(), &scene, &r.error)
-                            : vector_loader().decode(bytes.data(), bytes.size(), &scene, &r.error);
+                            : vector_loader().decode(bytes.data(), bytes.size(), &scene, &r.error, pdf_page);
     if (!read) {
         if (r.error.empty())
             r.error = "couldn't read the SVG";
@@ -1255,7 +1257,8 @@ VectorPlacement place_svg_bytes(PageDoc &doc, VectorStore &store, std::vector<ui
     /* Pictures come out of an SVG as frames; a PDF page stays one placed page */
     if (images && scene.format != "pdf" && place_grouped(doc, store, *images, scene, name, page, at, paste, r))
         return r;
-    return place_whole(doc, store, std::move(bytes), std::move(scene), name, source, page, at, paste);
+    return place_whole(doc, store, std::move(bytes), std::move(scene), name, source, page, at, paste,
+                       pdf_page);
 }
 
 

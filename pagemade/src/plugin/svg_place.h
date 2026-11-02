@@ -52,11 +52,12 @@ struct VectorPlacement {
  * `source` is the file: URI (empty when pasted); a group stores each
  * piece itself and does not keep that link. `fonts` measures Paste as Text.
  * `paste`: the bytes came from the clipboard (decode_svg_paste's units, and
- * fitted to the live area rather than a column). */
+ * fitted to the live area rather than a column). `pdf_page` (from 0) is the
+ * page of a file with pages; the asset keeps it. */
 VectorPlacement place_svg_bytes(PageDoc &doc, VectorStore &store, std::vector<uint8_t> bytes,
                                 const std::string &name, const std::string &source,
                                 size_t page, const Point *at, ImageStore *images = nullptr,
                                 SvgPaste how = SvgPaste::Drawing,
-                                const FontLibrary *fonts = nullptr, bool paste = false);
+                                const FontLibrary *fonts = nullptr, bool paste = false, int pdf_page = 0);
 
 } // namespace pagemade

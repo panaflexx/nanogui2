@@ -51,14 +51,20 @@ std::vector<std::pair<std::string, std::string>> VectorLoader::types() const {
     return out;
 }
 
-bool VectorLoader::decode(const uint8_t *data, size_t n, VectorScene *out, std::string *error) const {
+int VectorLoader::page_count(const uint8_t *data, size_t n) const {
+    const VectorDecoder *d = match(data, n);
+    return d ? d->page_count(data, n) : 0;
+}
+
+bool VectorLoader::decode(const uint8_t *data, size_t n, VectorScene *out, std::string *error,
+                          int page) const {
     const VectorDecoder *d = match(data, n);
     if (!d) {
         if (error)
             *error = "no vector decoder accepted this file";
         return false;
     }
-    return d->decode(data, n, out, error);
+    return page == 0 ? d->decode(data, n, out, error) : d->decode_page(data, n, page, out, error);
 }
 
 VectorLoader &vector_loader() {
@@ -138,14 +144,14 @@ bool VectorStore::add(uint32_t id, std::vector<uint8_t> bytes, VectorScene scene
     return true;
 }
 
-bool VectorStore::add(uint32_t id, std::vector<uint8_t> bytes, std::string *error) {
+bool VectorStore::add(uint32_t id, std::vector<uint8_t> bytes, std::string *error, int page) {
     if (id == 0) {
         if (error)
             *error = "graphic id is missing";
         return false;
     }
     VectorScene scene;
-    if (!vector_loader().decode(bytes.data(), bytes.size(), &scene, error))
+    if (!vector_loader().decode(bytes.data(), bytes.size(), &scene, error, page))
         return false;
     return add(id, std::move(bytes), std::move(scene));
 }

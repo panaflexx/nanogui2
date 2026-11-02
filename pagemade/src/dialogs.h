@@ -99,6 +99,11 @@ void ask_text(nanogui::Screen *screen, const std::string &title, const std::stri
               const std::string &initial, const std::string &hint,
               std::function<void(const std::string &)> done);
 
+/* Placing a file with pages (a PDF): which page. `done` gets it, from 0;
+ * Cancel runs nothing. */
+void ask_place_page(nanogui::Screen *screen, const std::string &name, int count,
+                    std::function<void(int)> done);
+
 /* File > New Document. `done` runs after OK, with the page setup and how
  * many blank pages to create. Cancel runs nothing. */
 struct NewDocument {

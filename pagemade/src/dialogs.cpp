@@ -271,6 +271,27 @@ void ask_text(Screen *screen, const std::string &title, const std::string &label
     box->request_focus();
 }
 
+void ask_place_page(Screen *screen, const std::string &name, int count,
+                    std::function<void(int)> done) {
+    auto *d = new ModalDialog(screen, "Place Page");
+    Label *what = new Label(d->body(), "\u201C" + name + "\u201D has " + std::to_string(count) +
+                            " pages.", "sans", 16);
+    what->set_fixed_size(Vector2i(320, 0));
+    Widget *row = new Widget(d->body());
+    row->set_layout(new BoxLayout(Orientation::Horizontal, Alignment::Middle, 0, 10));
+    new Label(row, "Page:", "sans-bold");
+    IntSpin *box = new IntSpin(row, 1, 1, 1, count);
+    box->set_fixed_size(Vector2i(80, 28));
+    new Label(row, "of " + std::to_string(count), "sans");
+    d->add_button("Cancel", {}, ModalDialog::Role::Cancel);
+    d->add_button("Place", [box, count, done] {
+        if (done)
+            done(std::clamp(box->value(), 1, count) - 1);
+    }, ModalDialog::Role::Default);
+    d->open();
+    box->request_focus();
+}
+
 void ask_save_as(Screen *screen, const std::string &current_path, bool embed_assets,
                  std::function<void(const std::string &, bool)> done) {
     const bool untitled = current_path.empty();

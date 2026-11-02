@@ -9,7 +9,9 @@
  *
  *   paths, fills (nonzero, even-odd), strokes with dashes, caps and joins;
  *   clipping paths; Gray, RGB, CMYK, ICC-based, Cal, Lab, Indexed,
- *   Separation and DeviceN colors (tint functions of type 0, 2 and 3);
+ *   Separation and DeviceN colors (tint functions of every type: sampled,
+ *   exponential, stitching and PostScript calculator); axial and radial
+ *   shadings, painted (sh) or as pattern fills and strokes, as gradients;
  *   constant alpha from graphics states; form XObjects;
  *   image XObjects and inline images: a JPEG goes in as it is, anything
  *   else is decoded to pixels (1 to 16 bits, any of those color spaces,
@@ -22,8 +24,9 @@
  * installed face (Helvetica in Nimbus Sans, Times in Nimbus Roman, and so
  * on); its positions still come from the PDF's widths.
  *
- * Not drawn yet, and named on the scene: shadings and pattern fills, Type 3
- * fonts, JPEG 2000, CCITT and JBIG2 images, soft-mask groups. Plain C++ on
+ * Not drawn yet, and named on the scene: mesh and function shadings,
+ * tiling patterns, Type 3 fonts, JPEG 2000, CCITT and JBIG2 images,
+ * soft-mask groups. Plain C++ on
  * FreeType and miniz: the same on macOS, Linux and Windows.
  */
 #include "plugin/pdf_parse.h"
@@ -40,6 +43,8 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cctype>
+#include <cstdlib>
 #include <cstring>
 #include <functional>
 #include <map>
@@ -473,11 +478,194 @@ public:
             }
             return true;
         }
-        return false;                    // type 4 (PostScript): not yet
+        if (type == 4 && fn.is(Type::Stream)) {
+            std::string code;
+            if (!m_doc.stream_bytes(fn, code))
+                return false;
+            const Object &domain = m_doc.get(fn, "Domain"), &range = m_doc.get(fn, "Range");
+            std::vector<double> stack;
+            for (size_t i = 0; i < in.size(); ++i) {
+                double v = in[i];
+                if (domain.size() >= 2 * i + 2)
+                    v = std::clamp(v, domain[2 * i].as_number(), domain[2 * i + 1].as_number());
+                stack.push_back(v);
+            }
+            if (!run_ps(code, stack))
+                return false;
+            const size_t outs = range.size() / 2;
+            if (outs == 0 || stack.size() < outs)
+                return false;
+            for (size_t o = 0; o < outs; ++o) {
+                const double v = stack[stack.size() - outs + o];
+                out.push_back((float) std::clamp(v, range[2 * o].as_number(), range[2 * o + 1].as_number()));
+            }
+            return true;
+        }
+        return false;
     }
 
 private:
+    /* A type 4 function: PostScript's arithmetic, boolean, stack and
+     * if/ifelse operators on a number stack. Programs are parsed once. */
+    struct PsOp {
+        enum Kind : uint8_t { Num, Op, Block } kind = Num;
+        double value = 0;
+        std::string op;
+        std::vector<PsOp> block;
+    };
+
+    static bool parse_ps(const std::string &code, size_t &i, std::vector<PsOp> &out, int depth) {
+        while (i < code.size()) {
+            const char c = code[i];
+            if (std::isspace((unsigned char) c)) {
+                ++i;
+            } else if (c == '{') {
+                ++i;
+                PsOp b;
+                b.kind = PsOp::Block;
+                if (depth > 32 || !parse_ps(code, i, b.block, depth + 1))
+                    return false;
+                out.push_back(std::move(b));
+            } else if (c == '}') {
+                ++i;
+                return depth > 0;
+            } else {
+                const size_t start = i;
+                while (i < code.size() && !std::isspace((unsigned char) code[i]) && code[i] != '{' && code[i] != '}')
+                    ++i;
+                const std::string tok = code.substr(start, i - start);
+                PsOp op;
+                char *end = nullptr;
+                const double v = std::strtod(tok.c_str(), &end);
+                if (end && *end == '\0' && !tok.empty()) {
+                    op.kind = PsOp::Num;
+                    op.value = v;
+                } else {
+                    op.kind = PsOp::Op;
+                    op.op = tok;
+                }
+                out.push_back(std::move(op));
+            }
+        }
+        return depth == 0;
+    }
+
+    static bool exec_ps(const std::vector<PsOp> &prog, std::vector<double> &st, int depth) {
+        if (depth > 32)
+            return false;
+        auto pop = [&](double &v) {
+            if (st.empty())
+                return false;
+            v = st.back();
+            st.pop_back();
+            return true;
+        };
+        for (size_t k = 0; k < prog.size(); ++k) {
+            const PsOp &p = prog[k];
+            if (p.kind == PsOp::Num) {
+                st.push_back(p.value);
+                continue;
+            }
+            if (p.kind == PsOp::Block) {
+                /* `{a} if` or `{a} {b} ifelse` */
+                if (k + 1 < prog.size() && prog[k + 1].kind == PsOp::Op && prog[k + 1].op == "if") {
+                    double c;
+                    if (!pop(c))
+                        return false;
+                    if (c != 0 && !exec_ps(p.block, st, depth + 1))
+                        return false;
+                    ++k;
+                } else if (k + 2 < prog.size() && prog[k + 1].kind == PsOp::Block &&
+                           prog[k + 2].kind == PsOp::Op && prog[k + 2].op == "ifelse") {
+                    double c;
+                    if (!pop(c))
+                        return false;
+                    if (!exec_ps(c != 0 ? p.block : prog[k + 1].block, st, depth + 1))
+                        return false;
+                    k += 2;
+                } else {
+                    return false;
+                }
+                continue;
+            }
+            const std::string &o = p.op;
+            double a = 0, b = 0;
+            auto two = [&] { return pop(b) && pop(a); };
+            if (o == "add") { if (!two()) return false; st.push_back(a + b); }
+            else if (o == "sub") { if (!two()) return false; st.push_back(a - b); }
+            else if (o == "mul") { if (!two()) return false; st.push_back(a * b); }
+            else if (o == "div") { if (!two()) return false; st.push_back(b != 0 ? a / b : 0); }
+            else if (o == "idiv") { if (!two()) return false; st.push_back((long) b != 0 ? (double) ((long) a / (long) b) : 0); }
+            else if (o == "mod") { if (!two()) return false; st.push_back((long) b != 0 ? (double) ((long) a % (long) b) : 0); }
+            else if (o == "exp") { if (!two()) return false; st.push_back(std::pow(a, b)); }
+            else if (o == "atan") { if (!two()) return false; double d = std::atan2(a, b) * 180.0 / 3.14159265358979; st.push_back(d < 0 ? d + 360 : d); }
+            else if (o == "eq") { if (!two()) return false; st.push_back(a == b); }
+            else if (o == "ne") { if (!two()) return false; st.push_back(a != b); }
+            else if (o == "gt") { if (!two()) return false; st.push_back(a > b); }
+            else if (o == "ge") { if (!two()) return false; st.push_back(a >= b); }
+            else if (o == "lt") { if (!two()) return false; st.push_back(a < b); }
+            else if (o == "le") { if (!two()) return false; st.push_back(a <= b); }
+            else if (o == "and") { if (!two()) return false; st.push_back((double) ((long) a & (long) b)); }
+            else if (o == "or") { if (!two()) return false; st.push_back((double) ((long) a | (long) b)); }
+            else if (o == "xor") { if (!two()) return false; st.push_back((double) ((long) a ^ (long) b)); }
+            else if (o == "bitshift") { if (!two()) return false; long v = (long) a; int sh = (int) b; st.push_back((double) (sh >= 0 ? v << sh : v >> -sh)); }
+            else if (o == "exch") { if (!two()) return false; st.push_back(b); st.push_back(a); }
+            else if (o == "neg") { if (!pop(a)) return false; st.push_back(-a); }
+            else if (o == "abs") { if (!pop(a)) return false; st.push_back(std::fabs(a)); }
+            else if (o == "ceiling") { if (!pop(a)) return false; st.push_back(std::ceil(a)); }
+            else if (o == "floor") { if (!pop(a)) return false; st.push_back(std::floor(a)); }
+            else if (o == "round") { if (!pop(a)) return false; st.push_back(std::floor(a + 0.5)); }
+            else if (o == "truncate" || o == "cvi") { if (!pop(a)) return false; st.push_back(std::trunc(a)); }
+            else if (o == "cvr") { if (!pop(a)) return false; st.push_back(a); }
+            else if (o == "sqrt") { if (!pop(a)) return false; st.push_back(std::sqrt(std::max(0.0, a))); }
+            else if (o == "sin") { if (!pop(a)) return false; st.push_back(std::sin(a * 3.14159265358979 / 180.0)); }
+            else if (o == "cos") { if (!pop(a)) return false; st.push_back(std::cos(a * 3.14159265358979 / 180.0)); }
+            else if (o == "ln") { if (!pop(a)) return false; st.push_back(a > 0 ? std::log(a) : 0); }
+            else if (o == "log") { if (!pop(a)) return false; st.push_back(a > 0 ? std::log10(a) : 0); }
+            else if (o == "not") { if (!pop(a)) return false; st.push_back(a == 0 ? 1 : 0); }
+            else if (o == "true") st.push_back(1);
+            else if (o == "false") st.push_back(0);
+            else if (o == "pop") { if (!pop(a)) return false; }
+            else if (o == "dup") { if (st.empty()) return false; st.push_back(st.back()); }
+            else if (o == "copy") {
+                if (!pop(a)) return false;
+                const size_t n = (size_t) std::max(0.0, a);
+                if (n > st.size()) return false;
+                for (size_t i = st.size() - n, e = st.size(); i < e; ++i) st.push_back(st[i]);
+            } else if (o == "index") {
+                if (!pop(a)) return false;
+                const size_t n = (size_t) std::max(0.0, a);
+                if (n >= st.size()) return false;
+                st.push_back(st[st.size() - 1 - n]);
+            } else if (o == "roll") {
+                if (!two()) return false;
+                const long n = (long) a, j = (long) b;
+                if (n <= 0 || (size_t) n > st.size()) continue;
+                const long shift = ((j % n) + n) % n;
+                std::rotate(st.end() - n, st.end() - shift, st.end());
+            } else {
+                return false;            // an operator a type 4 function can't have
+            }
+        }
+        return true;
+    }
+
+    bool run_ps(const std::string &code, std::vector<double> &stack) const {
+        auto it = m_ps.find(code);
+        if (it == m_ps.end()) {
+            std::vector<PsOp> top;
+            size_t i = 0;
+            if (!parse_ps(code, i, top, 0))
+                top.clear();
+            /* The program is one block: { ... } */
+            std::vector<PsOp> prog = top.size() == 1 && top[0].kind == PsOp::Block ? top[0].block : top;
+            it = m_ps.emplace(code, std::move(prog)).first;
+        }
+        return exec_ps(it->second, stack, 0);
+    }
+
     const pdf::Document &m_doc;
+    mutable std::map<std::string, std::vector<PsOp>> m_ps;
 };
 
 /* ---- Color spaces ------------------------------------------------------------ */
@@ -505,11 +693,49 @@ Color lab_to_rgb(float L, float a, float b, const float *wp) {
 
 /* ---- The interpreter ------------------------------------------------------- */
 
+/* An axial or radial shading, its colors sampled into stops */
+struct Shading {
+    bool radial = false;
+    float x0 = 0, y0 = 0, x1 = 1, y1 = 0, r0 = 0, r1 = 1;
+    std::vector<GradientStop> stops;
+    Transform space;                     // shading space -> the graphic's box
+    bool has_bbox = false;
+    float bbox[4] = {0, 0, 0, 0};
+};
+
+/* The gradient paint for a shading: linear from (x0, y0) to (x1, y1), or
+ * radial with the outer circle as the unit circle and the inner circle's
+ * center as the focal point (an inner radius moves the stops outward) */
+VectorPaint shading_paint(const Shading &sh, float alpha) {
+    VectorPaint p;
+    p.kind = sh.radial ? PaintKind::Radial : PaintKind::Linear;
+    p.stops = sh.stops;
+    p.spread = Spread::Pad;
+    if (!sh.radial) {
+        float dx = sh.x1 - sh.x0, dy = sh.y1 - sh.y0;
+        if (dx == 0.f && dy == 0.f)
+            dx = 1e-3f;
+        p.xf = sh.space * Transform{dx, dy, -dy, dx, sh.x0, sh.y0};
+    } else {
+        const float r1 = std::max(sh.r1, 1e-3f);
+        p.xf = sh.space * Transform{r1, 0, 0, r1, sh.x1, sh.y1};
+        p.focal = {(sh.x0 - sh.x1) / r1, (sh.y0 - sh.y1) / r1};
+        if (sh.r0 > 0.f)
+            for (GradientStop &st : p.stops)
+                st.offset = (sh.r0 + st.offset * (r1 - sh.r0)) / r1;
+    }
+    for (GradientStop &st : p.stops)
+        st.color.a *= alpha;
+    p.color = p.stops.empty() ? Color{0, 0, 0, 1} : p.stops[p.stops.size() / 2].color;
+    return p;
+}
+
 struct GState {
     Transform ctm;
     std::shared_ptr<ColorSpace> fill_cs, stroke_cs;
     Color fill{0, 0, 0, 1}, stroke{0, 0, 0, 1};
     bool fill_pattern = false, stroke_pattern = false;
+    std::shared_ptr<Shading> fill_shading, stroke_shading;   // a shading pattern
     float fill_alpha = 1.f, stroke_alpha = 1.f;
     float line_width = 1.f;
     LineCap cap = LineCap::Butt;
@@ -547,6 +773,7 @@ public:
     void run_page(const Object &page, const Transform &base) {
         GState gs;
         gs.ctm = base;
+        m_base = base;
         gs.fill_cs = gs.stroke_cs = m_device_gray;
         const Object &res = m_doc.get(page, "Resources");
         const Object &contents = m_doc.get(page, "Contents");
@@ -615,14 +842,20 @@ private:
             sh.fill.kind = PaintKind::Solid;
             sh.fill.color = gs.fill;
             sh.fill.color.a *= gs.fill_alpha;
+        } else if (fill && gs.fill_shading) {
+            sh.fill = shading_paint(*gs.fill_shading, gs.fill_alpha);
         } else if (fill) {
-            note(m_scene, "pattern fills");
+            note(m_scene, "tiling patterns");
         }
-        if (stroke && !gs.stroke_pattern) {
+        if (stroke && (!gs.stroke_pattern || gs.stroke_shading)) {
             const float k = scale_of(gs.ctm);
-            sh.stroke.paint.kind = PaintKind::Solid;
-            sh.stroke.paint.color = gs.stroke;
-            sh.stroke.paint.color.a *= gs.stroke_alpha;
+            if (gs.stroke_shading) {
+                sh.stroke.paint = shading_paint(*gs.stroke_shading, gs.stroke_alpha);
+            } else {
+                sh.stroke.paint.kind = PaintKind::Solid;
+                sh.stroke.paint.color = gs.stroke;
+                sh.stroke.paint.color.a *= gs.stroke_alpha;
+            }
             /* A zero width is the thinnest line the device draws */
             sh.stroke.width = gs.line_width > 0.f ? gs.line_width * k : 0.25f;
             sh.stroke.cap = gs.cap;
@@ -632,7 +865,7 @@ private:
                 sh.stroke.dash.push_back(d * k);
             sh.stroke.dash_offset = gs.dash_phase * k;
         } else if (stroke) {
-            note(m_scene, "pattern fills");
+            note(m_scene, "tiling patterns");
         }
         if (sh.fill.none() && sh.stroke.none())
             return;
@@ -773,6 +1006,105 @@ private:
         case ColorSpace::Indexed: return to_rgb(cs, {0});
         default: return {0, 0, 0, 1};
         }
+    }
+
+    /* An axial (2) or radial (3) shading; null for the others, which are named */
+    std::shared_ptr<Shading> shading(const Object &ref, const Object &res, const Transform &space) {
+        const Object &obj = m_doc.resolve(ref);
+        if (!obj.dict)
+            return nullptr;
+        const int type = m_doc.get(obj, "ShadingType").as_int(0);
+        if (type != 2 && type != 3) {
+            note(m_scene, "mesh and function shadings");
+            return nullptr;
+        }
+        auto out = std::make_shared<Shading>();
+        out->radial = type == 3;
+        out->space = space;
+        const Object &c = m_doc.get(obj, "Coords");
+        if (c.size() < (size_t) (out->radial ? 6 : 4))
+            return nullptr;
+        auto n = [&](size_t i) { return (float) m_doc.resolve(c[i]).as_number(); };
+        if (out->radial) {
+            out->x0 = n(0); out->y0 = n(1); out->r0 = n(2);
+            out->x1 = n(3); out->y1 = n(4); out->r1 = n(5);
+        } else {
+            out->x0 = n(0); out->y0 = n(1); out->x1 = n(2); out->y1 = n(3);
+        }
+        const Object &domain = m_doc.get(obj, "Domain");
+        const float t0 = domain.size() >= 2 ? (float) domain[0].as_number(0) : 0.f;
+        const float t1 = domain.size() >= 2 ? (float) domain[1].as_number(1) : 1.f;
+        std::shared_ptr<ColorSpace> cs = color_space(m_doc.get(obj, "ColorSpace"), res);
+        const Object *fn = obj.get("Function");
+        if (!fn)
+            return nullptr;
+        const int samples = 24;          // enough for any gradient a function draws smoothly
+        for (int i = 0; i <= samples; ++i) {
+            const float u = (float) i / (float) samples;
+            std::vector<float> comps;
+            if (!m_fn.eval(*fn, {t0 + (t1 - t0) * u}, comps))
+                continue;
+            out->stops.push_back({u, to_rgb(*cs, comps)});
+        }
+        if (out->stops.size() < 2) {
+            note(m_scene, "color functions");
+            return nullptr;
+        }
+        const Object &bbox = m_doc.get(obj, "BBox");
+        if (bbox.size() == 4) {
+            out->has_bbox = true;
+            for (int i = 0; i < 4; ++i)
+                out->bbox[i] = (float) m_doc.resolve(bbox[(size_t) i]).as_number();
+        }
+        return out;
+    }
+
+    /* sh: the shading fills the clip (its bounding box, when it has one;
+     * else the whole page) */
+    void paint_shading(const GState &gs, const std::string &name, const Object &res) {
+        std::shared_ptr<Shading> sh = shading(m_doc.get(m_doc.get(res, "Shading"), name.c_str()), res, gs.ctm);
+        if (!sh)
+            return;
+        Path area;
+        if (sh->has_bbox) {
+            const float *b = sh->bbox;
+            const Point p[4] = {gs.ctm.apply({b[0], b[1]}), gs.ctm.apply({b[2], b[1]}),
+                                gs.ctm.apply({b[2], b[3]}), gs.ctm.apply({b[0], b[3]})};
+            area = {{PathCmd::Move, 0, 0, 0, 0, p[0].x, p[0].y}, {PathCmd::Line, 0, 0, 0, 0, p[1].x, p[1].y},
+                    {PathCmd::Line, 0, 0, 0, 0, p[2].x, p[2].y}, {PathCmd::Line, 0, 0, 0, 0, p[3].x, p[3].y},
+                    {PathCmd::Close, 0, 0, 0, 0, 0, 0}};
+        } else {
+            const float w = m_scene.width, h = m_scene.height;
+            area = {{PathCmd::Move, 0, 0, 0, 0, 0, 0}, {PathCmd::Line, 0, 0, 0, 0, w, 0},
+                    {PathCmd::Line, 0, 0, 0, 0, w, h}, {PathCmd::Line, 0, 0, 0, 0, 0, h},
+                    {PathCmd::Close, 0, 0, 0, 0, 0, 0}};
+        }
+        VectorShape shape;
+        shape.path = std::move(area);
+        shape.clip = gs.clip;
+        shape.fill = shading_paint(*sh, gs.fill_alpha);
+        shape.windings = std::make_shared<const std::vector<uint8_t>>(fill_windings(shape.path));
+        m_scene.order.push_back({VectorSlot::Shape, (int) m_scene.shapes.size()});
+        m_scene.shapes.push_back(std::move(shape));
+    }
+
+    /* A pattern color (scn /P0): a shading pattern paints with its
+     * gradient, in the page's default space under the pattern's matrix */
+    std::shared_ptr<Shading> pattern_shading(const std::string &name, const Object &res) {
+        const Object &pat = m_doc.get(m_doc.get(res, "Pattern"), name.c_str());
+        if (!pat.dict)
+            return nullptr;
+        if (m_doc.get(pat, "PatternType").as_int(0) != 2) {
+            note(m_scene, "tiling patterns");
+            return nullptr;
+        }
+        Transform matrix;
+        const Object &m = m_doc.get(pat, "Matrix");
+        if (m.size() == 6)
+            matrix = {(float) m[0].as_number(), (float) m[1].as_number(), (float) m[2].as_number(),
+                      (float) m[3].as_number(), (float) m[4].as_number(), (float) m[5].as_number()};
+        const Object *sh = pat.get("Shading");
+        return sh ? shading(*sh, res, m_base * matrix) : nullptr;
     }
 
     /* ---- Fonts ---- */
@@ -1342,6 +1674,8 @@ private:
             std::shared_ptr<ColorSpace> &cs = fill ? gs.fill_cs : gs.stroke_cs;
             if (cs->kind == ColorSpace::Pattern) {
                 (fill ? gs.fill_pattern : gs.stroke_pattern) = true;
+                (fill ? gs.fill_shading : gs.stroke_shading) =
+                    !args.empty() && args.back().is(Type::Name) ? pattern_shading(args.back().str, res) : nullptr;
                 return;
             }
             std::vector<float> c;
@@ -1350,6 +1684,7 @@ private:
                     c.push_back((float) a.number);
             (fill ? gs.fill : gs.stroke) = to_rgb(*cs, c);
             (fill ? gs.fill_pattern : gs.stroke_pattern) = false;
+            (fill ? gs.fill_shading : gs.stroke_shading) = nullptr;
         };
         Object o;
         while (lx.next(o)) {
@@ -1448,8 +1783,8 @@ private:
                     (fill ? gs.fill : gs.stroke) = initial(*cs);
             } else if (op == "sc" || op == "scn" || op == "SC" || op == "SCN") {
                 set_color(op == "sc" || op == "scn");
-            } else if (op == "sh") {
-                note(m_scene, "shadings");
+            } else if (op == "sh" && !args.empty() && args.back().is(Type::Name)) {
+                paint_shading(gs, args.back().str, res);
             } else if (op == "Do" && !args.empty() && args.back().is(Type::Name)) {
                 do_xobject(gs, args.back().str, res, depth);
             } else if (op == "BI") {
@@ -1568,6 +1903,7 @@ private:
     std::shared_ptr<ColorSpace> m_device_gray, m_device_rgb, m_device_cmyk;
     Path m_path;
     Point m_cur{0, 0}, m_start{0, 0};
+    Transform m_base;                    // the page's default space -> the box (patterns use it)
     Transform m_tm, m_tlm;
 };
 
@@ -1626,6 +1962,14 @@ public:
         return {{"pdf", "PDF"}};
     }
     bool decode(const uint8_t *data, size_t n, VectorScene *out, std::string *error) const override {
+        return decode_page(data, n, 0, out, error);
+    }
+    int page_count(const uint8_t *data, size_t n) const override {
+        pdf::Document doc;
+        return doc.open(data, n, nullptr) ? doc.page_count() : 0;
+    }
+    bool decode_page(const uint8_t *data, size_t n, int index, VectorScene *out,
+                     std::string *error) const override {
         if (!out)
             return false;
         *out = VectorScene();
@@ -1633,8 +1977,12 @@ public:
         pdf::Document doc;
         if (!doc.open(data, n, error))
             return false;
-        /* The first page; a page chooser will pick another */
-        const Object &page = doc.page(0);
+        if (index < 0 || index >= doc.page_count()) {
+            if (error)
+                *error = "the PDF has no page " + std::to_string(index + 1);
+            return false;
+        }
+        const Object &page = doc.page(index);
         Transform base;
         if (!page_frame(doc, page, out->width, out->height, base)) {
             if (error)

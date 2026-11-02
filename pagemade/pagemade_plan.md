@@ -184,15 +184,18 @@ and its nanovgd renderer. The composer lays out in points and every backend
   graphic, through Place, drag and drop, and reopening. Cross-reference
   tables and streams, object streams, /Prev updates, a scan when the xref is
   damaged; Flate, LZW, ASCIIHex, ASCII85, RunLength and predictors. Paths,
-  clips, dashes, every common color space (tint functions 0, 2, 3), constant
+  clips, dashes, every common color space (tint functions 0, 2, 3, 4), axial
+  and radial shadings (sh and shading patterns) as gradients, constant
   alpha, forms, image XObjects and inline images (JPEG passed through, the
   rest to PNG, stencil and soft masks), text from embedded TrueType, CFF
   and Type 1 fonts as outlines through FreeType. The standard 14, not
   embedded, are drawn in the installed URW faces at the PDF's widths. Plain
-  C++ on FreeType and miniz on every platform.
-  Next: a page chooser for multi-page files; PDF export that embeds the
-  placed page as a form (text stays text); shadings and patterns; type 4
-  functions; Type 3 fonts; encrypted files; JPEG 2000.
+  C++ on FreeType and miniz on every platform. Placing a PDF with more
+  than one page asks which (Place Page); the page is saved with the
+  placement ("page" on the vector asset) and decoded again on open.
+  Next: PDF export that embeds the placed page as a form (text stays
+  text); mesh and function shadings; tiling patterns; Type 3 fonts;
+  encrypted files; JPEG 2000.
 
 ## Next, in order
 
@@ -204,8 +207,8 @@ and its nanovgd renderer. The composer lays out in points and every backend
 - Small text on screen: a nanovgd entry point that draws cached glyph bitmaps by
   glyph id at exact composed positions; cache drawn pages as display lists.
 - Paragraph-at-a-time (Knuth-Plass) composer; right-to-left text.
-- Groups; master pages; spreads or a continuous page view (the view shows one
-  page at a time). An asset library that moves pictures between documents and
+- Master pages. (Groups, and the one-page, spread and all-pages views,
+  are done.) An asset library that moves pictures between documents and
   pages; the publication's asset table is the record it will move.
 - SVG still to come: a gradient drawn as its real stops, and clipping a shape
   to a path. The frame stays a rectangle until then.

@@ -320,6 +320,7 @@ struct VectorAsset {
     std::string source;
     float width = 0, height = 0;         // the graphic's box, points
     std::vector<std::string> skipped;
+    int page = 0;                        // which page of a file with pages (PDF), from 0
     uint64_t source_size = 0;
     int64_t source_mtime = 0;
     uint64_t hash = 0;

@@ -503,6 +503,10 @@ public:
     void mark_clean();                 // the document was just saved
     /* Called whenever the document changes, is saved or is replaced. */
     std::function<void()> on_document_change;
+    /* Placing a file with more than one page (a PDF): ask which, then call
+     * `chosen` with it (from 0). Unset places the first page. */
+    std::function<void(const std::string &name, int count, std::function<void(int)> chosen)>
+        on_choose_page;
     /* A short message for the status bar (a refused edit). */
     std::function<void(const std::string &)> on_note;
 
@@ -578,6 +582,11 @@ private:
     void drop_uneditable();
     /* New items can go on the active layer; otherwise says why (on_note). */
     bool check_active_layer();
+    /* Place SVG or PDF bytes read from `path` (`pdf_page` of a PDF) as
+     * place_file does, on the UI thread */
+    void place_vector_bytes(const std::vector<uint8_t> &bytes, const std::string &path, size_t page,
+                            const pagemade::Point *at, int pdf_page,
+                            const std::function<void(const std::string &, const std::string &)> &done);
     /* `ids` and everything grouped with them, without repeats. */
     std::vector<pagemade::ItemId> with_groups(const std::vector<pagemade::ItemId> &ids) const;
     void selection_changed();

@@ -997,6 +997,11 @@ public:
             }
         };
 
+        m_view->on_choose_page = [this](const std::string &name, int count,
+                                        std::function<void(int)> chosen) {
+            ask_place_page(this, name, count, std::move(chosen));
+        };
+
         m_pages = new PageIconStrip(window, m_view);
         m_pages->on_view = [this] { fit_page(); };
         m_pages->on_turned = [this] {

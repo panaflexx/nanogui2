@@ -628,6 +628,8 @@ std::string make_json(const PageDoc &doc, const SaveOptions &opts, const std::ve
             j.key("source").value(a.source);
         j.key("width").value(a.width);
         j.key("height").value(a.height);
+        if (a.page > 0)
+            j.key("page").value(a.page);
         if (!a.skipped.empty()) {
             j.key("skipped").begin_array();
             for (const std::string &s : a.skipped)
@@ -1431,6 +1433,8 @@ OpenResult open_document(const std::string &path, const FontLibrary &installed,
         double wh = 0;
         if (number(field(a, "width"), wh)) asset.width = (float) wh;
         if (number(field(a, "height"), wh)) asset.height = (float) wh;
+        get(a, "page", asset.page);
+        asset.page = std::max(0, asset.page);
         if (const DictValue *sk = field(a, "skipped"))
             for (size_t k = 0; k < count(sk); ++k)
                 if (const DictValue *v = at(sk, k); v && v->type == DICT_STRING && v->string_value)
@@ -1520,7 +1524,7 @@ OpenResult open_document(const std::string &path, const FontLibrary &installed,
             continue;
         }
         std::string err;
-        if (r.vectors.add(asset.id, std::move(bytes), &err)) {
+        if (r.vectors.add(asset.id, std::move(bytes), &err, asset.page)) {
             if (const VectorScene *scene = r.vectors.scene(asset.id)) {
                 asset.width = scene->width;
                 asset.height = scene->height;
