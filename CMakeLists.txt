@@ -1053,7 +1053,7 @@ if (NANOGUI_BUILD_EXAMPLES)
         pagemade/src/composerview.cpp
         pagemade/src/render_nvg.cpp
         pagemade/src/raster_nvg.cpp
-        pagemade/src/pdf.cpp
+        pagemade/src/plugin/pdf_export.cpp
         pagemade/src/default_fonts.cpp
         pagemade/src/system_fonts.cpp
         pagemade/src/font_menu.cpp
@@ -1067,13 +1067,17 @@ if (NANOGUI_BUILD_EXAMPLES)
         pagemade/src/image_color.cpp
         pagemade/src/vector.cpp
         pagemade/src/plugin/xml.cpp
-        pagemade/src/plugin/svg.cpp
+        pagemade/src/plugin/svg_import.cpp
+        pagemade/src/plugin/svg_place.cpp
+        pagemade/src/plugin/plugin.cpp
+        pagemade/src/plugin/pdf_parse.cpp
+        pagemade/src/plugin/pdf_import.cpp
         pagemade/src/setup_adjust.cpp
         pagemade/src/dialogs.cpp
         pagemade/src/image_assets.cpp
         pagemade/src/layout_templates.cpp
         pagemade/src/layouts_panel.cpp
-        pagemade/src/svg_export.cpp
+        pagemade/src/plugin/svg_export.cpp
         pagemade/src/tool_tabs.cpp
         pagemade/src/dock_window.cpp
         pagemade/src/layers_panel.cpp
@@ -1099,7 +1103,11 @@ if (NANOGUI_BUILD_EXAMPLES)
         pagemade/src/image_color.cpp
         pagemade/src/vector.cpp
         pagemade/src/plugin/xml.cpp
-        pagemade/src/plugin/svg.cpp
+        pagemade/src/plugin/svg_import.cpp
+        pagemade/src/plugin/svg_place.cpp
+        pagemade/src/plugin/plugin.cpp
+        pagemade/src/plugin/pdf_parse.cpp
+        pagemade/src/plugin/pdf_import.cpp
         pagemade/src/setup_adjust.cpp
         pagemade/src/image_stb.cpp
         pagemade/src/swatch_library.cpp
@@ -1107,8 +1115,8 @@ if (NANOGUI_BUILD_EXAMPLES)
     add_executable(pagemade_compose_test
         pagemade/src/compose_test.cpp
         pagemade/src/layout_templates.cpp
-        pagemade/src/svg_export.cpp
-        pagemade/src/pdf.cpp
+        pagemade/src/plugin/svg_export.cpp
+        pagemade/src/plugin/pdf_export.cpp
         pagemade/src/default_fonts.cpp
         pagemade/src/system_fonts.cpp
         pagemade/src/font_menu.cpp
@@ -1121,7 +1129,11 @@ if (NANOGUI_BUILD_EXAMPLES)
         pagemade/src/image_color.cpp
         pagemade/src/vector.cpp
         pagemade/src/plugin/xml.cpp
-        pagemade/src/plugin/svg.cpp
+        pagemade/src/plugin/svg_import.cpp
+        pagemade/src/plugin/svg_place.cpp
+        pagemade/src/plugin/plugin.cpp
+        pagemade/src/plugin/pdf_parse.cpp
+        pagemade/src/plugin/pdf_import.cpp
         pagemade/src/setup_adjust.cpp
         pagemade/src/image_stb.cpp
         pagemade/src/swatch_library.cpp
@@ -1141,7 +1153,11 @@ if (NANOGUI_BUILD_EXAMPLES)
         pagemade/src/image_color.cpp
         pagemade/src/vector.cpp
         pagemade/src/plugin/xml.cpp
-        pagemade/src/plugin/svg.cpp
+        pagemade/src/plugin/svg_import.cpp
+        pagemade/src/plugin/svg_place.cpp
+        pagemade/src/plugin/plugin.cpp
+        pagemade/src/plugin/pdf_parse.cpp
+        pagemade/src/plugin/pdf_import.cpp
         pagemade/src/image_stb.cpp
         pagemade/src/sample.cpp)
     foreach(_t pagemade_app pagemade_compose_test pagemade_book pagemade_render_bench)
@@ -1152,6 +1168,11 @@ if (NANOGUI_BUILD_EXAMPLES)
           ${CMAKE_CURRENT_SOURCE_DIR}
           ${CMAKE_CURRENT_SOURCE_DIR}/include
           ${CMAKE_CURRENT_SOURCE_DIR}/ext/nanovgd/src)
+      # FreeType reads the fonts embedded in placed PDFs (plugin/pdf_import.cpp)
+      if (FREETYPE_INCLUDE_DIRS)
+        target_include_directories(${_t} PRIVATE ${FREETYPE_INCLUDE_DIRS})
+      endif()
+      target_link_libraries(${_t} ${FREETYPE_LIBRARIES})
       target_compile_definitions(${_t} PRIVATE
           PAGEMADE_RESOURCE_DIR="${CMAKE_CURRENT_SOURCE_DIR}/resources"
           PAGEMADE_DATA_DIR="${CMAKE_CURRENT_SOURCE_DIR}/pagemade/resources")
