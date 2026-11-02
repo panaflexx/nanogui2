@@ -246,10 +246,20 @@ void ComposerView::flush_deferred() {
 }
 
 Bounds ComposerView::selection_bounds() const {
+    /* The selection can span pages: each item's box in the current page's
+     * coordinates */
     Bounds b;
-    for (ItemId id : m_sel)
-        if (const Item *it = m_doc.find_item(id))
-            b.add(item_bounds(*it));
+    for (ItemId id : m_sel) {
+        size_t pg = 0;
+        if (const Item *it = m_doc.find_item(id, &pg)) {
+            const Bounds ib = item_bounds(*it);
+            if (ib.empty())
+                continue;
+            const Point d = page_shift(pg, m_page);
+            b.add(Point{ib.x0 + d.x, ib.y0 + d.y});
+            b.add(Point{ib.x1 + d.x, ib.y1 + d.y});
+        }
+    }
     return b;
 }
 
@@ -466,6 +476,23 @@ void ComposerView::set_page_view(PageView view) {
     if (m_page_view == view)
         return;
     m_page_view = view;
+    /* Selected items on pages no longer in view leave the selection: an
+     * edit must not reach what can't be seen */
+    std::vector<PageSlot> slots;
+    float aw, ah;
+    arrangement(m_doc, m_page, m_page_view, slots, aw, ah);
+    const size_t before = m_sel.size();
+    m_sel.erase(std::remove_if(m_sel.begin(), m_sel.end(), [&](ItemId id) {
+        size_t pg = 0;
+        if (!m_doc.find_item(id, &pg))
+            return true;
+        for (const PageSlot &sl : slots)
+            if (sl.index == pg)
+                return false;
+        return true;
+    }), m_sel.end());
+    if (m_sel.size() != before)
+        selection_changed();
     if (screen()) {
         screen()->perform_layout();
         screen()->redraw();
@@ -533,7 +560,7 @@ Point ComposerView::page_point_from_local(const Vector2f &local_in) const {
     if (m_pointer_down)
         page = m_gesture_page;
     else if (!m_placing)
-        page = page_under(slots, local.x(), local.y(), m_doc.setup.width, m_doc.setup.height, m_page);
+        page = item_page_under(slots, local);
     if (!m_doc.pages.empty() && page >= m_doc.pages.size())
         page = m_doc.pages.size() - 1;
     m_point_page = page;
@@ -545,6 +572,77 @@ Point ComposerView::page_point_from_local(const Vector2f &local_in) const {
             break;
         }
     return {local.x() - sx, local.y() - sy};
+}
+
+/* The page an event at `local` (arrangement space) belongs to. An item can
+ * hang off its page onto the pasteboard, even over another page: the item
+ * under the pointer, topmost as drawn (later pages paint over earlier
+ * ones), names its page. Otherwise the page under the pointer, or the
+ * nearest. Tools that draw new items only use the paper. */
+size_t ComposerView::item_page_under(const std::vector<PageSlot> &slots, const Vector2f &local) const {
+    const size_t paper = page_under(slots, local.x(), local.y(), m_doc.setup.width, m_doc.setup.height, m_page);
+    const bool picks = m_tool == Tool::Pointer || m_tool == Tool::Crop || m_tool == Tool::Rotate ||
+                       m_tool == Tool::Text;
+    if (!picks || slots.size() < 2)
+        return paper;
+    const float slack = (kHandlePx + kTabHPx) / zoom();
+    for (auto sl = slots.rbegin(); sl != slots.rend(); ++sl) {
+        if (sl->index >= m_doc.pages.size())
+            continue;
+        const Point pt{local.x() - sl->x, local.y() - sl->y};
+        /* Cheap first: is the point near any item's box on that page? */
+        bool near = false;
+        for (const Item &it : m_doc.pages[sl->index].items) {
+            const Bounds b = item_bounds(it);
+            if (pt.x >= b.x0 - slack && pt.x <= b.x1 + slack && pt.y >= b.y0 - slack &&
+                pt.y <= b.y1 + slack) {
+                near = true;
+                break;
+            }
+        }
+        if (!near)
+            continue;
+        const bool hit = m_tool == Tool::Text ? text_frame_at(pt, sl->index) != 0
+                                              : hit_test(pt, sl->index).item != 0;
+        if (hit)
+            return sl->index;
+    }
+    return paper;
+}
+
+/* Where page `from`'s origin sits in page `to`'s coordinates (0, 0 when
+ * either is not in the arrangement). */
+Point ComposerView::page_shift(size_t from, size_t to) const {
+    if (from == to)
+        return {0.f, 0.f};
+    std::vector<PageSlot> slots;
+    float aw, ah;
+    arrangement(m_doc, m_page, m_page_view, slots, aw, ah);
+    const PageSlot *a = nullptr, *b = nullptr;
+    for (const PageSlot &sl : slots) {
+        if (sl.index == from) a = &sl;
+        if (sl.index == to) b = &sl;
+    }
+    if (!a || !b)
+        return {0.f, 0.f};
+    return {a->x - b->x, a->y - b->y};
+}
+
+void ComposerView::turn_page_keeping_selection(size_t i) {
+    if (i >= m_doc.pages.size() || i == m_page)
+        return;
+    end_placement(false);
+    if (m_creating)
+        finish_creation();
+    m_page = i;
+    m_edit_story = 0;
+    m_typing_on = false;
+    m_burst_open = false;
+    m_selecting = false;
+    if (on_page_change)
+        on_page_change();
+    if (screen())
+        screen()->redraw();
 }
 
 /* ---- Snapping ----------------------------------------------------------- */
@@ -890,8 +988,9 @@ ComposerView::Hit ComposerView::hit_test(const Point &pt, size_t page) const {
     }
 
     for (auto id = m_sel.rbegin(); id != m_sel.rend(); ++id) {
-        const Item *it = m_doc.find_item(*id);
-        if (!it)
+        size_t on = 0;
+        const Item *it = m_doc.find_item(*id, &on);
+        if (!it || on != page)           // the selection can span pages
             continue;
         const Point l = it->xf.inverse().apply(pt);
         const float s = item_scale(it->xf);
@@ -1015,7 +1114,7 @@ bool ComposerView::mouse_button_event(const Vector2i &p, int button, bool down, 
         if (!down || !on_context_menu)
             return true;
         if (m_point_page != m_page)
-            show_page(m_point_page);
+            turn_page_keeping_selection(m_point_page);
         const Point at = page_point_from_screen(screen()->mouse_pos());
         m_context_pt = at;
         if (!editing()) {
@@ -1055,10 +1154,22 @@ bool ComposerView::mouse_button_event(const Vector2i &p, int button, bool down, 
             box.add(m_marquee_end);
             if (!m_marquee_add)
                 m_sel.clear();
-            for (const Item &it : items())
-                if (box.contains(item_bounds(it)) && !is_selected(it.id) &&
-                    m_doc.item_editable(it))
-                    m_sel.push_back(it.id);
+            /* Every page in view: the marquee can cross onto the next */
+            std::vector<PageSlot> slots;
+            float aw, ah;
+            arrangement(m_doc, m_page, m_page_view, slots, aw, ah);
+            for (const PageSlot &sl : slots) {
+                if (sl.index >= m_doc.pages.size())
+                    continue;
+                const Point d = page_shift(m_page, sl.index);
+                Bounds there;
+                there.add(Point{box.x0 + d.x, box.y0 + d.y});
+                there.add(Point{box.x1 + d.x, box.y1 + d.y});
+                for (const Item &it : m_doc.pages[sl.index].items)
+                    if (there.contains(item_bounds(it)) && !is_selected(it.id) &&
+                        m_doc.item_editable(it))
+                        m_sel.push_back(it.id);
+            }
             m_sel = with_groups(m_sel);  // a group comes whole
             m_marquee = false;
             selection_changed();
@@ -1103,7 +1214,7 @@ bool ComposerView::mouse_button_event(const Vector2i &p, int button, bool down, 
     m_gesture_page = m_point_page;
     m_pointer_down = true;
     if (m_gesture_page != m_page)
-        show_page(m_gesture_page);
+        turn_page_keeping_selection(m_gesture_page);   // a selection can span pages
     m_burst_open = false;                // any click ends a typing or nudging run
     m_merged_key = nullptr;              // ... or a palette spin
     const bool shift = (modifiers & GLFW_MOD_SHIFT) != 0;
@@ -3197,9 +3308,10 @@ void ComposerView::arrange(Stack how) {
     push_undo();
     /* Stacking order on the page, so a group keeps its own order. */
     std::vector<ItemId> order;
-    for (const Item &it : items())
-        if (is_selected(it.id))
-            order.push_back(it.id);
+    for (const Page &pg : m_doc.pages)  // the selection can span pages
+        for (const Item &it : pg.items)
+            if (is_selected(it.id))
+                order.push_back(it.id);
     switch (how) {
     case Stack::Front:
         for (ItemId id : order)

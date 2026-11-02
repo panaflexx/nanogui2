@@ -562,6 +562,15 @@ private:
      * started on while the button is down. */
     pagemade::Point page_point_from_local(const nanogui::Vector2f &local) const;
     float zoom() const;
+    /* The page an event at `local` (arrangement space) belongs to: the page
+     * of the item under it, topmost as drawn, else the page under it. */
+    size_t item_page_under(const std::vector<pagemade::PageSlot> &slots,
+                           const nanogui::Vector2f &local) const;
+    /* Page `from`'s origin in page `to`'s coordinates. */
+    pagemade::Point page_shift(size_t from, size_t to) const;
+    /* Make page `i` current without clearing the selection (a click on
+     * another page in a spread or the all-pages view). */
+    void turn_page_keeping_selection(size_t i);
     /* Handles of selected items first, then items top to bottom. */
     Hit hit_test(const pagemade::Point &pt, size_t page) const;
     /* Topmost text block under pt (0 = none). */
