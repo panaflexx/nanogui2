@@ -2006,14 +2006,23 @@ void Screen::update_focus(Widget* widget) {
 
 bool Screen::zoom_callback_event(double magnification, const Vector2i& pos) {
     // First try the focused widget / path
+    bool handled = false;
     if (!m_focus_path.empty()) {
         for (auto it = m_focus_path.rbegin(); it != m_focus_path.rend(); ++it) {
-            if ((*it)->zoom_event(magnification, pos))
-                return true;
+            if ((*it)->zoom_event(magnification, pos)) {
+                handled = true;
+                break;
+            }
         }
     }
     // Fall back to normal widget traversal
-    return Widget::zoom_event(magnification, pos);
+    if (!handled)
+        handled = Widget::zoom_event(magnification, pos);
+    /* Pinch is not a GLFW scroll callback, so nothing else sets m_redraw.
+     * redraw() also posts an empty event, which wakes glfwWaitEvents. */
+    if (handled)
+        redraw();
+    return handled;
 }
 
 void Screen::dispose_window(Window* window) {

@@ -1,10 +1,15 @@
 # Copy non-system dylibs into $APP/Contents/Frameworks and rewrite their
-# install names to @rpath so nmail.app runs without Homebrew prefixes.
+# install names to @rpath so an .app runs without Homebrew prefixes.
 #
 # Invoked as a POST_BUILD -P script:
 #   cmake -DAPP=<bundle dir> -DEXE=<binary> -DSEARCH_DIRS=<lib dir> -P ...
 #
-# APP / EXE / SEARCH_DIRS are required (passed with -D on the command line).
+# APP / EXE are required. SEARCH_DIRS is a colon-separated list of directories
+# to look in when a dependency is @rpath or otherwise not an absolute path.
+# EXTRA_BINS is an optional colon-separated list of extra dylibs to bundle
+# (libheif codec plugins are dlopen'd and do not appear on the link line).
+# PLUGIN_SUBDIR, if set, moves those extra dylibs into
+# Contents/Frameworks/<PLUGIN_SUBDIR> after their dependencies are rewritten.
 
 if (NOT APP OR NOT EXE)
   message(FATAL_ERROR "macos_bundle_dylibs.cmake needs -DAPP= and -DEXE=")
@@ -64,6 +69,28 @@ function(_otool_deps bin out)
   set(${out} "${_deps}" PARENT_SCOPE)
 endfunction()
 
+# LC_RPATH entries. Homebrew dylibs often depend on @rpath/libfoo.dylib and
+# record /opt/homebrew/lib as an rpath rather than an absolute dependency.
+function(_otool_rpaths bin out)
+  execute_process(COMMAND otool -l "${bin}"
+    OUTPUT_VARIABLE _txt
+    ERROR_QUIET
+    RESULT_VARIABLE _rc
+    OUTPUT_STRIP_TRAILING_WHITESPACE)
+  set(_paths "")
+  if (_rc EQUAL 0)
+    string(REGEX MATCHALL "path [^\n(]+" _matches "${_txt}")
+    foreach (_m IN LISTS _matches)
+      string(REGEX REPLACE "^path[ \t]+" "" _p "${_m}")
+      string(STRIP "${_p}" _p)
+      if (_p)
+        list(APPEND _paths "${_p}")
+      endif()
+    endforeach()
+  endif()
+  set(${out} "${_paths}" PARENT_SCOPE)
+endfunction()
+
 # Turn @rpath / @loader_path / @executable_path into a real file.
 function(_resolve name from_bin out)
   if (IS_ABSOLUTE "${name}" AND EXISTS "${name}")
@@ -76,7 +103,8 @@ function(_resolve name from_bin out)
   string(REGEX REPLACE "^@loader_path/" "" _rel "${_rel}")
   string(REGEX REPLACE "^@executable_path/" "" _rel "${_rel}")
   get_filename_component(_from_dir "${from_bin}" DIRECTORY)
-  foreach (_dir ${_from_dir} ${_search})
+  _otool_rpaths("${from_bin}" _rpaths)
+  foreach (_dir ${_from_dir} ${_search} ${_rpaths})
     foreach (_cand "${_dir}/${_base}" "${_dir}/${_rel}")
       if (EXISTS "${_cand}")
         get_filename_component(_cand "${_cand}" REALPATH)
@@ -92,6 +120,28 @@ endfunction()
 set(_queue "${EXE}")
 set(_copied "")
 set(_seen "${EXE}")
+set(_plugin_bases "")
+if (EXTRA_BINS)
+  string(REPLACE ":" ";" _extras "${EXTRA_BINS}")
+  foreach (_extra IN LISTS _extras)
+    if (NOT EXISTS "${_extra}")
+      continue()
+    endif()
+    get_filename_component(_base "${_extra}" NAME)
+    set(_dst "${_fw}/${_base}")
+    execute_process(COMMAND ${CMAKE_COMMAND} -E copy "${_extra}" "${_dst}"
+      RESULT_VARIABLE _rc)
+    if (NOT _rc EQUAL 0)
+      message(WARNING "failed to copy plugin ${_base} into ${_fw}")
+      continue()
+    endif()
+    execute_process(COMMAND chmod u+w "${_dst}")
+    list(APPEND _queue "${_dst}")
+    list(APPEND _seen "${_dst}")
+    list(APPEND _copied "${_dst}")
+    list(APPEND _plugin_bases "${_base}")
+  endforeach()
+endif()
 while (_queue)
   list(GET _queue 0 _bin)
   list(REMOVE_AT _queue 0)
@@ -164,3 +214,26 @@ foreach (_bin IN LISTS _rewrite)
   execute_process(COMMAND codesign --force --sign - "${_bin}"
     RESULT_VARIABLE _rc OUTPUT_QUIET ERROR_QUIET)
 endforeach()
+
+# Codec plugins live in their own directory so libheif does not try to
+# dlopen libfreetype and the rest of Frameworks. @loader_path/.. is
+# Contents/Frameworks, where their dependencies were copied.
+if (PLUGIN_SUBDIR AND _plugin_bases)
+  set(_pdir "${_fw}/${PLUGIN_SUBDIR}")
+  file(MAKE_DIRECTORY "${_pdir}")
+  foreach (_base IN LISTS _plugin_bases)
+    set(_srcp "${_fw}/${_base}")
+    set(_dstp "${_pdir}/${_base}")
+    if (NOT EXISTS "${_srcp}")
+      continue()
+    endif()
+    execute_process(COMMAND ${CMAKE_COMMAND} -E rename "${_srcp}" "${_dstp}")
+    execute_process(COMMAND install_name_tool -add_rpath "@loader_path/.." "${_dstp}"
+      RESULT_VARIABLE _rc ERROR_VARIABLE _err)
+    if (NOT _rc EQUAL 0)
+      message(WARNING "install_name_tool -add_rpath failed on ${_base}: ${_err}")
+    endif()
+    execute_process(COMMAND codesign --force --sign - "${_dstp}"
+      RESULT_VARIABLE _rc OUTPUT_QUIET ERROR_QUIET)
+  endforeach()
+endif()

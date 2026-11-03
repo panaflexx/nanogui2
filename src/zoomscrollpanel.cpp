@@ -167,8 +167,12 @@ void ZoomScrollPanel::set_zoom_about(double z, const Vector2i& anchor) {
         m_zoom = new_zoom;
     }
     clamp_state();
+    /* Reflow mode only sets m_update_layout, and that flag is applied in
+     * draw(). A pinch (unlike Ctrl+wheel) does not set the screen's redraw
+     * flag on its own, so the new scale would sit unseen until the next
+     * mouse event. Always ask for a frame. */
     if (m_reflow_on_zoom || std::abs(old - m_zoom) < 1e-9) m_update_layout = true;
-    else if (Screen* s = screen()) s->redraw();
+    if (Screen* s = screen()) s->redraw();
     else m_update_layout = true;
 }
 
@@ -518,8 +522,11 @@ bool ZoomScrollPanel::zoom_event(double magnification, const Vector2i& pos) {
     if (!m_zoom_enabled)
         return false;
 
-    // pos is already in panel-local coordinates
-    zoom_by(1.0 + magnification * 5.0, pos);
+    /* pos is in the parent's coordinates, same as scroll_event. Ctrl+wheel
+     * subtracts m_pos; a pinch has to as well or the anchor sits on the
+     * ruler inset instead of the fingers. */
+    Vector2i anchor(pos.x() - m_pos.x(), pos.y() - m_pos.y());
+    zoom_by(1.0 + magnification * 5.0, anchor);
     return true;
 }
 

@@ -131,7 +131,16 @@ if (NOT NANOGUI_BACKEND)
       CMAKE_CXX_COMPILER MATCHES "/em\\+\\+(-[a-zA-Z0-9.])?$")
     set(NANOGUI_BACKEND_DEFAULT "GLES 2")
   elseif (APPLE)
+    # Metal shaders are compiled with xcrun metal, which ships in Xcode and
+    # not in the Command Line Tools. Fall back to OpenGL when it is absent.
     set(NANOGUI_BACKEND_DEFAULT "Metal")
+    execute_process(COMMAND xcrun -sdk macosx --find metal
+      RESULT_VARIABLE _nanogui_metal_rc
+      OUTPUT_QUIET ERROR_QUIET)
+    if (NOT _nanogui_metal_rc EQUAL 0)
+      set(NANOGUI_BACKEND_DEFAULT "OpenGL")
+      message(STATUS "NanoGUI: metal compiler not found (install Xcode for Metal); using OpenGL.")
+    endif()
   else()
     set(NANOGUI_BACKEND_DEFAULT "OpenGL")
   endif()
@@ -1203,6 +1212,114 @@ if (NANOGUI_BUILD_EXAMPLES)
         RUNTIME_OUTPUT_DIRECTORY_DEBUG ${CMAKE_CURRENT_BINARY_DIR}/bin
         RUNTIME_OUTPUT_DIRECTORY_RELEASE ${CMAKE_CURRENT_BINARY_DIR}/bin
         RUNTIME_OUTPUT_DIRECTORY_RELWITHDEBINFO ${CMAKE_CURRENT_BINARY_DIR}/bin)
+
+    # macOS application bundle, same shape as nmail.app. Fonts and hyphenation
+    # data go in Contents/Resources. HarfBuzz, libheif, libjpeg, FreeType and
+    # their dependencies are copied into Contents/Frameworks and rewritten to
+    # @rpath, so the app does not need Homebrew on the machine that runs it.
+    # libheif codec plugins are dlopen'd; they are seeded separately and land
+    # in Contents/Frameworks/heif.
+    if (APPLE)
+      set(PAGEMADE_VERSION "0.1.0" CACHE STRING "PageMade version (Info.plist)")
+      set_target_properties(pagemade_app PROPERTIES
+        MACOSX_BUNDLE TRUE
+        MACOSX_BUNDLE_INFO_PLIST "${CMAKE_CURRENT_SOURCE_DIR}/resources/pagemade-Info.plist.in"
+        MACOSX_BUNDLE_BUNDLE_NAME "PageMade"
+        MACOSX_BUNDLE_EXECUTABLE_NAME "pagemade"
+        MACOSX_BUNDLE_GUI_IDENTIFIER "org.adamantine.pagemade"
+        MACOSX_BUNDLE_ICON_FILE "pagemade.icns"
+        MACOSX_BUNDLE_SHORT_VERSION_STRING "${PAGEMADE_VERSION}"
+        MACOSX_BUNDLE_BUNDLE_VERSION "${PAGEMADE_VERSION}"
+        BUILD_WITH_INSTALL_RPATH TRUE
+        INSTALL_RPATH "@executable_path/../Frameworks")
+
+      # Dock and Finder read Contents/Resources/pagemade.icns. The PNG may be
+      # portrait; the script keeps the center square.
+      set(_pm_icns "${CMAKE_CURRENT_BINARY_DIR}/CMakeFiles/pagemade.icns")
+      add_custom_command(
+        OUTPUT "${_pm_icns}"
+        COMMAND ${CMAKE_COMMAND}
+          -DSRC=${CMAKE_CURRENT_SOURCE_DIR}/resources/pagemade-icon.png
+          -DDST=${_pm_icns}
+          -P ${CMAKE_CURRENT_SOURCE_DIR}/resources/macos_make_icns.cmake
+        DEPENDS
+          "${CMAKE_CURRENT_SOURCE_DIR}/resources/pagemade-icon.png"
+          "${CMAKE_CURRENT_SOURCE_DIR}/resources/macos_make_icns.cmake"
+        COMMENT "Building pagemade.icns"
+        VERBATIM)
+      target_sources(pagemade_app PRIVATE "${_pm_icns}")
+      set_source_files_properties("${_pm_icns}" PROPERTIES
+        MACOSX_PACKAGE_LOCATION "Resources"
+        GENERATED TRUE)
+
+      file(GLOB PAGEMADE_BUNDLE_FONTS "${CMAKE_CURRENT_SOURCE_DIR}/resources/*.ttf")
+      target_sources(pagemade_app PRIVATE ${PAGEMADE_BUNDLE_FONTS})
+      set_source_files_properties(${PAGEMADE_BUNDLE_FONTS} PROPERTIES
+        MACOSX_PACKAGE_LOCATION "Resources/resources"
+        HEADER_FILE_ONLY TRUE)
+
+      file(GLOB PAGEMADE_HYPH_FILES
+        "${CMAKE_CURRENT_SOURCE_DIR}/pagemade/resources/hyphenation/*")
+      target_sources(pagemade_app PRIVATE ${PAGEMADE_HYPH_FILES})
+      set_source_files_properties(${PAGEMADE_HYPH_FILES} PROPERTIES
+        MACOSX_PACKAGE_LOCATION "Resources/pagemade/resources/hyphenation"
+        HEADER_FILE_ONLY TRUE)
+
+      set(_pm_search "$<TARGET_FILE_DIR:nanogui>")
+      if (IS_DIRECTORY "/opt/homebrew/lib")
+        string(APPEND _pm_search ":/opt/homebrew/lib")
+      endif()
+      if (IS_DIRECTORY "/usr/local/lib")
+        string(APPEND _pm_search ":/usr/local/lib")
+      endif()
+      foreach (_d ${HARFBUZZ_LIBRARY_DIRS} ${LIBHEIF_LIBRARY_DIRS})
+        if (_d)
+          string(APPEND _pm_search ":${_d}")
+        endif()
+      endforeach()
+
+      set(_pm_plugins "")
+      if (LIBHEIF_FOUND AND PKG_CONFIG_EXECUTABLE)
+        execute_process(
+          COMMAND ${PKG_CONFIG_EXECUTABLE} --variable=pluginsdir libheif
+          OUTPUT_VARIABLE _pm_plugindir
+          OUTPUT_STRIP_TRAILING_WHITESPACE
+          ERROR_QUIET)
+        set(_pm_plug_dirs "")
+        if (_pm_plugindir)
+          list(APPEND _pm_plug_dirs "${_pm_plugindir}")
+        endif()
+        foreach (_d ${LIBHEIF_LIBRARY_DIRS})
+          list(APPEND _pm_plug_dirs "${_d}/libheif")
+        endforeach()
+        list(APPEND _pm_plug_dirs "/opt/homebrew/lib/libheif" "/usr/local/lib/libheif")
+        foreach (_d ${_pm_plug_dirs})
+          file(GLOB _found "${_d}/*.dylib")
+          list(APPEND _pm_plugins ${_found})
+        endforeach()
+        if (_pm_plugins)
+          list(REMOVE_DUPLICATES _pm_plugins)
+          message(STATUS "pagemade: bundling libheif plugins ${_pm_plugins}")
+        endif()
+      endif()
+      string(REPLACE ";" ":" _pm_plugins_arg "${_pm_plugins}")
+      set(_pm_plugin_subdir "")
+      if (_pm_plugins)
+        set(_pm_plugin_subdir "heif")
+      endif()
+
+      add_custom_command(TARGET pagemade_app POST_BUILD
+        COMMAND ${CMAKE_COMMAND}
+          -DAPP=$<TARGET_BUNDLE_DIR:pagemade_app>
+          -DEXE=$<TARGET_FILE:pagemade_app>
+          "-DSEARCH_DIRS=${_pm_search}"
+          "-DEXTRA_BINS=${_pm_plugins_arg}"
+          "-DPLUGIN_SUBDIR=${_pm_plugin_subdir}"
+          -P ${CMAKE_CURRENT_SOURCE_DIR}/resources/macos_bundle_dylibs.cmake
+        VERBATIM)
+      set_property(TARGET pagemade_app APPEND PROPERTY LINK_DEPENDS
+        "${CMAKE_CURRENT_SOURCE_DIR}/resources/macos_bundle_dylibs.cmake")
+    endif()
   else()
     message(STATUS "pagemade: HarfBuzz not found, skipping.")
   endif()

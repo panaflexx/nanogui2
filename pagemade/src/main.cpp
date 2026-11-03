@@ -104,6 +104,8 @@
 #if !defined(_WIN32)
 #include <fcntl.h>
 #include <unistd.h>
+#else
+#include <direct.h>
 #endif
 
 #ifndef PAGEMADE_DATA_DIR
@@ -717,7 +719,7 @@ public:
         register_system_fonts(m_fonts);
         font_menu_load_or_seed(m_font_menu, font_menu_config_path(), m_fonts.families());
         swatch_library_load_or_seed(m_swatch_lib, swatch_library_config_path());
-        const std::string hyph = std::string(PAGEMADE_DATA_DIR) + "/hyphenation/hyph-en-us";
+        const std::string hyph = data_dir() + "/hyphenation/hyph-en-us";
         if (!m_hyphenator.load(hyph + ".pat.txt", hyph + ".hyp.txt"))
             std::fprintf(stderr, "pagemade: no hyphenation patterns at %s.pat.txt\n", hyph.c_str());
 
@@ -3644,6 +3646,27 @@ static bool parse_key(const std::string &spec, int &key, int &mods) {
     }
 }
 
+/* File arguments are resolved before a bundle chdir, so --open rel.pagemade
+ * still means the directory the user launched from. */
+static std::string make_absolute(const std::string &p) {
+    if (p.empty())
+        return p;
+#ifdef _WIN32
+    if ((p.size() >= 2 && p[1] == ':') || p[0] == '/' || p[0] == '\\')
+        return p;
+    char cwd[4096];
+    if (!_getcwd(cwd, sizeof cwd))
+        return p;
+#else
+    if (p[0] == '/')
+        return p;
+    char cwd[4096];
+    if (!getcwd(cwd, sizeof cwd))
+        return p;
+#endif
+    return std::string(cwd) + "/" + p;
+}
+
 int main(int argc, char **argv) {
     std::string shot, pdf, open_path, place_path, dialog;
     bool print_title = false;
@@ -3729,6 +3752,15 @@ int main(int argc, char **argv) {
         else if (a == "--caption-pictures") caption_pictures = true;
         else if (a == "--fit-columns") fit_columns = true;
     }
+
+    shot = make_absolute(shot);
+    pdf = make_absolute(pdf);
+    open_path = make_absolute(open_path);
+    place_path = make_absolute(place_path);
+    for (Action &act : actions)
+        if (act.kind == Action::Save || act.kind == Action::SaveEmbedded)
+            act.text = make_absolute(act.text);
+    prepare_app_bundle();
 
     nanogui::init();
     {
