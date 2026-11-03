@@ -241,6 +241,11 @@ public:
     /* The selection, in the order items were picked. */
     const std::vector<pagemade::ItemId> &selection() const { return m_sel; }
     void select(pagemade::ItemId id);   // 0 clears
+    /* Edit > Select All: the story's text while editing it, else every
+     * editable item on the page or spread on screen. Deselect All ends
+     * editing and clears the selection. */
+    void select_all();
+    void deselect_all();
     /* Select a story's text block by position: story index, thread index. */
     void select_frame(size_t story, size_t frame);
 
@@ -359,6 +364,9 @@ public:
     /* Two or more units: items, or whole groups. */
     bool can_align() const;
     void align_selection(AlignTo how);
+    /* Make Same Width / Height / Size: as the first item (or group) picked */
+    enum class MatchSize { Width, Height, Both };
+    void match_size(MatchSize how);
 
     /* ---- Pictures -------------------------------------------------- */
     /* Some selected picture has a file to read again. */
@@ -644,6 +652,18 @@ private:
     void draw_ruler_guides(NVGcontext *ctx, float px, size_t page);
     /* Snap a page point to the guides, axis by axis. */
     pagemade::Point snap_point(pagemade::Point p) const;
+    /* Smart guides: the boxes of the current page's items that aren't
+     * moving, the lines a point or box snaps to (guides, then those boxes'
+     * edges and centers), and the dotted lines shown for what lines up. */
+    std::vector<pagemade::Bounds> snap_objects() const;
+    std::vector<float> snap_lines(bool vertical) const;
+    void note_alignments(const pagemade::Bounds &moving);
+    void draw_smart_guides(NVGcontext *ctx, float px) const;
+    struct SmartGuide {
+        bool vertical = false;
+        float pos = 0.f, a0 = 0.f, a1 = 0.f;   // the line, and its extent along it
+    };
+    std::vector<SmartGuide> m_smart;
     /* Adjust a move so one of the box's edges (or its center) lands on a guide. */
     pagemade::Point snap_move(const pagemade::Bounds &b, pagemade::Point d) const;
 

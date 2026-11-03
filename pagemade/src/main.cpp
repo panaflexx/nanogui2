@@ -1475,6 +1475,10 @@ public:
         add_cmd(edit, "Paste as Text", {{SYSTEM_COMMAND_MOD | GLFW_MOD_SHIFT, GLFW_KEY_V}},
                 [this] { m_view->edit_paste(nullptr, ComposerView::PasteAs::Text); });
         add_cmd(edit, "Paste as SVG", {}, [this] { m_view->edit_paste(nullptr, ComposerView::PasteAs::Svg); });
+        new Separator(edit->popup());
+        add_cmd(edit, "Select All", {{SYSTEM_COMMAND_MOD, GLFW_KEY_A}}, [this] { m_view->select_all(); });
+        add_cmd(edit, "Deselect All", {{SYSTEM_COMMAND_MOD | GLFW_MOD_SHIFT, GLFW_KEY_A}},
+                [this] { m_view->deselect_all(); });
 
         /* Type: typographer's quotes, and the characters a keyboard lacks.
          * Shortcuts follow InDesign's where it has them. Line and frame
@@ -2315,6 +2319,11 @@ public:
                 item("Align Top", FA_ARROW_UP, true, {}, [v] { v->align_selection(A::Top); });
                 item("Align Middle", FA_ARROWS_ALT_V, true, {}, [v] { v->align_selection(A::Middle); });
                 item("Align Bottom", FA_ARROW_DOWN, true, {}, [v] { v->align_selection(A::Bottom); });
+                section();
+                using M = ComposerView::MatchSize;
+                item("Make Same Width", FA_ARROWS_ALT_H, true, {}, [v] { v->match_size(M::Width); });
+                item("Make Same Height", FA_ARROWS_ALT_V, true, {}, [v] { v->match_size(M::Height); });
+                item("Make Same Size", FA_EXPAND_ARROWS_ALT, true, {}, [v] { v->match_size(M::Both); });
             }
             section();
             item("Bring to Front", 0, true, {{C, GLFW_KEY_F}},

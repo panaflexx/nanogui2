@@ -695,6 +695,96 @@ std::vector<float> ComposerView::base_guides_y() const {
     return {0, s.height, s.margin_top, s.height - s.margin_bottom};
 }
 
+/* ---- Smart guides ------------------------------------------------------- *
+ *
+ * With Snap on, what moves or is drawn also snaps to the edges and centers
+ * of the other items on the page, and a dotted purple line joins it to each
+ * item it lines up with (left, center, right; top, middle, bottom). */
+
+std::vector<Bounds> ComposerView::snap_objects() const {
+    std::vector<Bounds> out;
+    if (m_page >= m_doc.pages.size())
+        return out;
+    auto moving = [&](ItemId id) {
+        if (m_creating && id == m_created)
+            return true;
+        if (!m_pointer_down || m_drag == Handle::None)
+            return false;                // m_drag_items is the last drag's
+        for (const Item &o : m_drag_items)
+            if (o.id == id)
+                return true;
+        return false;
+    };
+    for (const Item &it : m_doc.pages[m_page].items) {
+        if (moving(it.id) || !m_doc.item_visible(it))
+            continue;
+        const Bounds b = item_bounds(it);
+        if (!b.empty())
+            out.push_back(b);
+    }
+    return out;
+}
+
+std::vector<float> ComposerView::snap_lines(bool vertical) const {
+    std::vector<float> g = vertical ? guides_x() : guides_y();
+    for (const Bounds &b : snap_objects()) {
+        const float a = vertical ? b.x0 : b.y0, c = vertical ? b.x1 : b.y1;
+        g.insert(g.end(), {a, (a + c) * 0.5f, c});
+    }
+    return g;
+}
+
+void ComposerView::note_alignments(const Bounds &m) {
+    m_smart.clear();
+    if (!m_snap || m.empty())
+        return;
+    const float eps = 0.5f / zoom();
+    auto add = [&](bool vertical, float pos, float a0, float a1) {
+        for (SmartGuide &g : m_smart)
+            if (g.vertical == vertical && std::fabs(g.pos - pos) < eps) {
+                g.a0 = std::min(g.a0, a0);
+                g.a1 = std::max(g.a1, a1);
+                return;
+            }
+        m_smart.push_back({vertical, pos, a0, a1});
+    };
+    const float mx[] = {m.x0, (m.x0 + m.x1) * 0.5f, m.x1};
+    const float my[] = {m.y0, (m.y0 + m.y1) * 0.5f, m.y1};
+    for (const Bounds &t : snap_objects()) {
+        const float tx[] = {t.x0, (t.x0 + t.x1) * 0.5f, t.x1};
+        const float ty[] = {t.y0, (t.y0 + t.y1) * 0.5f, t.y1};
+        for (float a : mx)
+            for (float b : tx)
+                if (std::fabs(a - b) < eps)
+                    add(true, b, std::min(m.y0, t.y0), std::max(m.y1, t.y1));
+        for (float a : my)
+            for (float b : ty)
+                if (std::fabs(a - b) < eps)
+                    add(false, b, std::min(m.x0, t.x0), std::max(m.x1, t.x1));
+    }
+}
+
+void ComposerView::draw_smart_guides(NVGcontext *ctx, float px) const {
+    if (m_smart.empty())
+        return;
+    const float dash = 3.f * px, step = 6.f * px, over = 4.f * px;
+    nvgBeginPath(ctx);
+    for (const SmartGuide &g : m_smart)
+        for (float t = g.a0 - over; t < g.a1 + over; t += step) {
+            const float e = std::min(t + dash, g.a1 + over);
+            if (g.vertical) {
+                nvgMoveTo(ctx, g.pos, t);
+                nvgLineTo(ctx, g.pos, e);
+            } else {
+                nvgMoveTo(ctx, t, g.pos);
+                nvgLineTo(ctx, e, g.pos);
+            }
+        }
+    nvgStrokeWidth(ctx, px);
+    nvgStrokeColor(ctx, nvgRGB(170, 60, 230));
+    nvgStroke(ctx);
+}
+
 Point ComposerView::snap_point(Point p) const {
     if (!m_snap)
         return p;
@@ -708,7 +798,7 @@ Point ComposerView::snap_point(Point p) const {
             }
         return best;
     };
-    return {snap(p.x, guides_x()), snap(p.y, guides_y())};
+    return {snap(p.x, snap_lines(true)), snap(p.y, snap_lines(false))};
 }
 
 Point ComposerView::snap_move(const Bounds &b, Point d) const {
@@ -723,8 +813,8 @@ Point ComposerView::snap_move(const Bounds &b, Point d) const {
                     best = g - (e + dv);
         return std::fabs(best) <= tol ? dv + best : dv;
     };
-    return {adjust({b.x0, (b.x0 + b.x1) * 0.5f, b.x1}, guides_x(), d.x),
-            adjust({b.y0, (b.y0 + b.y1) * 0.5f, b.y1}, guides_y(), d.y)};
+    return {adjust({b.x0, (b.x0 + b.x1) * 0.5f, b.x1}, snap_lines(true), d.x),
+            adjust({b.y0, (b.y0 + b.y1) * 0.5f, b.y1}, snap_lines(false), d.y)};
 }
 
 /* ---- Ruler guides ------------------------------------------------------- */
@@ -1118,10 +1208,11 @@ bool ComposerView::mouse_button_event(const Vector2i &p, int button, bool down, 
         const Point at = page_point_from_screen(screen()->mouse_pos());
         m_context_pt = at;
         if (!editing()) {
+            /* An unselected item under the pointer becomes the selection.
+             * Empty space keeps it, so a click just beside the selection
+             * still offers its commands. */
             const Hit hit = hit_test(at, m_page);
-            if (!hit.item)
-                m_sel.clear();
-            else if (!is_selected(hit.item))
+            if (hit.item && !is_selected(hit.item))
                 m_sel = with_groups({hit.item});
             selection_changed();
             if (screen())
@@ -1145,6 +1236,7 @@ bool ComposerView::mouse_button_event(const Vector2i &p, int button, bool down, 
     if (!down) {
         m_pointer_down = false;
         flush_deferred();                // the drag's last move, before it ends
+        m_smart.clear();
         if (m_creating) {
             finish_creation();
         } else if (m_marquee) {
@@ -1213,6 +1305,7 @@ bool ComposerView::mouse_button_event(const Vector2i &p, int button, bool down, 
     request_focus();
     m_gesture_page = m_point_page;
     m_pointer_down = true;
+    m_smart.clear();
     if (m_gesture_page != m_page)
         turn_page_keeping_selection(m_gesture_page);   // a selection can span pages
     m_burst_open = false;                // any click ends a typing or nudging run
@@ -1447,6 +1540,9 @@ bool ComposerView::mouse_drag_event(const Vector2i &p, const Vector2i &, int, in
         for (const Item &o : m_drag_items)
             if (Item *it = m_doc.find_item(o.id))
                 it->xf = Transform::translate(sd.x, sd.y) * o.xf;
+        Bounds now = m_drag_bounds;
+        now.x0 += sd.x; now.x1 += sd.x; now.y0 += sd.y; now.y1 += sd.y;
+        note_alignments(now);
         defer_selection_changed();
         return true;                     // nor does moving
     }
@@ -1515,8 +1611,30 @@ bool ComposerView::mouse_drag_event(const Vector2i &p, const Vector2i &, int, in
     }
     if (it->is_text())
         defer_recompose(it->id);
+    note_alignments(item_bounds(*it));
     defer_selection_changed();
     return true;
+}
+
+/* `it` as `o` scaled by sx, sy (page axes) about `from`, which lands on
+ * `to`. Its width and height scale by how much the scale stretches the
+ * item's own axes, so a turned item keeps its angle; pictures scale with
+ * their frames. The caller reflows text. */
+static void scale_item_from(Item &it, const Item &o, Point from, Point to, float sx, float sy) {
+    auto stretch = [&](Point v) {
+        const float len = std::hypot(v.x, v.y);
+        return len > 0.f ? std::hypot(v.x * sx, v.y * sy) / len : 1.f;
+    };
+    it.w = o.w * stretch(o.xf.apply_vector({1.f, 0.f}));
+    it.h = o.h * stretch(o.xf.apply_vector({0.f, 1.f}));
+    const Point p = o.xf.apply({0.f, 0.f});
+    it.xf = o.xf;
+    it.xf.e = to.x + (p.x - from.x) * sx;
+    it.xf.f = to.y + (p.y - from.y) * sy;
+    if (const PlacedImage *im = o.image())
+        it.content = scale_placement(*im, o.w, o.h, it.w, it.h);
+    if (const PlacedVector *pv = o.vector())
+        it.content = scale_placement(*pv, o.w, o.h, it.w, it.h);
 }
 
 /* The group's box, as it was at the press, goes from its fixed corner to
@@ -1546,31 +1664,19 @@ void ComposerView::resize_group(Point d, int modifiers) {
     /* The fixed corner stays put */
     const float nx0 = left ? b.x1 - w0 * sx : b.x0;
     const float ny0 = top ? b.y1 - h0 * sy : b.y0;
-    auto map = [&](Point p) { return Point{nx0 + (p.x - b.x0) * sx, ny0 + (p.y - b.y0) * sy}; };
-    auto stretch = [&](Point v) {
-        const float len = std::hypot(v.x, v.y);
-        return len > 0.f ? std::hypot(v.x * sx, v.y * sy) / len : 1.f;
-    };
-
+    Bounds now;
     for (const Item &o : m_drag_items) {
         if (o.group != m_drag_group)
             continue;
         Item *it = m_doc.find_item(o.id);
         if (!it)
             continue;
-        it->w = o.w * stretch(o.xf.apply_vector({1.f, 0.f}));
-        it->h = o.h * stretch(o.xf.apply_vector({0.f, 1.f}));
-        const Point origin = map(o.xf.apply({0.f, 0.f}));
-        it->xf = o.xf;
-        it->xf.e = origin.x;
-        it->xf.f = origin.y;
-        if (const PlacedImage *im = o.image())
-            it->content = scale_placement(*im, o.w, o.h, it->w, it->h);
-        if (const PlacedVector *pv = o.vector())
-            it->content = scale_placement(*pv, o.w, o.h, it->w, it->h);
+        scale_item_from(*it, o, {b.x0, b.y0}, {nx0, ny0}, sx, sy);
+        now.add(item_bounds(*it));
         if (it->is_text())
             defer_recompose(it->id);
     }
+    note_alignments(now);
     defer_selection_changed();
 }
 
@@ -1716,6 +1822,7 @@ void ComposerView::update_creation(Point pt, bool constrain) {
     }
     if (it->is_text())
         defer_recompose(it->id);
+    note_alignments(item_bounds(*it));
     defer_selection_changed();
 }
 
@@ -2790,6 +2897,46 @@ bool ComposerView::can_paste() const {
     return clipboard_has_text();
 }
 
+void ComposerView::select_all() {
+    if (Story *s = edit_story()) {       // the story's text
+        m_anchor = {};
+        m_caret = story_end(*s);
+        m_burst_open = false;
+        if (screen())
+            screen()->redraw();
+        return;
+    }
+    end_placement(false);
+    if (m_creating)
+        finish_creation();
+    /* Every item that can be edited on the page, or the spread, on screen.
+     * The all-pages view takes the current page's spread (or page). */
+    std::vector<PageSlot> slots;
+    float aw, ah;
+    arrangement(m_doc, m_page, m_page_view == PageView::Stack ? PageView::Spread : m_page_view,
+                slots, aw, ah);
+    m_sel.clear();
+    for (const PageSlot &sl : slots)
+        if (sl.index < m_doc.pages.size())
+            for (const Item &it : m_doc.pages[sl.index].items)
+                if (m_doc.item_editable(it))
+                    m_sel.push_back(it.id);
+    m_sel = with_groups(m_sel);
+    selection_changed();
+    if (screen())
+        screen()->redraw();
+}
+
+void ComposerView::deselect_all() {
+    m_edit_story = 0;                    // ends text editing too
+    m_typing_on = false;
+    m_selecting = false;
+    m_sel.clear();
+    selection_changed();
+    if (screen())
+        screen()->redraw();
+}
+
 void ComposerView::edit_copy() {
     if (editing()) {
         text_clipboard(GLFW_KEY_C);
@@ -3182,6 +3329,35 @@ void ComposerView::align_selection(AlignTo how) {
             if (Item *it = m_doc.find_item(id))
                 it->xf = Transform::translate(dx, dy) * it->xf;
     }
+    selection_changed();
+    if (screen())
+        screen()->redraw();
+}
+
+/* Make the selection's units (a group, or an item) as wide and/or tall as
+ * the first one picked. Each keeps its top-left corner; a group scales as a
+ * whole, like a group resized by a corner. */
+void ComposerView::match_size(MatchSize how) {
+    const std::vector<AlignUnit> units =
+        align_units(m_doc, with_groups(m_sel), [this](const Item &it) { return item_bounds(it); });
+    if (units.size() < 2)
+        return;
+    const Bounds &ref = units.front().bounds;
+    const float rw = ref.x1 - ref.x0, rh = ref.y1 - ref.y0;
+    push_undo();
+    for (size_t u = 1; u < units.size(); ++u) {
+        const Bounds &b = units[u].bounds;
+        const float w = b.x1 - b.x0, h = b.y1 - b.y0;
+        /* A side with no extent (a straight line) keeps it */
+        const float sx = how != MatchSize::Height && w > 0.01f && rw > 0.01f ? rw / w : 1.f;
+        const float sy = how != MatchSize::Width && h > 0.01f && rh > 0.01f ? rh / h : 1.f;
+        for (ItemId id : units[u].ids)
+            if (Item *it = m_doc.find_item(id)) {
+                const Item o = *it;
+                scale_item_from(*it, o, {b.x0, b.y0}, {b.x0, b.y0}, sx, sy);
+            }
+    }
+    recompose();
     selection_changed();
     if (screen())
         screen()->redraw();
@@ -3773,6 +3949,10 @@ bool ComposerView::keyboard_event(int key, int, int action, int modifiers) {
         Story *s = edit_story();
         switch (key) {
         case GLFW_KEY_A:
+            if (modifiers & GLFW_MOD_SHIFT) {
+                deselect_all();          // Cmd/Ctrl+Shift+A
+                return true;
+            }
             m_anchor = {};
             m_caret = story_end(*s);
             m_burst_open = false;
@@ -5733,6 +5913,14 @@ void ComposerView::draw(NVGcontext *ctx) {
     paint_items(false);
     if (hand)
         paint_items(true);               // the item in hand, above both pages
+    if (m_pointer_down && !m_smart.empty())
+        for (const PageSlot &sl : slots)
+            if (sl.index == m_page) {
+                nvgSave(ctx);
+                nvgTranslate(ctx, o.x() + sl.x, o.y() + sl.y);
+                draw_smart_guides(ctx, px);
+                nvgRestore(ctx);
+            }
 
     /* A drag over the view: the frame it would place, or a place-gun mark
      * while its size isn't known yet */
