@@ -29,6 +29,7 @@
 #include "composer/composer.h"
 #include "image.h"
 
+#include <algorithm>
 #include <cstdint>
 #include <string>
 #include <variant>
@@ -243,6 +244,13 @@ PlacedImage scale_placement(PlacedImage im, float old_w, float old_h, float new_
 /* The frame's top-left moved to (left, top) in the old item space. The
  * picture stays put on the page. */
 PlacedImage crop_placement(PlacedImage im, float left, float top);
+/* As scale_placement, but the picture keeps its proportions when the frame
+ * stretches more one way than the other: it scales by the larger stretch,
+ * about the frame's middle, so a picture that filled the frame still does
+ * (cropped a little), unsquished. The same as scale_placement for an even
+ * stretch. */
+PlacedImage scale_placement_keep_aspect(PlacedImage im, float old_w, float old_h, float new_w,
+                                        float new_h);
 
 /* A placed vector graphic. The frame clips it the way a picture's frame
  * does: x, y, w, h are the whole graphic in item space. The file bytes and
@@ -256,6 +264,8 @@ struct PlacedVector {
 
 PlacedVector scale_placement(PlacedVector v, float old_w, float old_h, float new_w, float new_h);
 PlacedVector crop_placement(PlacedVector v, float left, float top);
+PlacedVector scale_placement_keep_aspect(PlacedVector v, float old_w, float old_h, float new_w,
+                                         float new_h);
 
 /* A layer of the publication, on every page. Layers stack bottom to top;
  * within one, items keep their own stacking order. A hidden layer is not
@@ -273,9 +283,20 @@ struct Layer {
 struct Item {
     ItemId    id = 0;
     LayerId   layer = 0;         // 0 or unknown: the bottom layer
-    /* Items on one page with the same nonzero group select, move and
-     * stack together (a picture and its caption). Groups don't nest. */
+    /* Groups nest as in Illustrator. `group` is the innermost group the
+     * item is in (0: none) and `outer_groups` the groups around that one,
+     * inside out, so the last is the outermost. Items on one page with the
+     * same outermost group select, move and stack together (a picture and
+     * its caption; a paste of a drawing, its type and its pictures). */
     uint32_t  group = 0;
+    std::vector<uint32_t> outer_groups;
+    uint32_t root_group() const { return outer_groups.empty() ? group : outer_groups.back(); }
+    /* The group around the innermost one, or 0 */
+    uint32_t group_parent() const { return outer_groups.empty() ? 0 : outer_groups.front(); }
+    /* Whether `g` is one of the item's groups, at any level */
+    bool in_group(uint32_t g) const {
+        return g && (group == g || std::find(outer_groups.begin(), outer_groups.end(), g) != outer_groups.end());
+    }
     float     w = 0, h = 0;
     Transform xf;                // item space -> page
     std::variant<TextFrame, Shape, PlacedImage, PlacedVector> content;
@@ -546,17 +567,27 @@ struct PageDoc {
      * their order, so a group moves together. */
     void    restack(const std::vector<ItemId> &ids, int dir);
 
-    /* The item and everything grouped with it, in stacking order; just
-     * the item when it isn't grouped; empty when it's missing. */
+    /* The item and everything in its outermost group, in stacking order;
+     * just the item when it isn't grouped; empty when it's missing. */
     std::vector<ItemId> group_members(ItemId id) const;
-    /* Group the items (two or more, on one page; groups they were in are
-     * merged). They become adjacent in the stack where the topmost one
-     * was, keeping their order. Returns the group, or 0 when they can't
-     * be grouped. */
+    /* The outermost group around `group` (itself when it is outermost),
+     * or 0 when no item is in it. */
+    uint32_t group_root(uint32_t group) const;
+    /* Group the items, as Illustrator does: two or more units (an item,
+     * or a whole outermost group) on one page go into a new group around
+     * them, and a group among them stays a group inside it. They become
+     * adjacent in the stack where the topmost one was, keeping their
+     * order. Returns the group, or 0 when they can't be grouped. */
     uint32_t group_items(const std::vector<ItemId> &ids);
-    /* Take the items' whole groups apart. */
+    /* The same, without moving them in the stack (a placement builds its
+     * groups in paint order). */
+    uint32_t group_in_place(const std::vector<ItemId> &ids);
+    /* Take away the outermost group of each item's group. A group inside
+     * it stays grouped, now outermost. */
     void     ungroup_items(const std::vector<ItemId> &ids);
-    /* Clear groups left with one member, or split across pages. */
+    /* Clear groups split across pages, and groups with fewer than two
+     * parts (items or groups directly inside): an item alone in a group
+     * leaves it, and a group holding just one group goes away. */
     void     tidy_groups();
 
     /* Insert a blank page at `index` (clamped to the end). */

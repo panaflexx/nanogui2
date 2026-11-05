@@ -24,6 +24,8 @@ namespace pagemade {
 
 namespace {
 
+void shift_path(Path &p, float dx, float dy);
+
 float measure_text(const FontLibrary *fonts, const VectorTextRun &style, const std::string &text) {
     if (text.empty() || !(style.size > 0.f))
         return 0.f;
@@ -462,12 +464,85 @@ VectorPlacement place_whole(PageDoc &doc, VectorStore &store, std::vector<uint8_
     return r;
 }
 
-/* Pictures become picture items. Shapes and text on either side of one stay
- * a graphic, in the same paint order, and the pieces are one group. False
- * leaves the document alone: the caller places the file as one graphic. */
+/* Move a slice so its ink starts at the origin. The frame can then be
+ * that ink, and a click on the drawing is not a click on the whole page. */
+bool crop_to_ink(VectorScene &scene, float &bx, float &by, float &bw, float &bh,
+                 const FontLibrary *fonts) {
+    Bounds box;
+    float pad = 0.5f;
+    for (const VectorShape &sh : scene.shapes) {
+        box.add(path_bounds(sh.path));
+        if (!sh.stroke.none())
+            pad = std::max(pad, sh.stroke.width);
+    }
+    for (const VectorText &tx : scene.texts) {
+        float pen = 0.f;
+        for (const VectorTextRun &run : tx.runs) {
+            if (run.text.empty())
+                continue;
+            if (run.has_x)
+                pen = run.x;
+            pen += run.dx;
+            const float y = (run.has_y ? run.y : 0.f) + run.dy;
+            const float size = run.size > 0.f ? run.size : 12.f;
+            const float w = std::max(measure_text(fonts, run, run.text), size * 0.25f);
+            const float x0 = pen, x1 = pen + w;
+            const float y0 = y - size * 0.85f, y1 = y + size * 0.3f;
+            for (Point p : {Point{x0, y0}, Point{x1, y0}, Point{x0, y1}, Point{x1, y1}})
+                box.add(tx.xf.apply(p));
+            pen += w;
+        }
+    }
+    if (box.empty() || !(box.x1 > box.x0) || !(box.y1 > box.y0))
+        return false;
+    bx = box.x0 - pad;
+    by = box.y0 - pad;
+    bw = box.x1 - box.x0 + pad * 2.f;
+    bh = box.y1 - box.y0 + pad * 2.f;
+    const Transform shift = Transform::translate(-bx, -by);
+    std::vector<ClipLayers> kept;
+    std::map<int, int> clips;
+    auto clip_into = [&](int c) {
+        if (c < 0 || (size_t) c >= scene.clips.size())
+            return -1;
+        auto have = clips.find(c);
+        if (have != clips.end())
+            return have->second;
+        ClipLayers layers = scene.clips[(size_t) c];
+        for (auto &layer : layers)
+            for (ClipPath &cp : layer)
+                shift_path(cp.path, -bx, -by);
+        clips[c] = (int) kept.size();
+        kept.push_back(std::move(layers));
+        return clips[c];
+    };
+    for (VectorShape &sh : scene.shapes) {
+        shift_path(sh.path, -bx, -by);
+        if (sh.fill.gradient())
+            sh.fill.xf = shift * sh.fill.xf;
+        if (sh.stroke.paint.gradient())
+            sh.stroke.paint.xf = shift * sh.stroke.paint.xf;
+        sh.clip = clip_into(sh.clip);
+        sh.windings.reset();
+    }
+    for (VectorText &tx : scene.texts) {
+        tx.xf = shift * tx.xf;
+        tx.clip = clip_into(tx.clip);
+    }
+    scene.clips = std::move(kept);
+    scene.width = bw;
+    scene.height = bh;
+    return true;
+}
+
+/* Pictures become picture items. Runs of shapes, and runs of text, become
+ * their own graphics fitted to their ink, so each can be grabbed. The
+ * shapes are one group, the text is another, and both sit in the paste's
+ * group with the pictures. False leaves the document alone: the caller
+ * places the file as one graphic. */
 bool place_grouped(PageDoc &doc, VectorStore &store, ImageStore &images, const VectorScene &scene,
                    const std::string &name, size_t page, const Point *at, bool paste,
-                   VectorPlacement &r) {
+                   const FontLibrary *fonts, VectorPlacement &r) {
     struct Pic {
         int index = -1;
         float ix = 0, iy = 0, iw = 0, ih = 0;   // the whole picture, graphic box
@@ -525,6 +600,7 @@ bool place_grouped(PageDoc &doc, VectorStore &store, ImageStore &images, const V
     }
     struct Part {
         bool picture = false;
+        bool text = false;
         Pic pic;
         VectorScene scene;
     };
@@ -532,6 +608,7 @@ bool place_grouped(PageDoc &doc, VectorStore &store, ImageStore &images, const V
     Part cur;
     cur.scene = slice_shell(scene);
     bool used = false;
+    int run = 0;                         // 1 shapes, 2 text
     auto flush = [&] {
         if (!used)
             return;
@@ -539,6 +616,7 @@ bool place_grouped(PageDoc &doc, VectorStore &store, ImageStore &images, const V
         cur = Part();
         cur.scene = slice_shell(scene);
         used = false;
+        run = 0;
     };
     for (const VectorSlotRef &ref : order) {
         if (ref.slot == VectorSlot::Image) {
@@ -556,12 +634,19 @@ bool place_grouped(PageDoc &doc, VectorStore &store, ImageStore &images, const V
         if (ref.slot == VectorSlot::Shape) {
             if (ref.index < 0 || (size_t) ref.index >= scene.shapes.size())
                 continue;
+            if (run == 2)
+                flush();
+            run = 1;
             cur.scene.shapes.push_back(scene.shapes[(size_t) ref.index]);
             cur.scene.order.push_back({VectorSlot::Shape, (int) cur.scene.shapes.size() - 1});
             used = true;
         } else if (ref.slot == VectorSlot::Text) {
             if (ref.index < 0 || (size_t) ref.index >= scene.texts.size())
                 continue;
+            if (run == 1)
+                flush();
+            run = 2;
+            cur.text = true;
             cur.scene.texts.push_back(scene.texts[(size_t) ref.index]);
             cur.scene.order.push_back({VectorSlot::Text, (int) cur.scene.texts.size() - 1});
             used = true;
@@ -586,6 +671,7 @@ bool place_grouped(PageDoc &doc, VectorStore &store, ImageStore &images, const V
         pictures += p.picture ? 1 : 0;
     }
     int vector_n = 0, picture_n = 0;
+    std::vector<ItemId> shape_ids, text_ids;
     for (const Part &p : parts) {
         if (p.picture) {
             const VectorImage &im = scene.images[(size_t) p.pic.index];
@@ -621,18 +707,22 @@ bool place_grouped(PageDoc &doc, VectorStore &store, ImageStore &images, const V
             r.items.push_back(doc.add_item(page, std::move(it)));
             continue;
         }
-        const std::string svg = scene_svg(p.scene);
+        VectorScene slice = p.scene;
+        float bx = 0, by = 0, bw = 0, bh = 0;
+        if (!crop_to_ink(slice, bx, by, bw, bh, fonts))
+            continue;
+        const std::string svg = scene_svg(slice);
         std::vector<uint8_t> bytes(svg.begin(), svg.end());
         const uint32_t id = store.take_id();
         VectorAsset asset;
         asset.id = id;
         asset.name = vectors > 1 ? stem + "-" + std::to_string(++vector_n) + ".svg" : stem + ".svg";
-        asset.width = p.scene.width;
-        asset.height = p.scene.height;
+        asset.width = bw;
+        asset.height = bh;
         asset.skipped = scene.skipped;
         asset.source_size = bytes.size();
         asset.hash = image_bytes_hash(bytes.data(), bytes.size());
-        if (!store.add(id, std::move(bytes), p.scene)) {
+        if (!store.add(id, std::move(bytes), std::move(slice))) {
             r.error = "couldn't keep the SVG";
             return true;
         }
@@ -640,18 +730,26 @@ bool place_grouped(PageDoc &doc, VectorStore &store, ImageStore &images, const V
         if (r.asset == 0)
             r.asset = id;
         Item it;
-        it.w = fw;
-        it.h = fh;
-        it.xf = Transform::translate(fx, fy);
+        it.w = bw * sx;
+        it.h = bh * sy;
+        it.xf = Transform::translate(fx + bx * sx, fy + by * sy);
         PlacedVector pv;
         pv.asset = id;
-        pv.w = fw;
-        pv.h = fh;
+        pv.w = it.w;
+        pv.h = it.h;
         it.content = pv;
-        r.items.push_back(doc.add_item(page, std::move(it)));
+        const ItemId placed_id = doc.add_item(page, std::move(it));
+        r.items.push_back(placed_id);
+        (p.text ? text_ids : shape_ids).push_back(placed_id);
     }
+    /* The shapes are a group, the type another, and both go in the
+     * paste's group with the pictures (in paint order, unmoved) */
+    if (shape_ids.size() >= 2)
+        doc.group_in_place(shape_ids);
+    if (text_ids.size() >= 2)
+        doc.group_in_place(text_ids);
     if (r.items.size() >= 2)
-        r.group = doc.group_items(r.items);
+        r.group = doc.group_in_place(r.items);
     r.item = r.items.empty() ? 0 : r.items.front();
     r.note = vector_place_note(name.empty() ? std::string("graphic.svg") : name, scene.skipped);
     r.ok = r.item != 0;
@@ -796,7 +894,7 @@ bool place_as_text(PageDoc &doc, VectorStore &store, ImageStore *images, const F
     const float sx = fw / scene.width, sy = fh / scene.height;
     const Transform page_map{sx, 0, 0, sy, fx, fy};
     const std::string stem = file_stem(name);
-    int drawing_n = 0;
+    int drawing_n = 0, picture_n = 0;
 
     /* ---- The drawing: shapes, and pictures that can't stand alone ---- */
     std::vector<VectorSlotRef> drawing;
@@ -811,6 +909,23 @@ bool place_as_text(PageDoc &doc, VectorStore &store, ImageStore *images, const F
                 box.add(path_bounds(sh.path));
                 if (!sh.stroke.none())
                     pad = std::max(pad, sh.stroke.width);
+            } else if (ref.slot == VectorSlot::Text) {
+                const VectorText &tx = scene.texts[(size_t) ref.index];
+                float pen = 0.f;
+                for (const VectorTextRun &run : tx.runs) {
+                    if (run.text.empty())
+                        continue;
+                    if (run.has_x)
+                        pen = run.x;
+                    pen += run.dx;
+                    const float y = (run.has_y ? run.y : 0.f) + run.dy;
+                    const float size = run.size > 0.f ? run.size : 12.f;
+                    const float w = std::max(measure_text(fonts, run, run.text), size * 0.25f);
+                    const float x0 = pen, x1 = pen + w, y0 = y - size * 0.85f, y1 = y + size * 0.3f;
+                    for (Point p : {Point{x0, y0}, Point{x1, y0}, Point{x0, y1}, Point{x1, y1}})
+                        box.add(tx.xf.apply(p));
+                    pen += w;
+                }
             } else {
                 const VectorImage &im = scene.images[(size_t) ref.index];
                 for (Point p : {Point{im.x, im.y}, Point{im.x + im.w, im.y}, Point{im.x + im.w, im.y + im.h},
@@ -855,6 +970,12 @@ bool place_as_text(PageDoc &doc, VectorStore &store, ImageStore *images, const F
                 sh.windings.reset();
                 slice.order.push_back({VectorSlot::Shape, (int) slice.shapes.size()});
                 slice.shapes.push_back(std::move(sh));
+            } else if (ref.slot == VectorSlot::Text) {
+                VectorText tx = scene.texts[(size_t) ref.index];
+                tx.xf = shift * tx.xf;
+                tx.clip = clip_into(tx.clip);
+                slice.order.push_back({VectorSlot::Text, (int) slice.texts.size()});
+                slice.texts.push_back(std::move(tx));
             } else {
                 VectorImage im = scene.images[(size_t) ref.index];
                 im.xf = shift * im.xf;
@@ -1030,13 +1151,12 @@ bool place_as_text(PageDoc &doc, VectorStore &store, ImageStore *images, const F
                 for (Run &run : runs)
                     run.style.leading = block_gap;     // the SVG's own line spacing
             if (!para.runs.empty()) {
-                /* Join with the line before: a break hyphen goes, else a space */
+                /* Join with the line before. A hyphen stays, so "well-" and
+                 * "known" stay "well-known"; a space separates other lines. */
                 std::string &prev = para.runs.back().text;
-                const bool hyphen = !prev.empty() && prev.back() == '-' && !L.text.empty() &&
-                                    std::islower((unsigned char) L.text[0]);
-                if (hyphen)
-                    prev.pop_back();
-                else if (!prev.empty() && prev.back() != ' ')
+                const bool hyphen = !prev.empty() && (prev.back() == '-' || prev.back() == '\xAD') &&
+                                    !L.text.empty() && std::islower((unsigned char) L.text[0]);
+                if (!hyphen && !prev.empty() && prev.back() != ' ')
                     prev += ' ';
             }
             for (Run &run : runs) {
@@ -1148,9 +1268,12 @@ bool place_as_text(PageDoc &doc, VectorStore &store, ImageStore *images, const F
                                 : p.meta.format == "png" ? ".png"
                                 : p.meta.format == "tiff" ? ".tif"
                                                           : ".img";
+        int pictures = 0;
+        for (char c : pull)
+            pictures += c ? 1 : 0;
         ImageAsset asset;
         asset.id = id;
-        asset.name = stem + ext;
+        asset.name = stem + (pictures > 1 ? "-" + std::to_string(++picture_n) : "") + ext;
         asset.meta = p.meta;
         asset.source_size = im.bytes->size();
         asset.hash = image_bytes_hash(im.bytes->data(), im.bytes->size());
@@ -1189,10 +1312,17 @@ bool place_as_text(PageDoc &doc, VectorStore &store, ImageStore *images, const F
         if (ref.slot == VectorSlot::Text) {
             if (i >= scene.texts.size())
                 continue;
-            flush_drawing();
-            PasteLine L;
-            if (read_line(scene.texts[i], L))
-                add_line(std::move(L));
+            /* A text frame has no clip of its own. Clipped type stays in
+             * the drawing, where the clip still applies. */
+            if (scene.texts[i].clip >= 0) {
+                flush_block();
+                drawing.push_back(ref);
+            } else {
+                flush_drawing();
+                PasteLine L;
+                if (read_line(scene.texts[i], L))
+                    add_line(std::move(L));
+            }
         } else if (ref.slot == VectorSlot::Shape) {
             if (i >= scene.shapes.size())
                 continue;
@@ -1255,7 +1385,8 @@ VectorPlacement place_svg_bytes(PageDoc &doc, VectorStore &store, std::vector<ui
         place_as_text(doc, store, images, fonts, scene, name, page, at, paste, r))
         return r;
     /* Pictures come out of an SVG as frames; a PDF page stays one placed page */
-    if (images && scene.format != "pdf" && place_grouped(doc, store, *images, scene, name, page, at, paste, r))
+    if (images && scene.format != "pdf" &&
+        place_grouped(doc, store, *images, scene, name, page, at, paste, fonts, r))
         return r;
     return place_whole(doc, store, std::move(bytes), std::move(scene), name, source, page, at, paste,
                        pdf_page);

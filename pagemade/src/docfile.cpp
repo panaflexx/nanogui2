@@ -183,6 +183,12 @@ void write_item(JsonOut &j, const Item &it) {
     j.key("layer").value(it.layer);
     if (it.group)
         j.key("group").value(it.group);
+    if (!it.outer_groups.empty()) {      // the groups around it, inside out
+        j.key("outer_groups").begin_array();
+        for (uint32_t g : it.outer_groups)
+            j.value(g);
+        j.end_array();
+    }
     j.key("w").value(it.w);
     j.key("h").value(it.h);
     j.key("xf").numbers({it.xf.a, it.xf.b, it.xf.c, it.xf.d, it.xf.e, it.xf.f});
@@ -833,6 +839,18 @@ bool read_item(const DictValue *o, Item &it) {
     get(o, "id", it.id);
     get(o, "layer", it.layer);
     get(o, "group", it.group);
+    if (const DictValue *og = field(o, "outer_groups")) {
+        for (size_t k = 0; k < count(og); ++k) {
+            double g = 0;
+            if (number(at(og, k), g) && g > 0)
+                it.outer_groups.push_back((uint32_t) g);
+        }
+    } else {
+        uint32_t parent = 0;             // the first nested-group files: one level
+        get(o, "group_parent", parent);
+        if (parent)
+            it.outer_groups.push_back(parent);
+    }
     get(o, "w", it.w);
     get(o, "h", it.h);
     float xf[6] = {1, 0, 0, 1, 0, 0};
@@ -938,7 +956,11 @@ void repair(PageDoc &d, std::vector<std::string> &warnings) {
     d.tidy_groups();
     for (const Page &p : d.pages)
         for (const Item &it : p.items)
-            max_id = std::max(max_id, it.group);  // new groups take ids past these
+            for (uint32_t g : it.outer_groups)
+                max_id = std::max(max_id, std::max(it.group, g));
+    for (const Page &p : d.pages)
+        for (const Item &it : p.items)
+            max_id = std::max(max_id, it.group);
 
     std::set<ItemId> threaded;
     std::set<StoryId> story_ids;

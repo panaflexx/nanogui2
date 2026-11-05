@@ -557,6 +557,9 @@ private:
         uint32_t group = 0;              // a corner of this selected group's box
     };
     /* Page bounds of each group whose members are all selected, on `page`. */
+    /* The boxes with corner handles on `page`: each whole selected group (by
+     * its outermost group), or, when two or more units are selected there,
+     * one box around them all (key kSelectionBox in composerview.cpp). */
     std::map<uint32_t, pagemade::Bounds> selected_groups(size_t page) const;
     /* Scale a group's members with its box, a corner dragged by `d`. */
     void resize_group(pagemade::Point d, int modifiers);

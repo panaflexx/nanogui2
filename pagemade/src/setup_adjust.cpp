@@ -79,7 +79,7 @@ std::vector<std::vector<size_t>> units(const Page &p) {
     std::vector<std::vector<size_t>> out;
     std::map<uint32_t, size_t> group;
     for (size_t i = 0; i < p.items.size(); ++i) {
-        const uint32_t g = p.items[i].group;
+        const uint32_t g = p.items[i].root_group();   // a group inside another moves with it
         if (g && group.count(g)) {
             out[group[g]].push_back(i);
             continue;

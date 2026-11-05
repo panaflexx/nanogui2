@@ -6,6 +6,7 @@
 #include <algorithm>
 #include <cstdio>
 #include <map>
+#include <set>
 #include <cmath>
 
 namespace pagemade {
@@ -531,6 +532,28 @@ PlacedImage scale_placement(PlacedImage im, float old_w, float old_h, float new_
     return im;
 }
 
+template <typename P>
+static P keep_aspect(P p, float old_w, float old_h, float new_w, float new_h) {
+    if (old_w == 0.f || old_h == 0.f)
+        return p;
+    const float k = std::max(new_w / old_w, new_h / old_h);
+    p.x = new_w * 0.5f + (p.x - old_w * 0.5f) * k;
+    p.y = new_h * 0.5f + (p.y - old_h * 0.5f) * k;
+    p.w *= k;
+    p.h *= k;
+    return p;
+}
+
+PlacedImage scale_placement_keep_aspect(PlacedImage im, float old_w, float old_h, float new_w,
+                                        float new_h) {
+    return keep_aspect(im, old_w, old_h, new_w, new_h);
+}
+
+PlacedVector scale_placement_keep_aspect(PlacedVector v, float old_w, float old_h, float new_w,
+                                         float new_h) {
+    return keep_aspect(v, old_w, old_h, new_w, new_h);
+}
+
 PlacedImage crop_placement(PlacedImage im, float left, float top) {
     im.x -= left;
     im.y -= top;
@@ -894,6 +917,16 @@ void PageDoc::restack(const std::vector<ItemId> &ids, int dir) {
     sort_by_layer();                     // a step never leaves the layer
 }
 
+uint32_t PageDoc::group_root(uint32_t group) const {
+    if (!group)
+        return 0;
+    for (const Page &p : pages)
+        for (const Item &it : p.items)
+            if (it.in_group(group))
+                return it.root_group();
+    return 0;
+}
+
 std::vector<ItemId> PageDoc::group_members(ItemId id) const {
     size_t pg = 0;
     const Item *it = find_item(id, &pg);
@@ -901,32 +934,78 @@ std::vector<ItemId> PageDoc::group_members(ItemId id) const {
         return {};
     if (it->group == 0)
         return {id};
+    const uint32_t root = it->root_group();
     std::vector<ItemId> out;
     for (const Item &o : pages[pg].items)
-        if (o.group == it->group)
+        if (o.group && o.root_group() == root)
             out.push_back(o.id);
     return out;
 }
 
-uint32_t PageDoc::group_items(const std::vector<ItemId> &ids) {
-    /* The items and whatever they were grouped with, all on one page */
-    size_t page = SIZE_MAX;
+/* Wrap `members` (whole units) in a new group `gid`: a loose item joins
+ * it, a group gets it as the new outermost level. */
+static void wrap_in_group(PageDoc &doc, const std::vector<ItemId> &members, uint32_t gid) {
+    for (ItemId id : members)
+        if (Item *it = doc.find_item(id)) {
+            if (!it->group)
+                it->group = gid;
+            else
+                it->outer_groups.push_back(gid);
+        }
+}
+
+/* The items and whatever they are grouped with, all on one page, in two
+ * or more units; empty when they can't be grouped. */
+static std::vector<ItemId> group_units(const PageDoc &doc, const std::vector<ItemId> &ids,
+                                       size_t &page) {
+    page = SIZE_MAX;
     std::vector<ItemId> members;
+    std::vector<uint32_t> roots;
+    size_t loose = 0;
     for (ItemId id : ids) {
         size_t pg = 0;
-        if (!find_item(id, &pg))
+        const Item *it = doc.find_item(id, &pg);
+        if (!it)
             continue;
         if (page == SIZE_MAX)
             page = pg;
         else if (pg != page)
-            return 0;
-        for (ItemId m : group_members(id))
-            if (std::find(members.begin(), members.end(), m) == members.end())
-                members.push_back(m);
+            return {};
+        if (!it->group) {
+            if (std::find(members.begin(), members.end(), id) == members.end()) {
+                members.push_back(id);
+                ++loose;
+            }
+            continue;
+        }
+        if (std::find(roots.begin(), roots.end(), it->root_group()) != roots.end())
+            continue;
+        roots.push_back(it->root_group());
+        for (ItemId m : doc.group_members(id))
+            members.push_back(m);
     }
-    if (page == SIZE_MAX || members.size() < 2)
+    if (loose + roots.size() < 2)
+        return {};
+    return members;
+}
+
+uint32_t PageDoc::group_in_place(const std::vector<ItemId> &ids) {
+    size_t page = SIZE_MAX;
+    const std::vector<ItemId> members = group_units(*this, ids, page);
+    if (members.empty())
         return 0;
     const uint32_t gid = next_id++;
+    wrap_in_group(*this, members, gid);
+    return gid;
+}
+
+uint32_t PageDoc::group_items(const std::vector<ItemId> &ids) {
+    size_t page = SIZE_MAX;
+    const std::vector<ItemId> members = group_units(*this, ids, page);
+    if (members.empty())
+        return 0;
+    const uint32_t gid = next_id++;
+    wrap_in_group(*this, members, gid);
     std::vector<Item> &items = pages[page].items;
     auto in = [&](const Item &it) {
         return std::find(members.begin(), members.end(), it.id) != members.end();
@@ -941,7 +1020,6 @@ uint32_t PageDoc::group_items(const std::vector<ItemId> &ids) {
     for (size_t i = 0; i < items.size(); ++i) {
         if (in(items[i])) {
             grouped.push_back(items[i]);
-            grouped.back().group = gid;
         } else {
             rest.push_back(items[i]);
             if (i < top)
@@ -959,31 +1037,95 @@ uint32_t PageDoc::group_items(const std::vector<ItemId> &ids) {
 }
 
 void PageDoc::ungroup_items(const std::vector<ItemId> &ids) {
+    std::vector<uint32_t> roots;
     for (ItemId id : ids)
-        for (ItemId m : group_members(id))
-            if (Item *it = find_item(m))
-                it->group = 0;
+        if (const Item *it = find_item(id); it && it->group)
+            if (std::find(roots.begin(), roots.end(), it->root_group()) == roots.end())
+                roots.push_back(it->root_group());
+    for (Page &p : pages)
+        for (Item &it : p.items) {
+            if (!it.group || std::find(roots.begin(), roots.end(), it.root_group()) == roots.end())
+                continue;
+            if (!it.outer_groups.empty())
+                it.outer_groups.pop_back();
+            else
+                it.group = 0;
+        }
+}
+
+/* Drop group `g` from the item's chain (the level inside it moves up). */
+static void leave_group(Item &it, uint32_t g) {
+    if (it.group == g) {
+        if (it.outer_groups.empty()) {
+            it.group = 0;
+        } else {
+            it.group = it.outer_groups.front();
+            it.outer_groups.erase(it.outer_groups.begin());
+        }
+        return;
+    }
+    it.outer_groups.erase(std::remove(it.outer_groups.begin(), it.outer_groups.end(), g),
+                          it.outer_groups.end());
 }
 
 void PageDoc::tidy_groups() {
-    /* A group lives on one page: where it is found first */
-    std::map<uint32_t, size_t> home, count;
+    /* A chain names each group once, and a group lives on one page (where
+     * it is found first): an item elsewhere leaves it, and the groups
+     * around it too */
+    std::map<uint32_t, size_t> home;
     for (size_t pi = 0; pi < pages.size(); ++pi)
         for (Item &it : pages[pi].items) {
-            if (!it.group)
+            if (!it.group) {
+                it.outer_groups.clear();
                 continue;
-            auto h = home.find(it.group);
-            if (h == home.end())
-                home[it.group] = pi;
-            else if (h->second != pi)
-                it.group = 0;
-            if (it.group)
-                ++count[it.group];
+            }
+            std::vector<uint32_t> chain{it.group};
+            chain.insert(chain.end(), it.outer_groups.begin(), it.outer_groups.end());
+            size_t keep = 0;
+            for (; keep < chain.size(); ++keep) {
+                const uint32_t g = chain[keep];
+                if (!g || std::find(chain.begin(), chain.begin() + (long) keep, g) != chain.begin() + (long) keep)
+                    break;                   // a zero or a repeat (a loop): stop there
+                auto h = home.find(g);
+                if (h == home.end())
+                    home[g] = pi;
+                else if (h->second != pi)
+                    break;
+            }
+            chain.resize(keep);
+            it.group = chain.empty() ? 0 : chain.front();
+            it.outer_groups.assign(chain.size() > 1 ? chain.begin() + 1 : chain.end(), chain.end());
         }
-    for (Page &p : pages)
-        for (Item &it : p.items)
-            if (it.group && count[it.group] < 2)
-                it.group = 0;
+    /* A group needs two parts directly inside it: items, or groups. One
+     * left (or none) and the group goes; what was in it moves up a level.
+     * Repeat, since that can leave the group around it short too. */
+    for (int pass = 0; pass < 64; ++pass) {
+        /* parts[g]: what sits directly inside g (an item id, or a group
+         * id marked with the top bit) */
+        std::map<uint32_t, std::set<uint64_t>> parts;
+        for (const Page &p : pages)
+            for (const Item &it : p.items) {
+                if (!it.group)
+                    continue;
+                parts[it.group].insert(it.id);
+                uint32_t inner = it.group;
+                for (uint32_t g : it.outer_groups) {
+                    parts[g].insert((1ull << 63) | inner);
+                    inner = g;
+                }
+            }
+        std::set<uint32_t> short_groups;
+        for (const auto &kv : parts)
+            if (kv.second.size() < 2)
+                short_groups.insert(kv.first);
+        if (short_groups.empty())
+            break;
+        for (Page &p : pages)
+            for (Item &it : p.items)
+                for (uint32_t g : short_groups)
+                    if (it.in_group(g))
+                        leave_group(it, g);
+    }
 }
 
 size_t PageDoc::insert_page(size_t index) {
@@ -1031,12 +1173,17 @@ size_t PageDoc::duplicate_pages(size_t first, size_t count) {
         for (const Item &o : pages[p].items) {
             Item it = o;
             it.id = next_id++;
-            if (it.group) {
-                auto g = new_group.find(o.group);
-                if (g == new_group.end())
-                    g = new_group.emplace(o.group, next_id++).first;
-                it.group = g->second;
-            }
+            auto remap_group = [&](uint32_t g) {
+                if (!g)
+                    return 0u;
+                auto found = new_group.find(g);
+                if (found == new_group.end())
+                    found = new_group.emplace(g, next_id++).first;
+                return found->second;
+            };
+            it.group = remap_group(o.group);
+            for (uint32_t &g : it.outer_groups)
+                g = remap_group(g);
             new_id[o.id] = it.id;
             copy.items.push_back(std::move(it));
         }

@@ -24,6 +24,7 @@
 #include <cstdio>
 #include <cstring>
 #include <map>
+#include <set>
 #include <memory>
 
 #define STB_IMAGE_WRITE_STATIC
@@ -755,16 +756,30 @@ std::string items_svg(const PageDoc &doc, size_t page, const std::vector<ItemId>
 
     Svg svg;
     std::map<const Font *, FontFace> faces;
-    uint32_t group = 0;                  // the open <g>, if any
+    std::vector<uint32_t> open;          // the open <g>s, outermost first
+    std::set<uint32_t> named;            // groups whose id is written
     for (const Item &it : doc.pages[page].items) {
         if (!chosen(it))
             continue;
-        if (it.group != group) {
-            if (group)
-                svg.body += "</g>\n";
-            group = it.group;
-            if (group)
-                svg.body += "<g id=\"group" + std::to_string(group) + "\">\n";
+        /* Nested groups are nested <g>s: close what this item isn't in,
+         * open what it is (outermost first) */
+        std::vector<uint32_t> path;
+        if (it.group) {
+            path.assign(it.outer_groups.rbegin(), it.outer_groups.rend());
+            path.push_back(it.group);
+        }
+        size_t same = 0;
+        while (same < open.size() && same < path.size() && open[same] == path[same])
+            ++same;
+        while (open.size() > same) {
+            svg.body += "</g>\n";
+            open.pop_back();
+        }
+        for (size_t k = same; k < path.size(); ++k) {
+            /* A group split by the stack opens again, without the id twice */
+            const bool first = named.insert(path[k]).second;
+            svg.body += first ? "<g id=\"group" + std::to_string(path[k]) + "\">\n" : "<g>\n";
+            open.push_back(path[k]);
         }
         if (it.is_text()) {
             write_text_frame(svg, doc, it, comps, faces);
@@ -780,7 +795,7 @@ std::string items_svg(const PageDoc &doc, size_t page, const std::vector<ItemId>
                 write_image(svg, *im, images);
         }
     }
-    if (group)
+    for (size_t k = 0; k < open.size(); ++k)
         svg.body += "</g>\n";
 
     std::string out = "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n"

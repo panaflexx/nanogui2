@@ -2938,8 +2938,9 @@ static void test_groups(const FontLibrary &fonts) {
     CHECK(order == (std::vector<ItemId>{b, a, c, d}), "the group is adjacent in the stack");
 
     const uint32_t g2 = doc.group_items({c, d});
-    CHECK(g2 != 0 && g2 != g && doc.group_members(a).size() == 3,
-          "grouping a member with another item takes in its whole group");
+    CHECK(g2 != 0 && g2 != g && doc.group_members(a).size() == 3 && doc.find_item(a)->group == g &&
+              doc.find_item(a)->outer_groups == std::vector<uint32_t>{g2} && doc.find_item(d)->group == g2,
+          "grouping a member with another item takes in its whole group, which nests inside");
 
     const std::string path = "/tmp/pagemade-groups.pagemade";
     std::string err;
@@ -2951,17 +2952,136 @@ static void test_groups(const FontLibrary &fonts) {
         CHECK(g3 == 0, "still one page per group after opening");
         Item *ib = back.doc.find_item(b);
         Item *ia = back.doc.find_item(a);
-        CHECK(ia && ib && back.doc.next_id > ia->group, "new ids come after saved groups");
+        CHECK(ia && ib && back.doc.next_id > ia->group && back.doc.next_id > ia->root_group(),
+              "new ids come after saved groups");
     }
 
     doc.ungroup_items({a});
-    CHECK(doc.group_members(c).size() == 1 && doc.find_item(d)->group == 0,
-          "ungroup takes the whole group apart");
+    CHECK(doc.group_members(c).size() == 2 && doc.find_item(d)->group == 0,
+          "ungroup takes away the outer group; the pair inside stays");
+    doc.ungroup_items({a});
+    CHECK(doc.group_members(c).size() == 1 && doc.find_item(a)->group == 0,
+          "a second ungroup takes the pair apart");
 
     doc.group_items({a, b});
     doc.remove_item(a);
     doc.tidy_groups();
     CHECK(doc.find_item(b)->group == 0, "a group left with one item ends");
+
+    /* A group can hold another group. Ungroup peels one level. */
+    PageDoc nest = new_publication(PageSetup(), 1);
+    auto nbox = [&](float x) {
+        Item it;
+        it.w = 20; it.h = 20;
+        it.xf = Transform::translate(x, 0);
+        it.content = Shape();
+        return nest.add_item(0, it);
+    };
+    const ItemId e = nbox(0), f = nbox(30), h = nbox(60);
+    const uint32_t inner = nest.group_items({e, f});
+    /* Grouping a group with an item puts the group inside the new one */
+    const uint32_t outer = nest.group_items({e, h});
+    CHECK(inner != 0 && outer != 0 && nest.group_root(inner) == outer &&
+              nest.find_item(e)->group == inner && nest.find_item(h)->group == outer,
+          "the inner group sits in the outer one");
+    CHECK(nest.group_members(h).size() == 3, "a group of groups is every member");
+    const std::string npath = "/tmp/pagemade-nested.pagemade";
+    CHECK(save_document(nest, fonts, npath, SaveOptions{false}, &err), "save nested groups: %s", err.c_str());
+    OpenResult nback = open_document(npath, fonts);
+    CHECK(nback.ok && nback.doc.find_item(e) && nback.doc.find_item(h) &&
+              nback.doc.find_item(e)->group_parent() == nback.doc.find_item(h)->group &&
+              nback.doc.group_members(h).size() == 3,
+          "a group inside a group survives saving");
+    if (nback.ok) {
+        nback.doc.ungroup_items({h});
+        const Item *ne = nback.doc.find_item(e);
+        const Item *nf = nback.doc.find_item(f);
+        const Item *nh = nback.doc.find_item(h);
+        CHECK(ne && nf && nh && nh->group == 0 && ne->group != 0 && ne->group == nf->group &&
+                  ne->group_parent() == 0,
+              "ungroup peels the outer group and leaves the inner one");
+        nback.doc.ungroup_items({e});
+        CHECK(nback.doc.find_item(e)->group == 0 && nback.doc.find_item(f)->group == 0,
+              "a second ungroup takes the inner group apart");
+    }
+    nest.remove_item(f);
+    nest.tidy_groups();
+    CHECK(nest.find_item(e)->group == outer && nest.find_item(h)->group == outer &&
+              nest.find_item(e)->group_parent() == 0,
+          "one item left in an inner group joins the group around it");
+
+    /* A group of groups, with no item of its own, inside another group:
+     * every level is kept through saving, and one Ungroup peels one */
+    PageDoc deep = new_publication(PageSetup(), 1);
+    auto dbox = [&](float x) {
+        Item it;
+        it.w = 10; it.h = 10;
+        it.xf = Transform::translate(x, 0);
+        it.content = Shape();
+        return deep.add_item(0, it);
+    };
+    const ItemId a1 = dbox(0), a2 = dbox(20), b1 = dbox(40), b2 = dbox(60), x1 = dbox(80);
+    const uint32_t ga = deep.group_items({a1, a2}), gb = deep.group_items({b1, b2});
+    const uint32_t both = deep.group_items({a1, b1});
+    const uint32_t top = deep.group_items({a1, x1});
+    CHECK(ga && gb && both && top && deep.group_root(ga) == top && deep.group_root(both) == top &&
+              deep.find_item(a1)->outer_groups == std::vector<uint32_t>({both, top}) &&
+              deep.group_members(x1).size() == 5,
+          "groups nest three deep (%zu members)", deep.group_members(x1).size());
+    CHECK(!deep.group_items({a1}), "one group alone isn't grouped again");
+    const std::string dpath = "/tmp/pagemade-deep-groups.pagemade";
+    CHECK(save_document(deep, fonts, dpath, SaveOptions{false}, &err), "save deep groups: %s", err.c_str());
+    OpenResult dback = open_document(dpath, fonts);
+    CHECK(dback.ok && dback.doc.find_item(a1) &&
+              dback.doc.find_item(a1)->outer_groups == std::vector<uint32_t>({both, top}),
+          "every level survives saving");
+    {
+        const std::string dsvg = items_svg(deep, 0, {a1, a2, b1, b2, x1}, {}, nullptr, nullptr);
+        size_t opens = 0, opens_all = 0, closes = 0;
+        for (size_t at = dsvg.find("<g id=\"group"); at != std::string::npos; at = dsvg.find("<g id=\"group", at + 2))
+            ++opens;
+        for (size_t at = dsvg.find("<g"); at != std::string::npos; at = dsvg.find("<g", at + 2))
+            ++opens_all;
+        for (size_t at = dsvg.find("</g>"); at != std::string::npos; at = dsvg.find("</g>", at + 4))
+            ++closes;
+        CHECK(opens == 4 && closes == opens_all &&
+                  dsvg.find("<g id=\"group" + std::to_string(top) + "\">\n<g id=\"group" +
+                            std::to_string(both) + "\">\n<g id=\"group" + std::to_string(ga)) != std::string::npos,
+              "SVG copies nest the groups (%zu groups, %zu <g>, %zu </g>)", opens, opens_all, closes);
+    }
+    PageDoc peel = deep;
+    peel.ungroup_items({x1});
+    CHECK(peel.find_item(x1)->group == 0 && peel.group_members(a1).size() == 4 &&
+              peel.find_item(a1)->root_group() == both,
+          "ungroup takes away only the outermost group");
+    peel.ungroup_items({a1});
+    CHECK(peel.group_members(a1).size() == 2 && peel.group_members(b1).size() == 2 &&
+              peel.find_item(a1)->group == ga && peel.find_item(a1)->outer_groups.empty(),
+          "and again: the two inner groups are left");
+    /* The item beside the group of groups goes: the outer group holds only
+     * that group, so it ends, and a single Ungroup splits the pair */
+    deep.remove_item(x1);
+    deep.tidy_groups();
+    CHECK(deep.find_item(a1)->root_group() == both &&
+              deep.find_item(a1)->outer_groups == std::vector<uint32_t>({both}),
+          "a group holding just one group goes away");
+    deep.ungroup_items({a1});
+    CHECK(deep.find_item(a1)->group == ga && deep.find_item(b1)->group == gb &&
+              deep.group_members(a1).size() == 2,
+          "one ungroup then gives the two groups back");
+    /* A chain that loops (a damaged file) is cut where it repeats */
+    PageDoc loop = new_publication(PageSetup(), 1);
+    Item la, lb;
+    la.w = lb.w = 10; la.h = lb.h = 10;
+    la.content = lb.content = Shape();
+    const ItemId li = loop.add_item(0, la), lj = loop.add_item(0, lb);
+    loop.find_item(li)->group = 500;
+    loop.find_item(li)->outer_groups = {501, 500};
+    loop.find_item(lj)->group = 500;
+    loop.find_item(lj)->outer_groups = {501, 500};
+    loop.tidy_groups();
+    CHECK(loop.find_item(li)->group == 500 && loop.find_item(li)->outer_groups.empty(),
+          "a looping chain is cut (%zu levels)", loop.find_item(li)->outer_groups.size());
 }
 
 static void test_page_markers(const FontLibrary &fonts) {
@@ -3442,6 +3562,17 @@ static void test_images(const FontLibrary &fonts) {
         PlacedImage scaled = scale_placement(im, 50, 20, 100, 40);
         CHECK(near(scaled.x, 0) && near(scaled.y, 0) && near(scaled.w, 200) && near(scaled.h, 80),
               "scale keeps the crop's fraction of the picture");
+        /* A frame 100 x 40 filled by a 100 x 40 picture, stretched to 200 x 40:
+         * the picture doubles both ways about the middle, still filling it */
+        PlacedImage fill;
+        fill.x = 0; fill.y = 0; fill.w = 100; fill.h = 40;
+        PlacedImage wide = scale_placement_keep_aspect(fill, 100, 40, 200, 40);
+        CHECK(near(wide.w, 200) && near(wide.h, 80) && near(wide.x, 0) && near(wide.y, -20),
+              "an uneven stretch keeps the picture's proportions (%g x %g at %g,%g)",
+              wide.w, wide.h, wide.x, wide.y);
+        PlacedImage even = scale_placement_keep_aspect(im, 50, 20, 100, 40);
+        CHECK(near(even.x, 0) && near(even.y, 0) && near(even.w, 200) && near(even.h, 80),
+              "an even stretch is the plain scale");
         PlacedImage cropped = crop_placement(im, 20, 5);
         CHECK(near(cropped.x, -20) && near(cropped.y, -5) && near(cropped.w, 100) && near(cropped.h, 40),
               "crop leaves the picture where it was");
@@ -5447,28 +5578,42 @@ static void test_svg_group(const FontLibrary &fonts) {
     ImageStore images;
     const VectorPlacement placed =
         place_svg_bytes(doc, vectors, bytes_of(xml), "paste.svg", "", 0, nullptr, &images);
-    CHECK(placed.ok && placed.group != 0 && placed.items.size() == 3, "three grouped pieces (%zu, group %u): %s",
+    CHECK(placed.ok && placed.group != 0 && placed.items.size() == 4,
+          "a shape, two text slices and a picture (%zu, group %u): %s",
           placed.items.size(), placed.group, placed.error.c_str());
-    int graphics = 0, photos = 0;
-    bool one_group = true;
+    int graphics = 0, photos = 0, text_slices = 0;
+    bool direct_ok = true, text_nested = true;
+    uint32_t text_group = 0;
+    ItemId text_id = 0;
     const Item *photo = nullptr;
+    const Item *shape = nullptr;
     std::string words, saved_words;
     for (const Item &it : doc.pages[0].items) {
-        one_group = one_group && it.group == placed.group && it.group != 0;
         if (const PlacedVector *v = it.vector()) {
             ++graphics;
             const VectorScene *scene = vectors.scene(v->asset);
             CHECK(scene && scene->images.empty(), "a graphic piece draws no picture");
-            if (scene)
+            const bool type = scene && !scene->texts.empty();
+            if (type) {
+                ++text_slices;
+                text_group = it.group;
+                text_id = it.id;
+                text_nested = text_nested && it.group != 0 && it.group != placed.group &&
+                              it.group_parent() == placed.group;
                 for (const VectorText &tx : scene->texts)
                     for (const VectorTextRun &run : tx.runs)
                         words += run.text;
+            } else {
+                shape = &it;
+                direct_ok = direct_ok && it.group == placed.group && it.group_parent() == 0;
+            }
             VectorStore::Bytes back = vectors.source_of(v->asset);
             VectorScene again;
             std::string err;
             CHECK(back && vector_loader().decode(back->data(), back->size(), &again, &err) &&
-                      again.images.empty() && near(again.width, 20.f),
-                  "the saved graphic is the piece, not the whole file (%s)", err.c_str());
+                      again.images.empty() && again.width < 19.f,
+                  "the saved graphic is its own ink, not the whole file (%g, %s)",
+                  again.width, err.c_str());
             for (const VectorText &tx : again.texts)
                 for (const VectorTextRun &run : tx.runs)
                     saved_words += run.text;
@@ -5476,13 +5621,20 @@ static void test_svg_group(const FontLibrary &fonts) {
         if (it.image()) {
             ++photos;
             photo = &it;
+            direct_ok = direct_ok && it.group == placed.group && it.group_parent() == 0;
         }
     }
-    CHECK(graphics == 2 && photos == 1 && one_group, "two graphics and one picture, one group");
+    CHECK(graphics == 3 && photos == 1 && text_slices == 2 && direct_ok && text_nested,
+          "the drawing and the picture are the paste; the type is a group inside it");
+    CHECK(doc.group_members(placed.item).size() == 4, "one click selects the whole paste");
     CHECK(words.find("Hi") != std::string::npos && words.find("Yo") != std::string::npos,
           "the words stay in the graphics (%s)", words.c_str());
     CHECK(saved_words.find("Hi") != std::string::npos && saved_words.find("Yo") != std::string::npos,
           "opening the file again keeps the words (%s)", saved_words.c_str());
+    if (shape)
+        CHECK(near(shape->w, 5.f) && near(shape->h, 5.f) && near(shape->xf.e, 53.5f) &&
+                  near(shape->xf.f, 53.5f),
+              "the rectangle is its own box (%g,%g %g x %g)", shape->xf.e, shape->xf.f, shape->w, shape->h);
     if (photo && photo->image()) {
         CHECK(near(photo->xf.e, 56.f) && near(photo->xf.f, 56.f) && near(photo->w, 6.f) &&
                   near(photo->h, 6.f),
@@ -5495,10 +5647,23 @@ static void test_svg_group(const FontLibrary &fonts) {
               "the picture is a PNG asset");
     }
     doc.ungroup_items({placed.item});
+    bool peeled = true, type_kept = text_group != 0;
+    for (const Item &it : doc.pages[0].items) {
+        const bool type = it.vector() && it.group == text_group;
+        if (type) {
+            type_kept = type_kept && it.group_parent() == 0;
+            peeled = peeled && it.group == text_group;
+        } else {
+            peeled = peeled && it.group == 0;
+        }
+    }
+    CHECK(peeled && type_kept && doc.pages[0].items.size() == 4,
+          "ungroup peels the paste and leaves the type grouped");
+    doc.ungroup_items({text_id});
     bool apart = true;
     for (const Item &it : doc.pages[0].items)
         apart = apart && it.group == 0;
-    CHECK(apart && doc.pages[0].items.size() == 3, "ungroup leaves the picture and the graphics");
+    CHECK(apart, "a second ungroup takes the type apart");
 
     vectors.realize(fonts);
     const std::vector<Composition> comps;
@@ -5698,6 +5863,76 @@ static void test_svg_paste(const FontLibrary &fonts) {
             }
     CHECK(frames == 2, "three lines make one frame, the stray one another (%zu)", frames);
 
+    /* A hyphen at the end of a line stays, so the next word joins it */
+    const std::string hyphen =
+        "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"200\" height=\"40\" viewBox=\"0 0 200 40\">"
+        "<text x=\"0\" y=\"16\" font-family=\"serif\" font-size=\"10\">well-</text>"
+        "<text x=\"0\" y=\"28\" font-family=\"serif\" font-size=\"10\">known</text></svg>";
+    PageDoc hdoc;
+    VectorStore hstore;
+    p = place_svg_bytes(hdoc, hstore, bytes(hyphen), "h.svg", "", 0, nullptr, nullptr, SvgPaste::Text,
+                        &fonts, true);
+    std::string joined;
+    if (const StoryEntry *hs = p.ok ? hdoc.story_of(p.item) : nullptr)
+        for (const Paragraph &para : hs->story.paragraphs)
+            for (const Run &run : para.runs)
+                joined += run.text;
+    CHECK(joined == "well-known", "a line-end hyphen stays (%s)", joined.c_str());
+
+    const char *png =
+        "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAIAAACQd1PeAAAADUlEQVR4nGP4z8DwHwAFAAH/iZk9HQAAAABJRU5ErkJggg==";
+    /* Two pictures get two names */
+    const std::string pair =
+        std::string("<svg xmlns=\"http://www.w3.org/2000/svg\" xmlns:xlink=\"http://www.w3.org/1999/xlink\" "
+                    "width=\"40\" height=\"20\" viewBox=\"0 0 40 20\">"
+                    "<image x=\"0\" y=\"0\" width=\"10\" height=\"10\" xlink:href=\"data:image/png;base64,") +
+        png +
+        "\"/>"
+        "<image x=\"20\" y=\"0\" width=\"10\" height=\"10\" xlink:href=\"data:image/png;base64," +
+        png + "\"/></svg>";
+    PageDoc idoc;
+    VectorStore istore;
+    ImageStore iimages;
+    p = place_svg_bytes(idoc, istore, bytes(pair), "shot.svg", "", 0, nullptr, &iimages, SvgPaste::Text,
+                        &fonts, true);
+    CHECK(p.ok && idoc.images.size() == 2 && idoc.images[0].name != idoc.images[1].name &&
+              idoc.images[0].name == "shot-1.png" && idoc.images[1].name == "shot-2.png",
+          "two pictures are named apart (%s, %s)",
+          idoc.images.size() > 0 ? idoc.images[0].name.c_str() : "",
+          idoc.images.size() > 1 ? idoc.images[1].name.c_str() : "");
+
+    /* Clipped type stays in the drawing; the clip would not survive a frame */
+    const std::string clipped =
+        "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"80\" height=\"40\" viewBox=\"0 0 80 40\">"
+        "<defs><clipPath id=\"c\"><rect width=\"8\" height=\"8\"/></clipPath></defs>"
+        "<text x=\"0\" y=\"16\" font-family=\"serif\" font-size=\"10\" clip-path=\"url(#c)\">Hidden</text>"
+        "<text x=\"20\" y=\"16\" font-family=\"serif\" font-size=\"10\">Shown</text></svg>";
+    PageDoc kdoc;
+    VectorStore kstore;
+    p = place_svg_bytes(kdoc, kstore, bytes(clipped), "k.svg", "", 0, nullptr, nullptr, SvgPaste::Text,
+                        &fonts, true);
+    bool hidden_drawn = false, shown_frame = false;
+    for (ItemId id : p.items)
+        if (const Item *ki = kdoc.find_item(id)) {
+            if (const PlacedVector *pv = ki->vector())
+                if (const VectorScene *sc = kstore.scene(pv->asset))
+                    for (const VectorText &tx : sc->texts) {
+                        std::string t;
+                        for (const VectorTextRun &run : tx.runs)
+                            t += run.text;
+                        hidden_drawn = hidden_drawn || (t.find("Hidden") != std::string::npos && tx.clip >= 0);
+                    }
+            if (const StoryEntry *ks = kdoc.story_of(id)) {
+                std::string t;
+                for (const Paragraph &para : ks->story.paragraphs)
+                    for (const Run &run : para.runs)
+                        t += run.text;
+                shown_frame = shown_frame || t == "Shown";
+                hidden_drawn = hidden_drawn && t.find("Hidden") == std::string::npos;
+            }
+        }
+    CHECK(p.ok && hidden_drawn && shown_frame, "clipped type stays in the drawing (%s)", p.error.c_str());
+
     /* A contents line: the leader dots (written after the number) and the
      * jump become a right tab with a dot leader */
     const std::string toc =
@@ -5720,8 +5955,6 @@ static void test_svg_paste(const FontLibrary &fonts) {
           "a contents line keeps its tab and leader (%s)", ctext.c_str());
 
     /* A turned picture can't be a frame: it stays in the drawing, drawn */
-    const char *png =
-        "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAIAAACQd1PeAAAADUlEQVR4nGP4z8DwHwAFAAH/iZk9HQAAAABJRU5ErkJggg==";
     const std::string turned =
         std::string("<svg xmlns=\"http://www.w3.org/2000/svg\" xmlns:xlink=\"http://www.w3.org/1999/xlink\" "
                     "width=\"100\" height=\"100\" viewBox=\"0 0 100 100\">"
