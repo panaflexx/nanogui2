@@ -30,6 +30,7 @@
 #include "image.h"
 
 #include <algorithm>
+#include <atomic>
 #include <cstdint>
 #include <string>
 #include <variant>
@@ -364,7 +365,7 @@ struct Guide {
 
 /* A fresh identity for each page made this session. */
 inline uint32_t next_page_uid() {
-    static uint32_t next = 0;
+    static std::atomic<uint32_t> next{0};   // pages could be made off the UI thread one day
     return ++next;
 }
 

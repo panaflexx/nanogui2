@@ -1413,6 +1413,32 @@ Composition compose(const Story &story, const std::vector<Frame> &frames,
                     leading = leading_of(empty_style, st);
                 leading = slug(leading);
 
+                /* The first line in a text block keeps its ink inside the
+                 * block: with tight leading (or line spacing below 1) the
+                 * baseline, two thirds down the slug, would put tall type
+                 * above the top. The line moves down just enough, and the
+                 * lines after it keep their spacing from it. */
+                if (at_frame_top) {
+                    float rise = 0.f;
+                    for (const Piece &p : c.pieces)
+                        for (const PGlyph &g : p.glyphs) {
+                            if (g.kind != Kind::Glyph)
+                                continue;
+                            const Font *fo = sh.font(g.run);
+                            if (!fo || fo->units_per_em() <= 0)
+                                continue;
+                            const CharStyle &gs = sh.style(g.run);
+                            float x0, y0, x1, y1;
+                            fo->glyph_bounds(g.gid, x0, y0, x1, y1);
+                            const float top = y1 * gs.size * g.scale / (float) fo->units_per_em() +
+                                              g.dy + gs.baseline_shift;
+                            rise = std::max(rise, top);
+                        }
+                    const float over = rise - leading * (2.f / 3.f);
+                    if (over > kEps)
+                        y += over;
+                }
+
                 /* Align to grid: the baseline moves down to the next grid
                  * line, so each line's pitch is a multiple of the step. */
                 if (st.align_to_grid && f.grid_step > 0.f) {

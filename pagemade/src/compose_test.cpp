@@ -18,6 +18,8 @@
 #include "plugin/svg_export.h"
 #include "plugin/svg_place.h"
 #include "plugin/pdf_parse.h"
+#include "plugin/xml.h"
+#include "json_util.h"
 #include "page.h"
 #include "setup_adjust.h"
 #include "swatch_library.h"
@@ -323,6 +325,39 @@ static void test_baseline_grid(const FontLibrary &fonts) {
         for (const Paragraph &p : se.story.paragraphs)
             flag |= p.style.align_to_grid;
     CHECK(flag, "align_to_grid round-trips");
+}
+
+/* Tight leading or line spacing below 1 puts the first baseline (two
+ * thirds down the slug) too high for tall type: the first line in a text
+ * block moves down so its ink stays inside; the next line keeps its pitch.
+ * Ordinary leading doesn't move. */
+static void test_first_line_inside(const FontLibrary &fonts) {
+    CharStyle cs;
+    cs.size = 48;
+    const std::vector<Frame> box = {{0, 0, 400, 400}};
+    ParaStyle tight;
+    tight.line_spacing = 0.5f;
+    Composition c = compose(one_para("BRITTANY\u2028GNG", cs, tight), box, fonts);
+    CHECK(c.lines.size() == 2, "two lines (%zu)", c.lines.size());
+    if (c.lines.size() == 2) {
+        float ink_top = 1e9f;
+        for (const GlyphRun &r : c.lines[0].runs) {
+            const float upem = (float) r.font->units_per_em();
+            for (const PlacedGlyph &g : r.glyphs) {
+                float x0, y0, x1, y1;
+                r.font->glyph_bounds(g.gid, x0, y0, x1, y1);
+                ink_top = std::min(ink_top, g.y - y1 * r.size / upem);
+            }
+        }
+        CHECK(ink_top >= -0.01f, "the capitals stay inside the block (ink top %g)", ink_top);
+        CHECK(std::fabs((c.lines[1].baseline - c.lines[0].baseline) - c.lines[0].leading) < 0.01f,
+              "the next line keeps its spacing (%g vs %g)", c.lines[1].baseline - c.lines[0].baseline,
+              c.lines[0].leading);
+    }
+    ParaStyle normal;
+    Composition n = compose(one_para("Plain text", CharStyle(), normal), box, fonts);
+    CHECK(!n.lines.empty() && std::fabs(n.lines[0].baseline - n.lines[0].leading * (2.f / 3.f)) < 0.01f,
+          "ordinary leading keeps its first baseline");
 }
 
 /* Optical margin alignment (ParaStyle::optical_margins): edge punctuation
@@ -6174,6 +6209,42 @@ static void test_pdf_import(const FontLibrary &fonts) {
     }
 }
 
+/* Parsers that recurse per nesting level refuse files nested past a cap,
+ * instead of running the stack out on hostile input. */
+static void test_parser_depth() {
+    auto nested_xml = [](int levels) {
+        std::string x = "<svg xmlns=\"http://www.w3.org/2000/svg\">";
+        for (int i = 0; i < levels; ++i) x += "<g>";
+        for (int i = 0; i < levels; ++i) x += "</g>";
+        return x + "</svg>";
+    };
+    XmlNode root;
+    std::string err;
+    std::string ok = nested_xml(200), deep = nested_xml(100000);
+    CHECK(xml_parse((const uint8_t *) ok.data(), ok.size(), &root, &err), "200 levels of XML parse: %s", err.c_str());
+    root = XmlNode();
+    err.clear();
+    CHECK(!xml_parse((const uint8_t *) deep.data(), deep.size(), &root, &err) && !err.empty(),
+          "100000 levels are refused, not a crash (%s)", err.c_str());
+
+    auto nested_json = [](int levels) {
+        std::string j;
+        for (int i = 0; i < levels; ++i) j += "[";
+        for (int i = 0; i < levels; ++i) j += "]";
+        return j;
+    };
+    char jerr[256] = {0};
+    const std::string jok = nested_json(200), jdeep = nested_json(100000);
+    DictValue *v = dict_deserialize_json(jok.data(), jok.size(), jok.size(), jerr, sizeof jerr);
+    CHECK(v != nullptr, "200 levels of JSON parse: %s", jerr);
+    if (v)
+        dict_destroy(v);
+    v = dict_deserialize_json(jdeep.data(), jdeep.size(), jdeep.size(), jerr, sizeof jerr);
+    CHECK(v == nullptr, "100000 levels of JSON are refused (%s)", jerr);
+    if (v)
+        dict_destroy(v);
+}
+
 int main(int argc, char **argv) {
     bool verbose = argc > 1 && std::strcmp(argv[1], "-v") == 0;
     FontLibrary fonts;
@@ -6196,6 +6267,7 @@ int main(int argc, char **argv) {
     test_frame_options(fonts);
     test_baseline_grid(fonts);
     test_optical_margins(fonts);
+    test_first_line_inside(fonts);
     test_paragraph_attributes(fonts);
     test_drop_caps(fonts);
     test_keeps(fonts);
@@ -6246,6 +6318,7 @@ int main(int argc, char **argv) {
     test_svg_export(fonts);
     test_svg_paste(fonts);
     test_pdf_import(fonts);
+    test_parser_depth();
     test_system_fonts();
     if (verbose)
         dump_sample(fonts);

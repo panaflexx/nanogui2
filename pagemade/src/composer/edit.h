@@ -90,6 +90,11 @@ struct Caret {
 
 /* Invalid when p is in overset text. */
 Caret   caret_at(const Composition &c, const Story &s, TextPos p);
+/* The band a line's type fills, top and bottom on the page: its fonts'
+ * ascent above the baseline and descent below it. The caret and the
+ * selection use it, so they match the type even with leading tighter or
+ * looser than the type. A line with no glyphs gives its slug. */
+void    line_band(const ComposedLine &l, float &top, float &bottom);
 float   x_at(const ComposedLine &l, const std::string &text, uint32_t byte);
 /* The position on `line` nearest x. Never returns the end of a line that
  * continues on the next one (that position is drawn on the next line). */

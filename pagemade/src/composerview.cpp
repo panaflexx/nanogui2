@@ -4244,6 +4244,9 @@ void ComposerView::draw_text_overlays(NVGcontext *ctx, const Item &it, float px)
         TextPos lo = m_anchor, hi = m_caret;
         if (hi < lo)
             std::swap(lo, hi);
+        /* One path, filled once: lines whose bands overlap (tight leading)
+         * don't darken where they meet */
+        nvgBeginPath(ctx);
         for (const ComposedLine &l : c->lines) {
             if (l.frame != ti || l.para < lo.para || l.para > hi.para)
                 continue;
@@ -4265,11 +4268,12 @@ void ComposerView::draw_text_overlays(NVGcontext *ctx, const Item &it, float px)
             } else if (to == l.byte_end && l.para_end && l.para < hi.para) {
                 x1 += 6.f;               // the paragraph mark is selected too
             }
-            nvgBeginPath(ctx);
-            nvgRect(ctx, x0, l.top, std::max(1.f, x1 - x0), l.leading);
-            nvgFillColor(ctx, nvgRGBA(60, 120, 255, 90));
-            nvgFill(ctx);
+            float top, bottom;
+            line_band(l, top, bottom);
+            nvgRect(ctx, x0, top, std::max(1.f, x1 - x0), bottom - top);
         }
+        nvgFillColor(ctx, nvgRGBA(60, 120, 255, 90));
+        nvgFill(ctx);
     } else if (edited && focused()) {
         Caret at = caret_at(*c, se->story, m_caret);   // invalid in overset text
         if (at.valid() && c->lines[at.line].frame == ti) {

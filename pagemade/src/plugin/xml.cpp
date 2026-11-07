@@ -12,10 +12,16 @@ namespace pagemade {
 
 namespace {
 
+/* Elements nested deeper than this are refused: parsing recurses once per
+ * level, so a hostile file could otherwise run the stack out. Real SVG
+ * stays far below it. */
+constexpr int kMaxDepth = 256;
+
 struct Reader {
     const char *p;
     const char *end;
     std::string error;
+    int depth = 0;                       // elements open now
 
     bool fail(const char *why) {
         if (error.empty())
@@ -260,6 +266,13 @@ bool parse_content(Reader &r, XmlNode &node, const Ns &ns) {
 bool parse_element(Reader &r, XmlNode &node, const Ns &parent) {
     if (!r.starts("<"))
         return r.fail("expected an element");
+    if (r.depth >= kMaxDepth)
+        return r.fail("elements nested too deeply");
+    struct Level {
+        int &d;
+        explicit Level(int &v) : d(v) { ++d; }
+        ~Level() { --d; }
+    } level(r.depth);
     ++r.p;
     std::string prefix, local;
     if (!parse_name(r, prefix, local))

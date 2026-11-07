@@ -17,6 +17,11 @@ extern "C" {
 
 #define MAX_KEY_LEN   (64 * 1024) // 8 KB max key length (bytes)
 #define MAX_VALUE_LEN 20000000  // 20 million chars max string value length (characters)
+// Objects and arrays nested deeper than this are refused (JSON and BSON):
+// parsing recurses once per level, so hostile input could exhaust the stack.
+#ifndef DICT_MAX_DEPTH
+#define DICT_MAX_DEPTH 256
+#endif
 
 typedef enum {
     DICT_NULL,
@@ -593,6 +598,7 @@ typedef struct {
     int salvage;    // on an error, keep what was parsed and close open containers
     int damaged;    // set when salvage stopped early
     int has_error;  // the first error is the one reported
+    int depth;      // objects and arrays open now (DICT_MAX_DEPTH)
 } DictJsonParser;
 
 // Forward declarations
@@ -847,10 +853,15 @@ static DictValue *dict_parse_value(DictJsonParser *p) {
         free(str);
         if (!val) dict_parser_error(p, "String too long or out of memory");
         return val;
-    } else if (c == '{') {
-        return dict_parse_object(p);
-    } else if (c == '[') {
-        return dict_parse_array(p);
+    } else if (c == '{' || c == '[') {
+        if (p->depth >= DICT_MAX_DEPTH) {
+            dict_parser_error(p, "Nested too deeply");
+            return NULL;
+        }
+        p->depth++;
+        DictValue *v = c == '{' ? dict_parse_object(p) : dict_parse_array(p);
+        p->depth--;
+        return v;
     } else if ((c == '-') || (c >= '0' && c <= '9')) {
         double num;
         if (!dict_parse_number(p, &num)) {
@@ -1123,7 +1134,8 @@ static DictValue *dict_deserialize_json_impl(const char *buffer, size_t buffer_l
         .error_str_len = error_str_len,
         .salvage = salvage,
         .damaged = 0,
-        .has_error = 0
+        .has_error = 0,
+        .depth = 0
     };
 
     dict_parser_skip_whitespace(&parser);
@@ -1325,8 +1337,9 @@ static int bson_serialize_value(const DictValue *val, uint8_t *buf, size_t buf_l
 // Optimized deserialize document that builds DICT_OBJECT or DICT_ARRAY directly,
 // avoiding intermediate object-to-array conversion.
 
-static DictValue *bson_deserialize_document_internal(const uint8_t *buf, size_t buf_len, size_t *read_bytes, int is_array) {
+static DictValue *bson_deserialize_document_internal(const uint8_t *buf, size_t buf_len, size_t *read_bytes, int is_array, int depth) {
     if (!buf || buf_len < 5 || !read_bytes) return NULL;
+    if (depth >= DICT_MAX_DEPTH) return NULL;  // nested too deeply
 
     int32_t doc_len = bson_read_int32_le(buf);
     if (doc_len < 5 || (size_t)doc_len > buf_len) return NULL;
@@ -1392,11 +1405,11 @@ static DictValue *bson_deserialize_document_internal(const uint8_t *buf, size_t 
                 val_read = 0;
                 break;
             case BSON_TYPE_DOCUMENT:
-                val = bson_deserialize_document_internal(buf + pos, (size_t)doc_len - pos, &val_read, 0);
+                val = bson_deserialize_document_internal(buf + pos, (size_t)doc_len - pos, &val_read, 0, depth + 1);
                 if (!val) goto fail;
                 break;
             case BSON_TYPE_ARRAY:
-                val = bson_deserialize_document_internal(buf + pos, (size_t)doc_len - pos, &val_read, 1);
+                val = bson_deserialize_document_internal(buf + pos, (size_t)doc_len - pos, &val_read, 1, depth + 1);
                 if (!val) goto fail;
                 break;
             default:
@@ -1446,7 +1459,7 @@ static size_t dict_serialize_bson(const DictValue *val, uint8_t *buf, size_t buf
 // Public API: deserialize BSON
 static DictValue *dict_deserialize_bson(const uint8_t *buf, size_t buf_len) {
     size_t read_bytes = 0;
-    DictValue *val = bson_deserialize_document_internal(buf, buf_len, &read_bytes, 0);
+    DictValue *val = bson_deserialize_document_internal(buf, buf_len, &read_bytes, 0, 0);
     if (!val) return NULL;
     if (read_bytes != buf_len) {
         dict_destroy(val);

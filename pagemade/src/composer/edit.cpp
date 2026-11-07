@@ -520,6 +520,26 @@ float x_at(const ComposedLine &l, const std::string &text, uint32_t byte) {
     return cb.back().x + cb.back().adv;
 }
 
+void line_band(const ComposedLine &l, float &top, float &bottom) {
+    float up = 0.f, down = 0.f;
+    bool any = false;
+    for (const GlyphRun &r : l.runs) {
+        if (!r.font || r.glyphs.empty() || r.font->units_per_em() <= 0)
+            continue;
+        const float k = r.size / (float) r.font->units_per_em();
+        up = std::max(up, r.font->ascender() * k);
+        down = std::max(down, -r.font->descender() * k);
+        any = true;
+    }
+    if (!any) {
+        top = l.top;
+        bottom = l.top + l.leading;
+        return;
+    }
+    top = l.baseline - up;
+    bottom = l.baseline + down;
+}
+
 Caret caret_at(const Composition &c, const Story &s, TextPos p) {
     Caret out;
     if (s.paragraphs.empty())
@@ -532,8 +552,7 @@ Caret caret_at(const Composition &c, const Story &s, TextPos p) {
         if (p.byte < l.byte_end || (p.byte == l.byte_end && l.para_end)) {
             out.line = i;
             out.x = x_at(l, paragraph_text(s.paragraphs[p.para]), p.byte);
-            out.top = l.top;
-            out.bottom = l.top + l.leading;
+            line_band(l, out.top, out.bottom);
             return out;
         }
     }

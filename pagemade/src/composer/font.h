@@ -16,6 +16,7 @@
 #include <cstdint>
 #include <deque>
 #include <memory>
+#include <mutex>
 #include <string>
 #include <unordered_map>
 #include <vector>
@@ -85,6 +86,8 @@ public:
     uint32_t space_glyph() const { return m_space_gid; }
     float advance(uint32_t gid) const;   // design units
 
+    /* Built on first use and kept: any thread may ask (the cache is
+     * locked), and the outline stays put for the life of the Font. */
     const GlyphOutline &outline(uint32_t gid) const;
     /* Union of the outlines' bounding boxes, design units (y up). */
     void glyph_bounds(uint32_t gid, float &x0, float &y0, float &x1, float &y1) const;
@@ -104,6 +107,9 @@ private:
     uint32_t    m_space_gid = 0;
     float       m_ul_pos = -100, m_ul_thick = 50;
     float       m_st_pos = 250, m_st_thick = 50;
+    /* The lazily filled caches below (small caps, outlines) are filled
+     * under this lock, so shaping or drawing off the UI thread is safe. */
+    mutable std::mutex m_cache_mutex;
     mutable bool m_smcp_known = false, m_smcp = false;
     /* The deque owns the outlines; the map only points at them. Inserting
      * another glyph rehashes the map and does not move the outlines. */

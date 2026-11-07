@@ -123,9 +123,9 @@ float Font::small_cap_scale() const {
 }
 
 bool Font::has_small_caps() const {
+    std::lock_guard<std::mutex> lock(m_cache_mutex);
     if (m_smcp_known)
         return m_smcp;
-    m_smcp_known = true;
     hb_buffer_t *buf = hb_buffer_create();
     hb_buffer_add_utf8(buf, "a", 1, 0, 1);
     hb_buffer_guess_segment_properties(buf);
@@ -143,6 +143,7 @@ bool Font::has_small_caps() const {
     uint32_t small = n ? info[0].codepoint : 0;
     hb_buffer_destroy(buf);
     m_smcp = small != 0 && small != plain;
+    m_smcp_known = true;                 // only once the answer is in
     return m_smcp;
 }
 
@@ -264,6 +265,7 @@ void classify_contours(GlyphOutline &o) {
 } // namespace
 
 const GlyphOutline &Font::outline(uint32_t gid) const {
+    std::lock_guard<std::mutex> lock(m_cache_mutex);
     auto it = m_outlines.find(gid);
     if (it != m_outlines.end())
         return *it->second;

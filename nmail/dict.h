@@ -21,6 +21,11 @@ extern "C" {
 
 #define MAX_KEY_LEN   (64 * 1024) // 8 KB max key length (bytes)
 #define MAX_VALUE_LEN 20000000  // 20 million chars max string value length (characters)
+// Objects and arrays nested deeper than this are refused (JSON and BSON):
+// parsing recurses once per level, so hostile input could exhaust the stack.
+#ifndef DICT_MAX_DEPTH
+#define DICT_MAX_DEPTH 256
+#endif
 
 /* ===== Stack / Arena allocator =====
  * If DictArena is provided to creation functions, allocations come from the
@@ -741,6 +746,7 @@ typedef struct {
     size_t pos;
     char *error_str;
     size_t error_str_len;
+    int depth;      // objects and arrays open now (DICT_MAX_DEPTH)
 } DictJsonParser;
 
 C2M_DICT_API DictValue *dict_parse_value(DictJsonParser *p);
@@ -926,10 +932,15 @@ C2M_DICT_API DictValue *dict_parse_value(DictJsonParser *p) {
         DictValue *val = dict_create_string(str);
         free(str);
         return val;
-    } else if (c == '{') {
-        return dict_parse_object(p);
-    } else if (c == '[') {
-        return dict_parse_array(p);
+    } else if (c == '{' || c == '[') {
+        if (p->depth >= DICT_MAX_DEPTH) {
+            dict_parser_error(p, "Nested too deeply");
+            return NULL;
+        }
+        p->depth++;
+        DictValue *v = c == '{' ? dict_parse_object(p) : dict_parse_array(p);
+        p->depth--;
+        return v;
     } else if ((c == '-') || (c >= '0' && c <= '9')) {
         double num;
         if (!dict_parse_number(p, &num)) return NULL;
@@ -1094,7 +1105,7 @@ C2M_DICT_API DictValue *dict_deserialize_json_len(const char *json, size_t len, 
 
 C2M_DICT_API DictValue *dict_deserialize_json_len(const char *json, size_t len, char *err_buf, size_t err_len) {
     if (json == NULL || len == 0) return dict_create_object();
-    DictJsonParser parser = {json, len, 0, err_buf, err_len};
+    DictJsonParser parser = {json, len, 0, err_buf, err_len, 0};
     DictValue *result = dict_parse_value(&parser);
     dict_parser_skip_whitespace(&parser);
     if (parser.pos != parser.buffer_len) {
@@ -1242,9 +1253,18 @@ C2M_DICT_API DictValue *dict_deserialize_bson(const uint8_t *buf, size_t buf_len
     return bson_deserialize_document_internal(buf, buf_len, read_bytes, 0);
 }
 
+static DictValue *bson_deserialize_at_depth(const uint8_t *buf, size_t buf_len,
+                                            size_t *read_bytes, int is_array, int depth);
+
 C2M_DICT_API DictValue *bson_deserialize_document_internal(const uint8_t *buf, size_t buf_len,
                                                       size_t *read_bytes, int is_array) {
+    return bson_deserialize_at_depth(buf, buf_len, read_bytes, is_array, 0);
+}
+
+static DictValue *bson_deserialize_at_depth(const uint8_t *buf, size_t buf_len,
+                                            size_t *read_bytes, int is_array, int depth) {
     if (!buf || buf_len < 5 || !read_bytes) return NULL;
+    if (depth >= DICT_MAX_DEPTH) return NULL;  // nested too deeply
 
     int32_t doc_len = bson_read_int32_le(buf);
     if (doc_len < 5 || (size_t)doc_len > buf_len) return NULL;
@@ -1292,8 +1312,8 @@ C2M_DICT_API DictValue *bson_deserialize_document_internal(const uint8_t *buf, s
         }
         case BSON_TYPE_DOCUMENT:
         case BSON_TYPE_ARRAY:
-            val = bson_deserialize_document_internal(buf + pos, buf_len - pos, &val_read,
-                                                     type_byte == BSON_TYPE_ARRAY);
+            val = bson_deserialize_at_depth(buf + pos, buf_len - pos, &val_read,
+                                            type_byte == BSON_TYPE_ARRAY, depth + 1);
             if (!val) goto fail;
             break;
         case BSON_TYPE_BOOL:
