@@ -61,11 +61,14 @@
 #include "setup_adjust.h"
 
 #include <atomic>
+#include <condition_variable>
 #include <deque>
 #include <functional>
 #include <map>
 #include <memory>
+#include <mutex>
 #include <set>
+#include <thread>
 #include <vector>
 
 namespace pagemade { class BackgroundWorker; struct LayoutTemplate; }
@@ -541,6 +544,36 @@ public:
      * back to the scroll panel (it calls this first: set_child_scroll_first). */
     bool scroll_event(const nanogui::Vector2i &p, const nanogui::Vector2f &rel) override;
     double m_wheel_scale_time = -1e9;    // the last scaling wheel step, glfwGetTime
+
+    /* ---- The text caret ---------------------------------------------
+     * It stays solid while the caret moves or text changes, then blinks
+     * after half a second idle, as editors do; after half a minute idle
+     * it stays on. It is drawn inverted over what is under it (white on
+     * dark, black on light) with a faint dark halo, so it shows on any
+     * background. A small thread wakes the screen when it flips. */
+    bool caret_visible_now();
+    void note_caret_state();             // in draw: restarts the blink on a change
+    void blink_loop();
+    struct CaretSeen {
+        uint64_t version = 0;
+        uint32_t story = 0;
+        size_t para = 0, anchor_para = 0;
+        uint32_t byte = 0, anchor_byte = 0;
+        bool focused = false;
+        bool operator==(const CaretSeen &o) const {
+            return version == o.version && story == o.story && para == o.para &&
+                   anchor_para == o.anchor_para && byte == o.byte && anchor_byte == o.anchor_byte &&
+                   focused == o.focused;
+        }
+    };
+    CaretSeen m_caret_seen;
+    std::atomic<double> m_caret_moved{0.0};   // glfwGetTime of the last change
+    std::atomic<bool> m_blink_wanted{false};  // a caret was drawn this frame
+    std::atomic<nanogui::Screen *> m_blink_screen{nullptr};
+    std::mutex m_blink_mutex;
+    std::condition_variable m_blink_cv;
+    bool m_blink_stop = false;           // under m_blink_mutex
+    std::thread m_blink_thread;
     bool mouse_drag_event(const nanogui::Vector2i &p, const nanogui::Vector2i &rel,
                           int button, int modifiers) override;
     bool mouse_motion_event(const nanogui::Vector2i &p, const nanogui::Vector2i &rel,

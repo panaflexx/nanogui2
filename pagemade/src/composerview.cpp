@@ -135,10 +135,71 @@ Point handle_point(const Item &it, int h) {
 ComposerView::ComposerView(Widget *parent, const FontLibrary *fonts, const Hyphenator *hyphenator)
     : Widget(parent), m_fonts(fonts), m_hyphenator(hyphenator) {
     set_live(true);   // zoom-dependent hairlines; never bake into a parent's draw list
+    m_blink_thread = std::thread([this] { blink_loop(); });
 }
 
 ComposerView::~ComposerView() {
     m_load_gate->open.store(false);      // results still on their way are dropped
+    {
+        std::lock_guard<std::mutex> lock(m_blink_mutex);
+        m_blink_stop = true;
+    }
+    m_blink_cv.notify_all();
+    if (m_blink_thread.joinable())
+        m_blink_thread.join();
+}
+
+/* ---- The caret's blink ---------------------------------------------------- */
+
+namespace {
+constexpr double kBlinkIdle = 0.5;       // solid this long after a change
+constexpr double kBlinkHalf = 0.53;      // then on and off this long each
+constexpr double kBlinkStop = 30.0;      // and solid again after this long idle
+} // namespace
+
+bool ComposerView::caret_visible_now() {
+    const double t = glfwGetTime() - m_caret_moved.load();
+    if (t < kBlinkIdle || t > kBlinkStop)
+        return true;
+    /* Off first, so the blink starts by going out */
+    return ((long long) ((t - kBlinkIdle) / kBlinkHalf)) % 2 == 1;
+}
+
+void ComposerView::note_caret_state() {
+    CaretSeen now;
+    now.version = m_version;
+    now.story = m_edit_story;
+    now.para = m_caret.para;
+    now.byte = m_caret.byte;
+    now.anchor_para = m_anchor.para;
+    now.anchor_byte = m_anchor.byte;
+    now.focused = focused();
+    if (!(now == m_caret_seen)) {
+        m_caret_seen = now;
+        m_caret_moved.store(glfwGetTime());
+    }
+    m_blink_screen.store(screen());
+}
+
+void ComposerView::blink_loop() {
+    std::unique_lock<std::mutex> lock(m_blink_mutex);
+    bool shown = true;
+    while (!m_blink_stop) {
+        m_blink_cv.wait_for(lock, std::chrono::milliseconds(40));
+        if (m_blink_stop)
+            break;
+        if (!m_blink_wanted.load())
+            continue;
+        const double t = glfwGetTime() - m_caret_moved.load();
+        bool on = true;
+        if (t >= kBlinkIdle && t <= kBlinkStop)
+            on = ((long long) ((t - kBlinkIdle) / kBlinkHalf)) % 2 == 1;
+        if (on != shown) {
+            shown = on;
+            if (nanogui::Screen *s = m_blink_screen.load())
+                s->redraw();             // thread-safe: a flag and an empty event
+        }
+    }
 }
 
 BackgroundWorker &ComposerView::loader() {
@@ -4277,10 +4338,30 @@ void ComposerView::draw_text_overlays(NVGcontext *ctx, const Item &it, float px)
     } else if (edited && focused()) {
         Caret at = caret_at(*c, se->story, m_caret);   // invalid in overset text
         if (at.valid() && c->lines[at.line].frame == ti) {
-            nvgBeginPath(ctx);
-            nvgRect(ctx, at.x, at.top, std::max(lpx, 1.f / item_scale(it.xf)), at.bottom - at.top);
-            nvgFillColor(ctx, nvgRGB(0, 0, 0));
-            nvgFill(ctx);
+            m_blink_wanted.store(true);
+            if (caret_visible_now()) {
+                const float w = std::max(lpx, 1.f / item_scale(it.xf));
+                const float h = at.bottom - at.top;
+                /* A faint dark halo, so it shows even over a middle grey */
+                nvgBeginPath(ctx);
+                nvgRect(ctx, at.x - lpx, at.top - lpx, lpx, h + 2.f * lpx);
+                nvgRect(ctx, at.x + w, at.top - lpx, lpx, h + 2.f * lpx);
+                nvgRect(ctx, at.x, at.top - lpx, w, lpx);
+                nvgRect(ctx, at.x, at.bottom, w, lpx);
+                nvgFillColor(ctx, nvgRGBA(0, 0, 0, 77));
+                nvgFill(ctx);
+                /* The bar inverts what is under it: white on dark, black
+                 * on light. Edge pixels blend toward it by their coverage;
+                 * the window's alpha is left alone. */
+                nvgSave(ctx);
+                nvgGlobalCompositeBlendFuncSeparate(ctx, NVG_ONE_MINUS_DST_COLOR, NVG_ONE_MINUS_SRC_ALPHA,
+                                                    NVG_ZERO, NVG_ONE);
+                nvgBeginPath(ctx);
+                nvgRect(ctx, at.x, at.top, w, h);
+                nvgFillColor(ctx, nvgRGB(255, 255, 255));
+                nvgFill(ctx);
+                nvgRestore(ctx);
+            }
         }
     }
     nvgRestore(ctx);
@@ -5859,6 +5940,8 @@ bool ComposerView::zoom_settled() const {
 void ComposerView::draw(NVGcontext *ctx) {
     const double stats_t0 = g_frame_stats.on ? glfwGetTime() : 0.0;
     flush_deferred();                    // a drag's moves since the last frame, once
+    note_caret_state();
+    m_blink_wanted.store(false);         // set again if a caret is drawn
     if (zoom() != m_zoom_seen) {
         m_zoom_seen = zoom();
         m_zoom_changed = glfwGetTime();

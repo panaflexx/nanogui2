@@ -350,6 +350,12 @@ static void test_first_line_inside(const FontLibrary &fonts) {
             }
         }
         CHECK(ink_top >= -0.01f, "the capitals stay inside the block (ink top %g)", ink_top);
+        float band_top, band_bottom;
+        line_band(c.lines[0], band_top, band_bottom);
+        CHECK(band_top <= ink_top + 0.01f && band_bottom > c.lines[0].baseline &&
+                  band_bottom - band_top > c.lines[0].leading,
+              "the selection band covers the capitals, past the tight slug (%g..%g, ink %g)",
+              band_top, band_bottom, ink_top);
         CHECK(std::fabs((c.lines[1].baseline - c.lines[0].baseline) - c.lines[0].leading) < 0.01f,
               "the next line keeps its spacing (%g vs %g)", c.lines[1].baseline - c.lines[0].baseline,
               c.lines[0].leading);
@@ -1214,7 +1220,11 @@ static void test_edit(const FontLibrary &fonts) {
             CHECK(at.valid(), "caret for byte %u is on a line", byte);
             if (!at.valid()) continue;
             const ComposedLine &l = c.lines[at.line];
-            CHECK(at.top == l.top && at.bottom == l.top + l.leading, "caret spans the slug");
+            float band_top, band_bottom;
+            line_band(l, band_top, band_bottom);
+            CHECK(at.top == band_top && at.bottom == band_bottom && at.top < l.baseline &&
+                      at.bottom > l.baseline,
+                  "caret spans the type, across the baseline");
             TextPos back = pos_at_x(c, s, at.line, at.x);
             CHECK(back.para == 0 && back.byte == byte,
                   "byte %u: x -> position round trips (got %u)", byte, back.byte);
