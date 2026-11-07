@@ -618,10 +618,12 @@ Story make_story(const PageDoc &doc, const std::vector<LayoutParagraph> &paras, 
             for (TabStop &tab : ps.tabs)
                 tab.pos = scaled(tab.pos, k);
         }
+        p.style.leading_method = doc.setup.leading_method;   // the document's default
         story.paragraphs.push_back(std::move(p));
     }
     if (story.paragraphs.empty()) {
         Paragraph p;
+        p.style.leading_method = doc.setup.leading_method;
         p.runs.push_back(Run{CharStyle(), ""});
         story.paragraphs.push_back(std::move(p));
     }

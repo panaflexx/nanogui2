@@ -328,6 +328,7 @@ bool same_format(const ParaStyle &a, const ParaStyle &b) {
            a.last_indent == b.last_indent && a.space_before == b.space_before &&
            a.space_after == b.space_after && a.autoleading == b.autoleading &&
            a.line_spacing == b.line_spacing && a.extra_spacing == b.extra_spacing &&
+           a.leading_method == b.leading_method &&
            a.drop_lines == b.drop_lines && a.drop_chars == b.drop_chars &&
            a.drop_scale == b.drop_scale && a.keep_together == b.keep_together &&
            a.keep_with_next == b.keep_with_next && a.start_new_frame == b.start_new_frame &&

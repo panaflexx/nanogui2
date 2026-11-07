@@ -277,6 +277,49 @@ void draw_para_icon(NVGcontext *ctx, ParaIcon icon, float x, float y, float w, f
             nvgFill(ctx);
         }
         break;
+    case ParaIcon::LeadProportional:
+        /* The slug, its baseline two thirds down */
+        nvgBeginPath(ctx);
+        nvgRect(ctx, ox + 2.5f, oy + 1.5f, 15, 13);
+        nvgStrokeWidth(ctx, 1.f);
+        stroke();
+        nvgStrokeWidth(ctx, 1.6f);
+        nvgBeginPath(ctx);
+        bar(ctx, ox + 5, ox + 15, oy + 10.2f);
+        stroke();
+        nvgBeginPath(ctx);
+        nvgRect(ctx, ox + 7, oy + 4.5f, 2.2f, 5.7f);
+        nvgRect(ctx, ox + 11, oy + 4.5f, 2.2f, 5.7f);
+        nvgFill(ctx);
+        break;
+    case ParaIcon::LeadBaseline:
+        /* Two baselines, the leading measured between them */
+        nvgBeginPath(ctx);
+        bar(ctx, ox + 7, ox + 19, oy + 3);
+        bar(ctx, ox + 7, ox + 19, oy + 13);
+        stroke();
+        nvgBeginPath(ctx);
+        nvgMoveTo(ctx, ox + 3, oy + 5);
+        nvgLineTo(ctx, ox + 3, oy + 11);
+        stroke();
+        arrow_head(ctx, ox + 3, oy + 3, 0, -1);
+        arrow_head(ctx, ox + 3, oy + 13, 0, 1);
+        break;
+    case ParaIcon::LeadTopOfCaps:
+        /* The slug's top on the capitals' top */
+        nvgBeginPath(ctx);
+        nvgRect(ctx, ox + 2.5f, oy + 1.5f, 15, 13);
+        nvgStrokeWidth(ctx, 1.f);
+        stroke();
+        nvgStrokeWidth(ctx, 1.6f);
+        nvgBeginPath(ctx);
+        nvgRect(ctx, ox + 6, oy + 1.5f, 8, 2);
+        nvgRect(ctx, ox + 9, oy + 1.5f, 2, 8.5f);
+        nvgFill(ctx);
+        nvgBeginPath(ctx);
+        bar(ctx, ox + 5, ox + 15, oy + 10.8f);
+        stroke();
+        break;
     case ParaIcon::OpticalMargins:
         /* A quote hanging left of the text edge. */
         lines4(5, 19, 2, 4, -1, 0);
@@ -304,6 +347,59 @@ void draw_para_icon(NVGcontext *ctx, ParaIcon icon, float x, float y, float w, f
     }
     }
     nvgRestore(ctx);
+}
+
+/* ---- Leading method ---------------------------------------------------------- */
+
+const char *const kLeadingMethodNames[3] = {"Proportional", "Baseline", "Top of caps"};
+
+ParaIcon leading_method_icon(pagemade::LeadingMethod m) {
+    switch (m) {
+    case pagemade::LeadingMethod::Baseline: return ParaIcon::LeadBaseline;
+    case pagemade::LeadingMethod::TopOfCaps: return ParaIcon::LeadTopOfCaps;
+    default: return ParaIcon::LeadProportional;
+    }
+}
+
+LeadingMethodDropdown::LeadingMethodDropdown(Widget *parent)
+    : Dropdown(parent, std::vector<std::string>(kLeadingMethodNames, kLeadingMethodNames + 3), {},
+               Dropdown::ComboBox, "") {
+    set_fixed_size(Vector2i(46, 30));
+    set_tooltip("Leading method: Proportional");
+    set_selected_callback([this](int i) {
+        if (m_loading || i < 0 || i > 2)
+            return;
+        m_method = (pagemade::LeadingMethod) i;
+        m_mixed = false;
+        set_tooltip(std::string("Leading method: ") + kLeadingMethodNames[i]);
+        if (m_changed)
+            m_changed(m_method);
+    });
+}
+
+void LeadingMethodDropdown::set_method(pagemade::LeadingMethod m, bool mixed) {
+    if (popup() && popup()->visible())
+        return;                          // the menu is open: it shows the choice
+    m_loading = true;
+    m_method = m;
+    m_mixed = mixed;
+    set_selected_index(mixed ? -1 : (int) m);
+    set_tooltip(mixed ? std::string("Leading method: mixed")
+                      : std::string("Leading method: ") + kLeadingMethodNames[(int) m]);
+    m_loading = false;
+}
+
+void LeadingMethodDropdown::draw(NVGcontext *ctx) {
+    /* The button without its caption, then the method's icon in its place */
+    std::string caption;
+    std::swap(caption, m_caption);
+    Dropdown::draw(ctx);
+    std::swap(caption, m_caption);
+    if (m_mixed)
+        return;
+    const Color ink = m_enabled ? m_theme->m_text_color : m_theme->m_disabled_text_color;
+    draw_para_icon(ctx, leading_method_icon(m_method), (float) m_pos.x() + 3.f, (float) m_pos.y(),
+                   26.f, (float) m_size.y(), ink);
 }
 
 /* ---- Small widgets ---------------------------------------------------------- */
@@ -616,6 +712,23 @@ ParagraphPanel::ParagraphPanel(Widget *parent, Hooks hooks)
               "%");
     add_field(spacing, ParaIcon::ExtraSpacing, "Extra spacing, added to every line",
               &P::extra_spacing, 1.f, -72.f, 72.f, 0.5f, "%.1f", "pt");
+    /* PageMaker's leading method: where each line's baseline sits */
+    auto *method_icon = new IconLabel(spacing, ParaIcon::LeadBaseline);
+    method_icon->set_tooltip("Leading method");
+    m_leading_method = new Dropdown(spacing,
+                                    std::vector<std::string>(kLeadingMethodNames, kLeadingMethodNames + 3),
+                                    {}, Dropdown::ComboBox, "Proportional");
+    m_leading_method->set_fixed_size(Vector2i(118, 28));
+    m_leading_method->set_tooltip("Leading method. Proportional: the baseline two thirds down each "
+                                  "line (PageMaker).\nBaseline: leading measured baseline to baseline "
+                                  "(InDesign).\nTop of caps: each line's top at its tallest capitals.");
+    m_leading_method->set_selected_callback([this](int i) {
+        if (m_loading || i < 0 || i > 2)
+            return;
+        const auto m = (pagemade::LeadingMethod) i;
+        if (m_hooks.apply)
+            m_hooks.apply([m](ParaStyle &ps) { ps.leading_method = m; }, nullptr);
+    });
 
     new Rule(this);
     Widget *indents = grid();
@@ -1009,6 +1122,16 @@ void ParagraphPanel::load(const std::vector<const Paragraph *> &paras,
             f.box->set_value(paras.front()->style.*(f.member) * f.scale);
         else
             f.box->TextBox::set_value("");
+    }
+
+    {
+        bool same = any;
+        for (const Paragraph *p : paras)
+            same &= p->style.leading_method == paras.front()->style.leading_method;
+        m_leading_method->set_selected_index(same ? (int) paras.front()->style.leading_method : -1);
+        if (!same)
+            m_leading_method->set_caption(any ? "\u2014" : "Proportional");
+        m_leading_method->set_enabled(any);
     }
 
     {

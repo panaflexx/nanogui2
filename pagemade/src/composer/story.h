@@ -79,6 +79,14 @@ struct TabStop {
 enum class ListKind { None, Bullet, Number };
 enum class NumberFormat { Arabic, LowerAlpha, UpperAlpha, LowerRoman, UpperRoman };
 
+/* Where a line's baseline sits, PageMaker's three leading methods.
+ * Proportional: two thirds down the line's slug (PageMaker's default).
+ * Baseline: a line's leading is the distance from the baseline above, as
+ * in InDesign and QuarkXPress; the first line in a text block sits its
+ * ascent down. Top of caps: the slug's top is the top of the line's
+ * tallest capitals. */
+enum class LeadingMethod { Proportional, Baseline, TopOfCaps };
+
 struct ParaStyle {
     std::string name;            // Styles palette name ("Body text", "Subhead 1", ...)
     Align align = Align::Left;
@@ -93,6 +101,7 @@ struct ParaStyle {
      * spacing, 0.5 sets lines on half their slugs. */
     float line_spacing = 1.f;
     float extra_spacing = 0.f;   // points added to every line, after line_spacing
+    LeadingMethod leading_method = LeadingMethod::Proportional;
 
     /* Drop cap: the first drop_chars characters set large beside the
      * opening lines. At drop_scale 100 the cap's height runs from the first

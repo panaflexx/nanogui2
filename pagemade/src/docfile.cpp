@@ -104,6 +104,9 @@ void write_para_style(JsonOut &j, const ParaStyle &ps) {
     if (ps.autoleading != d.autoleading) j.key("autoleading").value(ps.autoleading);
     if (ps.line_spacing != d.line_spacing) j.key("line_spacing").value(ps.line_spacing);
     if (ps.extra_spacing != d.extra_spacing) j.key("extra_spacing").value(ps.extra_spacing);
+    if (ps.leading_method != d.leading_method)
+        j.key("leading_method").value(ps.leading_method == LeadingMethod::Baseline ? "baseline"
+                                                                                   : "top_of_caps");
     if (ps.drop_lines != d.drop_lines) j.key("drop_lines").value(ps.drop_lines);
     if (ps.drop_chars != d.drop_chars) j.key("drop_chars").value(ps.drop_chars);
     if (ps.drop_scale != d.drop_scale) j.key("drop_scale").value(ps.drop_scale);
@@ -495,6 +498,9 @@ std::string make_json(const PageDoc &doc, const SaveOptions &opts, const std::ve
     const PageSetup ds;
     if (s.grid_start != ds.grid_start || s.grid_step != ds.grid_step)
         j.key("grid").numbers({s.grid_start, s.grid_step});
+    if (s.leading_method != ds.leading_method)
+        j.key("leading_method").value(s.leading_method == LeadingMethod::Baseline ? "baseline"
+                                                                                 : "top_of_caps");
     j.end_object();
 
     /* PDF export settings: only what differs from the defaults */
@@ -747,6 +753,13 @@ ParaStyle read_para_style(const DictValue *o) {
     get(o, "line_spacing", ps.line_spacing);
     ps.line_spacing = std::clamp(ps.line_spacing, kMinLineSpacing, kMaxLineSpacing);
     get(o, "extra_spacing", ps.extra_spacing);
+    {
+        std::string method;              // absent: proportional (files before it)
+        get(o, "leading_method", method);
+        ps.leading_method = method == "baseline"      ? LeadingMethod::Baseline
+                          : method == "top_of_caps"   ? LeadingMethod::TopOfCaps
+                                                      : LeadingMethod::Proportional;
+    }
     get(o, "drop_lines", ps.drop_lines);
     get(o, "drop_chars", ps.drop_chars);
     get(o, "drop_scale", ps.drop_scale);
@@ -1226,6 +1239,13 @@ OpenResult open_document(const std::string &path, const FontLibrary &installed,
     get(setup, "facing", d.setup.facing);
     get(setup, "bleed", d.setup.bleed);
     d.setup.bleed = std::clamp(d.setup.bleed, 0.f, 72.f);
+    {
+        std::string method;              // for new text; absent: proportional
+        get(setup, "leading_method", method);
+        d.setup.leading_method = method == "baseline"    ? LeadingMethod::Baseline
+                               : method == "top_of_caps" ? LeadingMethod::TopOfCaps
+                                                         : LeadingMethod::Proportional;
+    }
     float g[2] = {d.setup.grid_start, d.setup.grid_step};
     if (floats(setup, "grid", g, 2) == 2) {
         d.setup.grid_start = std::max(0.f, g[0]);

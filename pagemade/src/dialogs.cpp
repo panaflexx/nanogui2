@@ -6,6 +6,7 @@
 #include "composer/composer.h"
 #include "composer/font.h"
 #include "font_menu_ui.h"
+#include "paragraph_panel.h"
 #include "render_nvg.h"
 #include "spinbox.h"
 
@@ -460,6 +461,7 @@ struct DocForm {
     float gutter = 12.f;          // 0.167 in
     float bleed = 0.f;
     float grid_start = 0.f, grid_step = 12.f;   // the baseline grid, points
+    pagemade::LeadingMethod leading_method = pagemade::LeadingMethod::Proportional;
     bool syncing = false;
     Dropdown *sizes = nullptr;
     FloatSpin *width_box = nullptr, *height_box = nullptr;
@@ -616,6 +618,21 @@ static void build_page_form(Widget *form, const std::shared_ptr<DocForm> &st, In
                                    [st](float v) { st->grid_step = std::max(0.f, v * kPt); });
     step_box->set_tooltip("Paragraphs set to Align to Grid (Paragraph panel) put every\n"
                           "baseline on a grid line. 0 turns the grid off.");
+
+    Label *textl = new Label(form, "New Text", "sans-bold", 16);
+    textl->set_fixed_size(Vector2i(200, 0));
+    Widget *lm = form_row(form);
+    form_label(lm, "Leading", 88);
+    auto *method = new Dropdown(lm, std::vector<std::string>(kLeadingMethodNames, kLeadingMethodNames + 3), {},
+                                Dropdown::ComboBox, kLeadingMethodNames[(int) st->leading_method]);
+    method->set_fixed_size(Vector2i(150, 28));
+    method->set_selected_index((int) st->leading_method);
+    method->set_tooltip("The leading method new text starts with: Proportional (PageMaker),\n"
+                        "Baseline (InDesign) or Top of caps. Text already placed keeps its own.");
+    method->set_selected_callback([st](int i) {
+        if (i >= 0 && i < 3)
+            st->leading_method = (pagemade::LeadingMethod) i;
+    });
     refresh_size(st);
 }
 
@@ -634,6 +651,7 @@ static pagemade::PageSetup form_setup(const DocForm &st) {
     s.bleed = std::clamp(st.bleed, 0.f, 72.f);
     s.grid_start = std::max(0.f, st.grid_start);
     s.grid_step = std::clamp(st.grid_step, 0.f, 288.f);
+    s.leading_method = st.leading_method;
     return s;
 }
 
@@ -673,6 +691,7 @@ void ask_document_setup(Screen *screen, const pagemade::PageSetup &current, size
     st->bleed = current.bleed;
     st->grid_start = current.grid_start;
     st->grid_step = current.grid_step;
+    st->leading_method = current.leading_method;
 
     auto *d = new ModalDialog(screen, "Document Setup");
     Widget *form = d->body();

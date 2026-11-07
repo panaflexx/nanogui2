@@ -18,6 +18,7 @@
 #include "page.h"
 #include "spinbox.h"
 
+#include <nanogui/menu.h>
 #include <nanogui/widget.h>
 
 #include <functional>
@@ -37,9 +38,30 @@ enum class ParaIcon {
     DropCap, DropSize, DropChars,
     Orphans, Widows, KeepTogether, KeepWithNext, StartNewFrame,
     List, ListStart, AlignToGrid, OpticalMargins,
+    LeadProportional, LeadBaseline, LeadTopOfCaps,
 };
 void draw_para_icon(NVGcontext *ctx, ParaIcon icon, float x, float y, float w, float h,
                     const nanogui::Color &color);
+
+/* PageMaker's leading methods, in menu order (LeadingMethod's order). */
+extern const char *const kLeadingMethodNames[3];
+ParaIcon leading_method_icon(pagemade::LeadingMethod m);
+
+/* The control palette's leading-method switch: a small button showing the
+ * current method's icon (blank for a mix); its menu lists the three. */
+class LeadingMethodDropdown : public nanogui::Dropdown {
+public:
+    explicit LeadingMethodDropdown(nanogui::Widget *parent);
+    /* Show the selection's method; `mixed` when the paragraphs differ. */
+    void set_method(pagemade::LeadingMethod m, bool mixed);
+    void set_changed(std::function<void(pagemade::LeadingMethod)> fn) { m_changed = std::move(fn); }
+    void draw(NVGcontext *ctx) override;
+
+private:
+    pagemade::LeadingMethod m_method = pagemade::LeadingMethod::Proportional;
+    bool m_mixed = false, m_loading = false;
+    std::function<void(pagemade::LeadingMethod)> m_changed;
+};
 
 class ParagraphPanel : public nanogui::Widget {
 public:
@@ -95,6 +117,7 @@ private:
     Hooks m_hooks;
     nanogui::Dropdown *m_style = nullptr;
     nanogui::Dropdown *m_list = nullptr;
+    nanogui::Dropdown *m_leading_method = nullptr;
     /* The naming row (a StyleNameRow, see the .cpp); it covers the
      * Remove/Add row while it is up. */
     nanogui::Widget *m_naming = nullptr;

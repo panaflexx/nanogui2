@@ -1864,6 +1864,7 @@ void ComposerView::begin_creation(const Point &pt) {
         /* A new story: one empty "Body text" paragraph in the default type. */
         Paragraph para;
         para.style.name = "Body text";
+        para.style.leading_method = m_doc.setup.leading_method;   // the document's default
         para.runs.push_back(Run{m_default_type, ""});
         Story s;
         s.paragraphs.push_back(para);
@@ -3160,6 +3161,7 @@ bool ComposerView::paste_plain_text(const std::string &text, const Point *at) {
         const size_t nl = clean.find('\n', at_);
         Paragraph p;
         p.style = base.style;
+        p.style.leading_method = m_doc.setup.leading_method;     // the document's default
         p.runs.push_back(Run{type, clean.substr(at_, nl == std::string::npos ? nl : nl - at_)});
         story.paragraphs.push_back(std::move(p));
         if (nl == std::string::npos)
@@ -4751,6 +4753,7 @@ ItemId ComposerView::add_caption(size_t page, const Item &picture) {
         pagemade::apply_style(para, *def, m_doc.char_styles);
         lead = def->type.leading > 0.f ? def->type.leading : def->type.size * 1.2f;
     }
+    para.style.leading_method = m_doc.setup.leading_method;      // the document's default
     Story story;
     story.paragraphs.push_back(std::move(para));
     const StoryId sid = m_doc.add_story(std::move(story));

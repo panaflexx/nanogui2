@@ -1128,6 +1128,7 @@ bool place_as_text(PageDoc &doc, VectorStore &store, ImageStore *images, const F
             if (normal)
                 para.style = normal->para;
             para.style.name = normal ? normal->name : std::string();
+            para.style.leading_method = doc.setup.leading_method;   // the document's default
             para.style.align = justified ? Align::Justify : Align::Left;
             para.style.hyphenate = false;
             para.style.first_indent = para.style.left_indent = para.style.right_indent = 0.f;

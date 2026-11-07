@@ -1550,6 +1550,12 @@ public:
             add_cmd(type, sp.caption, sp.keys, [this, text] { m_view->insert_at_caret(text); });
         }
         new Separator(type->popup());
+        Dropdown *methods = type->add_submenu("Leading Method");
+        for (int i = 0; i < 3; ++i) {
+            const auto m = (LeadingMethod) i;
+            m_lead_items[i] = add_cmd(methods, kLeadingMethodNames[i], {}, [this, m] { set_leading_method(m); });
+        }
+        new Separator(type->popup());
         add_cmd(type, "Line Break (Shift+Return)", {},
                 [this] { m_view->insert_at_caret("\u2028"); });
         add_cmd(type, "Tab (Tab)", {}, [this] { m_view->insert_at_caret("\t"); });
@@ -1888,6 +1894,9 @@ public:
             });
             return true;
         });
+        /* Beside the leading: where each line's baseline sits */
+        m_lead_method = new LeadingMethodDropdown(type);
+        m_lead_method->set_changed([this](LeadingMethod m) { set_leading_method(m); });
 
         m_baseline = type_number("Baseline", "pt", 84, 0.5f, -500.f, 500.f);
         m_baseline->set_tooltip("Baseline shift. Positive raises the type.");
@@ -2583,10 +2592,32 @@ public:
         perform_layout();
     }
 
+    /* Type > Leading Method, the palette's switch and the Paragraph panel:
+     * the selected paragraphs, one undo step */
+    void set_leading_method(LeadingMethod m) {
+        m_view->apply_para([m](ParaStyle &ps) { ps.leading_method = m; });
+    }
+
     void sync_spacing() {
         if (!m_spacing)
             return;
         const auto paras = m_view->selected_paragraphs();
+        {
+            bool mixed = false;
+            for (const Paragraph *p : paras)
+                mixed |= p->style.leading_method != paras.front()->style.leading_method;
+            const LeadingMethod m = paras.empty() ? LeadingMethod::Proportional
+                                                  : paras.front()->style.leading_method;
+            if (m_lead_method) {
+                m_lead_method->set_enabled(!paras.empty());
+                m_lead_method->set_method(m, mixed);
+            }
+            for (int i = 0; i < 3; ++i)
+                if (m_lead_items[i]) {
+                    m_lead_items[i]->set_enabled(!paras.empty());
+                    m_lead_items[i]->set_icon(!paras.empty() && !mixed && (int) m == i ? FA_CHECK : 0);
+                }
+        }
         m_spacing->set_enabled(!paras.empty());
         if (m_spacing->focused() || m_spacing->spinning())
             return;                      // it shows the value being set
@@ -3577,6 +3608,8 @@ private:
     Vector2i         m_frame_float_size{0, 0};
     FloatSpin       *m_size = nullptr, *m_leading = nullptr, *m_baseline = nullptr;
     FloatSpin       *m_spacing = nullptr;
+    LeadingMethodDropdown *m_lead_method = nullptr;
+    MenuItem        *m_lead_items[3] = {nullptr, nullptr, nullptr};
     MenuItem        *m_dup_spread = nullptr;
     MenuItem        *m_remove_page = nullptr, *m_move_earlier = nullptr, *m_move_later = nullptr;
     MenuItem        *m_hide_page = nullptr;

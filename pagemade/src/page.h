@@ -86,6 +86,10 @@ struct PageSetup {
      * page's top. grid_step 0 turns the grid off. */
     float grid_start = 0.f;
     float grid_step = 12.f;
+    /* The leading method newly placed text starts with (a text block drawn,
+     * text pasted, a caption, a layout's text). Text already placed keeps
+     * its own; each paragraph can still be switched. */
+    LeadingMethod leading_method = LeadingMethod::Proportional;
 };
 
 /* How a PDF is written (File > Export PDF). Kept with the publication, so

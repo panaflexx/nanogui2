@@ -366,6 +366,95 @@ static void test_first_line_inside(const FontLibrary &fonts) {
           "ordinary leading keeps its first baseline");
 }
 
+/* PageMaker's leading methods. A 48 pt line over a 24 pt one, auto
+ * leading (57.6 and 28.8 pt slugs). */
+static void test_leading_methods(const FontLibrary &fonts) {
+    CharStyle big, small;
+    big.size = 48;
+    small.size = 24;
+    const std::vector<Frame> box = {{0, 0, 400, 400}};
+    auto two = [&](LeadingMethod m) {
+        Story s;
+        Paragraph p;
+        p.style.leading_method = m;
+        p.runs = {{big, "BRITTANY\u2028"}, {small, "GNG"}};
+        s.paragraphs.push_back(p);
+        return compose(s, box, fonts);
+    };
+    const Composition prop = two(LeadingMethod::Proportional);
+    const Composition base = two(LeadingMethod::Baseline);
+    const Composition caps = two(LeadingMethod::TopOfCaps);
+    CHECK(prop.lines.size() == 2 && base.lines.size() == 2 && caps.lines.size() == 2, "two lines each");
+    if (prop.lines.size() != 2 || base.lines.size() != 2 || caps.lines.size() != 2)
+        return;
+    const float pgap = prop.lines[1].baseline - prop.lines[0].baseline;
+    CHECK(std::fabs(pgap - (57.6f / 3.f + 28.8f * 2.f / 3.f)) < 0.05f,
+          "proportional: a third of the slug above, two thirds of its own (%g)", pgap);
+    const float bgap = base.lines[1].baseline - base.lines[0].baseline;
+    CHECK(std::fabs(bgap - 28.8f) < 0.05f, "baseline: the small line's own leading below (%g)", bgap);
+    const Font *f = fonts.find("Serif", false, false);
+    const float upem = f ? (float) f->units_per_em() : 1000.f;
+    if (f)
+        CHECK(std::fabs(base.lines[0].baseline - f->ascender() * 48.f / upem) < 0.05f,
+              "baseline: the first line sits its ascent down (%g)", base.lines[0].baseline);
+    if (f)
+        CHECK(std::fabs(caps.lines[0].baseline - f->cap_height() * 48.f / upem) < 1.5f,
+              "top of caps: the first baseline is the caps' height down (%g vs %g)",
+              caps.lines[0].baseline, f->cap_height() * 48.f / upem);
+    const float cgap = caps.lines[1].baseline - caps.lines[0].baseline;
+    CHECK(cgap > 28.f && cgap < 57.6f, "top of caps: the next line keeps to its slug (%g)", cgap);
+
+    /* The method is saved with the paragraph */
+    PageDoc doc = sample_document();
+    doc.stories[1].story.paragraphs[0].style.leading_method = LeadingMethod::TopOfCaps;
+    doc.stories[1].story.paragraphs[1].style.leading_method = LeadingMethod::Baseline;
+    std::string err;
+    const std::string path = "/tmp/pagemade_test_leading.pagemade";
+    CHECK(save_document(doc, fonts, path, SaveOptions{false}, &err), "save leading: %s", err.c_str());
+    OpenResult back = open_document(path, fonts);
+    CHECK(back.ok && back.doc.stories[1].story.paragraphs[0].style.leading_method == LeadingMethod::TopOfCaps &&
+              back.doc.stories[1].story.paragraphs[1].style.leading_method == LeadingMethod::Baseline &&
+              back.doc.stories[1].story.paragraphs[2].style.leading_method == LeadingMethod::Proportional,
+          "leading methods round-trip");
+
+    /* The document's default is for new text only, and is saved with it */
+    PageDoc fresh = new_publication(PageSetup(), 1);
+    fresh.setup.leading_method = LeadingMethod::Baseline;
+    const std::string spath = "/tmp/pagemade_test_leading_default.pagemade";
+    CHECK(save_document(fresh, fonts, spath, SaveOptions{false}, &err), "save default: %s", err.c_str());
+    OpenResult sback = open_document(spath, fonts);
+    CHECK(sback.ok && sback.doc.setup.leading_method == LeadingMethod::Baseline,
+          "the document's default leading method is saved");
+    VectorStore vstore;
+    const std::string svg =
+        "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"200\" height=\"40\" viewBox=\"0 0 200 40\">"
+        "<text x=\"0\" y=\"16\" font-family=\"serif\" font-size=\"10\">Pasted words</text></svg>";
+    const VectorPlacement pasted = place_svg_bytes(fresh, vstore, std::vector<uint8_t>(svg.begin(), svg.end()),
+                                                   "p.svg", "", 0, nullptr, nullptr, SvgPaste::Text, &fonts, true);
+    const StoryEntry *ps = pasted.ok ? fresh.story_of(pasted.item) : nullptr;
+    CHECK(ps && !ps->story.paragraphs.empty() &&
+              ps->story.paragraphs[0].style.leading_method == LeadingMethod::Baseline,
+          "text pasted as text starts with the document's default");
+    const std::vector<LayoutTemplate> defs = default_layout_templates();
+    const LayoutTemplate *title = nullptr;
+    for (const LayoutTemplate &t : defs)
+        if (t.name == "Title Page")
+            title = &t;
+    if (title) {
+        const size_t before = fresh.stories.size();
+        place_layout(fresh, &vstore, *title, 0);
+        bool all = fresh.stories.size() > before;
+        for (size_t i = before; i < fresh.stories.size(); ++i)
+            for (const Paragraph &p : fresh.stories[i].story.paragraphs)
+                all = all && p.style.leading_method == LeadingMethod::Baseline;
+        CHECK(all, "a layout's text starts with the document's default");
+    }
+    /* Text already placed keeps its own method when the default changes */
+    fresh.setup.leading_method = LeadingMethod::TopOfCaps;
+    CHECK(ps && fresh.story_of(pasted.item)->story.paragraphs[0].style.leading_method == LeadingMethod::Baseline,
+          "placed text keeps its method");
+}
+
 /* Optical margin alignment (ParaStyle::optical_margins): edge punctuation
  * hangs past the measure — opening quotes at a line's start, periods,
  * commas and hyphens at its end — so the text edge stays straight. */
@@ -6278,6 +6367,7 @@ int main(int argc, char **argv) {
     test_baseline_grid(fonts);
     test_optical_margins(fonts);
     test_first_line_inside(fonts);
+    test_leading_methods(fonts);
     test_paragraph_attributes(fonts);
     test_drop_caps(fonts);
     test_keeps(fonts);

@@ -1136,6 +1136,10 @@ Composition compose(const Story &story, const std::vector<Frame> &frames,
     size_t fi = 0;
     float y = frames.empty() ? 0.f : frames[0].y;
     bool at_frame_top = true;
+    /* How far y sat below the last line's baseline right after it was
+     * placed: a Baseline-method line measures its leading from that
+     * baseline, so spacing added to y since then still counts. */
+    float drop = 0.f;
 
     auto finish = [&] {
         /* Vertical alignment. Composition is top-down; center, bottom and
@@ -1413,28 +1417,44 @@ Composition compose(const Story &story, const std::vector<Frame> &frames,
                     leading = leading_of(empty_style, st);
                 leading = slug(leading);
 
+                /* The line's type: its fonts' ascent and descent, its
+                 * tallest capitals, and its ink's top (all up from the
+                 * baseline, points) */
+                float asc = 0.f, desc = 0.f, caps = 0.f, rise = 0.f;
+                bool inked = false;
+                for (const Piece &p : c.pieces)
+                    for (const PGlyph &g : p.glyphs) {
+                        if (g.kind != Kind::Glyph)
+                            continue;
+                        const Font *fo = sh.font(g.run);
+                        if (!fo || fo->units_per_em() <= 0)
+                            continue;
+                        const CharStyle &gs = sh.style(g.run);
+                        const float k = gs.size * g.scale / (float) fo->units_per_em();
+                        float x0, y0, x1, y1;
+                        fo->glyph_bounds(g.gid, x0, y0, x1, y1);
+                        rise = std::max(rise, y1 * k + g.dy + gs.baseline_shift);
+                        asc = std::max(asc, fo->ascender() * k + gs.baseline_shift);
+                        desc = std::max(desc, -fo->descender() * k - gs.baseline_shift);
+                        caps = std::max(caps, fo->cap_height() * k + gs.baseline_shift);
+                        inked = true;
+                    }
+
+                /* The baseline, down from y, by the leading method */
+                const LeadingMethod method = st.leading_method;
+                float off = leading * (2.f / 3.f);   // proportional
+                if (method == LeadingMethod::TopOfCaps && inked)
+                    off = caps;
+                else if (method == LeadingMethod::Baseline)
+                    off = at_frame_top ? (inked ? asc : leading * (2.f / 3.f)) : leading - drop;
+
                 /* The first line in a text block keeps its ink inside the
                  * block: with tight leading (or line spacing below 1) the
-                 * baseline, two thirds down the slug, would put tall type
-                 * above the top. The line moves down just enough, and the
-                 * lines after it keep their spacing from it. */
+                 * baseline would put tall type above the top. The line
+                 * moves down just enough, and the lines after it keep
+                 * their spacing from it. */
                 if (at_frame_top) {
-                    float rise = 0.f;
-                    for (const Piece &p : c.pieces)
-                        for (const PGlyph &g : p.glyphs) {
-                            if (g.kind != Kind::Glyph)
-                                continue;
-                            const Font *fo = sh.font(g.run);
-                            if (!fo || fo->units_per_em() <= 0)
-                                continue;
-                            const CharStyle &gs = sh.style(g.run);
-                            float x0, y0, x1, y1;
-                            fo->glyph_bounds(g.gid, x0, y0, x1, y1);
-                            const float top = y1 * gs.size * g.scale / (float) fo->units_per_em() +
-                                              g.dy + gs.baseline_shift;
-                            rise = std::max(rise, top);
-                        }
-                    const float over = rise - leading * (2.f / 3.f);
+                    const float over = rise - off;
                     if (over > kEps)
                         y += over;
                 }
@@ -1442,20 +1462,24 @@ Composition compose(const Story &story, const std::vector<Frame> &frames,
                 /* Align to grid: the baseline moves down to the next grid
                  * line, so each line's pitch is a multiple of the step. */
                 if (st.align_to_grid && f.grid_step > 0.f) {
-                    const float b = y + leading * (2.f / 3.f);
+                    const float b = y + off;
                     const float snapped = f.grid_origin +
                         std::ceil((b - f.grid_origin) / f.grid_step - kEps) * f.grid_step;
-                    y = snapped - leading * (2.f / 3.f);
+                    y = snapped - off;
                 }
 
-                if (y + leading > f.y + f.h + kEps) {
+                /* Proportional and top of caps take the slug; baseline
+                 * leading needs the baseline and the descent below it */
+                const bool by_baseline = method == LeadingMethod::Baseline;
+                const float needs = by_baseline ? off + desc : leading;
+                if (y + needs > f.y + f.h + kEps) {
                     next_frame();
                     continue;
                 }
 
                 line.top = y;
-                line.leading = leading;
-                line.baseline = y + leading * (2.f / 3.f);
+                line.leading = by_baseline ? std::max(off, 0.f) : leading;
+                line.baseline = y + off;
                 line.para_end = br.last_after(c);
                 line.byte_start = c.pieces.empty() ? br.position() : c.pieces.front().start;
                 line.byte_end = c.pieces.empty() ? br.position() : c.pieces.back().stop;
@@ -1494,7 +1518,11 @@ Composition compose(const Story &story, const std::vector<Frame> &frames,
                 out.lines.push_back(std::move(line));
                 ++placed;
 
-                y += leading;
+                {
+                    const float base = out.lines.back().baseline;
+                    y = by_baseline ? std::max(y, base) : y + leading;
+                    drop = y - base;
+                }
                 at_frame_top = false;
                 first_line = false;
                 if (frame_break || placed == plan.break_after)
@@ -1524,6 +1552,7 @@ Composition compose(const Story &story, const std::vector<Frame> &frames,
         size_t fi, lines;
         float  y;
         bool   at_top;
+        float  drop;
     };
     const size_t n = story.paragraphs.size();
     std::vector<Plan> plans(n);
@@ -1600,7 +1629,7 @@ Composition compose(const Story &story, const std::vector<Frame> &frames,
     };
 
     for (size_t pi = 0; pi < n; ) {
-        starts[pi] = {fi, out.lines.size(), y, at_frame_top};
+        starts[pi] = {fi, out.lines.size(), y, at_frame_top, drop};
         const bool fits = compose_para(pi, plans[pi]);
         const size_t again = retries > 0 ? check(pi, !fits) : SIZE_MAX;
         if (again == SIZE_MAX) {
@@ -1615,6 +1644,7 @@ Composition compose(const Story &story, const std::vector<Frame> &frames,
         fi = c.fi;
         y = c.y;
         at_frame_top = c.at_top;
+        drop = c.drop;
         out.lines.resize(c.lines);
         for (size_t k = again + 1; k < n; ++k)
             plans[k] = Plan();
