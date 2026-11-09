@@ -1500,6 +1500,11 @@ void Screen::mouse_button_callback_event(int button, int action, int modifiers) 
 #endif
 
     try {
+        /* A click opens and closes popups, and focusing one raises its
+           window. Hold those raises until this function returns so the
+           child walk below is not iterating a vector that is being reordered. */
+        MouseDispatch dispatch(this);
+
         if (action == GLFW_PRESS)
             m_mouse_state |= 1 << button;
         else
@@ -1623,14 +1628,14 @@ void Screen::mouse_button_callback_event(int button, int action, int modifiers) 
                 std::find(m_focus_path.begin(), m_focus_path.end(), modal) == m_focus_path.end())
                 modal->request_focus();
         }
-        if ((!m_redraw || m_close_popups) && m_popup_visible.size() != 0) {
-            int Size = m_popup_visible.size();
-            for (int Cnt = 0; Cnt < Size; Cnt++) {
-                m_popup_visible.pop_front();
-            }
+        /* Dropping a popup sets m_close_popups. A menu opened by this same
+           click is already in the list and still visible; leave it there.
+           Wiping the whole list used to forget that menu. */
+        if (m_close_popups)
+            m_popup_visible.remove_if([](Popup *p) { return !p || !p->visible(); });
+        if ((!m_redraw || m_close_popups) && !m_popup_visible.empty())
             m_redraw = true;
-            m_close_popups = false;
-        }
+        m_close_popups = false;
     } catch (const std::exception& e) {
         std::cerr << "Screen::mouse_button_callback_event: Caught exception in event handler: " << e.what() << std::endl;
     }
@@ -2053,14 +2058,36 @@ void Screen::center_window(Window* window) {
     window->set_position(pos);
 }
 
+void Screen::end_mouse_dispatch() {
+    if (m_mouse_dispatch > 0)
+        --m_mouse_dispatch;
+    if (m_mouse_dispatch > 0)
+        return;
+    std::vector<Window*> raise;
+    raise.swap(m_raise_after_mouse);
+    for (Window *w : raise)
+        move_window_to_front(w);
+}
+
 void Screen::move_window_to_front(Window* window) {
     /* A root window is the backdrop the other windows sit on.  Raising it --
        which update_focus() does for whatever window you click -- buries every
        open dialog behind it, so clicking the app "loses" the Preferences or
        compose window.  Leave the z-order alone for roots; they are created
        first and so already sit at the bottom. */
-    if (window && window->is_root())
+    if (!window || window->is_root())
         return;
+
+    /* The click that opens a menu is still walking m_children. Reordering
+       now invalidates that walk. Remember the window and raise it when the
+       click returns. Last request stays last, so the menu ends up in front. */
+    if (m_mouse_dispatch > 0) {
+        auto at = std::find(m_raise_after_mouse.begin(), m_raise_after_mouse.end(), window);
+        if (at != m_raise_after_mouse.end())
+            m_raise_after_mouse.erase(at);
+        m_raise_after_mouse.push_back(window);
+        return;
+    }
 
     /* Reorder only. A window that isn't ours any more (disposed: its entry
      * and reference went to the cleanup queue) must not be pushed back:

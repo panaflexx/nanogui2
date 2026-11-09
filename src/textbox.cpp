@@ -439,7 +439,10 @@ bool TextBox::focus_event(bool focused) {
                     m_value = m_value_temp;
             }
 
-            if (m_callback && !m_callback(m_value))
+            /* Blur used to commit even when the text was unchanged. Closing
+               the paragraph pane then reapplied the style and reloaded the
+               Type dialog under the click that opened its font menu. */
+            if (m_value != backup && m_callback && !m_callback(m_value))
                 m_value = backup;
 
             m_valid_format = true;

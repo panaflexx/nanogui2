@@ -28,6 +28,17 @@ using pagemade::StyleDef;
 
 namespace {
 
+/* Clears the "box being committed" pointer if apply throws. */
+struct CommitArm {
+    Widget *&slot;
+    CommitArm(Widget *&slot, Widget *box) : slot(slot) { slot = box; }
+    ~CommitArm() { slot = nullptr; }
+};
+
+} // namespace
+
+namespace {
+
 const Color kSelected(56, 116, 226, 255);
 const Color kRule(0, 0, 0, 38);
 
@@ -885,15 +896,22 @@ void ParagraphPanel::add_field(Widget *grid, ParaIcon icon, const char *tip,
         return m_first.*(f.member) * f.scale;
     });
     box->TextBox::set_callback([this, index](const std::string &s) {
+        if (m_loading)
+            return true;
         const Field &f = m_fields[index];
         char *end = nullptr;
         const float v = std::strtof(s.c_str(), &end);
         if (end == s.c_str())
             return false;
         const float shown = std::clamp(v, f.lo, f.hi);
-        f.box->set_value(shown);
         const float value = shown / f.scale;
         const auto member = f.member;
+        f.box->set_value(shown);
+        /* Same number (blur of an untouched field): don't recompose, and
+           don't reload the Type dialog under the click that dismissed us. */
+        if (std::fabs(value - m_first.*member) <= 0.0005f)
+            return true;
+        CommitArm arm(m_commit_box, f.box);
         if (m_hooks.apply)
             m_hooks.apply([member, value](ParaStyle &ps) { ps.*member = value; },
                           f.box->spinning() ? f.box : nullptr);
@@ -974,15 +992,20 @@ FloatSpin *SpacingAttrs::add_attr(Widget *grid, const char *tip, float ParaStyle
     m_attrs.push_back({box, member, lo, hi, std::move(fix)});
     box->set_blank_value([this, index] { return m_first.*(m_attrs[index].member); });
     box->TextBox::set_callback([this, index](const std::string &s) {
+        if (m_loading)
+            return true;
         const AttrField &f = m_attrs[index];
         char *end = nullptr;
         const float v = std::strtof(s.c_str(), &end);
         if (end == s.c_str())
             return false;
         const float value = std::clamp(v, f.lo, f.hi);
-        f.box->set_value(value);
         const auto member = f.member;
+        f.box->set_value(value);
+        if (std::fabs(value - m_first.*member) <= 0.0005f)
+            return true;
         const auto fix = f.fix;
+        CommitArm arm(m_commit_box, f.box);
         if (m_apply)
             m_apply([member, value, fix](ParaStyle &ps) {
                 ps.*member = value;
@@ -1009,7 +1032,7 @@ void SpacingAttrs::load(const std::vector<const Paragraph *> &paras) {
         m_first = paras.front()->style;
     for (AttrField &f : m_attrs) {
         f.box->set_enabled(any);
-        if (f.box->focused() || f.box->spinning())
+        if (f.box->focused() || f.box->spinning() || f.box == m_commit_box)
             continue;                    // it shows what is being set
         bool same = any;
         for (const Paragraph *p : paras)
@@ -1038,14 +1061,19 @@ void ParagraphPanel::add_int_field(Widget *grid, ParaIcon icon, const char *tip,
     m_int_fields.push_back({box, member, lo, hi});
     box->set_blank_value([this, index] { return m_first.*(m_int_fields[index].member); });
     box->TextBox::set_callback([this, index](const std::string &s) {
+        if (m_loading)
+            return true;
         const IntField &f = m_int_fields[index];
         char *end = nullptr;
         const long v = std::strtol(s.c_str(), &end, 10);
         if (end == s.c_str())
             return false;
         const int value = (int) std::clamp<long>(v, f.lo, f.hi);
-        f.box->set_value(value);
         const auto member = f.member;
+        f.box->set_value(value);
+        if (value == m_first.*member)
+            return true;
+        CommitArm arm(m_commit_box, f.box);
         if (m_hooks.apply)
             m_hooks.apply([member, value](ParaStyle &ps) { ps.*member = value; },
                           f.box->spinning() ? f.box : nullptr);
@@ -1113,7 +1141,7 @@ void ParagraphPanel::load(const std::vector<const Paragraph *> &paras,
 
     for (Field &f : m_fields) {
         f.box->set_enabled(any);
-        if (f.box->focused() || f.box->spinning())
+        if (f.box->focused() || f.box->spinning() || f.box == m_commit_box)
             continue;                    // it shows what is being set
         bool same = any;
         for (const Paragraph *p : paras)
@@ -1150,7 +1178,7 @@ void ParagraphPanel::load(const std::vector<const Paragraph *> &paras,
 
     for (IntField &f : m_int_fields) {
         f.box->set_enabled(any);
-        if (f.box->focused() || f.box->spinning())
+        if (f.box->focused() || f.box->spinning() || f.box == m_commit_box)
             continue;
         bool same = any;
         for (const Paragraph *p : paras)

@@ -59,27 +59,50 @@ NAMESPACE_BEGIN(nanogui)
         const std::string& caption() const { return m_caption; }
 
         /// Sets the caption of this Button.
-        void set_caption(const std::string& caption) { m_caption = caption; }
+        /* Visual setters mark cached ancestors' display lists stale, as
+         * Label::set_caption does: a Dropdown's new caption inside a cached
+         * container otherwise showed only once the pointer moved over it. */
+        void set_caption(const std::string& caption) {
+            if (m_caption == caption) return;
+            m_caption = caption;
+            propagate_cache_dirty();
+        }
 
         /// Returns the background color of this Button.
         const Color& background_color() const { return m_background_color; }
         /// Sets the background color of this Button.
-        void set_background_color(const Color& background_color) { m_background_color = background_color; }
+        void set_background_color(const Color& background_color) {
+            if (m_background_color == background_color) return;
+            m_background_color = background_color;
+            propagate_cache_dirty();
+        }
 
         /// Returns the transparency boolean
         const bool& transparent() const { return m_make_transparent; }
         /// Sets the transprency boolean. used to override the unfocused color with the window fill.
-        void set_transparent(const bool& make_transparent) { m_make_transparent = make_transparent; }
+        void set_transparent(const bool& make_transparent) {
+            if (m_make_transparent == make_transparent) return;
+            m_make_transparent = make_transparent;
+            propagate_cache_dirty();
+        }
 
         /// Returns the text color of the caption of this Button.
         const Color& text_color() const { return m_text_color; }
         /// Sets the text color of the caption of this Button.
-        void set_text_color(const Color& text_color) { m_text_color = text_color; }
+        void set_text_color(const Color& text_color) {
+            if (m_text_color == text_color) return;
+            m_text_color = text_color;
+            propagate_cache_dirty();
+        }
 
         /// Returns the icon of this Button.  See \ref nanogui::Button::m_icon.
         int icon() const { return m_icon; }
         /// Sets the icon of this Button.  See \ref nanogui::Button::m_icon.
-        void set_icon(int icon) { m_icon = icon; }
+        void set_icon(int icon) {
+            if (m_icon == icon) return;
+            m_icon = icon;
+            propagate_cache_dirty();
+        }
 
         /// The current flags of this Button (see \ref nanogui::Button::Flags for options).
         int flags() const { return m_flags; }
@@ -89,7 +112,11 @@ NAMESPACE_BEGIN(nanogui)
         /// The position of the icon for this Button.
         IconPosition icon_position() const { return m_icon_position; }
         /// Sets the position of the icon for this Button.
-        void set_icon_position(IconPosition icon_position) { m_icon_position = icon_position; }
+        void set_icon_position(IconPosition icon_position) {
+            if (m_icon_position == icon_position) return;
+            m_icon_position = icon_position;
+            propagate_cache_dirty();
+        }
 
         /// Whether or not this Button is currently pushed.
         bool pushed() const { return m_pushed; }

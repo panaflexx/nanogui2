@@ -196,13 +196,26 @@ bool Widget::mouse_button_event(const Vector2i& p, int button, bool down, int mo
 
     Screen* CanICastSreen = dynamic_cast<Screen*>(this);
     bool screen_widget = CanICastSreen != NULL;
-    for (auto it = m_children.rbegin(); it != m_children.rend(); ++it) {
-        Widget* child = *it;
-        if (child->visible() && child->contains(p - m_pos))
-        {
-            if (child->mouse_button_event(p - m_pos, button, down, modifiers))
-                return true;
-            else if (screen_widget)break;// stop the loop if we are on the screen and found the first window the pointer is in
+    /* Opening a menu raises a window, which erases and reappends screen
+       children. A live reverse iterator into that vector then dangles
+       (the paragraph pane open, then the Type dialog's font menu). */
+    if (screen_widget) {
+        const std::vector<Widget*> children = m_children;
+        for (auto it = children.rbegin(); it != children.rend(); ++it) {
+            Widget* child = *it;
+            if (child->visible() && child->contains(p - m_pos)) {
+                if (child->mouse_button_event(p - m_pos, button, down, modifiers))
+                    return true;
+                break; // first window under the pointer owns the click
+            }
+        }
+    } else {
+        for (auto it = m_children.rbegin(); it != m_children.rend(); ++it) {
+            Widget* child = *it;
+            if (child->visible() && child->contains(p - m_pos)) {
+                if (child->mouse_button_event(p - m_pos, button, down, modifiers))
+                    return true;
+            }
         }
     }
     if (button == GLFW_MOUSE_BUTTON_1 && down && !m_focused)

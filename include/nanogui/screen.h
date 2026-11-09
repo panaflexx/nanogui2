@@ -19,6 +19,7 @@
 #include <list>
 #include <memory>
 #include <unordered_set>
+#include <vector>
 
 NAMESPACE_BEGIN(nanogui)
 
@@ -352,9 +353,24 @@ public:
     bool m_close_popups = false;
     double m_last_interaction;
 
+    /* Raises requested while a mouse click is still walking m_children.
+       Applied when the click returns, so the walk's iterators stay valid. */
+    void end_mouse_dispatch();
+    class MouseDispatch {
+    public:
+        explicit MouseDispatch(Screen *s) : m_s(s) { ++m_s->m_mouse_dispatch; }
+        ~MouseDispatch() { m_s->end_mouse_dispatch(); }
+        MouseDispatch(const MouseDispatch &) = delete;
+        MouseDispatch &operator=(const MouseDispatch &) = delete;
+    private:
+        Screen *m_s;
+    };
+
     void do_widget_cleanup();
 
 protected:
+    int m_mouse_dispatch = 0;
+    std::vector<Window *> m_raise_after_mouse;
     GLFWwindow* m_glfw_window = nullptr;
     NVGcontext* m_nvg_context = nullptr;
     GLFWcursor* m_cursors[(size_t)Cursor::CursorCount];

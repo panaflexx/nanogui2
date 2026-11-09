@@ -129,6 +129,9 @@ private:
     std::vector<IntField> m_int_fields;
     pagemade::ParaStyle m_first;         // the first selected paragraph's
     nanogui::Button *m_delete = nullptr, *m_new = nullptr;
+    /* The field whose blur is applying. load() must not write it back:
+       focus is already cleared, so the focused() skip would miss it. */
+    nanogui::Widget *m_commit_box = nullptr;
     bool m_loading = false;
 };
 
@@ -166,6 +169,7 @@ private:
     std::vector<AttrField> m_attrs;
     pagemade::ParaStyle m_first;         // the first selected paragraph's
     nanogui::CheckBox *m_strict = nullptr;
+    nanogui::Widget *m_commit_box = nullptr;
     bool m_loading = false;
 };
 

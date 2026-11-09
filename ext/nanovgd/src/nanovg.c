@@ -836,9 +836,12 @@ static void nvg__dlAppendList(NVGdrawList* dst, const NVGdrawList* src, const fl
 		if (dc == NULL) return;
 		*dc = *sc;
 		if (applyXform) {
-			nvgTransformPremultiply(dc->paint.xform, xform);
+			/* Recorded first, then the list's placement: Multiply, not
+			 * Premultiply (that applies the placement first, which only
+			 * agrees for pure translations) */
+			nvgTransformMultiply(dc->paint.xform, xform);
 			if (dc->scissor.extent[0] >= 0.0f)
-				nvgTransformPremultiply(dc->scissor.xform, xform);
+				nvgTransformMultiply(dc->scissor.xform, xform);
 			if (sc->type == NVG_DRAW_FILL || sc->type == NVG_DRAW_CLIP) {
 				float x0, y0, x1, y1, x2, y2, x3, y3;
 				nvgTransformPoint(&x0, &y0, xform, sc->bounds[0], sc->bounds[1]);
@@ -1001,7 +1004,11 @@ static void nvg__drawListSubmit(NVGcontext* ctx, const NVGdrawList* list, int us
 		// they are submitted under (e.g. scroll panels, windows).
 		if (useStateXform) {
 			if (scissor.extent[0] >= 0.0f && applyXform)
-				nvgTransformPremultiply(scissor.xform, state->xform);
+				/* The recorded scissor first, then the current transform.
+				 * Premultiply would apply them the other way round: right for
+				 * a pure translation, wrong as soon as a scale is in play (a
+				 * cached widget under a zoom panel clipped itself away). */
+				nvgTransformMultiply(scissor.xform, state->xform);
 			if (state->scissor.extent[0] >= 0.0f) {
 				if (scissor.extent[0] >= 0.0f)
 					scissor = nvg__scissorIntersect(&scissor, &state->scissor);
@@ -1012,7 +1019,7 @@ static void nvg__drawListSubmit(NVGcontext* ctx, const NVGdrawList* list, int us
 		scissorPtr = &scissor;
 
 		if (useStateXform && applyXform)
-			nvgTransformPremultiply(paint.xform, state->xform);
+			nvgTransformMultiply(paint.xform, state->xform);   // gradients, images: same order
 		if (useStateXform && alpha != 1.0f) {
 			paint.innerColor.a *= alpha;
 			paint.outerColor.a *= alpha;
