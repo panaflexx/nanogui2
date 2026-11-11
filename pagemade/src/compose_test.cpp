@@ -6771,6 +6771,91 @@ static void test_pdf_picture_flags() {
     std::remove(path.c_str());
 }
 
+/* File > Import: a publication made from a graphic file, a page for each
+ * of its pages, sized like the first, each drawing at full size. The pages
+ * of one PDF share one copy of its bytes, in memory and in the package. */
+static void test_import_publication(const FontLibrary &fonts) {
+    const std::string pg1 = "1 0 0 rg 0 0 10 10 re f\n", pg2 = "0 0 1 rg 0 0 40 10 re f\n";
+    std::string p3 = "%PDF-1.4\n";
+    p3 += "1 0 obj << /Type /Catalog /Pages 2 0 R >> endobj\n";
+    p3 += "2 0 obj << /Type /Pages /Kids [3 0 R 4 0 R] /Count 2 /MediaBox [0 0 300 200] >> endobj\n";
+    p3 += "3 0 obj << /Type /Page /Parent 2 0 R /Contents 5 0 R >> endobj\n";
+    p3 += "4 0 obj << /Type /Page /Parent 2 0 R /Contents 6 0 R >> endobj\n";
+    p3 += "5 0 obj << /Length " + std::to_string(pg1.size()) + " >> stream\n" + pg1 + "\nendstream endobj\n";
+    p3 += "6 0 obj << /Length " + std::to_string(pg2.size()) + " >> stream\n" + pg2 + "\nendstream endobj\n";
+    p3 += "trailer << /Root 1 0 R >>\n%%EOF\n";
+    ImportedPublication r =
+        import_publication(std::vector<uint8_t>(p3.begin(), p3.end()), "two.pdf", "", &fonts);
+    CHECK(r.ok, "import a two-page PDF: %s", r.error.c_str());
+    if (!r.ok)
+        return;
+    CHECK(r.doc.pages.size() == 2 && near(r.doc.setup.width, 300.f) && near(r.doc.setup.height, 200.f),
+          "two pages, the file's size (%zu, %g x %g)", r.doc.pages.size(), r.doc.setup.width,
+          r.doc.setup.height);
+    CHECK(r.doc.setup.margin_top > 0.f && r.doc.setup.columns == 1, "with ordinary margins, one column");
+    bool full = r.doc.pages.size() == 2;
+    for (const Page &pg : r.doc.pages) {
+        full = full && pg.items.size() == 1;
+        if (pg.items.size() == 1) {
+            const Item &it = pg.items[0];
+            full = full && it.is_vector() && near(it.xf.e, 0.f) && near(it.xf.f, 0.f) && near(it.w, 300.f) &&
+                   near(it.h, 200.f);
+        }
+    }
+    CHECK(full, "each page's drawing fills its page");
+    CHECK(r.doc.vectors.size() == 2 && r.doc.vectors[0].page == 0 && r.doc.vectors[1].page == 1,
+          "a graphic for each page of the file");
+    if (r.doc.vectors.size() == 2) {
+        VectorStore::Bytes a = r.vectors.source_of(r.doc.vectors[0].id), b = r.vectors.source_of(r.doc.vectors[1].id);
+        CHECK(a && a.get() == b.get(), "the pages share one copy of the file");
+        const VectorScene *second = r.vectors.scene(r.doc.vectors[1].id);
+        CHECK(second && second->shapes.size() == 1 && second->shapes[0].fill.color.b > 0.99f,
+              "page 2 draws the file's page 2");
+    }
+    CHECK(r.note.rfind("imported two.pdf", 0) == 0 && r.note.find("2 pages") != std::string::npos,
+          "the note (%s)", r.note.c_str());
+
+    /* Saved with its assets, the file is in the package once; opened, the
+     * pages share it again */
+    const std::string pkg = "/tmp/pagemade-import.pagemade";
+    std::string err;
+    CHECK(save_document(r.doc, fonts, pkg, SaveOptions{true}, &err, r.images.get(), &r.vectors), "save: %s",
+          err.c_str());
+    const std::string json = document_json(r.doc, fonts, SaveOptions{true}, r.images.get(), &r.vectors);
+    size_t refs = 0;
+    std::set<std::string> files;
+    for (size_t at = json.find("assets/vectors/"); at != std::string::npos; at = json.find("assets/vectors/", at + 1)) {
+        ++refs;
+        files.insert(json.substr(at, json.find('"', at) - at));
+    }
+    CHECK(refs == 2 && files.size() == 1, "both graphics name one file in the package (%zu, %zu)", refs,
+          files.size());
+    OpenResult back = open_document(pkg, fonts);
+    CHECK(back.ok && back.doc.vectors.size() == 2 && back.doc.pages.size() == 2, "open it: %s", back.error.c_str());
+    if (back.ok && back.doc.vectors.size() == 2) {
+        VectorStore::Bytes a = back.vectors.source_of(back.doc.vectors[0].id);
+        VectorStore::Bytes b = back.vectors.source_of(back.doc.vectors[1].id);
+        const VectorScene *second = back.vectors.scene(back.doc.vectors[1].id);
+        CHECK(a && a.get() == b.get() && second && second->shapes.size() == 1 &&
+                  second->shapes[0].fill.color.b > 0.99f,
+              "opened, the pages share the file and keep their own page");
+    }
+    std::remove(pkg.c_str());
+
+    /* An SVG: one page its size (400 x 250 px is 300 x 187.5 pt) */
+    const std::string svg = "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"400\" height=\"250\">"
+                            "<rect width=\"400\" height=\"250\" fill=\"#0a0\"/></svg>";
+    ImportedPublication s2 = import_publication(std::vector<uint8_t>(svg.begin(), svg.end()), "art.svg", "", &fonts);
+    CHECK(s2.ok && s2.doc.pages.size() == 1 && near(s2.doc.setup.width, 300.f) && near(s2.doc.setup.height, 187.5f) &&
+              s2.doc.pages[0].items.size() == 1 && near(s2.doc.pages[0].items[0].w, 300.f) &&
+              near(s2.doc.pages[0].items[0].xf.e, 0.f),
+          "an SVG is one page its size, the drawing at full size (%s)", s2.error.c_str());
+
+    const std::string junk = "not a drawing";
+    ImportedPublication bad = import_publication(std::vector<uint8_t>(junk.begin(), junk.end()), "x.txt", "", &fonts);
+    CHECK(!bad.ok && !bad.error.empty(), "a file that isn't a drawing is refused (%s)", bad.error.c_str());
+}
+
 int main(int argc, char **argv) {
     bool verbose = argc > 1 && std::strcmp(argv[1], "-v") == 0;
     FontLibrary fonts;
@@ -6848,6 +6933,7 @@ int main(int argc, char **argv) {
     test_parser_depth();
     test_pdf_cid_keyed(fonts);
     test_pdf_picture_flags();
+    test_import_publication(fonts);
     test_xml_validation();
     test_system_fonts();
     if (verbose)

@@ -1394,4 +1394,108 @@ VectorPlacement place_svg_bytes(PageDoc &doc, VectorStore &store, std::vector<ui
 }
 
 
+ImportedPublication import_publication(std::vector<uint8_t> bytes, const std::string &name,
+                                       const std::string &source, const FontLibrary *fonts) {
+    ImportedPublication r;
+    r.images = std::make_unique<ImageStore>();
+    const int pages = bytes.empty() ? 0 : vector_loader().page_count(bytes.data(), bytes.size());
+    VectorScene first;
+    std::string err;
+    if (pages < 1 || !vector_loader().decode(bytes.data(), bytes.size(), &first, &err, 0)) {
+        r.error = err.empty() ? "pagemade can't read this kind of file" : err;
+        return r;
+    }
+    if (!(first.width > 0.f) || !(first.height > 0.f)) {
+        r.error = "the file's page has no size";
+        return r;
+    }
+    const int count = std::min(pages, 5000);   // a sane page count
+
+    /* The pages are the file's, sized like its first. While placing, the
+     * live area is the whole page, so each drawing goes in at full size at
+     * the corner; ordinary margins and one column follow. */
+    PageSetup setup;
+    setup.width = first.width;
+    setup.height = first.height;
+    setup.facing = false;
+    setup.columns = 1;
+    PageSetup placing = setup;
+    placing.margin_top = placing.margin_bottom = 0.f;
+    placing.margin_inside = placing.margin_outside = 0.f;
+    r.doc = new_publication(placing, count);
+
+    const std::string leaf = name.empty() ? std::string("graphic") : name;
+    std::vector<std::string> skipped, remarks;
+    auto note_scene = [&](const VectorScene &sc) {
+        for (const std::string &s : sc.skipped)
+            if (std::find(skipped.begin(), skipped.end(), s) == skipped.end())
+                skipped.push_back(s);
+        for (const std::string &s : sc.remarks)
+            if (std::find(remarks.begin(), remarks.end(), s) == remarks.end())
+                remarks.push_back(s);
+    };
+
+    if (count == 1 && first.format != "pdf") {
+        /* One page (an SVG): placed as Place does, so its pictures come out
+         * as frames of their own */
+        VectorPlacement pl = place_svg_bytes(r.doc, r.vectors, std::move(bytes), leaf, source, 0, nullptr,
+                                             r.images.get(), SvgPaste::Drawing, fonts);
+        if (!pl.ok) {
+            r.error = pl.error;
+            return r;
+        }
+        note_scene(first);
+    } else {
+        const VectorStore::Bytes shared = std::make_shared<const std::vector<uint8_t>>(std::move(bytes));
+        const uint64_t hash = image_bytes_hash(shared->data(), shared->size());
+        for (int i = 0; i < count; ++i) {
+            VectorScene scene;
+            if (i == 0)
+                scene = std::move(first);
+            else if (!vector_loader().decode(shared->data(), shared->size(), &scene, &err, i) ||
+                     !(scene.width > 0.f) || !(scene.height > 0.f))
+                continue;                // a page that can't be read stays empty
+            note_scene(scene);
+            const uint32_t id = r.vectors.take_id();
+            VectorAsset asset;
+            asset.id = id;
+            asset.name = leaf;
+            asset.source = source;
+            asset.width = scene.width;
+            asset.height = scene.height;
+            asset.skipped = scene.skipped;
+            asset.page = i;
+            asset.source_size = shared->size();
+            asset.hash = hash;
+            float x, y, w, h;
+            vector_frame(r.doc.setup, (size_t) i, scene.width, scene.height, nullptr, x, y, w, h, true);
+            if (!r.vectors.add(id, shared, std::move(scene)))
+                continue;
+            r.doc.add_vector(asset);
+            Item it;
+            it.w = w;
+            it.h = h;
+            it.xf = Transform::translate(x, y);
+            PlacedVector pv;
+            pv.asset = id;
+            pv.w = w;
+            pv.h = h;
+            it.content = pv;
+            r.doc.add_item((size_t) i, std::move(it));
+        }
+        if (r.doc.vectors.empty()) {
+            r.error = "none of the file's pages could be read";
+            return r;
+        }
+    }
+    r.doc.setup = setup;                 // margins back once the drawings are in
+    r.note = vector_place_note(leaf, skipped, remarks);
+    r.note.replace(0, 6, "imported");    // "placed x" -> "imported x"
+    if (count > 1)
+        r.note += " (" + std::to_string(count) + " pages" +
+                  (pages > count ? " of " + std::to_string(pages) : std::string()) + ")";
+    r.ok = true;
+    return r;
+}
+
 } // namespace pagemade

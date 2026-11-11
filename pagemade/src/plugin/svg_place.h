@@ -11,9 +11,11 @@
  */
 #pragma once
 
+#include "page.h"
 #include "vector.h"
 
 #include <cstdint>
+#include <memory>
 #include <string>
 #include <vector>
 
@@ -59,5 +61,21 @@ VectorPlacement place_svg_bytes(PageDoc &doc, VectorStore &store, std::vector<ui
                                 size_t page, const Point *at, ImageStore *images = nullptr,
                                 SvgPaste how = SvgPaste::Drawing,
                                 const FontLibrary *fonts = nullptr, bool paste = false, int pdf_page = 0);
+
+/* File > Import: a new publication made from a graphic file (SVG, PDF, or
+ * any format vector_loader() reads). Its pages are the file's pages, sized
+ * like its first; each page's drawing is placed on its page at full size.
+ * A multi-page file's pages share one copy of its bytes. `source` is the
+ * file: URI the graphics link to (empty: embedded only). */
+struct ImportedPublication {
+    bool ok = false;
+    std::string error;
+    std::string note;
+    PageDoc doc;
+    VectorStore vectors;
+    std::unique_ptr<ImageStore> images;  // pictures an SVG embeds, as frames
+};
+ImportedPublication import_publication(std::vector<uint8_t> bytes, const std::string &name,
+                                       const std::string &source, const FontLibrary *fonts);
 
 } // namespace pagemade

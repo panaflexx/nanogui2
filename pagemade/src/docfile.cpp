@@ -421,11 +421,22 @@ std::string vector_leaf(const VectorAsset &a) {
 ImagePlan plan_vectors(const PageDoc &doc, const SaveOptions &opts, const VectorStore *vectors) {
     ImagePlan plan;
     std::set<std::string> names;
+    /* Graphics that share their bytes (the pages of one PDF) share one
+     * file in the package */
+    std::map<const void *, std::string> written;
     for (const VectorAsset &a : doc.vectors) {
         const bool link = !opts.embed_assets && !a.source.empty();
         if (link) {
             plan.uri[a.id] = a.source;
             continue;
+        }
+        const VectorStore::Bytes shared = vectors ? vectors->source_of(a.id) : nullptr;
+        if (shared && !shared->empty()) {
+            auto seen = written.find(shared.get());
+            if (seen != written.end()) {
+                plan.uri[a.id] = seen->second;
+                continue;
+            }
         }
         std::vector<uint8_t> bytes = vector_bytes(a, vectors);
         if (bytes.empty()) {
@@ -435,6 +446,8 @@ ImagePlan plan_vectors(const PageDoc &doc, const SaveOptions &opts, const Vector
         }
         const std::string name = unique_file_name(vector_leaf(a), names, "graphic");
         plan.uri[a.id] = package_ref("assets/vectors", name);
+        if (shared && !shared->empty())
+            written[shared.get()] = plan.uri[a.id];
         plan.embedded.push_back({a.id, "assets/vectors/" + name, std::move(bytes)});
     }
     return plan;
@@ -1539,9 +1552,27 @@ OpenResult open_document(const std::string &path, const FontLibrary &installed,
 
     /* Graphics are small, so a linked SVG is read here even when pictures
      * wait until they are on screen. The scene is what drawing uses. */
+    std::map<std::string, VectorStore::Bytes> read_once;   // the pages of one PDF share it
     for (VectorAsset &asset : d.vectors) {
         r.vectors.note_id(asset.id);
         const std::string uri = vector_uris.count(asset.id) ? vector_uris[asset.id] : std::string();
+        if (auto hit = read_once.find(uri); !uri.empty() && hit != read_once.end()) {
+            std::string err;
+            if (r.vectors.add(asset.id, hit->second, &err, asset.page)) {
+                if (const VectorScene *scene = r.vectors.scene(asset.id)) {
+                    asset.width = scene->width;
+                    asset.height = scene->height;
+                    asset.skipped = scene->skipped;
+                }
+                std::string path;
+                if (!is_package_ref(uri) && file_path_from_uri(uri, path))
+                    r.vectors.set_path(asset.id, path);
+            } else {
+                r.warnings.push_back("couldn't read the graphic " + (asset.name.empty() ? uri : asset.name) +
+                                     (err.empty() ? "" : ": " + err));
+            }
+            continue;
+        }
         std::vector<uint8_t> bytes;
         std::string where = asset.name.empty() ? uri : asset.name;
         std::string link_path;
@@ -1566,7 +1597,10 @@ OpenResult open_document(const std::string &path, const FontLibrary &installed,
             continue;
         }
         std::string err;
-        if (r.vectors.add(asset.id, std::move(bytes), &err, asset.page)) {
+        auto shared = std::make_shared<const std::vector<uint8_t>>(std::move(bytes));
+        if (!uri.empty())
+            read_once[uri] = shared;
+        if (r.vectors.add(asset.id, shared, &err, asset.page)) {
             if (const VectorScene *scene = r.vectors.scene(asset.id)) {
                 asset.width = scene->width;
                 asset.height = scene->height;

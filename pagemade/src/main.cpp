@@ -64,6 +64,7 @@
 #include "tool_tabs.h"
 #include "layers_panel.h"
 #include "ruler.h"
+#include "uri.h"
 #include "docfile.h"
 #include "default_fonts.h"
 #include "font_menu_ui.h"
@@ -71,6 +72,7 @@
 #include "page.h"
 #include "paragraph_panel.h"
 #include "plugin/pdf_export.h"
+#include "plugin/svg_place.h"
 #include "pdf_dialog.h"
 #include "print.h"
 #include "print_dialog.h"
@@ -1163,6 +1165,45 @@ public:
         });
     }
 
+    /* File > Import: close this publication (asking to save it), then make
+     * a new one from a graphic file, a page for each of its pages. Any
+     * format the vector loader reads is offered. */
+    void import_dialog() {
+        close_document_then([this] {
+            const std::string folder = m_doc_path.empty()
+                ? std::string() : nanogui::fs::parent_path(m_doc_path);
+            auto paths = file_dialog(vector_file_types(), false, false, folder);
+            if (!paths.empty() && !paths[0].empty())
+                import_path(paths[0]);
+        });
+    }
+
+    bool import_path(const std::string &path) {
+        const std::string name = nanogui::fs::filename(path);
+        std::vector<uint8_t> bytes;
+        std::string read_error;
+        if (!read_file(path, &bytes, &read_error) || bytes.empty()) {
+            show_alert(this, "\u201C" + name + "\u201D couldn't be read.", read_error);
+            return false;
+        }
+        ImportedPublication r = import_publication(std::move(bytes), name, file_uri(path), &m_fonts);
+        if (!r.ok) {
+            show_alert(this, "\u201C" + name + "\u201D couldn't be imported.", r.error);
+            return false;
+        }
+        m_view->invalidate_compositions();   // before the fonts go
+        m_fonts.clear_document_fonts();
+        m_images = std::move(*r.images);
+        m_vectors = std::move(r.vectors);
+        seed_swatches(r.doc);
+        m_view->set_document(std::move(r.doc));
+        m_doc_path.clear();                  // a new publication: Save asks where
+        m_embed_assets = false;
+        after_document_switch();
+        set_note(r.note);
+        return true;
+    }
+
     void place_dialog() {
         const std::string folder = m_doc_path.empty()
             ? std::string() : nanogui::fs::parent_path(m_doc_path);
@@ -1447,6 +1488,7 @@ public:
         Dropdown *file = m_menubar->add_menu("File");
         add_cmd(file, "New Document", {{SYSTEM_COMMAND_MOD, GLFW_KEY_N}}, [this] { new_document(); });
         add_cmd(file, "Open...", {{SYSTEM_COMMAND_MOD, GLFW_KEY_O}}, [this] { open_document_dialog(); });
+        add_cmd(file, "Import...", {}, [this] { import_dialog(); });
         add_cmd(file, "Place...", {{SYSTEM_COMMAND_MOD, GLFW_KEY_D}}, [this] { place_dialog(); });
         add_cmd(file, "Place Empty Picture Frame", {}, [this] { m_view->place_empty_frame(); });
         new Separator(file->popup());

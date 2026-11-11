@@ -134,14 +134,30 @@ void VectorStore::note_id(uint32_t id) {
 }
 
 bool VectorStore::add(uint32_t id, std::vector<uint8_t> bytes, VectorScene scene) {
-    if (id == 0)
+    return add(id, std::make_shared<const std::vector<uint8_t>>(std::move(bytes)), std::move(scene));
+}
+
+bool VectorStore::add(uint32_t id, Bytes bytes, VectorScene scene) {
+    if (id == 0 || !bytes)
         return false;
     Entry e;
-    e.source = std::make_shared<const std::vector<uint8_t>>(std::move(bytes));
+    e.source = std::move(bytes);
     e.scene = std::move(scene);
     note_id(id);
     m_entries[id] = std::move(e);
     return true;
+}
+
+bool VectorStore::add(uint32_t id, Bytes bytes, std::string *error, int page) {
+    if (id == 0 || !bytes) {
+        if (error)
+            *error = "graphic id is missing";
+        return false;
+    }
+    VectorScene scene;
+    if (!vector_loader().decode(bytes->data(), bytes->size(), &scene, error, page))
+        return false;
+    return add(id, std::move(bytes), std::move(scene));
 }
 
 bool VectorStore::add(uint32_t id, std::vector<uint8_t> bytes, std::string *error, int page) {

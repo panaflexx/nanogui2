@@ -213,6 +213,10 @@ public:
     bool add(uint32_t id, std::vector<uint8_t> bytes, std::string *error, int page = 0);
     /* The same with a scene the caller already decoded. */
     bool add(uint32_t id, std::vector<uint8_t> bytes, VectorScene scene);
+    /* Bytes another entry may hold too: each page of one PDF placed (or
+     * imported) on its own keeps a single copy of the file. */
+    bool add(uint32_t id, Bytes bytes, VectorScene scene);
+    bool add(uint32_t id, Bytes bytes, std::string *error, int page = 0);
     void set_path(uint32_t id, const std::string &path);
 
     /* Shared source bytes and a copy of each scene. PDF export takes this
