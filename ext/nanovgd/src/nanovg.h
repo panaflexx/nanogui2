@@ -232,6 +232,17 @@ extern NVG_EXPORT int nvgDrawListSize(const NVGdrawList* list);
 // Returns non-zero if the list is empty or was captured at a different devicePixelRatio.
 extern NVG_EXPORT int nvgDrawListNeedsRebuild(NVGcontext* ctx, const NVGdrawList* list);
 
+// As nvgDrawListNeedsRebuild, but for a list meant to be captured at `ratio`
+// rather than the frame's devicePixelRatio: a list recorded at a zoomed
+// resolution (frame ratio x the scale it is replayed under).
+extern NVG_EXPORT int nvgDrawListNeedsRebuildAt(NVGcontext* ctx, const NVGdrawList* list, float ratio);
+
+// The devicePixelRatio of the frame being drawn or recorded.
+extern NVG_EXPORT float nvgDevicePixelRatio(NVGcontext* ctx);
+
+// The average scale of the current transform (1 when untransformed).
+extern NVG_EXPORT float nvgCurrentScale(NVGcontext* ctx);
+
 // Deep-copies src into dst (dst is cleared first).
 extern NVG_EXPORT void nvgCloneDrawList(NVGdrawList* dst, const NVGdrawList* src);
 

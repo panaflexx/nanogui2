@@ -263,6 +263,31 @@ extern NANOGUI_EXPORT void async(const std::function<void()> &func);
  */
 extern NANOGUI_EXPORT void process_async();
 
+/**
+ * \brief True while a modal external program runs (\ref run_modal_command):
+ * screens ignore mouse, keyboard, scroll and drop input, but still resize
+ * and redraw.
+ */
+extern NANOGUI_EXPORT bool input_blocked();
+
+#if !defined(_WIN32) && !defined(EMSCRIPTEN)
+/**
+ * \brief Run a shell command and return what it writes to stdout, such as a
+ * zenity file dialog.
+ *
+ * Blocking on the pipe would leave the windows unpainted and unanswered,
+ * and Wayland compositors then flag the app as not responding. Instead,
+ * events are pumped and every screen is redrawn while the command runs;
+ * input is ignored until it exits (see \ref input_blocked). May be called
+ * from inside an event handler.
+ *
+ * \param status
+ *     If given, receives the exit status as returned by pclose().
+ */
+extern NANOGUI_EXPORT std::string run_modal_command(const std::string &cmd,
+                                                    int *status = nullptr);
+#endif
+
 extern NANOGUI_EXPORT std::vector<Widget *> g_widgets_to_cleanup;
 extern NANOGUI_EXPORT std::mutex g_widgets_to_cleanup_mutex;
 

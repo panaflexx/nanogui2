@@ -374,7 +374,7 @@ Screen::Screen(const Vector2i& size, const std::string& caption, bool resizable,
             if (it == __nanogui_screens.end())
                 return;
             Screen* s = it->second;
-            if (!s->m_process_events)
+            if (!s->m_process_events || input_blocked())
                 return;
             s->cursor_pos_callback_event(x, y);
         }
@@ -386,7 +386,7 @@ Screen::Screen(const Vector2i& size, const std::string& caption, bool resizable,
             if (it == __nanogui_screens.end())
                 return;
             Screen* s = it->second;
-            if (!s->m_process_events)
+            if (!s->m_process_events || input_blocked())
                 return;
             s->mouse_button_callback_event(button, action, modifiers);
         }
@@ -398,7 +398,7 @@ Screen::Screen(const Vector2i& size, const std::string& caption, bool resizable,
             if (it == __nanogui_screens.end())
                 return;
             Screen* s = it->second;
-            if (!s->m_process_events)
+            if (!s->m_process_events || input_blocked())
                 return;
             s->key_callback_event(key, scancode, action, mods);
         }
@@ -410,7 +410,7 @@ Screen::Screen(const Vector2i& size, const std::string& caption, bool resizable,
             if (it == __nanogui_screens.end())
                 return;
             Screen* s = it->second;
-            if (!s->m_process_events)
+            if (!s->m_process_events || input_blocked())
                 return;
             s->char_callback_event(codepoint);
         }
@@ -422,7 +422,7 @@ Screen::Screen(const Vector2i& size, const std::string& caption, bool resizable,
             if (it == __nanogui_screens.end())
                 return;
             Screen* s = it->second;
-            if (!s->m_process_events)
+            if (!s->m_process_events || input_blocked())
                 return;
             s->drop_callback_event(count, filenames);
         }
@@ -434,7 +434,7 @@ Screen::Screen(const Vector2i& size, const std::string& caption, bool resizable,
             if (it == __nanogui_screens.end())
                 return;
             Screen* s = it->second;
-            if (!s->m_process_events)
+            if (!s->m_process_events || input_blocked())
                 return;
             s->scroll_callback_event(x, y);
         }
@@ -1412,6 +1412,41 @@ void Screen::redraw() {
         glfwPostEmptyEvent();
 #endif
     }
+}
+
+void Screen::reset_input_state() {
+    if (!m_glfw_window)
+        return;
+    if (m_dnd)
+        end_drag(false);
+    m_suppress_drag_release = false;
+
+    m_mouse_state = 0;
+    for (int b = 0; b <= GLFW_MOUSE_BUTTON_LAST && b < 31; ++b)
+        if (glfwGetMouseButton(m_glfw_window, b) == GLFW_PRESS)
+            m_mouse_state |= 1 << b;
+    /* The release was swallowed; don't deliver it now, since the widget
+       would take it for a click where the press was. */
+    if (!(m_mouse_state & 1)) {
+        m_drag_active = false;
+        m_drag_widget = nullptr;
+    }
+
+    auto down = [&](int a, int b) {
+        return glfwGetKey(m_glfw_window, a) == GLFW_PRESS ||
+               glfwGetKey(m_glfw_window, b) == GLFW_PRESS;
+    };
+    m_modifiers = 0;
+    if (down(GLFW_KEY_LEFT_SHIFT, GLFW_KEY_RIGHT_SHIFT))     m_modifiers |= GLFW_MOD_SHIFT;
+    if (down(GLFW_KEY_LEFT_CONTROL, GLFW_KEY_RIGHT_CONTROL)) m_modifiers |= GLFW_MOD_CONTROL;
+    if (down(GLFW_KEY_LEFT_ALT, GLFW_KEY_RIGHT_ALT))         m_modifiers |= GLFW_MOD_ALT;
+    if (down(GLFW_KEY_LEFT_SUPER, GLFW_KEY_RIGHT_SUPER))     m_modifiers |= GLFW_MOD_SUPER;
+
+    /* Hover and the cursor shape follow wherever the pointer went */
+    double x, y;
+    glfwGetCursorPos(m_glfw_window, &x, &y);
+    cursor_pos_callback_event(x, y);
+    redraw();
 }
 
 /* GLFW cursor coordinates -> logical screen pixels */

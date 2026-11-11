@@ -46,6 +46,28 @@ bool CheckBox::mouse_button_event(const Vector2i &p, int button, bool down,
     return false;
 }
 
+bool CheckBox::keyboard_event(int key, int scancode, int action, int modifiers) {
+    Widget::keyboard_event(key, scancode, action, modifiers);   // repaint
+    if (!m_enabled || !focused())
+        return false;
+    if (key != GLFW_KEY_SPACE && key != GLFW_KEY_ENTER && key != GLFW_KEY_KP_ENTER)
+        return false;
+
+    /* Pressed while the key is down; toggled when it comes up, like a
+     * click. A release without a press here (the key that moved focus to
+     * this box, say) does nothing. */
+    if (action == GLFW_PRESS) {
+        m_pushed = true;
+    } else if (action == GLFW_RELEASE && m_pushed) {
+        m_pushed = false;
+        ref<CheckBox> self = this;     // the callback may rebuild the form
+        m_checked = !m_checked;
+        if (m_callback)
+            m_callback(m_checked);
+    }
+    return true;                       // repeats are swallowed too
+}
+
 Vector2i CheckBox::preferred_size(NVGcontext *ctx) const {
     if (m_min_size != Vector2i(0))
         return m_min_size;

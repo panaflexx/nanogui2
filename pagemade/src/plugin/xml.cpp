@@ -73,10 +73,16 @@ bool decode_entity(Reader &r, std::string &out) {
                 v = c - 'A' + 10;
             else
                 break;
-            cp = cp * (unsigned) base + (unsigned) v;
+            /* Stop growing once out of range: a long run of digits would
+               otherwise wrap around onto a valid code point. Leading zeros
+               are legal, so the digits themselves aren't limited. */
+            if (cp <= 0x10FFFF)
+                cp = cp * (unsigned) base + (unsigned) v;
             ++s;
         }
-        if (s == d || s >= r.end || *s != ';' || cp == 0 || cp > 0x10FFFF)
+        /* Surrogates aren't characters; encoding one gives invalid UTF-8 */
+        if (s == d || s >= r.end || *s != ';' || cp == 0 ||
+            (cp >= 0xD800 && cp <= 0xDFFF) || cp > 0x10FFFF)
             return r.fail("bad numeric entity");
         ++s;
         /* UTF-8 */
@@ -155,6 +161,10 @@ bool parse_name(Reader &r, std::string &prefix, std::string &local) {
     } else {
         prefix = raw.substr(0, colon);
         local = raw.substr(colon + 1);
+        /* One colon only, and the local part starts like a name */
+        if (local.find(':') != std::string::npos ||
+            (!local.empty() && !ok((unsigned char) local[0], true)))
+            return r.fail("bad name");
     }
     return !local.empty() || r.fail("expected a name");
 }

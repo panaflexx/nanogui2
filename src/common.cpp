@@ -35,6 +35,12 @@
 #  include <signal.h>
 #endif
 
+#if !defined(_WIN32)
+#  include <poll.h>
+#  include <unistd.h>
+#  include <cerrno>
+#endif
+
 #if defined(EMSCRIPTEN)
 #  include <emscripten/emscripten.h>
 #endif
@@ -359,8 +365,64 @@ load_image_directory(NVGcontext *ctx, const std::string &path) {
     return result;
 }
 
+static int g_input_blocked = 0;
+
+bool input_blocked() { return g_input_blocked > 0; }
+
+#if !defined(_WIN32) && !defined(EMSCRIPTEN)
+std::string run_modal_command(const std::string &cmd, int *status) {
+    FILE *pipe = popen(cmd.c_str(), "r");
+    if (!pipe)
+        throw std::runtime_error("popen() failed -- could not run \"" + cmd + "\"");
+    const int fd = fileno(pipe);
+
+    std::string out;
+    {
+        /* Input stays off until the command is gone, even if a draw throws */
+        struct Block {
+            Block() { ++g_input_blocked; }
+            ~Block() {
+                if (--g_input_blocked == 0)
+                    for (auto kv : __nanogui_screens)
+                        kv.second->reset_input_state();
+            }
+        } block;
+
+        char buf[4096];
+        for (;;) {
+            /* Wait a frame for output; between, answer the window system
+               (Wayland pings, resizes, exposes) and repaint what changed. */
+            pollfd pfd{fd, POLLIN, 0};
+            const int r = ::poll(&pfd, 1, 16);
+            if (r < 0 && errno != EINTR)
+                break;
+            if (r > 0) {
+                const ssize_t n = ::read(fd, buf, sizeof buf);
+                if (n > 0) {
+                    out.append(buf, (size_t) n);
+                    continue;
+                }
+                if (n == 0)
+                    break;                     // the command closed its stdout
+                if (errno != EINTR && errno != EAGAIN)
+                    break;
+            }
+            glfwPollEvents();
+            for (auto kv : __nanogui_screens) {
+                Screen *screen = kv.second;
+                if (screen->visible() && !glfwWindowShouldClose(screen->glfw_window()))
+                    screen->draw_all();
+            }
+        }
+    }
+    const int rc = pclose(pipe);
+    if (status)
+        *status = rc;
+    return out;
+}
+#endif
+
 std::vector<std::string> file_dialog(const std::vector<std::pair<std::string, std::string>> &filetypes, bool save, bool multiple, std::string initial_folder) {
-    static const int FILE_DIALOG_MAX_BUFFER = 16384;
     if (save && multiple) {
         throw std::invalid_argument("save and multiple must not both be true.");
     }
@@ -374,6 +436,7 @@ std::vector<std::string> file_dialog(const std::vector<std::pair<std::string, st
 #elif defined(EMSCRIPTEN)
     throw std::runtime_error("Opening files is not supported when NanoGUI is compiled via Emscripten");
 #elif defined(_WIN32)
+    static const int FILE_DIALOG_MAX_BUFFER = 16384;
     OPENFILENAME ofn;
     ZeroMemory(&ofn, sizeof(OPENFILENAME));
     ofn.lStructSize = sizeof(OPENFILENAME);
@@ -445,9 +508,6 @@ std::vector<std::string> file_dialog(const std::vector<std::pair<std::string, st
 
     return result;
 #else
-    char buffer[FILE_DIALOG_MAX_BUFFER];
-    buffer[0] = '\0';
-
     std::string cmd = "zenity --file-selection ";
     // The safest separator for multiple selected paths is /, since / can never occur
     // in file names. Only where two paths are concatenated will there be two / following
@@ -476,13 +536,9 @@ std::vector<std::string> file_dialog(const std::vector<std::pair<std::string, st
     for (auto pair : filetypes)
         cmd += "--file-filter=\"" + shell_safe(pair.second) +
                " | *." + pair.first + "\" ";
-    FILE *output = popen(cmd.c_str(), "r");
-    if (output == nullptr)
-        throw std::runtime_error("popen() failed -- could not launch zenity!");
-    while (fgets(buffer, FILE_DIALOG_MAX_BUFFER, output) != NULL)
-        ;
-    pclose(output);
-    std::string paths(buffer);
+    /* The dialog is its own process: keep drawing and answering the
+       compositor while it is up, so the app isn't flagged as hung. */
+    std::string paths = run_modal_command(cmd);
     paths.erase(std::remove(paths.begin(), paths.end(), '\n'), paths.end());
 
     std::vector<std::string> result;

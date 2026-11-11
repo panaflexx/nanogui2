@@ -653,7 +653,11 @@ protected:
     ::NVGdrawList* m_draw_list = nullptr;
     int m_cache_redraw_delay_ms = 0;
     double m_cache_last_request = 0.0;
-    float m_cache_pixel_ratio = 0.0f;
+    float m_cache_pixel_ratio = 0.0f;   // the ratio the list was recorded at
+    /* The ratio to record at: the frame's pixel ratio times the scale the
+       list is replayed under (a ZoomScrollPanel's zoom), so zoomed content
+       is tessellated and its glyphs rasterized at the size shown. */
+    float m_cache_want_ratio = 0.0f;
     Vector2i m_cache_size{0, 0};
 
 	// Animation support

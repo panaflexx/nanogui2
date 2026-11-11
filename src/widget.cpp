@@ -770,6 +770,8 @@ void Widget::update_draw_cache(NVGcontext* ctx) {
     float pxRatio = 1.0f;
     if (Screen* scr = screen())
         pxRatio = scr->pixel_ratio();
+    if (m_cache_want_ratio > 0.0f)
+        pxRatio = m_cache_want_ratio;
 
     if (!m_draw_list) {
         m_draw_list = nvgCreateDrawList(ctx);
@@ -893,16 +895,33 @@ void Widget::draw(NVGcontext* ctx) {
     }
 
     // Retained display-list path: submit a previously recorded local-space list.
-    if (m_cached) {
-        float pxRatio = 1.0f;
-        if (Screen* scr = screen())
-            pxRatio = scr->pixel_ratio();
-        if (m_cache_size != m_size || m_cache_pixel_ratio != pxRatio ||
-            nvgDrawListNeedsRebuild(ctx, m_draw_list)) {
+    /* Past this replay scale the list would need huge glyphs (nanovg caps
+       live text at 4x too), so the content is drawn directly instead. */
+    static const float kMaxCacheScale = 4.0f;
+    const float replay_scale = m_cached ? nvgCurrentScale(ctx) : 1.0f;
+    if (m_cached && replay_scale <= kMaxCacheScale) {
+        /* Record at the resolution the list is shown at: under a zoom, a
+           list tessellated at 1x and scaled up is blurry. An animation's
+           passing scale keeps the list it has. */
+        float want = nvgDevicePixelRatio(ctx) * replay_scale;
+        if (anim_active && m_cache_pixel_ratio > 0.0f)
+            want = m_cache_pixel_ratio;
+        auto differs = [](float a, float b) {
+            return std::fabs(a - b) > 1e-3f * std::max(a, b);
+        };
+        if (m_cache_size != m_size ||
+            nvgDrawListNeedsRebuildAt(ctx, m_draw_list, m_cache_pixel_ratio)) {
+            m_cache_want_ratio = want;
             m_cache_dirty = true;
             cache_register(this);
             if (Screen* scr = screen())
                 scr->redraw();
+        } else if (differs(m_cache_pixel_ratio, want) &&
+                   (!m_cache_dirty || differs(m_cache_want_ratio, want))) {
+            /* A new zoom: draw directly (sharp) while it keeps changing, and
+               record once it has held still for a moment. */
+            m_cache_want_ratio = want;
+            cache_redraw(120);
         }
         if (!m_cache_dirty && m_draw_list && nvgDrawListSize(m_draw_list) > 0) {
             nvgSubmitDrawList(ctx, m_draw_list);

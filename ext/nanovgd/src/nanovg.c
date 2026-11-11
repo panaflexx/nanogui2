@@ -598,14 +598,33 @@ int nvgDrawListSize(const NVGdrawList* list)
 	return list->ncalls;
 }
 
-int nvgDrawListNeedsRebuild(NVGcontext* ctx, const NVGdrawList* list)
+int nvgDrawListNeedsRebuildAt(NVGcontext* ctx, const NVGdrawList* list, float ratio)
 {
 	if (list == NULL) return 1;
 	if (list->ncalls == 0) return 1;
 	if (ctx == NULL) return 1;
-	if (list->devicePxRatio != ctx->devicePxRatio) return 1;
+	if (list->devicePxRatio != ratio) return 1;
 	if (list->fontGeneration != ctx->fontGeneration) return 1;
 	return 0;
+}
+
+int nvgDrawListNeedsRebuild(NVGcontext* ctx, const NVGdrawList* list)
+{
+	if (ctx == NULL) return 1;
+	return nvgDrawListNeedsRebuildAt(ctx, list, ctx->devicePxRatio);
+}
+
+float nvgDevicePixelRatio(NVGcontext* ctx)
+{
+	return ctx ? ctx->devicePxRatio : 1.0f;
+}
+
+static float nvg__getAverageScale(float *t);
+
+float nvgCurrentScale(NVGcontext* ctx)
+{
+	if (ctx == NULL) return 1.0f;
+	return nvg__getAverageScale(nvg__getState(ctx)->xform);
 }
 
 // Path 1 aliases

@@ -229,14 +229,14 @@ std::string ask_folder(const std::string &initial) {
         cmd += " --filename=";
         cmd += shell_quote(filename);
     }
-    FILE *pipe = popen(cmd.c_str(), "r");
-    if (!pipe)
-        return {};
+    /* Draws and answers the compositor while the dialog is up */
+    int rc = -1;
     std::string out;
-    char buf[4096];
-    while (std::fgets(buf, sizeof buf, pipe))
-        out += buf;
-    const int rc = pclose(pipe);
+    try {
+        out = nanogui::run_modal_command(cmd, &rc);
+    } catch (const std::exception &) {
+        return {};
+    }
     while (!out.empty() && (out.back() == '\n' || out.back() == '\r'))
         out.pop_back();
     if (rc != 0)

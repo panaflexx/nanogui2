@@ -579,11 +579,22 @@ public:
     bool mouse_motion_event(const nanogui::Vector2i &p, const nanogui::Vector2i &rel,
                             int button, int modifiers) override;
     bool focus_event(bool focused) override;
+    bool mouse_enter_event(const nanogui::Vector2i &p, bool enter) override;
     bool keyboard_event(int key, int scancode, int action, int modifiers) override;
     bool keyboard_character_event(unsigned int codepoint) override;
 
 private:
-    enum class Handle { None, Move, TopLeft, TopRight, BottomLeft, BottomRight, Windowshade, TopTab };
+    /* Corners, the middles of the edges (Top..Right: one side moves), and a
+     * text block's tabs */
+    enum class Handle { None, Move, TopLeft, TopRight, BottomLeft, BottomRight, Windowshade, TopTab,
+                        Top, Bottom, Left, Right };
+    static bool is_corner(Handle h) {
+        return h == Handle::TopLeft || h == Handle::TopRight || h == Handle::BottomLeft ||
+               h == Handle::BottomRight;
+    }
+    static bool is_side(Handle h) {
+        return h == Handle::Top || h == Handle::Bottom || h == Handle::Left || h == Handle::Right;
+    }
     struct Hit {
         pagemade::ItemId item = 0;
         Handle handle = Handle::None;
@@ -694,6 +705,13 @@ private:
     std::vector<pagemade::Bounds> snap_objects() const;
     std::vector<float> snap_lines(bool vertical) const;
     void note_alignments(const pagemade::Bounds &moving);
+    /* The same for a single point: where a new item would start */
+    void note_point_alignments(const pagemade::Point &p);
+    /* Hovering with a drawing tool, before the first click: the snapped
+     * start point and its smart guides, as InDesign shows them */
+    void hover_creation_point(const pagemade::Point &pt, size_t page);
+    bool m_hover_snap = false;           // m_smart shows the hover point's guides
+    pagemade::Point m_hover_pt;
     void draw_smart_guides(NVGcontext *ctx, float px) const;
     struct SmartGuide {
         bool vertical = false;

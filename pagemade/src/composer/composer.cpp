@@ -72,7 +72,7 @@ bool is_lower_letter(uint32_t cp) {
 void to_upper(uint32_t cp, std::vector<uint32_t> &out) {
     if (cp >= 'a' && cp <= 'z') { out.push_back(cp - 32); return; }
     if (cp == 0xDF) { out.push_back('S'); out.push_back('S'); return; }
-    if (cp == 0xFF) { out.push_back(0x178); return; }
+    if (cp == 0xFF) { out.push_back(0x178); return; }   // ÿ -> Ÿ, which is outside Latin-1
     if ((cp >= 0xE0 && cp <= 0xF6) || (cp >= 0xF8 && cp <= 0xFE)) {
         out.push_back(cp - 0x20);
         return;
@@ -736,6 +736,40 @@ public:
         m_hyphen_run = c.hyphenated ? m_hyphen_run + 1 : 0;
     }
 
+    /* Would the text from segment `seg` on make one last line in `avail`?
+     * A lookahead: the breaker's place is left as it was. */
+    bool rest_fits(size_t seg, float x0, float avail, float frame_x) {
+        const size_t next = m_next;
+        std::optional<Piece> carry = std::move(m_carry);
+        m_next = seg;
+        m_carry.reset();
+        const bool ok = last_after(next_line(x0, avail, frame_x));
+        m_next = next;
+        m_carry = std::move(carry);
+        return ok;
+    }
+
+    /* A last line too long for the last-line indent: keep the most words
+     * here whose rest still fits as one indented last line. False when even
+     * the last word alone won't fit there; `c` is then left as it was. */
+    bool break_for_last(LineCandidate &c, float x0, float avail, float frame_x) {
+        for (size_t k = c.pieces.size(); k-- > 1;) {
+            const Piece &p = c.pieces[k];
+            if (p.seg >= m_segs.size() || p.start != m_segs[p.seg].start)
+                continue;                      // not at a word's start
+            if (!rest_fits(p.seg, x0, avail, frame_x))
+                continue;
+            LineCandidate head;
+            head.next_seg = p.seg;
+            head.pieces.assign(std::make_move_iterator(c.pieces.begin()),
+                               std::make_move_iterator(c.pieces.begin() + k));
+            finish(head);
+            c = std::move(head);
+            return true;
+        }
+        return false;
+    }
+
     bool last_after(const LineCandidate &c) const {
         bool need_empty = !c.pieces.empty() && c.pieces.back().forced && !c.carry &&
                           c.next_seg >= m_segs.size();
@@ -1389,22 +1423,28 @@ Composition compose(const Story &story, const std::vector<Frame> &frames,
                     lead_in = text_x - (f.x + st.left_indent);
                 }
                 line.left = f.x + st.left_indent + lead_in;
-                line.width = f.w - st.left_indent - st.right_indent - lead_in;
+                /* Indents wider than the frame leave no room, not less */
+                line.width = std::max(0.f, f.w - st.left_indent - st.right_indent - lead_in);
 
                 LineCandidate c = br.next_line(line.left, line.width, f.x);
 
                 /* The last line takes the last-line indent. When the line
-                 * no longer fits there, the break comes earlier and the
-                 * words left over make a new, indented last line. */
+                 * no longer fits there, it breaks earlier at full width and
+                 * the words left over make a new, indented last line. If
+                 * not even the last word fits the indent, the indent is
+                 * given up rather than splitting the word. */
                 if (st.last_indent != 0.f && br.last_after(c) &&
                     line.width - st.last_indent > 0.f) {
-                    LineCandidate in = br.next_line(line.left + st.last_indent,
-                                                    line.width - st.last_indent, f.x);
+                    const float in_left = line.left + st.last_indent;
+                    const float in_width = line.width - st.last_indent;
+                    LineCandidate in = br.next_line(in_left, in_width, f.x);
                     if (br.last_after(in)) {
-                        line.left += st.last_indent;
-                        line.width -= st.last_indent;
+                        line.left = in_left;
+                        line.width = in_width;
+                        c = std::move(in);
+                    } else {
+                        br.break_for_last(c, in_left, in_width, f.x);
                     }
-                    c = std::move(in);
                 }
 
                 /* Slug height: the largest leading on the line, hanging

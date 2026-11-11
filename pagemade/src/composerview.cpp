@@ -126,6 +126,10 @@ Point handle_point(const Item &it, int h) {
     case 3: return {0, it.h};              // BottomLeft
     case 4: return {it.w, it.h};           // BottomRight
     case 5: return {it.w * 0.5f, it.h};    // Windowshade
+    case 6: return {it.w * 0.5f, 0};       // Top
+    case 7: return {it.w * 0.5f, it.h};    // Bottom
+    case 8: return {0, it.h * 0.5f};       // Left
+    case 9: return {it.w, it.h * 0.5f};    // Right
     default: return {0, 0};                // TopLeft
     }
 }
@@ -488,6 +492,10 @@ void ComposerView::set_tool(Tool t) {
     if (m_creating)
         finish_creation();
     m_tool = t;
+    if (m_hover_snap) {                  // the drawing tool's preview goes with it
+        m_hover_snap = false;
+        m_smart.clear();
+    }
     m_burst_open = false;
     m_selecting = false;
     m_rotating = false;
@@ -828,6 +836,58 @@ void ComposerView::note_alignments(const Bounds &m) {
     }
 }
 
+void ComposerView::note_point_alignments(const Point &p) {
+    m_smart.clear();
+    if (!m_snap)
+        return;
+    const float eps = 0.5f / zoom();
+    auto add = [&](bool vertical, float pos, float a0, float a1) {
+        for (SmartGuide &g : m_smart)
+            if (g.vertical == vertical && std::fabs(g.pos - pos) < eps) {
+                g.a0 = std::min(g.a0, a0);
+                g.a1 = std::max(g.a1, a1);
+                return;
+            }
+        m_smart.push_back({vertical, pos, a0, a1});
+    };
+    for (const Bounds &t : snap_objects()) {
+        for (float x : {t.x0, (t.x0 + t.x1) * 0.5f, t.x1})
+            if (std::fabs(p.x - x) < eps)
+                add(true, x, std::min(p.y, t.y0), std::max(p.y, t.y1));
+        for (float y : {t.y0, (t.y0 + t.y1) * 0.5f, t.y1})
+            if (std::fabs(p.y - y) < eps)
+                add(false, y, std::min(p.x, t.x0), std::max(p.x, t.x1));
+    }
+}
+
+void ComposerView::hover_creation_point(const Point &pt, size_t page) {
+    const bool had = m_hover_snap;
+    const Point was = m_hover_pt;
+    if (had)
+        m_smart.clear();
+    m_hover_snap = false;
+    const bool draws = m_tool == Tool::Line || m_tool == Tool::Rect || m_tool == Tool::Ellipse ||
+                       m_tool == Tool::Polygon || (m_tool == Tool::Text && !text_frame_at(pt, page));
+    if (draws && page == m_page && m_snap && !m_pointer_down && !m_placing) {
+        m_hover_pt = snap_point(pt);
+        note_point_alignments(m_hover_pt);
+        m_hover_snap = !m_smart.empty();
+    }
+    if ((had || m_hover_snap) && screen() &&
+        (had != m_hover_snap || was.x != m_hover_pt.x || was.y != m_hover_pt.y))
+        screen()->redraw();
+}
+
+bool ComposerView::mouse_enter_event(const Vector2i &p, bool enter) {
+    if (!enter && m_hover_snap) {        // the preview goes with the pointer
+        m_hover_snap = false;
+        m_smart.clear();
+        if (screen())
+            screen()->redraw();
+    }
+    return Widget::mouse_enter_event(p, enter);
+}
+
 void ComposerView::draw_smart_guides(NVGcontext *ctx, float px) const {
     if (m_smart.empty())
         return;
@@ -1143,8 +1203,11 @@ ComposerView::Hit ComposerView::hit_test(const Point &pt, size_t page) const {
             auto near = [&](float x, float y) {
                 return std::fabs(pt.x - x) <= hs && std::fabs(pt.y - y) <= hs;
             };
+            const float mx = (b.x0 + b.x1) * 0.5f, my = (b.y0 + b.y1) * 0.5f;
             Handle h = near(b.x0, b.y0) ? Handle::TopLeft : near(b.x1, b.y0) ? Handle::TopRight
                      : near(b.x0, b.y1) ? Handle::BottomLeft : near(b.x1, b.y1) ? Handle::BottomRight
+                     : near(mx, b.y0) ? Handle::Top : near(mx, b.y1) ? Handle::Bottom
+                     : near(b.x0, my) ? Handle::Left : near(b.x1, my) ? Handle::Right
                      : Handle::None;
             if (h != Handle::None)
                 for (const Item &it : m_doc.pages[page].items)
@@ -1177,6 +1240,14 @@ ComposerView::Hit ComposerView::hit_test(const Point &pt, size_t page) const {
             if (near(it->w, 0))        { hit.handle = Handle::TopRight;    return hit; }
             if (near(0, it->h))        { hit.handle = Handle::BottomLeft;  return hit; }
             if (near(it->w, it->h))    { hit.handle = Handle::BottomRight; return hit; }
+            /* The middles of the edges move one side. A text block's top and
+             * bottom middles are its tabs (checked below) */
+            if (near(0, it->h * 0.5f))      { hit.handle = Handle::Left;   return hit; }
+            if (near(it->w, it->h * 0.5f))  { hit.handle = Handle::Right;  return hit; }
+            if (!it->is_text()) {
+                if (near(it->w * 0.5f, 0))      { hit.handle = Handle::Top;    return hit; }
+                if (near(it->w * 0.5f, it->h))  { hit.handle = Handle::Bottom; return hit; }
+            }
         }
         if (it->is_text()) {
             const float tw = kTabWPx * 0.5f * px / s, th = kTabHPx * px / s;
@@ -1384,6 +1455,7 @@ bool ComposerView::mouse_button_event(const Vector2i &p, int button, bool down, 
     m_gesture_page = m_point_page;
     m_pointer_down = true;
     m_smart.clear();
+    m_hover_snap = false;
     if (m_gesture_page != m_page)
         turn_page_keeping_selection(m_gesture_page);   // a selection can span pages
     m_burst_open = false;                // any click ends a typing or nudging run
@@ -1639,7 +1711,9 @@ bool ComposerView::mouse_drag_event(const Vector2i &p, const Vector2i &, int, in
         return true;
     const Item &o = *orig;
     const int hidx = m_drag == Handle::TopLeft ? 1 : m_drag == Handle::TopRight ? 2 :
-                     m_drag == Handle::BottomLeft ? 3 : m_drag == Handle::BottomRight ? 4 : 5;
+                     m_drag == Handle::BottomLeft ? 3 : m_drag == Handle::BottomRight ? 4 :
+                     m_drag == Handle::Top ? 6 : m_drag == Handle::Bottom ? 7 :
+                     m_drag == Handle::Left ? 8 : m_drag == Handle::Right ? 9 : 5;
     const Point h0 = o.xf.apply(handle_point(o, hidx));
     const Point h1 = snap_point({h0.x + d.x, h0.y + d.y});
     const Point dl = o.xf.inverse().apply_vector({h1.x - h0.x, h1.y - h0.y});
@@ -1653,12 +1727,16 @@ bool ComposerView::mouse_drag_event(const Vector2i &p, const Vector2i &, int, in
         case Handle::TopRight:    x1 = std::max(x1 + dl.x, x0 + kMinBlock); y0 = std::min(y0 + dl.y, y1 - kMinBlock); break;
         case Handle::BottomLeft:  x0 = std::min(x0 + dl.x, x1 - kMinBlock); y1 = std::max(y1 + dl.y, y0 + kMinBlock); break;
         case Handle::BottomRight: x1 = std::max(x1 + dl.x, x0 + kMinBlock); y1 = std::max(y1 + dl.y, y0 + kMinBlock); break;
-        case Handle::Windowshade: y1 = std::max(y1 + dl.y, y0 + kMinBlock); break;
+        case Handle::Windowshade:
+        case Handle::Bottom:      y1 = std::max(y1 + dl.y, y0 + kMinBlock); break;
+        case Handle::Top:         y0 = std::min(y0 + dl.y, y1 - kMinBlock); break;
+        case Handle::Left:        x0 = std::min(x0 + dl.x, x1 - kMinBlock); break;
+        case Handle::Right:       x1 = std::max(x1 + dl.x, x0 + kMinBlock); break;
         default: break;
         }
         /* A picture's corners keep its proportions, by whichever side moved
          * further, about the opposite corner; Ctrl resizes freely. */
-        const bool corner = m_drag != Handle::Windowshade;
+        const bool corner = is_corner(m_drag);
         if ((o.image() || o.vector()) && m_tool == Tool::Pointer && corner && o.w > 0 && o.h > 0 &&
             !key_held(modifiers, GLFW_MOD_CONTROL, GLFW_KEY_LEFT_CONTROL, GLFW_KEY_RIGHT_CONTROL)) {
             const float s = std::max({(x1 - x0) / o.w, (y1 - y0) / o.h,
@@ -1673,16 +1751,18 @@ bool ComposerView::mouse_drag_event(const Vector2i &p, const Vector2i &, int, in
     it->w = x1 - x0;
     it->h = y1 - y0;
     it->xf = o.xf * Transform::translate(x0, y0);
+    /* Crop moves the frame and leaves the picture on the page; so does an
+     * edge's middle handle (one side moving would squish it, as in InDesign
+     * the frame crops). The pointer's corners scale the picture with it. */
+    const bool crop = m_tool == Tool::Crop || is_side(m_drag);
     if (const PlacedImage *im = o.image()) {
-        /* Crop moves the frame and leaves the picture on the page.
-         * The pointer scales the picture with the frame. */
-        if (m_tool == Tool::Crop)
+        if (crop)
             it->content = crop_placement(*im, x0, y0);
         else
             it->content = scale_placement(*im, o.w, o.h, it->w, it->h);
     }
     if (const PlacedVector *pv = o.vector()) {
-        if (m_tool == Tool::Crop)
+        if (crop)
             it->content = crop_placement(*pv, x0, y0);
         else
             it->content = scale_placement(*pv, o.w, o.h, it->w, it->h);
@@ -1741,16 +1821,22 @@ void ComposerView::resize_group(Point d, int modifiers) {
         }
     if (b.empty() || b.x1 - b.x0 <= 0.f || b.y1 - b.y0 <= 0.f)
         return;
-    const bool left = m_drag == Handle::TopLeft || m_drag == Handle::BottomLeft;
-    const bool top = m_drag == Handle::TopLeft || m_drag == Handle::TopRight;
+    const bool left = m_drag == Handle::TopLeft || m_drag == Handle::BottomLeft || m_drag == Handle::Left;
+    const bool top = m_drag == Handle::TopLeft || m_drag == Handle::TopRight || m_drag == Handle::Top;
+    /* An edge's middle moves that side only: the other axis keeps its size */
+    const bool only_x = m_drag == Handle::Left || m_drag == Handle::Right;
+    const bool only_y = m_drag == Handle::Top || m_drag == Handle::Bottom;
     const Point c0{left ? b.x0 : b.x1, top ? b.y0 : b.y1};
     const Point c1 = snap_point({c0.x + d.x, c0.y + d.y});
     const float w0 = b.x1 - b.x0, h0 = b.y1 - b.y0;
-    float sx = (left ? b.x1 - std::min(c1.x, b.x1 - kMinBlock)
-                     : std::max(c1.x, b.x0 + kMinBlock) - b.x0) / w0;
-    float sy = (top ? b.y1 - std::min(c1.y, b.y1 - kMinBlock)
-                    : std::max(c1.y, b.y0 + kMinBlock) - b.y0) / h0;
-    if (!key_held(modifiers, GLFW_MOD_CONTROL, GLFW_KEY_LEFT_CONTROL, GLFW_KEY_RIGHT_CONTROL))
+    float sx = only_y ? 1.f
+                      : (left ? b.x1 - std::min(c1.x, b.x1 - kMinBlock)
+                              : std::max(c1.x, b.x0 + kMinBlock) - b.x0) / w0;
+    float sy = only_x ? 1.f
+                      : (top ? b.y1 - std::min(c1.y, b.y1 - kMinBlock)
+                             : std::max(c1.y, b.y0 + kMinBlock) - b.y0) / h0;
+    if (!only_x && !only_y &&
+        !key_held(modifiers, GLFW_MOD_CONTROL, GLFW_KEY_LEFT_CONTROL, GLFW_KEY_RIGHT_CONTROL))
         sx = sy = std::max(sx, sy);
     /* The fixed corner stays put */
     const float nx0 = left ? b.x1 - w0 * sx : b.x0;
@@ -1786,6 +1872,7 @@ bool ComposerView::mouse_motion_event(const Vector2i &p, const Vector2i &rel, in
     /* The panel already applied the zoom to the event point. */
     const Point pt = page_point_from_local(Vector2f((float) p.x(), (float) p.y()) - Vector2f(m_pos));
     const size_t page = m_point_page;
+    hover_creation_point(pt, page);
     switch (m_tool) {
     case Tool::Text:
         set_cursor(text_frame_at(pt, page) ? Cursor::IBeam : Cursor::Crosshair);
@@ -1795,7 +1882,9 @@ bool ComposerView::mouse_motion_event(const Vector2i &p, const Vector2i &rel, in
         case Handle::TopLeft: case Handle::TopRight:
         case Handle::BottomLeft: case Handle::BottomRight:
             set_cursor(Cursor::HVResize); break;
-        case Handle::Windowshade: set_cursor(Cursor::VResize); break;
+        case Handle::Windowshade:
+        case Handle::Top: case Handle::Bottom: set_cursor(Cursor::VResize); break;
+        case Handle::Left: case Handle::Right: set_cursor(Cursor::HResize); break;
         case Handle::TopTab: set_cursor(Cursor::Hand); break;
         case Handle::None: {
             /* Over a ruler guide (and no item): it can be dragged */
@@ -1818,6 +1907,8 @@ bool ComposerView::mouse_motion_event(const Vector2i &p, const Vector2i &rel, in
         case Handle::TopLeft: case Handle::TopRight:
         case Handle::BottomLeft: case Handle::BottomRight:
             set_cursor(Cursor::HVResize); break;
+        case Handle::Top: case Handle::Bottom: set_cursor(Cursor::VResize); break;
+        case Handle::Left: case Handle::Right: set_cursor(Cursor::HResize); break;
         case Handle::Move:
             if (const Item *it = m_doc.find_item(hit.item))
                 if (it->is_image() || it->is_vector()) { set_cursor(Cursor::Hand); break; }
@@ -1860,6 +1951,8 @@ void ComposerView::begin_creation(const Point &pt) {
     m_creation_version = m_version;
     const Point p = snap_point(pt);
     m_drag_start = p;
+    m_hover_snap = false;
+    note_point_alignments(p);            // shown until the drag draws the box
     if (m_tool == Tool::Text) {
         /* A new story: one empty "Body text" paragraph in the default type. */
         Paragraph para;
@@ -4543,7 +4636,12 @@ void ComposerView::draw_chrome(NVGcontext *ctx, float px, size_t page,
             if (is_line(it))
                 corners = {{0, 0}, {it.w, it.h}};
             else
-                corners = {{0, 0}, {it.w, 0}, {0, it.h}, {it.w, it.h}};
+                corners = {{0, 0}, {it.w, 0}, {0, it.h}, {it.w, it.h},
+                           {0, it.h * 0.5f}, {it.w, it.h * 0.5f}};   // and the edges' middles
+            if (!is_line(it) && !it.is_text()) {   // a text block's are its tabs
+                corners.push_back({it.w * 0.5f, 0});
+                corners.push_back({it.w * 0.5f, it.h});
+            }
             for (const Point &c : corners)
                 nvgRect(ctx, c.x - hs * 0.5f, c.y - hs * 0.5f, hs, hs);
             nvgFillColor(ctx, nvgRGB(0, 0, 0));
@@ -4563,8 +4661,10 @@ void ComposerView::draw_chrome(NVGcontext *ctx, float px, size_t page,
             nvgStroke(ctx);
             const float hs = kHandlePx * px;
             nvgBeginPath(ctx);
+            const float mx = (b.x0 + b.x1) * 0.5f, my = (b.y0 + b.y1) * 0.5f;
             for (const Point &c : {Point{b.x0, b.y0}, Point{b.x1, b.y0},
-                                   Point{b.x0, b.y1}, Point{b.x1, b.y1}})
+                                   Point{b.x0, b.y1}, Point{b.x1, b.y1},
+                                   Point{mx, b.y0}, Point{mx, b.y1}, Point{b.x0, my}, Point{b.x1, my}})
                 nvgRect(ctx, c.x - hs * 0.5f, c.y - hs * 0.5f, hs, hs);
             nvgFillColor(ctx, nvgRGB(0, 0, 0));
             nvgFill(ctx);
@@ -6050,12 +6150,24 @@ void ComposerView::draw(NVGcontext *ctx) {
     paint_items(false);
     if (hand)
         paint_items(true);               // the item in hand, above both pages
-    if (m_pointer_down && !m_smart.empty())
+    if ((m_pointer_down || m_hover_snap) && !m_smart.empty())
         for (const PageSlot &sl : slots)
             if (sl.index == m_page) {
                 nvgSave(ctx);
                 nvgTranslate(ctx, o.x() + sl.x, o.y() + sl.y);
                 draw_smart_guides(ctx, px);
+                if (m_hover_snap) {
+                    /* Where the first click will start the new item */
+                    const float r = 4.f * px;
+                    nvgBeginPath(ctx);
+                    nvgMoveTo(ctx, m_hover_pt.x - r, m_hover_pt.y - r);
+                    nvgLineTo(ctx, m_hover_pt.x + r, m_hover_pt.y + r);
+                    nvgMoveTo(ctx, m_hover_pt.x + r, m_hover_pt.y - r);
+                    nvgLineTo(ctx, m_hover_pt.x - r, m_hover_pt.y + r);
+                    nvgStrokeWidth(ctx, 1.5f * px);
+                    nvgStrokeColor(ctx, nvgRGB(170, 60, 230));
+                    nvgStroke(ctx);
+                }
                 nvgRestore(ctx);
             }
 

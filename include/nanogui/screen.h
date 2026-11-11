@@ -132,6 +132,13 @@ public:
     /// Send an event that will cause the screen to be redrawn at the next event loop iteration
     void redraw();
 
+    /**
+     * \brief Resync mouse buttons, modifiers and the pointer with the
+     * devices, after a spell of ignored input (\ref input_blocked) may have
+     * swallowed releases. A drag whose button is no longer down is dropped.
+     */
+    void reset_input_state();
+
     /// Caption drawn under the cursor while a tab has been dragged off its
     /// strip. Empty clears it. The strip's own ghost stays inside the strip.
     void set_tab_drag_ghost(const std::string &caption);

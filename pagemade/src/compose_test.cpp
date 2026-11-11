@@ -574,17 +574,52 @@ static void test_paragraph_attributes(const FontLibrary &fonts) {
     CHECK(std::fabs(li.x_start - 30.f) < 0.01f && std::fabs(li.left - 30.f) < 0.01f,
           "last line indented 30pt (%g)", li.x_start);
     {
+        /* A last line of several words, with an indent that leaves a
+         * little less room than the whole line needs */
+        const std::string text = kLong + " It ends on a few short words.";
         ParaStyle ps;
-        Composition plain = compose(one_para(kLong, cs, ps), wide, fonts);
-        ps.last_indent = 190;            // leaves 10pt: no last line fits
-        Composition in = compose(one_para(kLong, cs, ps), wide, fonts);
-        CHECK(in.lines.size() > plain.lines.size(),
-              "a long last line breaks again for the indent (%zu vs %zu lines)",
+        Composition plain = compose(one_para(text, cs, ps), wide, fonts);
+        const float natural = plain.lines.back().x_end - plain.lines.back().x_start;
+        ps.last_indent = 200.f - natural + 1.f;
+        Composition in = compose(one_para(text, cs, ps), wide, fonts);
+        CHECK(in.lines.size() == plain.lines.size() + 1,
+              "a long last line breaks once more for the indent (%zu vs %zu lines)",
               in.lines.size(), plain.lines.size());
         bool only_last = true;
         for (size_t i = 0; i + 1 < in.lines.size(); ++i)
             only_last &= close(in.lines[i].left, 0);
         CHECK(only_last, "only the last line is indented");
+        CHECK(close(in.lines.back().left, ps.last_indent),
+              "the new last line takes the indent (%g)", in.lines.back().left);
+        const size_t pen = in.lines.size() - 2;
+        CHECK(close(in.lines[pen].x_start, plain.lines.back().x_start) &&
+                  in.lines[pen].x_end < plain.lines.back().x_end,
+              "the words that stay keep their place");
+    }
+    {
+        /* Too little room for even the last word: the indent is given up
+         * rather than splitting the word across lines. */
+        ParaStyle ps;
+        Composition plain = compose(one_para(kLong, cs, ps), wide, fonts);
+        ps.last_indent = 190;            // leaves 10pt
+        Composition in = compose(one_para(kLong, cs, ps), wide, fonts);
+        CHECK(in.lines.size() == plain.lines.size(),
+              "no word is split for the last-line indent (%zu vs %zu lines)",
+              in.lines.size(), plain.lines.size());
+        CHECK(close(in.lines.back().left, 0) &&
+                  close(in.lines.back().x_end, plain.lines.back().x_end),
+              "the last line is set as without the indent (%g)", in.lines.back().left);
+    }
+    {
+        /* Indents wider than the frame leave a zero, not negative, measure */
+        ParaStyle ps;
+        ps.left_indent = 150;
+        ps.right_indent = 150;
+        Composition c = compose(one_para("Some words", cs, ps), wide, fonts);
+        bool ok = !c.lines.empty();
+        for (const ComposedLine &l : c.lines)
+            ok &= l.width >= 0.f;
+        CHECK(ok, "over-wide indents give no negative line width");
     }
 
     /* Extra spacing adds points after line spacing; it may be negative. */
@@ -6308,6 +6343,30 @@ static void test_pdf_import(const FontLibrary &fonts) {
     }
 }
 
+/* Numeric entities give valid UTF-8 or fail; names have one colon at most. */
+static void test_xml_validation() {
+    auto parse = [](const std::string &x, std::string *text = nullptr) {
+        XmlNode root;
+        std::string err;
+        const bool ok = xml_parse((const uint8_t *) x.data(), x.size(), &root, &err);
+        if (ok && text)
+            *text = xml_text(root);
+        return ok;
+    };
+    std::string t;
+    CHECK(parse("<a>&#x41;&#65;&#x00000000000000041;</a>", &t) && t == "AAA",
+          "numeric entities, leading zeros allowed (%s)", t.c_str());
+    CHECK(parse("<a>&#x1F600;</a>", &t) && t == "\xF0\x9F\x98\x80", "an astral entity is 4-byte UTF-8");
+    CHECK(!parse("<a>&#xD800;</a>") && !parse("<a>&#xDFFF;</a>") && !parse("<a>&#55296;</a>"),
+          "surrogate entities are refused");
+    CHECK(!parse("<a>&#x110000;</a>"), "past U+10FFFF is refused");
+    CHECK(!parse("<a>&#x10000000000000041;</a>") && !parse("<a>&#18446744073709551681;</a>"),
+          "a run of digits can't wrap around onto a valid code point");
+    CHECK(parse("<svg:a xmlns:svg=\"urn:x\"/>"), "a prefixed name parses");
+    CHECK(!parse("<a:b:c xmlns:a=\"urn:x\"/>"), "a name with two colons is refused");
+    CHECK(!parse("<a:1b xmlns:a=\"urn:x\"/>"), "a local part must start like a name");
+}
+
 /* Parsers that recurse per nesting level refuse files nested past a cap,
  * instead of running the stack out on hostile input. */
 static void test_parser_depth() {
@@ -6419,6 +6478,7 @@ int main(int argc, char **argv) {
     test_svg_paste(fonts);
     test_pdf_import(fonts);
     test_parser_depth();
+    test_xml_validation();
     test_system_fonts();
     if (verbose)
         dump_sample(fonts);

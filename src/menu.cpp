@@ -667,6 +667,17 @@ const Widget *PopupMenu::find_widget(const Vector2i &p) const
     return Window::find_widget(p);
 }
 
+/* A choice made in a combo box's popup leaves the keyboard focus on the
+ * combo box, as Escape does, so Tab goes on to the next field. Menu bar
+ * menus and context menus hand focus back to their window as before. */
+static void refocus_combo(PopupMenu *outer) {
+    auto *dd = outer ? dynamic_cast<Dropdown *>(outer->parent_item()) : nullptr;
+    if (dd && dd->mode() == Dropdown::ComboBox && dd->enabled() && dd->visible_recursive()) {
+        dd->set_pushed(false);           // the popup is closed; don't draw it pressed
+        dd->request_focus();
+    }
+}
+
 bool PopupMenu::mouse_button_event(const Vector2i &p, int button, bool down, int modifiers)
 {
     if (button == GLFW_MOUSE_BUTTON_1 && over_scrollbar(p)) {
@@ -736,11 +747,13 @@ bool PopupMenu::mouse_button_event(const Vector2i &p, int button, bool down, int
                 dd->set_pushed(false);
 
             // close the menu and any parent menus
+            PopupMenu *outer = this;
             Window *parent_window = m_parent_window;
             while (parent_window)
             {
                 if (auto i = dynamic_cast<PopupMenu *>(parent_window))
                 {
+                    outer = i;
                     parent_window->set_visible(false);
                     parent_window = i->m_parent_window;
                 }
@@ -761,6 +774,7 @@ bool PopupMenu::mouse_button_event(const Vector2i &p, int button, bool down, int
                     parent_window = nullptr;
                 }
             }
+            refocus_combo(outer);
         }
         return true;
     }
@@ -812,11 +826,13 @@ bool PopupMenu::keyboard_event(int key, int scancode, int action, int modifiers)
                 set_highlighted_index(-1);
 
                 // close the menu and any parent menus
+                PopupMenu *outer = this;
                 Window *parent_window = m_parent_window;
                 while (parent_window)
                 {
                     if (auto i = dynamic_cast<PopupMenu *>(parent_window))
                     {
+                        outer = i;
                         parent_window->set_visible(false);
                         parent_window = i->m_parent_window;
                     }
@@ -833,6 +849,7 @@ bool PopupMenu::keyboard_event(int key, int scancode, int action, int modifiers)
                         parent_window = nullptr;
                     }
                 }
+                refocus_combo(outer);
 
                 // execute the item's callback
                 if (auto i = item(idx_backup))
