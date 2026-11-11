@@ -230,6 +230,20 @@ else()
 endif()
 set(CMAKE_CXX_VISIBILITY_PRESET hidden)
 
+# Pin C to gnu17 so newer compilers (GCC 15+ defaults to C23) behave like
+# Ubuntu 24.04's GCC 13 and Apple clang. CMake < 3.21 doesn't know "17";
+# C11 is the same language (C17 only fixed defects), so fall back to it.
+# Not REQUIRED: an older compiler just uses the newest standard it has.
+# MSVC is left alone (it never defaults to C23).
+if (NOT MSVC AND NOT DEFINED CMAKE_C_STANDARD)
+  if (CMAKE_VERSION VERSION_LESS 3.21)
+    set(CMAKE_C_STANDARD 11)
+  else()
+    set(CMAKE_C_STANDARD 17)
+  endif()
+  set(CMAKE_C_EXTENSIONS ON)  # gnu17/gnu11, matching the compilers' own defaults
+endif()
+
 # Prefer libc++ in conjunction with Clang
 if (CMAKE_CXX_COMPILER_ID MATCHES "Clang" AND NOT CMAKE_CXX_FLAGS MATCHES "-stdlib=libc\\+\\+")
   CHECK_CXX_COMPILER_AND_LINKER_FLAGS(HAS_LIBCPP "-stdlib=libc++" "-stdlib=libc++")
@@ -770,6 +784,8 @@ if (NANOGUI_BUILD_EXAMPLES)
   add_executable(flextest 	   examples/flextest.cpp)
   add_executable(guieditor     examples/guieditor.cpp examples/guieditor_json.cpp examples/guieditor_json_editor.cpp)
   add_executable(json2cpp      examples/json2cpp.cpp)
+  # json2cpp deliberately doesn't link nanogui; it only needs include/dict.h.
+  target_include_directories(json2cpp PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include)
   add_executable(folderview    examples/folderview.cpp)
   add_executable(datatest      examples/datatest.cpp)
   # Vendored Gumbo HTML5 parser (ext/gumbo submodule), used by nmail to
@@ -1170,11 +1186,10 @@ if (NANOGUI_BUILD_EXAMPLES)
         pagemade/src/image_stb.cpp
         pagemade/src/sample.cpp)
     foreach(_t pagemade_app pagemade_compose_test pagemade_book pagemade_render_bench)
-      # dict.h (the JSON reader) lives at the repository root.
-      # nanovg_exif.h and stb_image.h live with nanovgd. fscompat.h is in
-      # include/, which pagemade_compose_test doesn't get via libnanogui.
+      # dict.h (the JSON reader) and fscompat.h are under include/, which
+      # pagemade_compose_test doesn't get via libnanogui. nanovg_exif.h and
+      # stb_image.h live with nanovgd.
       target_include_directories(${_t} PRIVATE
-          ${CMAKE_CURRENT_SOURCE_DIR}
           ${CMAKE_CURRENT_SOURCE_DIR}/include
           ${CMAKE_CURRENT_SOURCE_DIR}/ext/nanovgd/src)
       # FreeType reads the fonts embedded in placed PDFs (plugin/pdf_import.cpp)
