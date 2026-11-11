@@ -1089,7 +1089,9 @@ private:
     }
 
     /* A pattern color (scn /P0): a shading pattern paints with its
-     * gradient, in the page's default space under the pattern's matrix */
+     * gradient under the pattern's matrix, which maps to the default space
+     * of the content stream it's used in (the page's, or a form's), not to
+     * the current user space: a cm before the scn doesn't move it. */
     std::shared_ptr<Shading> pattern_shading(const std::string &name, const Object &res) {
         const Object &pat = m_doc.get(m_doc.get(res, "Pattern"), name.c_str());
         if (!pat.dict)
@@ -1612,10 +1614,15 @@ private:
             /* drawn as its parts; group knockout and isolation aren't modeled */
         }
         const Object &fres = m_doc.get(xo, "Resources");
-        const Transform saved_tm = m_tm, saved_tlm = m_tlm;
+        /* A pattern's matrix maps to the default space of the stream that
+           uses it: inside a form, that is the form's space (the CTM at Do
+           times /Matrix), not the page's. */
+        const Transform saved_tm = m_tm, saved_tlm = m_tlm, saved_base = m_base;
+        m_base = inner.ctm;
         run(data, fres.dict ? fres : res, inner, depth + 1);
         m_tm = saved_tm;
         m_tlm = saved_tlm;
+        m_base = saved_base;
     }
 
     void ext_gstate(GState &gs, const std::string &name, const Object &res) {
@@ -1866,14 +1873,19 @@ private:
         size_t start = lx.pos();
         if (start < n && (d[start] == ' ' || d[start] == '\n' || d[start] == '\r'))
             ++start;
+        /* EI after whitespace, followed by whitespace or the stream's end
+           (a content stream may end on it with no newline) */
         size_t end = start;
-        for (; end + 2 < n; ++end) {
+        bool found = false;
+        for (; end + 1 < n; ++end) {
             const bool ws_before = end == start || d[end - 1] == ' ' || d[end - 1] == '\n' || d[end - 1] == '\r' || d[end - 1] == '\t';
             if (ws_before && d[end] == 'E' && d[end + 1] == 'I' &&
-                (end + 2 >= n || d[end + 2] == ' ' || d[end + 2] == '\n' || d[end + 2] == '\r' || d[end + 2] == '\t'))
+                (end + 2 >= n || d[end + 2] == ' ' || d[end + 2] == '\n' || d[end + 2] == '\r' || d[end + 2] == '\t')) {
+                found = true;
                 break;
+            }
         }
-        if (end + 2 >= n)
+        if (!found)
             end = n;
         size_t data_end = end;
         while (data_end > start && (d[data_end - 1] == ' ' || d[data_end - 1] == '\n' || d[data_end - 1] == '\r'))

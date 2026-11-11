@@ -6306,6 +6306,43 @@ static void test_pdf_import(const FontLibrary &fonts) {
     CHECK(spot == 1, "the spot color goes through its PostScript tint transform");
     CHECK(gs.skipped.empty(), "nothing skipped (%s)", gs.skipped.empty() ? "" : gs.skipped[0].c_str());
 
+    /* A pattern maps to the default space of the stream that paints with
+     * it: a cm in the page doesn't move it, a form's space does. The same
+     * radial pattern (center 25,25) fills a square after a cm on the page,
+     * then inside a form moved 50 right. */
+    {
+        const std::string page_body = "q 1 0 0 1 0 50 cm /Pattern cs /P1 scn 0 -50 50 50 re f Q\n/Fm0 Do\n";
+        const std::string form_body = "/Pattern cs /P1 scn 0 0 50 50 re f\n";
+        const std::string pat = "<< /PatternType 2 /Shading << /ShadingType 3 /ColorSpace /DeviceGray "
+                                "/Coords [25 25 0 25 25 25] /Function << /FunctionType 2 /Domain [0 1] "
+                                "/C0 [1] /C1 [0] /N 1 >> >> >>";
+        std::string p4 = "%PDF-1.4\n";
+        p4 += "1 0 obj << /Type /Catalog /Pages 2 0 R >> endobj\n";
+        p4 += "2 0 obj << /Type /Pages /Kids [3 0 R] /Count 1 >> endobj\n";
+        p4 += "3 0 obj << /Type /Page /Parent 2 0 R /MediaBox [0 0 100 100] /Contents 4 0 R /Resources << "
+              "/Pattern << /P1 " + pat + " >> /XObject << /Fm0 5 0 R >> >> >> endobj\n";
+        p4 += "4 0 obj << /Length " + std::to_string(page_body.size()) + " >> stream\n" + page_body +
+              "\nendstream endobj\n";
+        p4 += "5 0 obj << /Type /XObject /Subtype /Form /BBox [0 0 50 50] /Matrix [1 0 0 1 50 0] "
+              "/Resources << /Pattern << /P1 " + pat + " >> >> /Length " + std::to_string(form_body.size()) +
+              " >> stream\n" + form_body + "\nendstream endobj\n";
+        p4 += "trailer << /Root 1 0 R >>\n%%EOF\n";
+        VectorScene ps;
+        CHECK(vector_loader().decode((const uint8_t *) p4.data(), p4.size(), &ps, &err), "patterns: %s", err.c_str());
+        std::vector<Point> centers;
+        for (const VectorShape &sh : ps.shapes)
+            if (sh.fill.kind == PaintKind::Radial)
+                centers.push_back(sh.fill.xf.apply({0.f, 0.f}));
+        CHECK(centers.size() == 2, "both squares paint with the pattern (%zu)", centers.size());
+        if (centers.size() == 2) {
+            /* y up 25 is y down 75 on the 100pt page */
+            CHECK(std::fabs(centers[0].x - 25.f) < 0.01f && std::fabs(centers[0].y - 75.f) < 0.01f,
+                  "a cm on the page doesn't move the pattern (%g,%g)", centers[0].x, centers[0].y);
+            CHECK(std::fabs(centers[1].x - 75.f) < 0.01f && std::fabs(centers[1].y - 75.f) < 0.01f,
+                  "in a form, the pattern follows the form's space (%g,%g)", centers[1].x, centers[1].y);
+        }
+    }
+
     /* Two pages: a red square on the first, a wider blue one on the
      * second. The placement keeps the page it shows, through save and open. */
     const std::string pg1 = "1 0 0 rg 0 0 10 10 re f\n", pg2 = "0 0 1 rg 0 0 40 10 re f\n";
