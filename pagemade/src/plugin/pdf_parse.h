@@ -79,7 +79,8 @@ class Document {
 public:
     /* Reads the cross-reference. False (and `error`) when the file isn't a
      * PDF this reader can open; an encrypted one says so. The bytes are
-     * copied. */
+     * borrowed, not copied (a placed PDF can be hundreds of megabytes): they
+     * must outlive the Document. */
     bool open(const uint8_t *data, size_t n, std::string *error);
 
     /* `o` itself, or the object a Ref names (null when it names nothing). */
@@ -116,7 +117,14 @@ private:
     bool load_object_stream(int num) const;
     void collect_pages(const Object &node, const Object &inherited, int depth);
 
-    std::vector<uint8_t> m_bytes;
+    /* The file, borrowed */
+    struct View {
+        const uint8_t *p = nullptr;
+        size_t n = 0;
+        const uint8_t *data() const { return p; }
+        size_t size() const { return n; }
+        uint8_t operator[](size_t i) const { return p[i]; }
+    } m_bytes;
     std::map<int, Entry> m_xref;
     Object m_trailer;
     mutable std::map<int, Object> m_cache;

@@ -23,6 +23,8 @@
 #include <map>
 #include <memory>
 #include <string>
+#include <functional>
+#include <optional>
 #include <vector>
 
 namespace pagemade {
@@ -179,6 +181,20 @@ private:
 /* The loader with the built-in decoders (plugin/plugin.h). */
 VectorLoader &vector_loader();
 std::vector<std::pair<std::string, std::string>> vector_file_types();
+
+/* Many pages decoded at once on worker threads: each job is a file's bytes
+ * and the page to read. A large PDF of photos takes most of a second a
+ * page. `tick(done, total)` runs on the calling thread a few times a
+ * second (for a progress bar); returning false stops the work, and this
+ * returns false. A page that can't be read leaves its slot empty and its
+ * error in `errors` (when given). The decoders keep no shared state. */
+struct VectorDecodeJob {
+    std::shared_ptr<const std::vector<uint8_t>> bytes;
+    int page = 0;
+};
+bool decode_vector_pages(const std::vector<VectorDecodeJob> &jobs, std::vector<std::optional<VectorScene>> &out,
+                         std::vector<std::string> *errors = nullptr,
+                         const std::function<bool(size_t done, size_t total)> &tick = {});
 
 /* "placed name" or "placed name (gradients, clips skipped)". */
 std::string vector_place_note(const std::string &name, const std::vector<std::string> &skipped,

@@ -1395,7 +1395,8 @@ VectorPlacement place_svg_bytes(PageDoc &doc, VectorStore &store, std::vector<ui
 
 
 ImportedPublication import_publication(std::vector<uint8_t> bytes, const std::string &name,
-                                       const std::string &source, const FontLibrary *fonts) {
+                                       const std::string &source, const FontLibrary *fonts,
+                                       const std::function<bool(size_t done, size_t total)> &progress) {
     ImportedPublication r;
     r.images = std::make_unique<ImageStore>();
     const int pages = bytes.empty() ? 0 : vector_loader().page_count(bytes.data(), bytes.size());
@@ -1448,12 +1449,26 @@ ImportedPublication import_publication(std::vector<uint8_t> bytes, const std::st
     } else {
         const VectorStore::Bytes shared = std::make_shared<const std::vector<uint8_t>>(std::move(bytes));
         const uint64_t hash = image_bytes_hash(shared->data(), shared->size());
+        /* The first page is read; the rest on worker threads */
+        std::vector<VectorDecodeJob> jobs;
+        for (int i = 1; i < count; ++i)
+            jobs.push_back({shared, i});
+        std::vector<std::optional<VectorScene>> scenes;
+        const bool finished = decode_vector_pages(jobs, scenes, nullptr, [&](size_t done, size_t) {
+            return !progress || progress(done + 1, (size_t) count);
+        });
+        if (!finished) {
+            r.cancelled = true;
+            r.error = "cancelled";
+            return r;
+        }
         for (int i = 0; i < count; ++i) {
             VectorScene scene;
             if (i == 0)
                 scene = std::move(first);
-            else if (!vector_loader().decode(shared->data(), shared->size(), &scene, &err, i) ||
-                     !(scene.width > 0.f) || !(scene.height > 0.f))
+            else if (scenes[(size_t) i - 1] && scenes[(size_t) i - 1]->width > 0.f && scenes[(size_t) i - 1]->height > 0.f)
+                scene = std::move(*scenes[(size_t) i - 1]);
+            else
                 continue;                // a page that can't be read stays empty
             note_scene(scene);
             const uint32_t id = r.vectors.take_id();

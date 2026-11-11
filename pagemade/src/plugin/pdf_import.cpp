@@ -46,21 +46,11 @@
 #include <cctype>
 #include <cstdlib>
 #include <cstring>
+#include <miniz.h>
 #include <functional>
 #include <map>
 #include <memory>
 
-#define STB_IMAGE_WRITE_STATIC
-#define STB_IMAGE_WRITE_IMPLEMENTATION
-#if defined(__GNUC__)
-#pragma GCC diagnostic push
-#pragma GCC diagnostic ignored "-Wunused-function"
-#pragma GCC diagnostic ignored "-Wmissing-field-initializers"
-#endif
-#include "../../../ext/glfw/deps/stb_image_write.h"
-#if defined(__GNUC__)
-#pragma GCC diagnostic pop
-#endif
 
 namespace pagemade {
 
@@ -1506,10 +1496,6 @@ private:
     }
 
     /* ---- Images ---- */
-    static void png_sink(void *context, void *data, int size) {
-        static_cast<std::string *>(context)->append(static_cast<const char *>(data), (size_t) size);
-    }
-
     /* The picture an image dictionary and its (filtered) data describe, as
      * bytes a decoder reads: its JPEG, or PNG from the samples */
     bool image_bytes(const Object &dict, const std::string &raw_or_stream, bool inline_image, const Object &res,
@@ -1657,10 +1643,31 @@ private:
                     }
             }
         }
-        std::string png;
-        if (!stbi_write_png_to_func(png_sink, &png, w, h, 4, rgba.data(), w * 4))
+        /* PNG for the scene, written for speed: this copy stays in memory
+         * (the PDF itself is what a publication keeps), and a photo at
+         * stb's best compression takes most of a second. Opaque pictures
+         * go as RGB. */
+        bool opaque = true;
+        for (size_t i = 3; i < rgba.size() && opaque; i += 4)
+            opaque = rgba[i] == 255;
+        int channels = 4;
+        if (opaque) {
+            size_t o = 0;
+            for (size_t i = 0; i < rgba.size(); i += 4, o += 3) {
+                rgba[o] = rgba[i];
+                rgba[o + 1] = rgba[i + 1];
+                rgba[o + 2] = rgba[i + 2];
+            }
+            rgba.resize(o);
+            channels = 3;
+        }
+        size_t png_len = 0;
+        void *png = tdefl_write_image_to_png_file_in_memory_ex(rgba.data(), w, h, channels, &png_len,
+                                                                MZ_BEST_SPEED, MZ_FALSE);
+        if (!png)
             return false;
-        out = std::make_shared<const std::vector<uint8_t>>(png.begin(), png.end());
+        out = std::make_shared<const std::vector<uint8_t>>((const uint8_t *) png, (const uint8_t *) png + png_len);
+        mz_free(png);
         return true;
     }
 

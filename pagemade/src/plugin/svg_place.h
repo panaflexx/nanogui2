@@ -15,6 +15,7 @@
 #include "vector.h"
 
 #include <cstdint>
+#include <functional>
 #include <memory>
 #include <string>
 #include <vector>
@@ -69,13 +70,19 @@ VectorPlacement place_svg_bytes(PageDoc &doc, VectorStore &store, std::vector<ui
  * file: URI the graphics link to (empty: embedded only). */
 struct ImportedPublication {
     bool ok = false;
+    bool cancelled = false;
     std::string error;
     std::string note;
     PageDoc doc;
     VectorStore vectors;
     std::unique_ptr<ImageStore> images;  // pictures an SVG embeds, as frames
 };
+/* `progress(done, total)` reports pages read (from the calling thread, a
+ * few times a second); returning false cancels, and the result is not ok
+ * with `cancelled` set. Safe to run off the UI thread when `fonts` is null
+ * (they only measure an SVG's text, which is otherwise estimated). */
 ImportedPublication import_publication(std::vector<uint8_t> bytes, const std::string &name,
-                                       const std::string &source, const FontLibrary *fonts);
+                                       const std::string &source, const FontLibrary *fonts,
+                                       const std::function<bool(size_t done, size_t total)> &progress = {});
 
 } // namespace pagemade

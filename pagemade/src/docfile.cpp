@@ -1174,7 +1174,7 @@ bool save_document(const PageDoc &doc, const FontLibrary &fonts, const std::stri
 }
 
 OpenResult open_document(const std::string &path, const FontLibrary &installed,
-                         bool load_linked) {
+                         bool load_linked, const std::function<void(size_t done, size_t total)> &progress) {
     OpenResult r;
     mz_zip_archive zip;
     std::memset(&zip, 0, sizeof zip);
@@ -1552,65 +1552,74 @@ OpenResult open_document(const std::string &path, const FontLibrary &installed,
 
     /* Graphics are small, so a linked SVG is read here even when pictures
      * wait until they are on screen. The scene is what drawing uses. */
-    std::map<std::string, VectorStore::Bytes> read_once;   // the pages of one PDF share it
+    /* Each file is read once (the pages of one PDF share it), then every
+     * graphic is decoded on worker threads: a placed PDF of photos takes
+     * most of a second a page */
+    std::map<std::string, VectorStore::Bytes> read_once;
+    struct Pending {
+        VectorAsset *asset;
+        std::string where, link_path;
+    };
+    std::vector<Pending> pending;
+    std::vector<VectorDecodeJob> jobs;
     for (VectorAsset &asset : d.vectors) {
         r.vectors.note_id(asset.id);
         const std::string uri = vector_uris.count(asset.id) ? vector_uris[asset.id] : std::string();
-        if (auto hit = read_once.find(uri); !uri.empty() && hit != read_once.end()) {
-            std::string err;
-            if (r.vectors.add(asset.id, hit->second, &err, asset.page)) {
-                if (const VectorScene *scene = r.vectors.scene(asset.id)) {
-                    asset.width = scene->width;
-                    asset.height = scene->height;
-                    asset.skipped = scene->skipped;
-                }
-                std::string path;
-                if (!is_package_ref(uri) && file_path_from_uri(uri, path))
-                    r.vectors.set_path(asset.id, path);
-            } else {
-                r.warnings.push_back("couldn't read the graphic " + (asset.name.empty() ? uri : asset.name) +
-                                     (err.empty() ? "" : ": " + err));
-            }
-            continue;
-        }
-        std::vector<uint8_t> bytes;
         std::string where = asset.name.empty() ? uri : asset.name;
         std::string link_path;
-        bool got = false;
-        if (is_package_ref(uri)) {
-            const std::string entry = package_entry(uri);
-            where = entry;
-            bool found_entry = false;
-            std::vector<char> raw = extract(zip, entry, &found_entry);
-            if (found_entry) {
-                bytes.assign(raw.begin(), raw.end());
-                got = true;
+        VectorStore::Bytes shared;
+        if (auto hit = read_once.find(uri); !uri.empty() && hit != read_once.end()) {
+            shared = hit->second;
+            if (std::string path; !is_package_ref(uri) && file_path_from_uri(uri, path))
+                link_path = path;
+        } else {
+            std::vector<uint8_t> bytes;
+            bool got = false;
+            if (is_package_ref(uri)) {
+                const std::string entry = package_entry(uri);
+                where = entry;
+                bool found_entry = false;
+                std::vector<char> raw = extract(zip, entry, &found_entry);
+                if (found_entry) {
+                    bytes.assign(raw.begin(), raw.end());
+                    got = true;
+                }
+            } else if (std::string path; file_path_from_uri(uri, path)) {
+                link_path = path;
+                where = path;
+                got = read_whole_file(path, &bytes);
             }
-        } else if (std::string path; file_path_from_uri(uri, path)) {
-            link_path = path;
-            where = path;
-            got = read_whole_file(path, &bytes);
-        }
-        if (!got || bytes.empty()) {
+            if (!got || bytes.empty()) {
+                if (!uri.empty())
+                    r.warnings.push_back("couldn't read the graphic " + where);
+                continue;
+            }
+            shared = std::make_shared<const std::vector<uint8_t>>(std::move(bytes));
             if (!uri.empty())
-                r.warnings.push_back("couldn't read the graphic " + where);
+                read_once[uri] = shared;
+        }
+        pending.push_back({&asset, where, link_path});
+        jobs.push_back({shared, asset.page});
+    }
+    std::vector<std::optional<VectorScene>> scenes;
+    std::vector<std::string> errors;
+    decode_vector_pages(jobs, scenes, &errors, progress ? [&](size_t done, size_t total) {
+        progress(done, total);
+        return true;
+    } : std::function<bool(size_t, size_t)>());
+    for (size_t i = 0; i < pending.size(); ++i) {
+        VectorAsset &asset = *pending[i].asset;
+        if (!scenes[i]) {
+            r.warnings.push_back("couldn't read the graphic " + pending[i].where +
+                                 (errors[i].empty() ? "" : ": " + errors[i]));
             continue;
         }
-        std::string err;
-        auto shared = std::make_shared<const std::vector<uint8_t>>(std::move(bytes));
-        if (!uri.empty())
-            read_once[uri] = shared;
-        if (r.vectors.add(asset.id, shared, &err, asset.page)) {
-            if (const VectorScene *scene = r.vectors.scene(asset.id)) {
-                asset.width = scene->width;
-                asset.height = scene->height;
-                asset.skipped = scene->skipped;
-            }
-            if (!link_path.empty())
-                r.vectors.set_path(asset.id, link_path);
-        } else
-            r.warnings.push_back("couldn't read the graphic " + where +
-                                 (err.empty() ? "" : ": " + err));
+        asset.width = scenes[i]->width;
+        asset.height = scenes[i]->height;
+        asset.skipped = scenes[i]->skipped;
+        r.vectors.add(asset.id, jobs[i].bytes, std::move(*scenes[i]));
+        if (!pending[i].link_path.empty())
+            r.vectors.set_path(asset.id, pending[i].link_path);
     }
 
     /* Fonts: embedded copies always; linked files only for families that

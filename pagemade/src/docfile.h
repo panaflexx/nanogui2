@@ -33,6 +33,7 @@
 
 #include <memory>
 #include <string>
+#include <functional>
 #include <vector>
 
 namespace pagemade {
@@ -83,8 +84,11 @@ bool save_document(const PageDoc &doc, const FontLibrary &fonts, const std::stri
  * installed is used as is. With `load_linked` false, linked pictures are
  * registered in OpenResult::images without being read (their metadata comes
  * from the document); an AssetManager loads them as they come on screen. */
+/* `progress(done, total)` reports graphics decoded, from this thread a few
+ * times a second, while a publication with large placed PDFs opens. */
 OpenResult open_document(const std::string &path, const FontLibrary &installed,
-                         bool load_linked = true);
+                         bool load_linked = true,
+                         const std::function<void(size_t done, size_t total)> &progress = {});
 
 /* The document.json text for a document (tests and debugging).
  * `images` supplies picture bytes when an asset is embedded. */

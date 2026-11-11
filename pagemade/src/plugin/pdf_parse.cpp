@@ -13,6 +13,7 @@
 #include <cctype>
 #include <cstdlib>
 #include <cstring>
+#include <string_view>
 
 namespace pagemade {
 namespace pdf {
@@ -516,7 +517,7 @@ const Object &Document::page(int i) const {
 }
 
 bool Document::open(const uint8_t *data, size_t n, std::string *error) {
-    m_bytes.assign(data, data + n);
+    m_bytes = View{data, n};
     m_xref.clear();
     m_cache.clear();
     m_pages.clear();
@@ -720,7 +721,7 @@ bool Document::parse_at(size_t offset, int num, Object &out) const {
         }
     }
     if (!have) {
-        const std::string hay((const char *) m_bytes.data() + start, m_bytes.size() - start);
+        const std::string_view hay((const char *) m_bytes.data() + start, m_bytes.size() - start);
         const size_t e = hay.find("endstream");
         len = e == std::string::npos ? hay.size() : e;
         while (len > 0 && (hay[len - 1] == '\n' || hay[len - 1] == '\r'))
@@ -803,7 +804,7 @@ bool Document::rebuild() {
         i = lx.pos() - 1;
     }
     /* Trailers, the last first; and objects packed in object streams */
-    const std::string hay((const char *) m_bytes.data(), n);
+    const std::string_view hay((const char *) m_bytes.data(), n);
     for (size_t at = hay.rfind("trailer"); at != std::string::npos;
          at = at ? hay.rfind("trailer", at - 1) : std::string::npos) {
         Lexer lx(m_bytes.data(), n, at + 7);

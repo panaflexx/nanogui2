@@ -16,6 +16,12 @@
 #include <cstdio>
 #include <map>
 #include <utility>
+#include <system_error>
+#include <chrono>
+#include <thread>
+#include <mutex>
+#include <condition_variable>
+#include <atomic>
 
 namespace pagemade {
 
@@ -76,6 +82,82 @@ VectorLoader &vector_loader() {
 
 std::vector<std::pair<std::string, std::string>> vector_file_types() {
     return vector_loader().types();
+}
+
+bool decode_vector_pages(const std::vector<VectorDecodeJob> &jobs, std::vector<std::optional<VectorScene>> &out,
+                         std::vector<std::string> *errors,
+                         const std::function<bool(size_t done, size_t total)> &tick) {
+    out.assign(jobs.size(), std::nullopt);
+    if (errors)
+        errors->assign(jobs.size(), std::string());
+    if (jobs.empty())
+        return !tick || tick(0, 0);
+    /* One core stays with the window; each worker holds a page's pictures
+     * at once, so not too many */
+    const unsigned hw = std::max(1u, std::thread::hardware_concurrency());
+    const size_t workers = std::min<size_t>({jobs.size(), (size_t) std::max(1u, hw > 2 ? hw - 1 : 1u), 8});
+    std::atomic<size_t> next{0}, done{0};
+    std::atomic<bool> stop{false};
+    std::mutex mu;
+    std::condition_variable cv;
+    auto work = [&] {
+        for (;;) {
+            const size_t i = next++;
+            if (i >= jobs.size() || stop)
+                break;
+            VectorScene scene;
+            std::string err;
+            const VectorDecodeJob &j = jobs[i];
+            bool ok = false;
+            try {
+                ok = j.bytes && vector_loader().decode(j.bytes->data(), j.bytes->size(), &scene, &err, j.page);
+            } catch (const std::exception &ex) {
+                err = ex.what();
+            } catch (...) {
+                err = "the page couldn't be read";
+            }
+            if (ok)
+                out[i] = std::move(scene);
+            else if (errors)
+                (*errors)[i] = err;
+            {
+                std::lock_guard<std::mutex> lock(mu);
+                ++done;
+            }
+            cv.notify_one();
+        }
+    };
+    std::vector<std::thread> pool;
+    try {
+        for (size_t k = 1; k < workers; ++k)
+            pool.emplace_back(work);
+    } catch (const std::system_error &) {
+        /* No more threads: the ones started, and this one, do the rest */
+    }
+    if (!tick) {
+        work();
+    } else {
+        /* This thread reports progress rather than decoding, so the bar
+         * moves; with no workers at all it decodes too */
+        if (pool.empty())
+            work();
+        std::unique_lock<std::mutex> lock(mu);
+        while (done < jobs.size()) {
+            cv.wait_for(lock, std::chrono::milliseconds(50));
+            const size_t d = done;
+            lock.unlock();
+            if (!tick(d, jobs.size()))
+                stop = true;
+            lock.lock();
+            if (stop)
+                break;
+        }
+    }
+    for (std::thread &t : pool)
+        t.join();
+    if (tick && !stop)
+        tick(jobs.size(), jobs.size());
+    return !stop;
 }
 
 std::string vector_place_note(const std::string &name, const std::vector<std::string> &skipped,

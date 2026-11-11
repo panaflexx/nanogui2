@@ -1036,6 +1036,14 @@ public:
         m_shutting_down = true;
         if (m_pdf_job)
             m_pdf_job->cancel = true;
+        if (m_import_job)
+            m_import_job->cancel = true;
+        while (m_import_thread.joinable() || m_import_job) {
+            nanogui::process_async();        // the completion joins the thread
+            if (!m_import_thread.joinable() && !m_import_job)
+                break;
+            std::this_thread::sleep_for(std::chrono::milliseconds(2));
+        }
         /* Also an export not yet started (its start is two async turns
          * away): start_pdf_job sees m_shutting_down and only clears up. */
         while (m_pdf_thread.joinable() || m_pdf_job) {
@@ -1178,22 +1186,152 @@ public:
         });
     }
 
-    bool import_path(const std::string &path) {
+    /* Import `path` as a new publication. A big PDF takes a while (most of
+     * a second a page, spread over the cores), so it runs on its own thread
+     * behind a progress dialog with Cancel, and the window keeps drawing;
+     * the publication on screen stays until the new one is ready. `wait`
+     * imports right here instead (scripted runs that use it at once). */
+    struct ImportJob {
+        std::atomic<bool> cancel{false};
+        std::mutex mu;
+        size_t done = 0, total = 0;
+        bool posted = false;
+        ModalDialog *dialog = nullptr;
+        Label *label = nullptr;
+        ProgressBar *bar = nullptr;
+        Button *cancel_button = nullptr;
+    };
+    std::shared_ptr<ImportJob> m_import_job;
+    std::thread m_import_thread;
+
+    bool import_path(const std::string &path, bool wait = false) {
         const std::string name = nanogui::fs::filename(path);
-        std::vector<uint8_t> bytes;
-        std::string read_error;
-        if (!read_file(path, &bytes, &read_error) || bytes.empty()) {
-            show_alert(this, "\u201C" + name + "\u201D couldn't be read.", read_error);
+        if (wait) {
+            std::vector<uint8_t> bytes;
+            std::string read_error;
+            if (!read_file(path, &bytes, &read_error) || bytes.empty()) {
+                show_alert(this, "“" + name + "” couldn't be read.", read_error);
+                return false;
+            }
+            ImportedPublication r = import_publication(std::move(bytes), name, file_uri(path), &m_fonts);
+            return finish_import(name, r);
+        }
+        if (m_import_job)
+            return false;                    // one at a time
+        auto job = std::make_shared<ImportJob>();
+        m_import_job = job;
+        auto *d = new ModalDialog(this, "Importing “" + name + "”");
+        Widget *body = d->body();
+        body->set_layout(new BoxLayout(Orientation::Vertical, Alignment::Fill, 0, 8));
+        job->label = new Label(body, "Reading the file…", "sans");
+        job->label->set_fixed_size(Vector2i(420, 0));
+        job->label->set_live(true);
+        job->bar = new ProgressBar(body);
+        job->bar->set_fixed_size(Vector2i(420, 12));
+        job->bar->set_live(true);
+        job->cancel_button = d->add_button("Cancel", [job] {
+            job->cancel = true;
+            if (job->label)
+                job->label->set_caption("Cancelling…");
+            if (job->cancel_button) {
+                job->cancel_button->set_enabled(false);
+                job->cancel_button->propagate_cache_dirty();
+            }
+        }, ModalDialog::Role::Cancel, false);
+        job->dialog = d;
+        d->open();
+
+        const std::string uri = file_uri(path);
+        try {
+            m_import_thread = std::thread([this, job, path, name, uri] {
+                auto result = std::make_shared<ImportedPublication>();
+                std::string read_error;
+                try {
+                    std::vector<uint8_t> bytes;
+                    if (!read_file(path, &bytes, &read_error) || bytes.empty()) {
+                        result->error = read_error.empty() ? "the file is empty" : read_error;
+                    } else if (!job->cancel) {
+                        /* No font library off the UI thread: it loads faces
+                         * as they're asked for. Only an SVG's text width
+                         * would use it, and that is estimated instead. */
+                        *result = import_publication(std::move(bytes), name, uri, nullptr,
+                                                     [job](size_t done, size_t total) {
+                            bool post = false;
+                            {
+                                std::lock_guard<std::mutex> lock(job->mu);
+                                job->done = done;
+                                job->total = total;
+                                post = !job->posted;
+                                job->posted = true;
+                            }
+                            if (post) {
+                                nanogui::async([job] {
+                                    std::lock_guard<std::mutex> lock(job->mu);
+                                    job->posted = false;
+                                    if (job->bar && job->total)
+                                        job->bar->set_value((float) job->done / (float) job->total);
+                                    if (job->label && !job->cancel)
+                                        job->label->set_caption("Page " + std::to_string(job->done) + " of " +
+                                                                std::to_string(job->total));
+                                    if (job->dialog)
+                                        if (Screen *screen = job->dialog->screen())
+                                            screen->redraw();
+                                });
+                                glfwPostEmptyEvent();
+                            }
+                            return !job->cancel.load();
+                        });
+                    }
+                } catch (const std::exception &ex) {
+                    result->ok = false;
+                    result->error = ex.what();
+                } catch (...) {
+                    result->ok = false;
+                    result->error = "the import failed";
+                }
+                if (job->cancel)
+                    result->cancelled = true;
+                nanogui::async([this, job, result, name] {
+                    if (m_import_thread.joinable())
+                        m_import_thread.join();
+                    if (job->dialog)
+                        job->dialog->close();
+                    job->dialog = nullptr;
+                    job->label = nullptr;
+                    job->bar = nullptr;
+                    job->cancel_button = nullptr;
+                    m_import_job.reset();
+                    if (m_shutting_down)
+                        return;
+                    if (result->cancelled)
+                        set_note("import of " + name + " cancelled");
+                    else
+                        finish_import(name, *result);
+                });
+                glfwPostEmptyEvent();
+            });
+        } catch (const std::system_error &ex) {
+            if (job->dialog)
+                job->dialog->close();
+            m_import_job.reset();
+            show_alert(this, "“" + name + "” couldn't be imported.", ex.what());
             return false;
         }
-        ImportedPublication r = import_publication(std::move(bytes), name, file_uri(path), &m_fonts);
+        return true;
+    }
+
+    /* The imported publication replaces the open one (on the UI thread) */
+    bool finish_import(const std::string &name, ImportedPublication &r) {
         if (!r.ok) {
-            show_alert(this, "\u201C" + name + "\u201D couldn't be imported.", r.error);
+            show_alert(this, "“" + name + "” couldn't be imported.", r.error);
             return false;
         }
         m_view->invalidate_compositions();   // before the fonts go
         m_fonts.clear_document_fonts();
-        m_images = std::move(*r.images);
+        if (r.images)
+            m_images = std::move(*r.images);
+        else
+            m_images.clear();
         m_vectors = std::move(r.vectors);
         seed_swatches(r.doc);
         m_view->set_document(std::move(r.doc));
@@ -1244,7 +1382,7 @@ public:
      * PDF, whatever the vector loader reads) is imported as a new
      * publication. Told apart by content, not name: a publication is a zip
      * package, and no drawing format is. */
-    bool open_any(const std::string &path) {
+    bool open_any(const std::string &path, bool wait = false) {
         unsigned char head[4] = {0, 0, 0, 0};
         size_t got = 0;
         if (FILE *f = std::fopen(path.c_str(), "rb")) {
@@ -1256,13 +1394,49 @@ public:
             return false;
         }
         const bool package = got == 4 && head[0] == 'P' && head[1] == 'K' && head[2] == 3 && head[3] == 4;
-        return package ? open_path(path) : import_path(path);
+        return package ? open_path(path) : import_path(path, wait);
     }
 
     /* Open without asking about the current publication (callers do that). */
     bool open_path(const std::string &path) {
-        /* Linked pictures are read as they come on screen, not here */
-        OpenResult r = open_document(path, m_fonts, false);
+        /* Linked pictures are read as they come on screen, not here. Placed
+         * graphics are decoded now, which for large PDFs takes a while:
+         * past a moment a progress dialog shows, and the window keeps
+         * drawing (input waits) so it isn't flagged as hung. */
+        ModalDialog *wait = nullptr;
+        Label *wait_label = nullptr;
+        ProgressBar *wait_bar = nullptr;
+        const double started = glfwGetTime();
+        struct Modal {
+            Modal() { nanogui::begin_modal_work(); }
+            ~Modal() { nanogui::end_modal_work(); }
+        };
+        OpenResult r;
+        {
+            Modal modal;
+            r = open_document(path, m_fonts, false, [&](size_t done, size_t total) {
+                if (!wait && total > 1 && glfwGetTime() - started > 0.3) {
+                    wait = new ModalDialog(this, "Opening \u201C" + nanogui::fs::filename(path) + "\u201D");
+                    Widget *body = wait->body();
+                    body->set_layout(new BoxLayout(Orientation::Vertical, Alignment::Fill, 0, 8));
+                    wait_label = new Label(body, "Reading the placed graphics\u2026", "sans");
+                    wait_label->set_fixed_size(Vector2i(420, 0));
+                    wait_label->set_live(true);
+                    wait_bar = new ProgressBar(body);
+                    wait_bar->set_fixed_size(Vector2i(420, 12));
+                    wait_bar->set_live(true);
+                    wait->open();
+                }
+                if (wait) {
+                    wait_label->set_caption("Graphic " + std::to_string(done) + " of " + std::to_string(total));
+                    wait_bar->set_value(total ? (float) done / (float) total : 0.f);
+                    redraw();
+                }
+                nanogui::pump_modal_work();
+            });
+        }
+        if (wait)
+            wait->close();
         if (!r.ok) {
             show_alert(this, "\u201C" + nanogui::fs::filename(path) +
                              "\u201D couldn't be opened.", r.error);
@@ -3872,7 +4046,12 @@ int main(int argc, char **argv) {
         app->dec_ref();
         app->set_visible(true);
         for (int k = 0; k < 3; ++k) { app->perform_layout(); app->draw_all(); }
-        if (!open_path.empty() && !app->open_any(open_path))
+        /* A scripted run (screenshot, export, actions) needs an imported file
+         * in place before it goes on; otherwise it imports behind a
+         * progress dialog while the window runs */
+        const bool scripted = !shot.empty() || !pdf.empty() || !actions.empty() || !dialog.empty() ||
+                              !place_path.empty();
+        if (!open_path.empty() && !app->open_any(open_path, scripted))
             std::printf("open FAILED %s\n", open_path.c_str());
         if (caption_pictures)
             app->view()->set_caption_pictures(true);

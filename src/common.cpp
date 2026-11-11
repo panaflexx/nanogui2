@@ -369,6 +369,25 @@ static int g_input_blocked = 0;
 
 bool input_blocked() { return g_input_blocked > 0; }
 
+void begin_modal_work() { ++g_input_blocked; }
+
+void end_modal_work() {
+    if (g_input_blocked > 0 && --g_input_blocked == 0)
+        for (auto kv : __nanogui_screens)
+            kv.second->reset_input_state();
+}
+
+void pump_modal_work() {
+#if !defined(EMSCRIPTEN)
+    glfwPollEvents();
+    for (auto kv : __nanogui_screens) {
+        Screen *screen = kv.second;
+        if (screen->visible() && !glfwWindowShouldClose(screen->glfw_window()))
+            screen->draw_all();
+    }
+#endif
+}
+
 #if !defined(_WIN32) && !defined(EMSCRIPTEN)
 std::string run_modal_command(const std::string &cmd, int *status) {
     FILE *pipe = popen(cmd.c_str(), "r");
@@ -380,12 +399,8 @@ std::string run_modal_command(const std::string &cmd, int *status) {
     {
         /* Input stays off until the command is gone, even if a draw throws */
         struct Block {
-            Block() { ++g_input_blocked; }
-            ~Block() {
-                if (--g_input_blocked == 0)
-                    for (auto kv : __nanogui_screens)
-                        kv.second->reset_input_state();
-            }
+            Block() { begin_modal_work(); }
+            ~Block() { end_modal_work(); }
         } block;
 
         char buf[4096];
@@ -407,12 +422,7 @@ std::string run_modal_command(const std::string &cmd, int *status) {
                 if (errno != EINTR && errno != EAGAIN)
                     break;
             }
-            glfwPollEvents();
-            for (auto kv : __nanogui_screens) {
-                Screen *screen = kv.second;
-                if (screen->visible() && !glfwWindowShouldClose(screen->glfw_window()))
-                    screen->draw_all();
-            }
+            pump_modal_work();
         }
     }
     const int rc = pclose(pipe);

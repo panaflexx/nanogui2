@@ -270,6 +270,20 @@ extern NANOGUI_EXPORT void process_async();
  */
 extern NANOGUI_EXPORT bool input_blocked();
 
+/**
+ * \brief Long work on the UI thread that keeps the windows alive.
+ *
+ * Between begin_modal_work() and end_modal_work(), input to every screen is
+ * ignored (see \ref input_blocked). Call pump_modal_work() every so often
+ * from the work: it answers the window system (Wayland pings, resizes,
+ * exposes) and redraws what changed, so the app isn't flagged as hung and
+ * a progress bar moves. Calls nest; the last end_modal_work() resyncs each
+ * screen's mouse and modifier state. May be used inside an event handler.
+ */
+extern NANOGUI_EXPORT void begin_modal_work();
+extern NANOGUI_EXPORT void pump_modal_work();
+extern NANOGUI_EXPORT void end_modal_work();
+
 #if !defined(_WIN32) && !defined(EMSCRIPTEN)
 /**
  * \brief Run a shell command and return what it writes to stdout, such as a

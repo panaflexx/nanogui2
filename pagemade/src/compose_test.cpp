@@ -6784,6 +6784,31 @@ static void test_import_publication(const FontLibrary &fonts) {
     p3 += "5 0 obj << /Length " + std::to_string(pg1.size()) + " >> stream\n" + pg1 + "\nendstream endobj\n";
     p3 += "6 0 obj << /Length " + std::to_string(pg2.size()) + " >> stream\n" + pg2 + "\nendstream endobj\n";
     p3 += "trailer << /Root 1 0 R >>\n%%EOF\n";
+    {
+        /* The parallel decoder: results in job order, a bad page an empty
+         * slot with its error, and a tick that says stop cancels */
+        auto bytes = std::make_shared<const std::vector<uint8_t>>(p3.begin(), p3.end());
+        std::vector<VectorDecodeJob> jobs;
+        for (int i = 0; i < 12; ++i)
+            jobs.push_back({bytes, i % 2});
+        jobs.push_back({bytes, 7});      // no such page
+        std::vector<std::optional<VectorScene>> scenes;
+        std::vector<std::string> errors;
+        size_t last = 0;
+        const bool all = decode_vector_pages(jobs, scenes, &errors, [&](size_t d, size_t) {
+            last = d;
+            return true;
+        });
+        bool order = all && scenes.size() == jobs.size();
+        for (size_t i = 0; order && i + 1 < jobs.size(); ++i)
+            order = scenes[i] && scenes[i]->shapes.size() == 1 &&
+                    (i % 2 ? scenes[i]->shapes[0].fill.color.b > 0.99f : scenes[i]->shapes[0].fill.color.r > 0.99f);
+        CHECK(order, "pages decoded in parallel come back in order");
+        CHECK(!scenes.back() && !errors.back().empty() && last == jobs.size(),
+              "a page that isn't there is an empty slot with its error (%s)", errors.back().c_str());
+        CHECK(!decode_vector_pages(jobs, scenes, nullptr, [](size_t, size_t) { return false; }),
+              "a tick that says stop cancels");
+    }
     ImportedPublication r =
         import_publication(std::vector<uint8_t>(p3.begin(), p3.end()), "two.pdf", "", &fonts);
     CHECK(r.ok, "import a two-page PDF: %s", r.error.c_str());
