@@ -423,12 +423,21 @@ public:
             return true;
         }
         const int type = m_doc.get(fn, "FunctionType").as_int(-1);
-        const float x = in.empty() ? 0.f : in[0];
+        /* Input i clipped to the function's domain (types 0, 2 and 3) */
+        const Object &domain = m_doc.get(fn, "Domain");
+        auto in_at = [&](size_t i) {
+            float v = i < in.size() ? in[i] : 0.f;
+            if (domain.size() >= 2 * i + 2) {
+                const float lo = (float) domain[2 * i].as_number(0), hi = (float) domain[2 * i + 1].as_number(1);
+                v = lo <= hi ? std::clamp(v, lo, hi) : v;
+            }
+            return v;
+        };
         if (type == 2) {
             const Object &c0 = m_doc.get(fn, "C0"), &c1 = m_doc.get(fn, "C1");
             const float n = (float) m_doc.get(fn, "N").as_number(1);
             const size_t k = std::max<size_t>(c0.is(Type::Array) ? c0.size() : 1, c1.is(Type::Array) ? c1.size() : 1);
-            const float t = std::pow(std::max(0.f, x), n);
+            const float t = std::pow(std::max(0.f, in_at(0)), n);
             for (size_t i = 0; i < k; ++i) {
                 const float a = c0.is(Type::Array) ? (float) c0[i].as_number(0) : 0.f;
                 const float b = c1.is(Type::Array) ? (float) c1[i].as_number(1) : 1.f;
@@ -438,8 +447,9 @@ public:
         }
         if (type == 3) {
             const Object &fns = m_doc.get(fn, "Functions"), &bounds = m_doc.get(fn, "Bounds");
-            const Object &encode = m_doc.get(fn, "Encode"), &domain = m_doc.get(fn, "Domain");
+            const Object &encode = m_doc.get(fn, "Encode");
             const float d0 = (float) domain[0].as_number(0), d1 = (float) domain[1].as_number(1);
+            const float x = in_at(0);
             size_t i = 0;
             while (i < bounds.size() && x >= (float) bounds[i].as_number())
                 ++i;
@@ -450,31 +460,76 @@ public:
             return i < fns.size() && eval(fns[i], {e0 + t * (e1 - e0)}, out, depth + 1);
         }
         if (type == 0 && fn.is(Type::Stream)) {
+            /* A sampled function: each input is mapped through Encode onto
+             * the sample grid, and the outputs interpolated (multilinear)
+             * between the grid points around it, then mapped through Decode */
             std::string samples;
             if (!m_doc.stream_bytes(fn, samples))
                 return false;
             const Object &size = m_doc.get(fn, "Size"), &range = m_doc.get(fn, "Range");
+            const Object &encode = m_doc.get(fn, "Encode"), &decode = m_doc.get(fn, "Decode");
             const int bps = m_doc.get(fn, "BitsPerSample").as_int(8);
-            const int count = size[0].as_int(1);
+            const size_t m = std::max<size_t>(1, domain.size() / 2);
             const size_t outs = range.size() / 2;
-            if (count < 1 || outs == 0 || bps <= 0 || bps > 32)
+            if (m > 8 || size.size() < m || outs == 0 || bps <= 0 || bps > 32)
                 return false;
-            const Object &domain = m_doc.get(fn, "Domain");
-            const float d0 = (float) domain[0].as_number(0), d1 = (float) domain[1].as_number(1);
-            const float t = d1 > d0 ? clamp01((x - d0) / (d1 - d0)) : 0.f;
-            const int idx = std::min(count - 1, (int) std::lround(t * (float) (count - 1)));
+            std::vector<int> dims(m);
+            size_t cells = 1;
+            for (size_t i = 0; i < m; ++i) {
+                dims[i] = size[i].as_int(0);
+                if (dims[i] < 1 || cells > (size_t) 1 << 26)
+                    return false;
+                cells *= (size_t) dims[i];
+            }
+            /* Where each input falls on its axis: a grid index and a fraction */
+            std::vector<int> base(m);
+            std::vector<float> frac(m);
+            for (size_t i = 0; i < m; ++i) {
+                const float d0 = (float) domain[2 * i].as_number(0), d1 = (float) domain[2 * i + 1].as_number(1);
+                const float e0 = encode.size() >= 2 * i + 2 ? (float) encode[2 * i].as_number(0) : 0.f;
+                const float e1 = encode.size() >= 2 * i + 2 ? (float) encode[2 * i + 1].as_number(0)
+                                                            : (float) (dims[i] - 1);
+                float e = d1 != d0 ? e0 + (in_at(i) - d0) * (e1 - e0) / (d1 - d0) : e0;
+                e = std::clamp(e, 0.f, (float) (dims[i] - 1));
+                base[i] = std::min((int) std::floor(e), std::max(0, dims[i] - 2));
+                frac[i] = dims[i] > 1 ? e - (float) base[i] : 0.f;
+            }
             const double maxv = std::pow(2.0, bps) - 1.0;
-            for (size_t o = 0; o < outs; ++o) {
-                const size_t bit = ((size_t) idx * outs + o) * (size_t) bps;
+            auto sample = [&](size_t cell, size_t o) {
+                const size_t bit = (cell * outs + o) * (size_t) bps;
                 uint64_t v = 0;
                 for (int b = 0; b < bps; ++b) {
                     const size_t at = bit + (size_t) b;
-                    if (at / 8 >= samples.size())
-                        break;
-                    v = (v << 1) | (((unsigned char) samples[at / 8] >> (7 - at % 8)) & 1);
+                    const unsigned char byte = at / 8 < samples.size() ? (unsigned char) samples[at / 8] : 0;
+                    v = (v << 1) | ((byte >> (7 - at % 8)) & 1);
+                }
+                return (float) (v / maxv);
+            };
+            for (size_t o = 0; o < outs; ++o) {
+                /* Sum over the 2^m corners of the cell, each weighted by
+                 * how near the input is to it */
+                float acc = 0.f;
+                for (size_t corner = 0; corner < ((size_t) 1 << m); ++corner) {
+                    float weight = 1.f;
+                    size_t cell = 0, stride = 1;
+                    for (size_t i = 0; i < m; ++i) {
+                        const bool up = (corner >> i) & 1;
+                        if (up && dims[i] < 2) {
+                            weight = 0.f;
+                            break;
+                        }
+                        weight *= up ? frac[i] : 1.f - frac[i];
+                        cell += (size_t) (base[i] + (up ? 1 : 0)) * stride;
+                        stride *= (size_t) dims[i];
+                    }
+                    if (weight > 0.f)
+                        acc += weight * sample(cell, o);
                 }
                 const float r0 = (float) range[2 * o].as_number(0), r1 = (float) range[2 * o + 1].as_number(1);
-                out.push_back(r0 + (float) (v / maxv) * (r1 - r0));
+                const float dd0 = decode.size() >= 2 * o + 2 ? (float) decode[2 * o].as_number(0) : r0;
+                const float dd1 = decode.size() >= 2 * o + 2 ? (float) decode[2 * o + 1].as_number(1) : r1;
+                const float v = dd0 + acc * (dd1 - dd0);
+                out.push_back(r0 <= r1 ? std::clamp(v, r0, r1) : v);
             }
             return true;
         }
@@ -482,7 +537,7 @@ public:
             std::string code;
             if (!m_doc.stream_bytes(fn, code))
                 return false;
-            const Object &domain = m_doc.get(fn, "Domain"), &range = m_doc.get(fn, "Range");
+            const Object &range = m_doc.get(fn, "Range");
             std::vector<double> stack;
             for (size_t i = 0; i < in.size(); ++i) {
                 double v = in[i];
@@ -701,7 +756,35 @@ struct Shading {
     Transform space;                     // shading space -> the graphic's box
     bool has_bbox = false;
     float bbox[4] = {0, 0, 0, 0};
+    /* Extend: whether the end colors go on past each end of the axis (or
+     * inside the start circle and outside the end one). PDF's default is
+     * neither: nothing is painted there. */
+    bool extend0 = false, extend1 = false;
 };
+
+/* Past an end that doesn't extend, the paint is transparent. The paint
+ * model always pads, so the ramp is narrowed by a hair at that end and a
+ * clear copy of the end color pads past it. */
+void unextended_ends(std::vector<GradientStop> &stops, bool extend0, bool extend1) {
+    const float eps = 1e-3f;
+    if (stops.empty() || (extend0 && extend1))
+        return;
+    const float lo = extend0 ? 0.f : eps, hi = extend1 ? 1.f : 1.f - eps;
+    for (GradientStop &st : stops)
+        st.offset = lo + st.offset * (hi - lo);
+    if (!extend0) {
+        GradientStop clear = stops.front();
+        clear.offset = 0.f;
+        clear.color.a = 0.f;
+        stops.insert(stops.begin(), clear);
+    }
+    if (!extend1) {
+        GradientStop clear = stops.back();
+        clear.offset = 1.f;
+        clear.color.a = 0.f;
+        stops.push_back(clear);
+    }
+}
 
 /* The gradient paint for a shading: linear from (x0, y0) to (x1, y1), or
  * radial with the outer circle as the unit circle and the inner circle's
@@ -715,14 +798,40 @@ VectorPaint shading_paint(const Shading &sh, float alpha) {
         float dx = sh.x1 - sh.x0, dy = sh.y1 - sh.y0;
         if (dx == 0.f && dy == 0.f)
             dx = 1e-3f;
-        p.xf = sh.space * Transform{dx, dy, -dy, dx, sh.x0, sh.y0};
+        /* An end that doesn't extend: the axis is lengthened by a hair
+         * there, and the narrowed ramp below keeps the colors in place */
+        const float eps = 1e-3f, lo = sh.extend0 ? 0.f : eps, hi = sh.extend1 ? 1.f : 1.f - eps;
+        const float span = 1.f / (hi - lo), start = -lo * span;
+        p.xf = sh.space * Transform{dx, dy, -dy, dx, sh.x0, sh.y0} * Transform{span, 0, 0, span, start, 0};
+        unextended_ends(p.stops, sh.extend0, sh.extend1);
     } else {
-        const float r1 = std::max(sh.r1, 1e-3f);
+        /* The outer circle is the unit circle; past it, nothing unless it
+         * extends (the radius grows by a hair to make room) */
+        const float eps = 1e-3f;
+        const float grow = sh.extend1 ? 1.f : 1.f / (1.f - eps);
+        const float r1 = std::max(sh.r1, 1e-3f) * grow;
         p.xf = sh.space * Transform{r1, 0, 0, r1, sh.x1, sh.y1};
         p.focal = {(sh.x0 - sh.x1) / r1, (sh.y0 - sh.y1) / r1};
-        if (sh.r0 > 0.f)
-            for (GradientStop &st : p.stops)
-                st.offset = (sh.r0 + st.offset * (r1 - sh.r0)) / r1;
+        const float inner = sh.r0 > 0.f ? sh.r0 / r1 : 0.f, outer = std::max(sh.r1, 1e-3f) / r1;
+        for (GradientStop &st : p.stops)
+            st.offset = inner + st.offset * (outer - inner);
+        if (!sh.extend1 && !p.stops.empty()) {
+            GradientStop clear = p.stops.back();
+            clear.offset = 1.f;
+            clear.color.a = 0.f;
+            p.stops.push_back(clear);
+        }
+        /* Inside the start circle, nothing unless it extends */
+        if (!sh.extend0 && inner > eps && !p.stops.empty()) {
+            p.stops.front().offset = inner;
+            GradientStop clear = p.stops.front();
+            clear.offset = std::max(0.f, inner - eps);
+            clear.color.a = 0.f;
+            p.stops.insert(p.stops.begin(), clear);
+            GradientStop zero = clear;
+            zero.offset = 0.f;
+            p.stops.insert(p.stops.begin(), zero);
+        }
     }
     for (GradientStop &st : p.stops)
         st.color.a *= alpha;
@@ -1049,6 +1158,11 @@ private:
         if (out->stops.size() < 2) {
             note(m_scene, "color functions");
             return nullptr;
+        }
+        const Object &extend = m_doc.get(obj, "Extend");
+        if (extend.size() >= 2) {
+            out->extend0 = m_doc.resolve(extend[0]).boolean;
+            out->extend1 = m_doc.resolve(extend[1]).boolean;
         }
         const Object &bbox = m_doc.get(obj, "BBox");
         if (bbox.size() == 4) {

@@ -3547,6 +3547,16 @@ static void test_pdf_settings(const FontLibrary &fonts) {
     if (ok)
         CHECK(info.find("Pages:           3") != std::string::npos &&
               info.find("Holiday book") != std::string::npos, "poppler reads it: %s", info.c_str());
+    {
+        /* PDF/X needs a title: an untitled export is named for its file */
+        PdfSettings untitled;
+        untitled.pdfx4 = true;
+        CHECK(export_pdf(path, doc, comps, &store, &untitled), "export PDF/X-4 untitled");
+        const std::string u = pdf_plain(read_bin(path));
+        CHECK(u.find("/Title (pagemade-settings)") != std::string::npos &&
+                  u.find("<rdf:li xml:lang=\"x-default\">pagemade-settings</rdf:li>") != std::string::npos,
+              "an untitled PDF/X takes its file's name as the title");
+    }
 
     std::vector<std::string> warn = pdf_preflight(doc, comps, &store, PdfSettings());
     bool odd = false, low = false;
@@ -6306,6 +6316,93 @@ static void test_pdf_import(const FontLibrary &fonts) {
     CHECK(spot == 1, "the spot color goes through its PostScript tint transform");
     CHECK(gs.skipped.empty(), "nothing skipped (%s)", gs.skipped.empty() ? "" : gs.skipped[0].c_str());
 
+    /* Extend: an axial shading without it paints nothing past its axis
+     * (PDF's default); with [true true] the end colors go on */
+    {
+        const std::string body = "/Sh1 sh\n/Sh2 sh\n";
+        const std::string fn = "/Function << /FunctionType 2 /Domain [0 1] /C0 [1 0 0] /C1 [0 0 1] /N 1 >>";
+        std::string p6 = "%PDF-1.4\n";
+        p6 += "1 0 obj << /Type /Catalog /Pages 2 0 R >> endobj\n";
+        p6 += "2 0 obj << /Type /Pages /Kids [3 0 R] /Count 1 >> endobj\n";
+        p6 += "3 0 obj << /Type /Page /Parent 2 0 R /MediaBox [0 0 100 100] /Contents 4 0 R /Resources << "
+              "/Shading << /Sh1 5 0 R /Sh2 6 0 R >> >> >> endobj\n";
+        p6 += "4 0 obj << /Length " + std::to_string(body.size()) + " >> stream\n" + body + "\nendstream endobj\n";
+        p6 += "5 0 obj << /ShadingType 2 /ColorSpace /DeviceRGB /Coords [25 0 75 0] " + fn + " >> endobj\n";
+        p6 += "6 0 obj << /ShadingType 2 /ColorSpace /DeviceRGB /Coords [25 0 75 0] /Extend [true true] " + fn +
+              " >> endobj\n";
+        p6 += "trailer << /Root 1 0 R >>\n%%EOF\n";
+        VectorScene es;
+        CHECK(vector_loader().decode((const uint8_t *) p6.data(), p6.size(), &es, &err), "extend: %s", err.c_str());
+        /* The paint at x (y down page space): along the gradient, padded */
+        auto at = [](const VectorPaint &p, float x) {
+            const float u = std::clamp(p.xf.inverse().apply({x, 50.f}).x, 0.f, 1.f);
+            const std::vector<GradientStop> &st = p.stops;
+            Color c = st.front().color;
+            for (size_t i = 1; i < st.size(); ++i)
+                if (u <= st[i].offset) {
+                    const float span = st[i].offset - st[i - 1].offset;
+                    const float t = span > 0.f ? (u - st[i - 1].offset) / span : 1.f;
+                    const Color &a = st[i - 1].color, &b = st[i].color;
+                    return Color{a.r + t * (b.r - a.r), a.g + t * (b.g - a.g), a.b + t * (b.b - a.b),
+                                 a.a + t * (b.a - a.a)};
+                } else {
+                    c = st[i].color;
+                }
+            return c;
+        };
+        CHECK(es.shapes.size() == 2, "two shadings (%zu)", es.shapes.size());
+        if (es.shapes.size() == 2) {
+            const VectorPaint &none = es.shapes[0].fill, &both = es.shapes[1].fill;
+            const Color mid = at(none, 50.f), left = at(none, 10.f), right = at(none, 90.f);
+            CHECK(std::fabs(mid.r - 0.5f) < 0.02f && std::fabs(mid.b - 0.5f) < 0.02f && mid.a > 0.99f,
+                  "the ramp is where it was (%g %g %g %g)", mid.r, mid.g, mid.b, mid.a);
+            CHECK(left.a < 0.01f && right.a < 0.01f, "nothing past the ends without Extend (%g, %g)", left.a,
+                  right.a);
+            CHECK(at(none, 25.5f).r > 0.95f && at(none, 25.5f).a > 0.99f && at(none, 74.5f).b > 0.95f,
+                  "and the end colors reach the ends");
+            const Color l2 = at(both, 10.f), r2 = at(both, 90.f);
+            CHECK(l2.a > 0.99f && l2.r > 0.99f && r2.a > 0.99f && r2.b > 0.99f,
+                  "Extend [true true] pads with the end colors");
+        }
+    }
+
+    /* Sampled tint transforms interpolate between their samples: a spot
+     * color whose function has two samples (none, full magenta) at 30%,
+     * and a two-input DeviceN on a 2 x 2 grid (cyan, magenta) */
+    {
+        const std::string body = "/CS1 cs 0.3 scn 0 0 50 50 re f\n/CS2 cs 0.5 0.25 scn 50 0 50 50 re f\n";
+        const std::string sep = "00000000 00FF0000>";
+        const std::string dn = "00000000 FF000000 00FF0000 FFFF0000>";
+        std::string p5 = "%PDF-1.4\n";
+        p5 += "1 0 obj << /Type /Catalog /Pages 2 0 R >> endobj\n";
+        p5 += "2 0 obj << /Type /Pages /Kids [3 0 R] /Count 1 >> endobj\n";
+        p5 += "3 0 obj << /Type /Page /Parent 2 0 R /MediaBox [0 0 100 50] /Contents 4 0 R /Resources << "
+              "/ColorSpace << /CS1 [/Separation /Spot /DeviceCMYK 5 0 R] "
+              "/CS2 [/DeviceN [/A /B] /DeviceCMYK 6 0 R] >> >> >> endobj\n";
+        p5 += "4 0 obj << /Length " + std::to_string(body.size()) + " >> stream\n" + body + "\nendstream endobj\n";
+        p5 += "5 0 obj << /FunctionType 0 /Domain [0 1] /Range [0 1 0 1 0 1 0 1] /Size [2] /BitsPerSample 8 "
+              "/Filter /ASCIIHexDecode /Length " + std::to_string(sep.size()) + " >> stream\n" + sep +
+              "\nendstream endobj\n";
+        p5 += "6 0 obj << /FunctionType 0 /Domain [0 1 0 1] /Range [0 1 0 1 0 1 0 1] /Size [2 2] "
+              "/BitsPerSample 8 /Filter /ASCIIHexDecode /Length " + std::to_string(dn.size()) +
+              " >> stream\n" + dn + "\nendstream endobj\n";
+        p5 += "trailer << /Root 1 0 R >>\n%%EOF\n";
+        VectorScene ts;
+        CHECK(vector_loader().decode((const uint8_t *) p5.data(), p5.size(), &ts, &err), "tints: %s", err.c_str());
+        auto same = [](const Color &a, const Color &b) {
+            return std::fabs(a.r - b.r) < 0.01f && std::fabs(a.g - b.g) < 0.01f && std::fabs(a.b - b.b) < 0.01f;
+        };
+        CHECK(ts.shapes.size() == 2, "two tinted squares (%zu)", ts.shapes.size());
+        if (ts.shapes.size() == 2) {
+            const Color want_sep = cmyk_to_rgb({0, 30, 0, 0}), want_dn = cmyk_to_rgb({50, 25, 0, 0});
+            const Color &a = ts.shapes[0].fill.color, &b = ts.shapes[1].fill.color;
+            CHECK(same(a, want_sep), "a 30%% spot tint is 30%% magenta (%g %g %g, want %g %g %g)", a.r, a.g, a.b,
+                  want_sep.r, want_sep.g, want_sep.b);
+            CHECK(same(b, want_dn), "a two-input DeviceN reads both inputs (%g %g %g, want %g %g %g)", b.r, b.g,
+                  b.b, want_dn.r, want_dn.g, want_dn.b);
+        }
+    }
+
     /* A pattern maps to the default space of the stream that paints with
      * it: a cm in the page doesn't move it, a form's space does. The same
      * radial pattern (center 25,25) fills a square after a cm on the page,
@@ -6440,6 +6537,240 @@ static void test_parser_depth() {
         dict_destroy(v);
 }
 
+/* A copy of face 0 of an OpenType collection whose CFF charset maps glyph
+ * g to CID g + 1, so its CIDs aren't its glyph ids (as in an Adobe-Japan1
+ * font). False unless the face has a CID-keyed CFF with one identity range. */
+static bool write_shifted_cid_font(const std::string &ttc, const std::string &out) {
+    const std::string d = read_bin(ttc);
+    auto u16 = [&](size_t at) { return at + 2 <= d.size() ? (uint32_t) ((uint8_t) d[at] << 8 | (uint8_t) d[at + 1]) : 0u; };
+    auto u32 = [&](size_t at) { return (u16(at) << 16) | u16(at + 2); };
+    if (d.size() < 16)
+        return false;
+    const size_t face = d.compare(0, 4, "ttcf") == 0 ? u32(12) : 0;
+    const uint32_t ntab = u16(face + 4);
+    std::vector<std::pair<std::string, std::string>> tables;
+    for (uint32_t i = 0; i < ntab; ++i) {
+        const size_t e = face + 12 + 16 * i;
+        const uint32_t off = u32(e + 8), len = u32(e + 12);
+        if ((size_t) off + len > d.size())
+            return false;
+        tables.push_back({d.substr(e, 4), d.substr(off, len)});
+    }
+    std::string *cff = nullptr;
+    for (auto &t : tables)
+        if (t.first == "CFF ")
+            cff = &t.second;
+    if (!cff || cff->size() < 4)
+        return false;
+    std::string &c = *cff;
+    auto cu = [&](size_t at, int n) {
+        uint32_t v = 0;
+        for (int i = 0; i < n; ++i)
+            v = v << 8 | (at + i < c.size() ? (uint8_t) c[at + i] : 0);
+        return v;
+    };
+    auto index_end = [&](size_t at, size_t *data, uint32_t *first, uint32_t *second) {
+        const uint32_t count = cu(at, 2);
+        if (!count)
+            return at + 2;
+        const int os = (int) cu(at + 2, 1);
+        const size_t base = at + 3 + (size_t) (count + 1) * os - 1;
+        if (data) *data = base;
+        if (first) *first = cu(at + 3, os);
+        if (second) *second = cu(at + 3 + os, os);
+        return base + cu(at + 3 + (size_t) count * os, os);
+    };
+    size_t top = 0;
+    uint32_t t0 = 0, t1 = 0;
+    index_end(index_end((uint8_t) c[2], nullptr, nullptr, nullptr), &top, &t0, &t1);
+    /* Top DICT: the charset (15) and CharStrings (17) offsets; ROS (12 30) */
+    long last = 0, charset = 0, charstrings = 0;
+    bool ros = false;
+    for (size_t p = top + t0; p < top + t1 && p < c.size();) {
+        const uint8_t b0 = (uint8_t) c[p];
+        if (b0 <= 21) {
+            const int op = b0 == 12 ? 1200 + (uint8_t) c[p + 1] : b0;
+            if (op == 15) charset = last;
+            if (op == 17) charstrings = last;
+            if (op == 1230) ros = true;
+            p += b0 == 12 ? 2 : 1;
+        } else if (b0 == 28) { last = (int16_t) cu(p + 1, 2); p += 3; }
+        else if (b0 == 29) { last = (int32_t) cu(p + 1, 4); p += 5; }
+        else if (b0 == 30) {
+            ++p;
+            while (p < c.size() && ((uint8_t) c[p] & 0x0F) != 0x0F && ((uint8_t) c[p] >> 4) != 0x0F) ++p;
+            ++p;
+        } else if (b0 <= 246) { last = b0 - 139; ++p; }
+        else if (b0 <= 250) { last = (b0 - 247) * 256 + (uint8_t) c[p + 1] + 108; p += 2; }
+        else { last = -(b0 - 251) * 256 - (uint8_t) c[p + 1] - 108; p += 2; }
+    }
+    const uint32_t glyphs = cu((size_t) charstrings, 2);
+    if (!ros || charset <= 2 || (size_t) charset + 5 > c.size() || c[(size_t) charset] != 2 ||
+        cu((size_t) charset + 1, 2) != 1 || cu((size_t) charset + 3, 2) != glyphs - 2)
+        return false;
+    c[(size_t) charset + 1] = 0;                 // the range's first CID: 1 -> 2
+    c[(size_t) charset + 2] = 2;
+
+    std::string o;
+    auto put16 = [&](uint32_t v) { o += (char) (v >> 8); o += (char) v; };
+    auto put32 = [&](uint32_t v) { put16(v >> 16); put16(v & 0xFFFF); };
+    put32(0x4F54544F);
+    put16(ntab); put16(0); put16(0); put16(0);
+    size_t at = 12 + 16 * tables.size();
+    std::string body;
+    for (auto &t : tables) {
+        o += t.first;
+        put32(0);
+        put32((uint32_t) (at + body.size()));
+        put32((uint32_t) t.second.size());
+        body += t.second;
+        while (body.size() % 4) body += '\0';
+    }
+    FILE *f = std::fopen(out.c_str(), "wb");
+    if (!f)
+        return false;
+    const bool ok = std::fwrite(o.data(), 1, o.size(), f) == o.size() &&
+                    std::fwrite(body.data(), 1, body.size(), f) == body.size();
+    return std::fclose(f) == 0 && ok;
+}
+
+/* A CID-keyed CFF font is found by CID: when its CIDs aren't its glyph ids,
+ * the exported codes have to be the CIDs, or the text vanishes. The same
+ * line in a font and in a copy whose CIDs are shifted must import back as
+ * the same outlines. Needs Noto Sans CJK. */
+static void test_pdf_cid_keyed(FontLibrary &fonts) {
+    const std::string noto = "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc";
+    const std::string shifted = "/tmp/pagemade-shifted-cid.otf";
+    if (read_bin(noto).empty() || !write_shifted_cid_font(noto, shifted) ||
+        !fonts.add_file("CJK Test", "Regular", noto) || !fonts.add_file("CJK Shifted", "Regular", shifted)) {
+        std::printf("  (skip: no Noto Sans CJK with a one-range CID charset)\n");
+        return;
+    }
+    auto outlines = [&](const char *family, size_t &cmds, std::string &text) {
+        CharStyle cs;
+        cs.size = 48;
+        cs.family = family;
+        PageDoc doc;
+        StoryId id = doc.add_story(one_para("\xE6\xBC\xA2\xE5\xAD\x97 Aa", cs, ParaStyle()));
+        doc.add_text_frame(0, id, 400, 80, Transform::translate(36, 36));
+        std::vector<Composition> comps;
+        comps.push_back(compose(doc.stories[0].story, doc.thread_frames(doc.stories[0]), fonts));
+        const std::string path = "/tmp/pagemade-cid.pdf";
+        if (!export_pdf(path, doc, comps))
+            return false;
+        const std::string pdf = read_bin(path);
+        text = pdf_plain(pdf);
+        VectorScene scene;
+        std::string err;
+        if (!vector_loader().decode((const uint8_t *) pdf.data(), pdf.size(), &scene, &err))
+            return false;
+        cmds = 0;
+        for (const VectorShape &sh : scene.shapes)
+            cmds += sh.path.size();
+        std::remove(path.c_str());
+        return true;
+    };
+    size_t plain = 0, moved = 0;
+    std::string plain_pdf, moved_pdf;
+    CHECK(outlines("CJK Test", plain, plain_pdf) && outlines("CJK Shifted", moved, moved_pdf),
+          "export and read back both fonts");
+    CHECK(plain > 20 && moved == plain,
+          "glyphs found by CID draw the same outlines (%zu vs %zu path commands)", moved, plain);
+    CHECK(moved_pdf.find("/Registry (Adobe) /Ordering (Identity) /Supplement 0") != std::string::npos,
+          "the CIDFont gives the font's own registry and ordering");
+    std::remove(shifted.c_str());
+}
+
+/* An 8 x 8 solid red (C0 M100 Y100 K0) CMYK JPEG with Adobe's APP14
+ * marker, as Photoshop writes them: the samples are stored inverted. */
+static const char kAdobeCmykJpeg[] =
+    "\xff\xd8\xff\xee\x00\x0e\x41\x64\x6f\x62\x65\x00\x64\x00\x00\x00\x00\x00\xff\xdb\x00\x43\x00\x10"
+    "\x0b\x0c\x0e\x0c\x0a\x10\x0e\x0d\x0e\x12\x11\x10\x13\x18\x28\x1a\x18\x16\x16\x18\x31\x23\x25\x1d"
+    "\x28\x3a\x33\x3d\x3c\x39\x33\x38\x37\x40\x48\x5c\x4e\x40\x44\x57\x45\x37\x38\x50\x6d\x51\x57\x5f"
+    "\x62\x67\x68\x67\x3e\x4d\x71\x79\x70\x64\x78\x5c\x65\x67\x63\xff\xc0\x00\x14\x08\x00\x08\x00\x08"
+    "\x04\x43\x11\x00\x4d\x11\x00\x59\x11\x00\x4b\x11\x00\xff\xc4\x00\x1f\x00\x00\x01\x05\x01\x01\x01"
+    "\x01\x01\x01\x00\x00\x00\x00\x00\x00\x00\x00\x01\x02\x03\x04\x05\x06\x07\x08\x09\x0a\x0b\xff\xc4"
+    "\x00\xb5\x10\x00\x02\x01\x03\x03\x02\x04\x03\x05\x05\x04\x04\x00\x00\x01\x7d\x01\x02\x03\x00\x04"
+    "\x11\x05\x12\x21\x31\x41\x06\x13\x51\x61\x07\x22\x71\x14\x32\x81\x91\xa1\x08\x23\x42\xb1\xc1\x15"
+    "\x52\xd1\xf0\x24\x33\x62\x72\x82\x09\x0a\x16\x17\x18\x19\x1a\x25\x26\x27\x28\x29\x2a\x34\x35\x36"
+    "\x37\x38\x39\x3a\x43\x44\x45\x46\x47\x48\x49\x4a\x53\x54\x55\x56\x57\x58\x59\x5a\x63\x64\x65\x66"
+    "\x67\x68\x69\x6a\x73\x74\x75\x76\x77\x78\x79\x7a\x83\x84\x85\x86\x87\x88\x89\x8a\x92\x93\x94\x95"
+    "\x96\x97\x98\x99\x9a\xa2\xa3\xa4\xa5\xa6\xa7\xa8\xa9\xaa\xb2\xb3\xb4\xb5\xb6\xb7\xb8\xb9\xba\xc2"
+    "\xc3\xc4\xc5\xc6\xc7\xc8\xc9\xca\xd2\xd3\xd4\xd5\xd6\xd7\xd8\xd9\xda\xe1\xe2\xe3\xe4\xe5\xe6\xe7"
+    "\xe8\xe9\xea\xf1\xf2\xf3\xf4\xf5\xf6\xf7\xf8\xf9\xfa\xff\xda\x00\x0e\x04\x43\x00\x4d\x00\x59\x00"
+    "\x4b\x00\x00\x3f\x00\xf4\x0a\xf3\xfa\xf3\xfa\xf4\x0a\xff\xd9";
+
+/* A CMYK JPEG goes in as it is, with the Decode array that undoes Adobe's
+ * inversion (else it prints as a negative), and PDF/X-4 gets no
+ * interpolation even for pictures written as JPEG. */
+static void test_pdf_picture_flags() {
+    const std::vector<uint8_t> cmyk(kAdobeCmykJpeg, kAdobeCmykJpeg + sizeof kAdobeCmykJpeg - 1);
+    ImageStore store;
+    ImageMetadata meta;
+    std::string err;
+    const uint32_t id = store.take_id();
+    CHECK(store.add(id, cmyk, &meta, &err) && meta.channels == 4, "a CMYK JPEG: %s", err.c_str());
+    PageDoc doc;
+    ImageAsset asset;
+    asset.id = id;
+    asset.name = "red.jpg";
+    asset.meta = meta;
+    doc.add_image(std::move(asset));
+    Item it;
+    it.w = 72;
+    it.h = 72;
+    it.content = PlacedImage{id, 0, 0, 72, 72};
+    doc.add_item(0, it);
+    std::vector<Composition> comps;
+    const std::string path = "/tmp/pagemade-cmyk.pdf";
+    CHECK(export_pdf(path, doc, comps, &store), "export the CMYK JPEG");
+    std::string plain = pdf_plain(read_bin(path));
+    CHECK(plain.find("/ColorSpace /DeviceCMYK /BitsPerComponent 8 /Decode [1 0 1 0 1 0 1 0]") !=
+                  std::string::npos && plain.find("/DCTDecode") != std::string::npos,
+          "Adobe's inverted CMYK is passed through with a Decode that inverts it back");
+
+    /* Read back: the importer keeps the JPEG; decoded, it is red */
+    const std::string pdf = read_bin(path);
+    VectorScene scene;
+    CHECK(vector_loader().decode((const uint8_t *) pdf.data(), pdf.size(), &scene, &err) &&
+              scene.images.size() == 1 && scene.images[0].bytes,
+          "read the picture back: %s", err.c_str());
+    if (scene.images.size() == 1 && scene.images[0].bytes) {
+        DecodedImage px;
+        const std::vector<uint8_t> &b = *scene.images[0].bytes;
+        CHECK(image_loader().decode(b.data(), b.size(), &px, &err) && px.width == 8 &&
+                  px.rgba[0] > 200 && px.rgba[1] < 80 && px.rgba[2] < 80,
+              "and it is red (%d %d %d)", px.rgba.empty() ? -1 : px.rgba[0],
+              px.rgba.empty() ? -1 : px.rgba[1], px.rgba.empty() ? -1 : px.rgba[2]);
+    }
+
+    PdfSettings x4;
+    x4.pdfx4 = true;
+    x4.compression = PdfSettings::Compression::Jpeg;
+    PageDoc png_doc;
+    ImageStore png_store;
+    const uint32_t pid = png_store.take_id();
+    std::vector<uint8_t> blue(8 * 8 * 3);
+    for (size_t i = 0; i < blue.size(); i += 3) {
+        blue[i] = 30;
+        blue[i + 1] = 120;
+        blue[i + 2] = 200;
+    }
+    CHECK(png_store.add(pid, make_png(8, 8, blue.data(), 2835, 2835), &meta, &err), "a PNG: %s", err.c_str());
+    ImageAsset pa;
+    pa.id = pid;
+    pa.name = "blue.png";
+    pa.meta = meta;
+    png_doc.add_image(std::move(pa));
+    it.content = PlacedImage{pid, 0, 0, 72, 72};
+    png_doc.add_item(0, it);
+    CHECK(export_pdf(path, png_doc, comps, &png_store, &x4), "export PDF/X-4 with JPEG compression");
+    plain = pdf_plain(read_bin(path));
+    CHECK(plain.find("/DCTDecode") != std::string::npos && plain.find("/Interpolate") == std::string::npos,
+          "a picture written as JPEG for PDF/X-4 isn't interpolated");
+    std::remove(path.c_str());
+}
+
 int main(int argc, char **argv) {
     bool verbose = argc > 1 && std::strcmp(argv[1], "-v") == 0;
     FontLibrary fonts;
@@ -6515,6 +6846,8 @@ int main(int argc, char **argv) {
     test_svg_paste(fonts);
     test_pdf_import(fonts);
     test_parser_depth();
+    test_pdf_cid_keyed(fonts);
+    test_pdf_picture_flags();
     test_xml_validation();
     test_system_fonts();
     if (verbose)

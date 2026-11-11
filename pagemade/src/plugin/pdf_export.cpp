@@ -35,8 +35,8 @@ namespace {
 
 /* Points with up to three decimals, nothing trailing. */
 std::string num(float v) {
-    if (std::fabs(v) < 5e-4f)
-        v = 0;
+    if (!std::isfinite(v) || std::fabs(v) < 5e-4f)
+        v = 0;                           // nan or inf isn't PDF syntax; a reader stops at it
     char buf[40];
     std::snprintf(buf, sizeof buf, "%.3f", (double) v);
     std::string s = buf;
@@ -222,7 +222,167 @@ struct PdfFont {
     std::set<uint32_t> gids;
     /* gid -> the text it came from (a ligature's glyph maps to both chars). */
     std::map<uint32_t, std::string> unicode;
+    /* A CID-keyed CFF whose CIDs aren't its glyph ids (an Adobe-Japan1
+     * font, say): the reader finds a glyph by CID through the font's
+     * charset, so the character code is the CID. Empty when code == gid. */
+    std::map<uint32_t, uint32_t> cid_of;
+    uint32_t code(uint32_t gid) const {
+        auto it = cid_of.find(gid);
+        return it == cid_of.end() ? gid : it->second;
+    }
 };
+
+/* A CFF's registry, ordering and supplement (its ROS) and the CID of each
+ * glyph, from its charset. False when the font isn't CID-keyed (glyphs are
+ * found by gid then) or the table can't be read. Every read is bounded. */
+bool cff_cids(const std::string &cff, std::vector<uint32_t> &cid, std::string &registry,
+              std::string &ordering, int &supplement) {
+    const uint8_t *s = (const uint8_t *) cff.data();
+    const size_t n = cff.size();
+    auto card = [&](size_t at, int size, uint32_t &v) {
+        if (size < 1 || size > 4 || at + (size_t) size > n)
+            return false;
+        v = 0;
+        for (int i = 0; i < size; ++i)
+            v = (v << 8) | s[at + (size_t) i];
+        return true;
+    };
+    struct Index { size_t data = 0; std::vector<uint32_t> offs; size_t end = 0; };
+    auto index = [&](size_t at, Index &ix) {
+        uint32_t count = 0, off_size = 0;
+        if (!card(at, 2, count))
+            return false;
+        if (count == 0) {
+            ix.end = at + 2;
+            return true;
+        }
+        if (!card(at + 2, 1, off_size) || off_size < 1 || off_size > 4)
+            return false;
+        ix.offs.resize(count + 1);
+        for (uint32_t i = 0; i <= count; ++i)
+            if (!card(at + 3 + (size_t) i * off_size, (int) off_size, ix.offs[i]) ||
+                ix.offs[i] < 1 || (i && ix.offs[i] < ix.offs[i - 1]))
+                return false;
+        ix.data = at + 3 + (size_t) (count + 1) * off_size - 1;
+        ix.end = ix.data + ix.offs.back();
+        return ix.end <= n;
+    };
+    if (n < 4)
+        return false;
+    Index names, tops, strings;
+    if (!index(s[2], names) || !index(names.end, tops) || tops.offs.size() < 2 ||
+        !index(tops.end, strings))
+        return false;
+
+    /* The first Top DICT: ROS (12 30), charset (15), CharStrings (17) */
+    bool ros = false;
+    double ros_ops[3] = {0, 0, 0};
+    uint32_t charset = 0, charstrings = 0;
+    std::vector<double> ops;
+    for (size_t p = tops.data + tops.offs[0], e = tops.data + tops.offs[1]; p < e;) {
+        const uint8_t b0 = s[p];
+        if (b0 <= 21) {
+            int op = b0;
+            if (b0 == 12) {
+                if (p + 1 >= e)
+                    return false;
+                op = 1200 + s[p + 1];
+                p += 2;
+            } else {
+                ++p;
+            }
+            if (op == 1230 && ops.size() >= 3) {
+                ros = true;
+                std::copy(ops.end() - 3, ops.end(), ros_ops);
+            } else if (op == 15 && !ops.empty()) {
+                charset = (uint32_t) ops.back();
+            } else if (op == 17 && !ops.empty()) {
+                charstrings = (uint32_t) ops.back();
+            }
+            ops.clear();
+        } else if (b0 == 28 || b0 == 29) {
+            uint32_t v = 0;
+            if (!card(p + 1, b0 == 28 ? 2 : 4, v))
+                return false;
+            ops.push_back(b0 == 28 ? (double) (int16_t) v : (double) (int32_t) v);
+            p += b0 == 28 ? 3 : 5;
+        } else if (b0 == 30) {               // a real: skipped to its end nibble
+            ++p;
+            while (p < e && (s[p] & 0x0F) != 0x0F && (s[p] >> 4) != 0x0F)
+                ++p;
+            ++p;
+            ops.push_back(0);
+        } else if (b0 >= 32 && b0 <= 246) {
+            ops.push_back(b0 - 139);
+            ++p;
+        } else if (b0 >= 247 && b0 <= 254) {
+            if (p + 1 >= e)
+                return false;
+            const int v = (b0 <= 250 ? (b0 - 247) * 256 + s[p + 1] + 108
+                                     : -(b0 - 251) * 256 - s[p + 1] - 108);
+            ops.push_back(v);
+            p += 2;
+        } else {
+            return false;
+        }
+    }
+    if (!ros || charstrings == 0)
+        return false;
+    Index glyphs;
+    if (!index(charstrings, glyphs) || glyphs.offs.size() < 2)
+        return false;
+    const size_t count = glyphs.offs.size() - 1;
+
+    /* SIDs past the 391 standard strings are in the String INDEX */
+    auto sid = [&](double v, std::string &out) {
+        const long id = (long) v - 391;
+        if (id < 0 || (size_t) id + 1 >= strings.offs.size())
+            return false;
+        const size_t a = strings.data + strings.offs[(size_t) id];
+        const size_t b = strings.data + strings.offs[(size_t) id + 1];
+        out.assign((const char *) s + a, b - a);
+        return true;
+    };
+    if (!sid(ros_ops[0], registry) || !sid(ros_ops[1], ordering))
+        return false;
+    supplement = (int) ros_ops[2];
+
+    /* Charset: gid 0 is CID 0; formats 0 (a list), 1 and 2 (ranges) */
+    cid.assign(count, 0);
+    if (charset <= 2)                        // the predefined charsets aren't CID-keyed
+        return false;
+    uint32_t fmt = 0;
+    if (!card(charset, 1, fmt) || fmt > 2)
+        return false;
+    size_t p = charset + 1;
+    for (size_t g = 1; g < count;) {
+        uint32_t first = 0, left = 0;
+        if (fmt == 0) {
+            if (!card(p, 2, first))
+                return false;
+            cid[g++] = first;
+            p += 2;
+            continue;
+        }
+        if (!card(p, 2, first) || !card(p + 2, fmt == 1 ? 1 : 2, left))
+            return false;
+        p += fmt == 1 ? 3 : 4;
+        for (uint32_t k = 0; k <= left && g < count; ++k)
+            cid[g++] = first + k;
+    }
+    return true;
+}
+
+/* A PDF literal string: ( ) and \ escaped */
+std::string pdf_literal(const std::string &s) {
+    std::string out = "(";
+    for (char c : s) {
+        if (c == '(' || c == ')' || c == '\\')
+            out += '\\';
+        out += c;
+    }
+    return out + ")";
+}
 
 /* The text span of every used glyph, recovered from the compositions
  * (clusters are byte offsets into the paragraph's text). */
@@ -328,10 +488,48 @@ bool embed_font(Writer &w, PdfFont &pf, int &out_res, int &tag_seq) {
     hb_blob_destroy(blob);
     hb_face_destroy(sub);
 
+    /* A CID-keyed CFF: its ROS names the CIDs, and when they aren't the
+     * glyph ids each glyph is written as its CID */
+    std::string registry = "Adobe", ordering = "Identity";
+    int supplement = 0;
+    pf.cid_of.clear();
+    if (cff) {
+        std::vector<uint32_t> cids;
+        std::string reg, ord;
+        int sup = 0;
+        if (cff_cids(bytes, cids, reg, ord, sup)) {
+            registry = reg;
+            ordering = ord;
+            supplement = sup;
+            for (uint32_t gid : pf.gids)
+                if (gid < cids.size() && cids[gid] != gid)
+                    pf.cid_of[gid] = cids[gid];
+        }
+    }
+
+    /* The subset tag: six capitals from the face and its glyph set (FNV-1a),
+     * so different subsets of a font get different names, and a merged or
+     * imposed PDF doesn't take one for the other. The sequence number keeps
+     * two faces in one file apart even if their hashes meet. */
+    uint64_t h = 1469598103934665603ull;
+    auto mix = [&](uint64_t v) {
+        for (int i = 0; i < 8; ++i) {
+            h ^= (v >> (8 * i)) & 0xFF;
+            h *= 1099511628211ull;
+        }
+    };
+    for (char ch : font->postscript_name())
+        mix((uint8_t) ch);
+    for (uint32_t gid : pf.gids)
+        mix(gid);
+    mix((uint64_t) tag_seq++);
     char tag[8];
-    std::snprintf(tag, sizeof tag, "PGM%c%c%c+", 'A' + (tag_seq / 26 / 26) % 26,
-                  'A' + (tag_seq / 26) % 26, 'A' + tag_seq % 26);
-    ++tag_seq;
+    for (int i = 0; i < 6; ++i) {
+        tag[i] = (char) ('A' + h % 26);
+        h /= 26;
+    }
+    tag[6] = '+';
+    tag[7] = '\0';
     const std::string ps = tag + font->postscript_name();
 
     int file = w.add_stream(cff ? "/Subtype /CIDFontType0C" : "/Length1 " +
@@ -361,13 +559,14 @@ bool embed_font(Writer &w, PdfFont &pf, int &out_res, int &tag_seq) {
     /* Widths: one [gid [w]] chunk per glyph keeps the W array simple. */
     std::string widths;
     for (uint32_t gid : pf.gids)
-        widths += " " + std::to_string(gid) + " [" +
+        widths += " " + std::to_string(pf.code(gid)) + " [" +
                   std::to_string(em(font->advance(gid))) + "]";
     std::string cid = "<< /Type /Font /Subtype /" +
                       std::string(cff ? "CIDFontType0" : "CIDFontType2") +
                       " /BaseFont /" + ps +
-                      " /CIDSystemInfo << /Registry (Adobe) /Ordering (Identity)"
-                      " /Supplement 0 >> /FontDescriptor " + std::to_string(desc) +
+                      " /CIDSystemInfo << /Registry " + pdf_literal(registry) + " /Ordering " +
+                      pdf_literal(ordering) + " /Supplement " + std::to_string(supplement) +
+                      " >> /FontDescriptor " + std::to_string(desc) +
                       " 0 R /DW " + std::to_string(em(font->advance(font->space_glyph()))) +
                       " /W [" + widths + " ]";
     if (!cff)
@@ -381,13 +580,17 @@ bool embed_font(Writer &w, PdfFont &pf, int &out_res, int &tag_seq) {
         "/CIDSystemInfo << /Registry (Adobe) /Ordering (UCS) /Supplement 0 >> def\n"
         "/CMapName /Adobe-Identity-UCS def\n/CMapType 2 def\n"
         "1 begincodespacerange\n<0000> <FFFF>\nendcodespacerange\n";
+    /* Keyed by character code (the CID when it isn't the gid), in order */
+    std::map<uint32_t, const std::string *> by_code;
+    for (const auto &kv : pf.unicode)
+        by_code[pf.code(kv.first)] = &kv.second;
     size_t n = 0;
-    size_t total = pf.unicode.size();
-    for (auto it = pf.unicode.begin(); it != pf.unicode.end();) {
+    size_t total = by_code.size();
+    for (auto it = by_code.begin(); it != by_code.end();) {
         size_t chunk = std::min((size_t) 100, total - n);
         cmap += std::to_string(chunk) + " beginbfchar\n";
         for (size_t k = 0; k < chunk; ++k, ++it)
-            cmap += "<" + hex16(it->first) + "> <" + utf16_hex(it->second) + ">\n";
+            cmap += "<" + hex16(it->first) + "> <" + utf16_hex(*it->second) + ">\n";
         cmap += "endbfchar\n";
         n += chunk;
     }
@@ -572,7 +775,7 @@ void emit_cm(std::string &s, const Transform &t) {
 /* A glyph run as real text: one BT/ET, each glyph at its composed position
  * (Tm carries the horizontal scale and the y-flip that keeps glyphs
  * upright under the page's y-down CTM). */
-void emit_glyphs(std::string &s, const GlyphRun &r, const Color &color, int res,
+void emit_glyphs(std::string &s, const GlyphRun &r, const PdfFont &pf, const Color &color, int res,
                  std::map<int, float> &alphas, bool tagged) {
     s += emit_color(color, false, alphas, tagged);
     s += "BT /F" + std::to_string(res) + " " + num(r.size) + " Tf\n";
@@ -581,7 +784,7 @@ void emit_glyphs(std::string &s, const GlyphRun &r, const Color &color, int res,
         if (g.flags & PlacedGlyph::Invisible)
             continue;
         char code[8];
-        std::snprintf(code, sizeof code, "%04X", g.gid);
+        std::snprintf(code, sizeof code, "%04X", pf.code(g.gid) & 0xFFFF);
         s += num(hs) + " 0 0 -1 " + num(g.x) + " " + num(g.y) + " Tm <" + code + "> Tj\n";
     }
     s += "ET\n";
@@ -653,6 +856,29 @@ bool picture_source(const ImageStore *images, uint32_t id, ImageStore::Bytes &by
     return true;
 }
 
+/* Whether a JPEG has Adobe's APP14 marker. Photoshop and most other tools
+ * that write one store CMYK (and YCCK) inverted, 255 for no ink; a PDF
+ * reader takes DCT samples as they are, so the image needs a Decode array
+ * that inverts them back, or it prints as a negative. */
+bool jpeg_adobe_marker(const uint8_t *d, size_t n) {
+    for (size_t p = 2; p + 4 <= n && d[p] == 0xFF;) {
+        const uint8_t m = d[p + 1];
+        if (m == 0xD8 || m == 0x01 || (m >= 0xD0 && m <= 0xD7)) {   // no length
+            p += 2;
+            continue;
+        }
+        if (m == 0xDA || m == 0xD9)          // the scan: markers are over
+            return false;
+        const size_t len = (size_t) d[p + 2] << 8 | d[p + 3];
+        if (len < 2)
+            return false;
+        if (m == 0xEE && len >= 7 && p + 9 <= n && std::memcmp(d + p + 4, "Adobe", 5) == 0)
+            return true;
+        p += 2 + len;
+    }
+    return false;
+}
+
 /* One XObject for the picture's source. A JPEG that isn't resampled keeps
  * its DCT stream and its stored (unrotated) pixel size; the page stream
  * turns it upright. Everything else is decoded upright, resampled when
@@ -671,16 +897,18 @@ PdfPicture embed_picture(Writer &w, const ImageStore::Entry &e, const PictureOpt
                           (opt.width < m.width_px || opt.height < m.height_px);
     const bool gray_jpeg = m.model == ColorModel::Gray || m.channels == 1;
     const bool cmyk_jpeg = m.model == ColorModel::CMYK || m.channels == 4;
-    /* Tagged color has no place for a device gray or CMYK JPEG: decode it */
+    /* Tagged color has no place for a device gray or CMYK JPEG: decode it.
+     * DCTDecode is 8 bits a sample only, so a 12-bit JPEG is decoded too. */
     if (jpeg && !resample && m.stored_width_px > 0 && m.stored_height_px > 0 &&
-        !(opt.tagged && (gray_jpeg || cmyk_jpeg))) {
+        m.bit_depth != 12 && !(opt.tagged && (gray_jpeg || cmyk_jpeg))) {
         const std::string cs = gray_jpeg ? "/DeviceGray" : cmyk_jpeg ? "/DeviceCMYK"
                              : rgb_space(w, m.icc, opt.tagged);
-        int bits = m.bit_depth == 12 ? 12 : 8;
+        const bool inverted = cmyk_jpeg && jpeg_adobe_marker(src, e.size());
         std::string dict = "/Type /XObject /Subtype /Image /Width " +
                            std::to_string(m.stored_width_px) + " /Height " +
                            std::to_string(m.stored_height_px) + " /ColorSpace " + cs +
-                           " /BitsPerComponent " + std::to_string(bits) +
+                           " /BitsPerComponent 8" +
+                           std::string(inverted ? " /Decode [1 0 1 0 1 0 1 0]" : "") +
                            std::string(opt.interpolate ? " /Interpolate true" : "") + " /Filter /DCTDecode";
         out.obj = w.add_raw_stream(dict, std::string((const char *) e.data(), e.size()));
         out.upright = false;
@@ -718,7 +946,8 @@ PdfPicture embed_picture(Writer &w, const ImageStore::Entry &e, const PictureOpt
                 "/Type /XObject /Subtype /Image /Width " + std::to_string(full.width) +
                     " /Height " + std::to_string(full.height) + " /ColorSpace " +
                     rgb_space(w, full.meta.icc, opt.tagged) +
-                    " /BitsPerComponent 8 /Interpolate true /Filter /DCTDecode",
+                    " /BitsPerComponent 8" + std::string(opt.interpolate ? " /Interpolate true" : "") +
+                    " /Filter /DCTDecode",
                 data);
             out.upright = true;
             return out;
@@ -1373,7 +1602,8 @@ bool export_pdf(const std::string &path, const PageDoc &doc,
                 if (it == font_res.end())
                     continue;
                 emit_cm(content, g->xf);
-                emit_glyphs(content, *g->run, g->color, it->second, alphas, tagged);
+                emit_glyphs(content, *g->run, fonts.at(g->run->font), g->color, it->second, alphas,
+                            tagged);
                 content += "Q\n";
             } else if (const auto *f = std::get_if<DrawFill>(&op)) {
                 emit_cm(content, f->xf);
@@ -1522,10 +1752,17 @@ bool export_pdf(const std::string &path, const PageDoc &doc,
                         (uint64_t) page_objs.size();
     const std::string id = hex64(h1) + hex64(h2);
     std::string catalog_extra, trailer = " /ID [<" + id + "> <" + id + ">]";
+    /* PDF/X requires a title (Info and XMP alike): without one, the file's name */
+    PdfSettings meta = o;
+    if (meta.pdfx4 && meta.title.empty()) {
+        meta.title = nanogui::fs::stem(path);
+        if (meta.title.empty())
+            meta.title = "Untitled";
+    }
     if (o.pdfx4 || !o.title.empty() || !o.author.empty() || !o.subject.empty()) {
         std::string info = "<< /Creator (pagemade) /Producer (pagemade) /CreationDate (" +
                            pdf_date + ") /ModDate (" + pdf_date + ")";
-        if (!o.title.empty()) info += " /Title " + pdf_text(o.title);
+        if (!meta.title.empty()) info += " /Title " + pdf_text(meta.title);
         if (!o.author.empty()) info += " /Author " + pdf_text(o.author);
         if (!o.subject.empty()) info += " /Subject " + pdf_text(o.subject);
         if (o.pdfx4) info += " /Trapped /False /GTS_PDFXVersion (PDF/X-4)";
@@ -1550,10 +1787,10 @@ bool export_pdf(const std::string &path, const PageDoc &doc,
                                  std::to_string(prof) + " 0 R >>");
         const std::string uuid = id.substr(0, 8) + "-" + id.substr(8, 4) + "-" + id.substr(12, 4) +
                                  "-" + id.substr(16, 4) + "-" + id.substr(20, 12);
-        const std::string xmp = xmp_packet(o, xmp_date, uuid);
-        const int meta = w.add_raw_stream("/Type /Metadata /Subtype /XML", xmp);
+        const std::string xmp = xmp_packet(meta, xmp_date, uuid);
+        const int meta_obj = w.add_raw_stream("/Type /Metadata /Subtype /XML", xmp);
         catalog_extra = " /OutputIntents [" + std::to_string(intent) + " 0 R] /Metadata " +
-                        std::to_string(meta) + " 0 R";
+                        std::to_string(meta_obj) + " 0 R";
     }
     int catalog = w.add("<< /Type /Catalog /Pages " + std::to_string(pages_obj) + " 0 R" +
                         catalog_extra + " >>");
