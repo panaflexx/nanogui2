@@ -1240,6 +1240,25 @@ public:
         });
     }
 
+    /* A file from the command line: a publication opens; a drawing (SVG,
+     * PDF, whatever the vector loader reads) is imported as a new
+     * publication. Told apart by content, not name: a publication is a zip
+     * package, and no drawing format is. */
+    bool open_any(const std::string &path) {
+        unsigned char head[4] = {0, 0, 0, 0};
+        size_t got = 0;
+        if (FILE *f = std::fopen(path.c_str(), "rb")) {
+            got = std::fread(head, 1, sizeof head, f);
+            std::fclose(f);
+        } else {
+            show_alert(this, "\u201C" + nanogui::fs::filename(path) + "\u201D couldn't be opened.",
+                       "There is no such file, or it can't be read.");
+            return false;
+        }
+        const bool package = got == 4 && head[0] == 'P' && head[1] == 'K' && head[2] == 3 && head[3] == 4;
+        return package ? open_path(path) : import_path(path);
+    }
+
     /* Open without asking about the current publication (callers do that). */
     bool open_path(const std::string &path) {
         /* Linked pictures are read as they come on screen, not here */
@@ -3826,6 +3845,16 @@ int main(int argc, char **argv) {
         else if (a == "--no-snap") no_snap = true;
         else if (a == "--caption-pictures") caption_pictures = true;
         else if (a == "--fit-columns") fit_columns = true;
+        else if (a == "--help" || a == "-h") {
+            std::printf("usage: pagemade [file]\n"
+                        "  file: a .%s publication to open, or an SVG or PDF\n"
+                        "        (or another drawing format) to import as a new publication\n",
+                        kPublicationExtension);
+            return 0;
+        }
+        /* A bare argument is the file to open (the first one; the rest are
+         * ignored). macOS's old -psn_ process serial number is skipped. */
+        else if (!a.empty() && a[0] != '-' && open_path.empty()) open_path = a;
     }
 
     shot = make_absolute(shot);
@@ -3843,7 +3872,7 @@ int main(int argc, char **argv) {
         app->dec_ref();
         app->set_visible(true);
         for (int k = 0; k < 3; ++k) { app->perform_layout(); app->draw_all(); }
-        if (!open_path.empty() && !app->open_path(open_path))
+        if (!open_path.empty() && !app->open_any(open_path))
             std::printf("open FAILED %s\n", open_path.c_str());
         if (caption_pictures)
             app->view()->set_caption_pictures(true);
