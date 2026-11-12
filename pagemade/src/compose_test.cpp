@@ -5570,10 +5570,63 @@ static void test_layout_templates(const FontLibrary &fonts) {
     const float k = std::min(468.f / 504.f, 324.f / 684.f);
     CHECK(fit.ok() && near(fit.parts[0].scale, k), "scaled to the live area (%g)",
           fit.ok() ? fit.parts[0].scale : 0.f);
-    const LayoutRect first = layout_rect_on_page(fit.parts[0], grid->elements[0].rect);
-    const float used_w = 504.f * k;
-    CHECK(near(first.x, 18.f + (468.f - used_w) * 0.5f) && near(first.y, 18),
-          "centered across, top at the margin (%g, %g)", first.x, first.y);
+    {
+        /* The grid fills the wider page: the frames stretch across, the
+         * gutters keep the layout's scale, and it reaches both margins */
+        float x0 = 1e9f, x1 = -1e9f, y0 = 1e9f, y1 = -1e9f;
+        std::vector<LayoutRect> rs;
+        for (const LayoutElement &e : grid->elements) {
+            const LayoutRect r = layout_element_on_page(fit.parts[0], e);
+            rs.push_back(r);
+            x0 = std::min(x0, r.x);
+            x1 = std::max(x1, r.x + r.w);
+            y0 = std::min(y0, r.y);
+            y1 = std::max(y1, r.y + r.h);
+        }
+        CHECK(near(x0, 18) && near(x1, 486) && near(y0, 18) && near(y1, 342),
+              "the grid fills the live area (%g..%g, %g..%g)", x0, x1, y0, y1);
+        /* Template gutters, and on the page */
+        const LayoutRect &a = grid->elements[0].rect, &b = grid->elements[1].rect;
+        const float tgap = std::fabs(b.x - (a.x + a.w)) > 0.01f ? b.x - (a.x + a.w)
+                                                                 : b.y - (a.y + a.h);
+        float gx = 1e9f, gy = 1e9f;
+        for (const LayoutRect &p : rs)
+            for (const LayoutRect &q : rs) {
+                if (q.x > p.x + p.w - 0.01f && std::fabs(q.y - p.y) < 0.01f)
+                    gx = std::min(gx, q.x - (p.x + p.w));
+                if (q.y > p.y + p.h - 0.01f && std::fabs(q.x - p.x) < 0.01f)
+                    gy = std::min(gy, q.y - (p.y + p.h));
+            }
+        CHECK(near(gx, tgap * k) && near(gy, tgap * k),
+              "gutters keep the layout's scale both ways (%g, %g; want %g)", gx, gy, tgap * k);
+        CHECK(rs[0].w > rs[0].h, "the frames turned wide with the page (%g x %g)", rs[0].w, rs[0].h);
+    }
+    {
+        /* A headline across two columns doesn't stretch the gutter under it */
+        LayoutTemplate t;
+        t.width = 300;
+        t.height = 300;
+        t.margins = {10, 10, 10, 10, 10};
+        LayoutElement head, l, r;
+        head.kind = LayoutElement::Kind::Text;
+        head.rect = {10, 10, 280, 40};
+        l.rect = {10, 60, 135, 230};
+        r.rect = {155, 60, 135, 230};
+        t.elements = {head, l, r};
+        PageSetup wide;
+        wide.width = 620;
+        wide.height = 320;
+        wide.margin_top = wide.margin_bottom = wide.margin_inside = wide.margin_outside = 10;
+        PageDoc w = new_publication(wide, 1);
+        const LayoutFit f = fit_layout(w, t, 0);
+        const LayoutRect hr = layout_rect_on_page(f.parts[0], head.rect),
+                         lr = layout_rect_on_page(f.parts[0], l.rect),
+                         rr = layout_rect_on_page(f.parts[0], r.rect);
+        CHECK(near(f.parts[0].scale, 300.f / 280.f) && near(rr.x - (lr.x + lr.w), 10.f * 300.f / 280.f) &&
+                  near(lr.w, rr.w) && near(hr.x, 10) && near(hr.x + hr.w, 610),
+              "columns stretch, the gutter doesn't (gap %g, %g / %g wide, head to %g)",
+              rr.x - (lr.x + lr.w), lr.w, rr.w, hr.x + hr.w);
+    }
 
     /* Text and SVG: a story in the named style, type scaled with the layout */
     const LayoutTemplate *title = find(defs, "Title Page");

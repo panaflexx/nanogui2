@@ -6205,7 +6205,7 @@ void ComposerView::draw(NVGcontext *ctx) {
                 nvgTranslate(ctx, o.x() + sl.x, o.y() + sl.y);
                 for (size_t ei : part.elements) {
                     const LayoutElement &el = m_drop_layout->elements[ei];
-                    const LayoutRect r = layout_rect_on_page(part, el.rect);
+                    const LayoutRect r = layout_element_on_page(part, el);
                     nvgBeginPath(ctx);
                     if (el.kind == LayoutElement::Kind::Shape && el.shape == Shape::Kind::Line) {
                         nvgMoveTo(ctx, r.x, r.y);

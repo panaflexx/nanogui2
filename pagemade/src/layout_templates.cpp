@@ -477,7 +477,100 @@ float element_center_x(const LayoutElement &e) {
     return e.rect.x + e.rect.w * 0.5f;
 }
 
+/* A frame's extent along the axis being stretched, and across it */
+struct Span {
+    float lo, hi, across_lo, across_hi;
+};
+
+/* The box's [c0, c1] onto the page's [l0, l0 + len] along one axis.
+ * Cut at every frame edge; each piece is a gutter (scaled by k) or part
+ * of a frame (stretched so the whole reaches len). Leaves `from` empty
+ * when nothing stretches: the uniform map already fits this way. */
+void stretch_axis(const std::vector<Span> &frames, float c0, float c1, float l0, float len, float k,
+                  std::vector<float> &from, std::vector<float> &to) {
+    constexpr float eps = 0.01f;
+    std::vector<float> cuts{c0, c1};
+    for (const Span &f : frames)
+        for (float v : {f.lo, f.hi})
+            if (v > c0 && v < c1)
+                cuts.push_back(v);
+    std::sort(cuts.begin(), cuts.end());
+    std::vector<float> uniq;
+    for (float v : cuts)
+        if (uniq.empty() || v - uniq.back() > eps)
+            uniq.push_back(v);
+    if (uniq.size() < 2)
+        return;
+    const size_t n = uniq.size() - 1;
+    std::vector<char> stretch(n, 0);
+    float fixed = 0.f, flex = 0.f;
+    for (size_t i = 0; i < n; ++i) {
+        const float a = uniq[i], b = uniq[i + 1];
+        bool covered = false;
+        for (const Span &f : frames)
+            covered = covered || (f.lo <= a + eps && f.hi >= b - eps);
+        /* Two frames side by side with this between them: a gutter, even
+         * under a frame that spans both */
+        bool gutter = false;
+        for (const Span &l : frames) {
+            if (!covered || gutter || l.hi > a + eps)
+                continue;
+            for (const Span &r : frames)
+                if (r.lo >= b - eps && std::min(l.across_hi, r.across_hi) -
+                                               std::max(l.across_lo, r.across_lo) > eps) {
+                    gutter = true;
+                    break;
+                }
+        }
+        stretch[i] = covered && !gutter;
+        (stretch[i] ? flex : fixed) += b - a;
+    }
+    if (flex < eps)
+        return;
+    const float s = (len - fixed * k) / flex;
+    if (!(s > k * 1.001f))
+        return;
+    from.push_back(uniq[0]);
+    to.push_back(l0);
+    for (size_t i = 0; i < n; ++i) {
+        from.push_back(uniq[i + 1]);
+        to.push_back(to.back() + (uniq[i + 1] - uniq[i]) * (stretch[i] ? s : k));
+    }
+}
+
+/* Stretch `p`'s frames to fill `live` both ways. */
+void stretch_part(LayoutFit::Part &p, const LayoutTemplate &t, const Area &c, const Area &live) {
+    std::vector<Span> xs, ys;
+    for (size_t ei : p.elements) {
+        const LayoutElement &e = t.elements[ei];
+        const LayoutRect &r = e.rect;
+        if ((e.kind != LayoutElement::Kind::Photo && e.kind != LayoutElement::Kind::Text) ||
+            !(r.w > 0.f) || !(r.h > 0.f))
+            continue;
+        xs.push_back({r.x, r.x + r.w, r.y, r.y + r.h});
+        ys.push_back({r.y, r.y + r.h, r.x, r.x + r.w});
+    }
+    stretch_axis(xs, c.x, c.x + c.w, live.x, live.w, p.scale, p.x_from, p.x_to);
+    stretch_axis(ys, c.y, c.y + c.h, live.y, live.h, p.scale, p.y_from, p.y_to);
+}
+
+float map_axis(const std::vector<float> &from, const std::vector<float> &to, float v, float k,
+               float d) {
+    if (from.size() < 2)
+        return v * k + d;
+    if (v <= from.front())
+        return to.front() + (v - from.front()) * k;
+    if (v >= from.back())
+        return to.back() + (v - from.back()) * k;
+    const size_t i = (size_t) (std::upper_bound(from.begin(), from.end(), v) - from.begin()) - 1;
+    const float u = (v - from[i]) / (from[i + 1] - from[i]);
+    return to[i] + u * (to[i + 1] - to[i]);
+}
+
 } // namespace
+
+float LayoutFit::Part::map_x(float x) const { return map_axis(x_from, x_to, x, scale, dx); }
+float LayoutFit::Part::map_y(float y) const { return map_axis(y_from, y_to, y, scale, dy); }
 
 LayoutFit fit_layout(const PageDoc &doc, const LayoutTemplate &t, size_t page) {
     LayoutFit fit;
@@ -509,6 +602,8 @@ LayoutFit fit_layout(const PageDoc &doc, const LayoutTemplate &t, size_t page) {
         LayoutFit::Part pl = part_for(left, cl, ll, k), pr = part_for(right, cr, lr, k);
         for (size_t i = 0; i < t.elements.size(); ++i)
             (element_center_x(t.elements[i]) < half ? pl : pr).elements.push_back(i);
+        stretch_part(pl, t, cl, ll);
+        stretch_part(pr, t, cr, lr);
         fit.parts.push_back(std::move(pl));
         fit.parts.push_back(std::move(pr));
         return fit;
@@ -518,13 +613,24 @@ LayoutFit fit_layout(const PageDoc &doc, const LayoutTemplate &t, size_t page) {
     LayoutFit::Part p = part_for(page, c, live, fit_scale(c, live));
     for (size_t i = 0; i < t.elements.size(); ++i)
         p.elements.push_back(i);
+    stretch_part(p, t, c, live);
     fit.parts.push_back(std::move(p));
     return fit;
 }
 
 LayoutRect layout_rect_on_page(const LayoutFit::Part &part, const LayoutRect &r) {
-    return {r.x * part.scale + part.dx, r.y * part.scale + part.dy, r.w * part.scale,
-            r.h * part.scale};
+    const float x0 = part.map_x(r.x), y0 = part.map_y(r.y);
+    return {x0, y0, part.map_x(r.x + r.w) - x0, part.map_y(r.y + r.h) - y0};
+}
+
+LayoutRect layout_element_on_page(const LayoutFit::Part &part, const LayoutElement &e) {
+    LayoutRect r = layout_rect_on_page(part, e.rect);
+    if (e.kind == LayoutElement::Kind::Shape && e.shape == Shape::Kind::Ellipse &&
+        std::fabs(e.rect.w - e.rect.h) < 0.5f && r.w > 0.f && r.h > 0.f) {
+        const float d = std::min(r.w, r.h);
+        r = {r.x + (r.w - d) * 0.5f, r.y + (r.h - d) * 0.5f, d, d};
+    }
+    return r;
 }
 
 namespace {
@@ -644,7 +750,7 @@ LayoutPlacement place_layout(PageDoc &doc, VectorStore *vectors, const LayoutTem
         const float k = part.scale;
         for (size_t ei : part.elements) {
             const LayoutElement &e = t.elements[ei];
-            const LayoutRect r = layout_rect_on_page(part, e.rect);
+            const LayoutRect r = layout_element_on_page(part, e);
             Item it;
             it.w = r.w;
             it.h = r.h;
