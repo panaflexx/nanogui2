@@ -31,7 +31,7 @@ bool swatch_library_save(const SwatchLibrary &library, const std::string &path);
  * as it is, even when empty. */
 void swatch_library_load_or_seed(SwatchLibrary &library, const std::string &path);
 
-/* $XDG_CONFIG_HOME/pagemade/colors.conf, else ~/.config/pagemade/colors.conf. */
+/* colors.conf in the per-user config directory. See user_config.h. */
 std::string swatch_library_config_path();
 
 /* Built-ins followed by the library's custom swatches, ids intact. */

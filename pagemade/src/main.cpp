@@ -80,6 +80,7 @@
 #include "spinbox.h"
 #include "swatch_library.h"
 #include "swatch_menu.h"
+#include "user_config.h"
 
 #define STB_IMAGE_WRITE_IMPLEMENTATION
 #include "../../ext/glfw/deps/stb_image_write.h"
@@ -642,13 +643,7 @@ private:
 /* View settings kept between sessions (view.conf beside colors.conf):
  * "key=value" lines, '#' comments. Only dark_mode so far. */
 static std::string view_config_path() {
-    if (const char *xdg = std::getenv("XDG_CONFIG_HOME"))
-        if (xdg[0])
-            return std::string(xdg) + "/pagemade/view.conf";
-    if (const char *home = std::getenv("HOME"))
-        if (home[0])
-            return std::string(home) + "/.config/pagemade/view.conf";
-    return "pagemade-view.conf";
+    return user_config_file("view.conf");
 }
 
 static bool load_dark_mode() {

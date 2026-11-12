@@ -7,7 +7,7 @@
  * table of contents, then seven chapters of 14 pages: an opener with big
  * type and an SVG ornament, photo grid pages (8 or 6 photos with captions),
  * and big-text "random fact" pages. Photos come from the pagemade image
- * asset library (~/.config/pagemade/assets.conf) and stay linked, never
+ * asset library (assets.conf; see user_config.h) and stay linked, never
  * embedded; SVGs come from ~/Pictures/SVG. All text is made up on the spot
  * from name and fact pools (fixed seed, so runs are repeatable).
  */
@@ -119,15 +119,13 @@ constexpr int kChapters = 7;
 /* ------------------------------------------------------------------ */
 
 static std::string leaf_name(const std::string &path) {
-    const size_t s = path.find_last_of('/');
+    const size_t s = path.find_last_of("/\\");
     return s == std::string::npos ? path : path.substr(s + 1);
 }
 
 /* The photo library: the first directory in pagemade's asset config. */
 static std::string asset_library_dir() {
-    const char *home = std::getenv("HOME");
-    std::string conf = std::string(home ? home : ".") + "/.config/pagemade/assets.conf";
-    FILE *f = std::fopen(conf.c_str(), "r");
+    FILE *f = std::fopen(asset_library_config_path().c_str(), "r");
     if (!f)
         return {};
     char line[4096];

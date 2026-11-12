@@ -2,10 +2,10 @@
  * pagemade/swatch_library.cpp — see swatch_library.h.
  */
 #include "swatch_library.h"
+#include "user_config.h"
 
 #include <algorithm>
 #include <cstdio>
-#include <cstdlib>
 #include <fstream>
 #include <nanogui/fscompat.h>
 
@@ -175,13 +175,7 @@ void swatch_library_load_or_seed(SwatchLibrary &library, const std::string &path
 }
 
 std::string swatch_library_config_path() {
-    if (const char *xdg = std::getenv("XDG_CONFIG_HOME"))
-        if (xdg[0])
-            return std::string(xdg) + "/pagemade/colors.conf";
-    if (const char *home = std::getenv("HOME"))
-        if (home[0])
-            return std::string(home) + "/.config/pagemade/colors.conf";
-    return "pagemade-colors.conf";
+    return user_config_file("colors.conf");
 }
 
 std::vector<Swatch> swatch_library_swatches(const SwatchLibrary &library) {

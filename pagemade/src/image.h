@@ -286,8 +286,8 @@ private:
 };
 
 /* The Image Assets library: the folders and image files the user added,
- * kept across sessions in $XDG_CONFIG_HOME/pagemade/assets.conf (else
- * ~/.config/pagemade/assets.conf), one path per line. */
+ * kept across sessions in the per-user config directory (assets.conf),
+ * one path per line. See user_config.h. */
 std::string asset_library_config_path();
 /* False when the file is missing or unreadable; `paths` is then empty. */
 bool asset_library_load(std::vector<std::string> &paths, const std::string &config);

@@ -71,7 +71,7 @@ FontMenuList font_menu_defaults(const std::vector<std::string> &installed);
 void font_menu_load_or_seed(FontMenuModel &model, const std::string &path,
                             const std::vector<std::string> &installed);
 
-/* $XDG_CONFIG_HOME/pagemade/fonts.conf, else ~/.config/pagemade/fonts.conf. */
+/* fonts.conf in the per-user config directory. See user_config.h. */
 std::string font_menu_config_path();
 
 /* Unique CharStyle::family values in story order. */

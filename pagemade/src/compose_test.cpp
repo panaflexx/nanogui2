@@ -4456,6 +4456,7 @@ static void test_font_menu() {
 
     const std::string config = font_menu_config_path();
     CHECK(!config.empty() && (config.find("pagemade/fonts.conf") != std::string::npos ||
+                              config.find("pagemade\\fonts.conf") != std::string::npos ||
                               config == "pagemade-fonts.conf"),
           "config path %s", config.c_str());
 }
@@ -4572,6 +4573,7 @@ static void test_swatch_library() {
     const std::string config_path = swatch_library_config_path();
     CHECK(!config_path.empty() &&
               (config_path.find("pagemade/colors.conf") != std::string::npos ||
+               config_path.find("pagemade\\colors.conf") != std::string::npos ||
                config_path == "pagemade-colors.conf"),
           "config path %s", config_path.c_str());
 }
@@ -4913,6 +4915,7 @@ static void test_asset_library_config() {
     nanogui::fs::remove_all(dir);
     const std::string config = asset_library_config_path();
     CHECK(config.find("pagemade/assets.conf") != std::string::npos ||
+              config.find("pagemade\\assets.conf") != std::string::npos ||
               config == "pagemade-assets.conf",
           "config path %s", config.c_str());
 }

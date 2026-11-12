@@ -10,6 +10,7 @@
 #include "image_color.h"
 #include "page.h"
 #include "uri.h"
+#include "user_config.h"
 
 #include "nanovg_exif.h"
 
@@ -1633,13 +1634,7 @@ bool ImageStore::display(uint32_t id, int long_edge, const uint8_t **rgba, int *
 }
 
 std::string asset_library_config_path() {
-    if (const char *xdg = std::getenv("XDG_CONFIG_HOME"))
-        if (xdg[0])
-            return std::string(xdg) + "/pagemade/assets.conf";
-    if (const char *home = std::getenv("HOME"))
-        if (home[0])
-            return std::string(home) + "/.config/pagemade/assets.conf";
-    return "pagemade-assets.conf";
+    return user_config_file("assets.conf");
 }
 
 bool asset_library_load(std::vector<std::string> &paths, const std::string &config) {

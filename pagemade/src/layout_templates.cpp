@@ -9,6 +9,7 @@
 
 #include "geometry.h"
 #include "json_util.h"
+#include "user_config.h"
 #include "vector.h"
 
 #include <nanogui/fscompat.h>
@@ -16,7 +17,6 @@
 #include <algorithm>
 #include <cmath>
 #include <cstdio>
-#include <cstdlib>
 #include <fstream>
 #include <map>
 #include <sstream>
@@ -370,13 +370,7 @@ bool layout_templates_from_json(const std::string &text, std::vector<LayoutTempl
 /* ---- The config file ------------------------------------------------------- */
 
 std::string layout_templates_config_path() {
-    if (const char *xdg = std::getenv("XDG_CONFIG_HOME"))
-        if (xdg[0])
-            return std::string(xdg) + "/pagemade/layouts.json";
-    if (const char *home = std::getenv("HOME"))
-        if (home[0])
-            return std::string(home) + "/.config/pagemade/layouts.json";
-    return "pagemade-layouts.json";
+    return user_config_file("layouts.json");
 }
 
 bool layout_templates_save(const std::vector<LayoutTemplate> &templates, const std::string &path,

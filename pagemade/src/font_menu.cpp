@@ -4,9 +4,9 @@
 #include "font_menu.h"
 
 #include "page.h"
+#include "user_config.h"
 
 #include <algorithm>
-#include <cstdlib>
 #include <fstream>
 #include <nanogui/fscompat.h>
 
@@ -279,13 +279,7 @@ void font_menu_load_or_seed(FontMenuModel &model, const std::string &path,
 }
 
 std::string font_menu_config_path() {
-    if (const char *xdg = std::getenv("XDG_CONFIG_HOME"))
-        if (xdg[0])
-            return std::string(xdg) + "/pagemade/fonts.conf";
-    if (const char *home = std::getenv("HOME"))
-        if (home[0])
-            return std::string(home) + "/.config/pagemade/fonts.conf";
-    return "pagemade-fonts.conf";
+    return user_config_file("fonts.conf");
 }
 
 std::vector<std::string> document_font_families(const PageDoc &doc) {

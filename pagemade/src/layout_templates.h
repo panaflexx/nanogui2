@@ -121,7 +121,7 @@ std::string layout_templates_json(const std::vector<LayoutTemplate> &templates);
 bool layout_templates_from_json(const std::string &json, std::vector<LayoutTemplate> &out,
                                 std::string *error = nullptr);
 
-/* $XDG_CONFIG_HOME/pagemade/layouts.json, else ~/.config/pagemade/layouts.json. */
+/* layouts.json in the per-user config directory. See user_config.h. */
 std::string layout_templates_config_path();
 /* The file's templates. A missing file is written with the built-in set
  * first; a file that can't be read gives the built-ins (and `error`), and
