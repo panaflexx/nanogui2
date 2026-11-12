@@ -17,6 +17,22 @@
 
 #include <nanogui/opengl.h>
 #include <GLFW/glfw3.h>
+#if defined(_WIN32)
+/* win32_nolegacy.h undefines near/far/small and windows.h will not define
+ * them again. The shell headers still use those macros, so put them back
+ * for this include only. */
+#  define near
+#  define far
+#  define small char
+#  define GLFW_EXPOSE_NATIVE_WIN32
+#  include <GLFW/glfw3native.h>
+#  include <shlobj.h>
+#  undef near
+#  undef far
+#  undef small
+#  pragma comment(lib, "ole32.lib")
+#  pragma comment(lib, "shell32.lib")
+#endif
 #include <nanogui/button.h>
 #include <nanogui/imagestash.h>
 #include <nanogui/label.h>
@@ -36,6 +52,8 @@
 #include <ctime>
 #include <nanogui/fscompat.h>
 #include <mutex>
+#include <stdexcept>
+#include <string>
 #include <utility>
 
 #if !defined(_WIN32)
@@ -214,13 +232,81 @@ std::string shell_quote(const std::string &s) {
     return out;
 }
 
-std::string ask_folder(const std::string &initial) {
+std::string ask_folder(Screen *screen, const std::string &initial) {
 #if defined(_WIN32)
-    (void) initial;
-    return {};
+    /* The system folder picker. Empty when the user cancels. Paths stay in
+     * the process ANSI code page, which is what file_dialog() and fs::
+     * return on Windows. */
+    const HRESULT init = CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED |
+                                         COINIT_DISABLE_OLE1DDE);
+    const bool uninit = SUCCEEDED(init);
+    struct Uninit {
+        bool on;
+        ~Uninit() { if (on) CoUninitialize(); }
+    } com{uninit};
+
+    IFileOpenDialog *dlg = nullptr;
+    HRESULT hr = CoCreateInstance(CLSID_FileOpenDialog, nullptr, CLSCTX_INPROC_SERVER,
+                                  IID_PPV_ARGS(&dlg));
+    if (FAILED(hr) || !dlg)
+        throw std::runtime_error("The folder dialog couldn't be opened.");
+    struct Release {
+        IUnknown *p;
+        ~Release() { if (p) p->Release(); }
+    } hold{dlg};
+
+    DWORD opts = 0;
+    dlg->GetOptions(&opts);
+    dlg->SetOptions(opts | FOS_PICKFOLDERS | FOS_FORCEFILESYSTEM | FOS_PATHMUSTEXIST |
+                    FOS_NOCHANGEDIR);
+    dlg->SetTitle(L"Add Folder");
+    dlg->SetOkButtonLabel(L"Add");
+    if (!initial.empty()) {
+        const int n = MultiByteToWideChar(CP_ACP, 0, initial.c_str(), -1, nullptr, 0);
+        if (n > 1) {
+            std::wstring wide((size_t) n - 1, L'\0');
+            MultiByteToWideChar(CP_ACP, 0, initial.c_str(), -1, wide.data(), n);
+            IShellItem *start = nullptr;
+            if (SUCCEEDED(SHCreateItemFromParsingName(wide.c_str(), nullptr,
+                                                      IID_PPV_ARGS(&start)))) {
+                dlg->SetFolder(start);
+                start->Release();
+            }
+        }
+    }
+
+    HWND owner = nullptr;
+    if (screen && screen->glfw_window())
+        owner = glfwGetWin32Window(screen->glfw_window());
+    hr = dlg->Show(owner);
+    if (hr == HRESULT_FROM_WIN32(ERROR_CANCELLED))
+        return {};
+    if (FAILED(hr))
+        throw std::runtime_error("The folder dialog couldn't be opened.");
+
+    IShellItem *chosen = nullptr;
+    if (FAILED(dlg->GetResult(&chosen)) || !chosen)
+        throw std::runtime_error("The folder dialog didn't return a folder.");
+    Release chosen_hold{chosen};
+    PWSTR path = nullptr;
+    if (FAILED(chosen->GetDisplayName(SIGDN_FILESYSPATH, &path)) || !path)
+        throw std::runtime_error("The folder dialog didn't return a folder.");
+    struct FreePath {
+        PWSTR p;
+        ~FreePath() { if (p) CoTaskMemFree(p); }
+    } free_path{path};
+
+    const int bytes = WideCharToMultiByte(CP_ACP, 0, path, -1, nullptr, 0, nullptr, nullptr);
+    if (bytes <= 1)
+        throw std::runtime_error("The chosen folder's path couldn't be read.");
+    std::string out((size_t) bytes - 1, '\0');
+    WideCharToMultiByte(CP_ACP, 0, path, -1, out.data(), bytes, nullptr, nullptr);
+    return out;
 #elif defined(__APPLE__)
+    (void) screen;
     return mac_folder_dialog(initial);
 #else
+    (void) screen;
     std::string cmd = "zenity --file-selection --directory --title='Add Folder'";
     if (!initial.empty()) {
         std::string filename = initial;
@@ -439,12 +525,14 @@ ImageAssetsPanel::ImageAssetsPanel(Widget *parent, ComposerView *view, ImageStor
             roots_changed();
     });
     add_folder->set_callback([this] {
-        const std::string dir = ask_folder(initial_folder());
-#if defined(_WIN32)
-        if (dir.empty() && screen())
-            show_alert(screen(), "Add Folder isn't available here.",
-                       "Drop a folder onto the picture grid.");
-#endif
+        std::string dir;
+        try {
+            dir = ask_folder(screen(), initial_folder());
+        } catch (const std::exception &ex) {
+            if (screen())
+                show_alert(screen(), "The folder couldn't be chosen.", ex.what());
+            return;
+        }
         if (!dir.empty() && add_root(dir))
             roots_changed();
     });
