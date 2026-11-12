@@ -20,7 +20,11 @@
 #include <unordered_map>
 #include <vector>
 
+#if defined(_WIN32)
+#include <nanogui/pthread_win.h>
+#else
 #include <pthread.h>
+#endif
 
 struct IMGcontext;
 struct IMGimage;

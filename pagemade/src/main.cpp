@@ -103,11 +103,13 @@
 #include <unordered_map>
 #include <vector>
 
-#if !defined(_WIN32)
+#if defined(_WIN32)
+#include <windows.h>
+#include <shellapi.h>
+#include <direct.h>
+#else
 #include <fcntl.h>
 #include <unistd.h>
-#else
-#include <direct.h>
 #endif
 
 #ifndef PAGEMADE_DATA_DIR
@@ -3489,9 +3491,12 @@ public:
         });
     }
 
-    /* Hand a file to the desktop's viewer (xdg-open) */
+    /* Hand a file to the desktop's viewer. */
     void open_with_desktop(const std::string &path) {
-#if !defined(_WIN32)
+#if defined(_WIN32)
+        /* file_dialog() returns ACP paths (GetSaveFileNameA), same as this. */
+        ShellExecuteA(nullptr, "open", path.c_str(), nullptr, nullptr, SW_SHOWNORMAL);
+#else
         pid_t pid = fork();
         if (pid == 0) {
             setsid();
@@ -3504,8 +3509,6 @@ public:
 #endif
             _exit(127);
         }
-#else
-        (void) path;
 #endif
     }
 

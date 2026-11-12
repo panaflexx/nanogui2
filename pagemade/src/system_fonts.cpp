@@ -1,9 +1,11 @@
 /*
  * pagemade/system_fonts.cpp — see system_fonts.h.
  *
- * fc-list is fontconfig's query tool. The dev library is not required:
- * one shot at startup records family, style, file, weight and slant, and
+ * One shot at startup records family, style, file, weight and slant.
  * FontLibrary loads a file only when that cut is shaped.
+ *
+ * Unix asks fontconfig's fc-list (the dev library is not required).
+ * Windows asks DirectWrite, which already knows the installed faces.
  */
 #include "system_fonts.h"
 
@@ -23,12 +25,18 @@
 #include <limits.h>
 #include <sys/stat.h>
 #include <unistd.h>
+#elif defined(_WIN32)
+#define WIN32_LEAN_AND_MEAN
+#include <windows.h>
+#include <dwrite_2.h>
+#include <wrl/client.h>
 #endif
 
 namespace pagemade {
 
 namespace {
 
+#if !defined(_WIN32)
 int css_weight(int fc) {
     struct P { int fc, css; };
     static const P p[] = {
@@ -47,6 +55,7 @@ int css_weight(int fc) {
     }
     return 950;
 }
+#endif
 
 struct Item {
     std::string family, style, path;
@@ -207,10 +216,163 @@ void collect_mac_fonts(std::vector<Item> &items) {
 }
 #endif
 
+void commit_items(FontLibrary &lib, std::vector<Item> &items) {
+    std::sort(items.begin(), items.end(), [](const Item &a, const Item &b) {
+        auto fold = [](std::string s) {
+            for (char &c : s)
+                c = (char) std::tolower((unsigned char) c);
+            return s;
+        };
+        const std::string af = fold(a.family), bf = fold(b.family);
+        if (af != bf) return af < bf;
+        if (a.family != b.family) return a.family < b.family;
+        if (a.weight != b.weight) return a.weight < b.weight;
+        if (a.italic != b.italic) return !a.italic && b.italic;
+        if (a.style != b.style) return a.style < b.style;
+        return !a.ranged && b.ranged;
+    });
+
+    std::string prev;
+    for (const Item &it : items) {
+        const std::string key = field_key(it);
+        if (key == prev)
+            continue;
+        prev = key;
+        lib.add_catalog(it.family, it.style, it.path, it.index, it.weight, it.italic);
+    }
+}
+
+#if defined(_WIN32)
+
+std::string wide_to_utf8(const wchar_t *w, unsigned n) {
+    if (!w || n == 0)
+        return {};
+    const int bytes = WideCharToMultiByte(CP_UTF8, 0, w, (int) n, nullptr, 0, nullptr, nullptr);
+    if (bytes <= 0)
+        return {};
+    std::string s((size_t) bytes, '\0');
+    WideCharToMultiByte(CP_UTF8, 0, w, (int) n, s.data(), bytes, nullptr, nullptr);
+    return s;
+}
+
+std::string localized_name(IDWriteLocalizedStrings *names) {
+    if (!names || names->GetCount() == 0)
+        return {};
+    UINT32 index = 0;
+    BOOL exists = FALSE;
+    if (FAILED(names->FindLocaleName(L"en-us", &index, &exists)) || !exists)
+        index = 0;
+    UINT32 len = 0;
+    if (FAILED(names->GetStringLength(index, &len)))
+        return {};
+    std::wstring w(len + 1, L'\0');
+    if (FAILED(names->GetString(index, w.data(), len + 1)))
+        return {};
+    return wide_to_utf8(w.c_str(), len);
+}
+
+bool outline_font_file(const std::string &path) {
+    const size_t dot = path.find_last_of('.');
+    if (dot == std::string::npos)
+        return false;
+    std::string ext = path.substr(dot);
+    for (char &c : ext)
+        c = (char) std::tolower((unsigned char) c);
+    return ext == ".ttf" || ext == ".otf" || ext == ".ttc" || ext == ".otc";
+}
+
+bool face_file(IDWriteFontFace *face, std::string &path, unsigned &index) {
+    UINT32 nfiles = 0;
+    if (!face || FAILED(face->GetFiles(&nfiles, nullptr)) || nfiles == 0)
+        return false;
+    Microsoft::WRL::ComPtr<IDWriteFontFile> file;
+    if (FAILED(face->GetFiles(&nfiles, file.GetAddressOf())) || !file)
+        return false;
+    const void *key = nullptr;
+    UINT32 key_size = 0;
+    if (FAILED(file->GetReferenceKey(&key, &key_size)))
+        return false;
+    Microsoft::WRL::ComPtr<IDWriteFontFileLoader> loader;
+    if (FAILED(file->GetLoader(loader.GetAddressOf())))
+        return false;
+    Microsoft::WRL::ComPtr<IDWriteLocalFontFileLoader> local;
+    if (FAILED(loader.As(&local)))
+        return false;
+    UINT32 path_len = 0;
+    if (FAILED(local->GetFilePathLengthFromKey(key, key_size, &path_len)))
+        return false;
+    std::wstring w(path_len + 1, L'\0');
+    if (FAILED(local->GetFilePathFromKey(key, key_size, w.data(), path_len + 1)))
+        return false;
+    path = wide_to_utf8(w.c_str(), path_len);
+    index = face->GetIndex();
+    return outline_font_file(path);
+}
+
+void collect_windows_fonts(std::vector<Item> &items) {
+    Microsoft::WRL::ComPtr<IDWriteFactory> factory;
+    if (FAILED(DWriteCreateFactory(DWRITE_FACTORY_TYPE_SHARED, __uuidof(IDWriteFactory),
+                                   reinterpret_cast<IUnknown **>(factory.GetAddressOf()))))
+        return;
+    Microsoft::WRL::ComPtr<IDWriteFontCollection> collection;
+    if (FAILED(factory->GetSystemFontCollection(collection.GetAddressOf(), FALSE)) || !collection)
+        return;
+
+    const UINT32 nfam = collection->GetFontFamilyCount();
+    for (UINT32 fi = 0; fi < nfam; ++fi) {
+        Microsoft::WRL::ComPtr<IDWriteFontFamily> family;
+        if (FAILED(collection->GetFontFamily(fi, family.GetAddressOf())) || !family)
+            continue;
+        Microsoft::WRL::ComPtr<IDWriteLocalizedStrings> family_names;
+        if (FAILED(family->GetFamilyNames(family_names.GetAddressOf())))
+            continue;
+        const std::string family_name = localized_name(family_names.Get());
+        if (family_name.empty())
+            continue;
+
+        const UINT32 nfont = family->GetFontCount();
+        for (UINT32 ji = 0; ji < nfont; ++ji) {
+            Microsoft::WRL::ComPtr<IDWriteFont> font;
+            if (FAILED(family->GetFont(ji, font.GetAddressOf())) || !font)
+                continue;
+            /* Synthesized bold/italic has no file of its own. */
+            if (font->GetSimulations() != DWRITE_FONT_SIMULATIONS_NONE)
+                continue;
+            Microsoft::WRL::ComPtr<IDWriteFontFace> face;
+            if (FAILED(font->CreateFontFace(face.GetAddressOf())) || !face)
+                continue;
+            Microsoft::WRL::ComPtr<IDWriteFontFace2> face2;
+            if (SUCCEEDED(face.As(&face2)) && face2->IsColorFont())
+                continue;                // emoji and other color fonts
+
+            Item it;
+            if (!face_file(face.Get(), it.path, it.index))
+                continue;
+            Microsoft::WRL::ComPtr<IDWriteLocalizedStrings> face_names;
+            std::string style;
+            if (SUCCEEDED(font->GetFaceNames(face_names.GetAddressOf())))
+                style = localized_name(face_names.Get());
+            const DWRITE_FONT_STYLE slant = font->GetStyle();
+            it.family = family_name;
+            it.style = style.empty() ? "Regular" : style;
+            it.weight = (int) font->GetWeight();
+            it.italic = slant == DWRITE_FONT_STYLE_ITALIC || slant == DWRITE_FONT_STYLE_OBLIQUE ||
+                        it.style.find("Italic") != std::string::npos ||
+                        it.style.find("Oblique") != std::string::npos;
+            items.push_back(std::move(it));
+        }
+    }
+}
+
+#endif // _WIN32
+
 } // namespace
 
 void register_system_fonts(FontLibrary &lib) {
     std::vector<Item> items;
+#if defined(_WIN32)
+    collect_windows_fonts(items);
+#else
     if (FILE *fp = popen(
             "fc-list -f '%{family[0]}\t%{style[0]}\t%{file}\t%{index}\t%{weight}\t%{slant}\t%{fontformat}\t%{outline}\t%{color}\n' 2>/dev/null",
             "r")) {
@@ -260,32 +422,10 @@ void register_system_fonts(FontLibrary &lib) {
     if (items.empty())
         collect_mac_fonts(items);
 #endif
+#endif
     if (items.empty())
         return;
-
-    std::sort(items.begin(), items.end(), [](const Item &a, const Item &b) {
-        auto fold = [](std::string s) {
-            for (char &c : s)
-                c = (char) std::tolower((unsigned char) c);
-            return s;
-        };
-        const std::string af = fold(a.family), bf = fold(b.family);
-        if (af != bf) return af < bf;
-        if (a.family != b.family) return a.family < b.family;
-        if (a.weight != b.weight) return a.weight < b.weight;
-        if (a.italic != b.italic) return !a.italic && b.italic;
-        if (a.style != b.style) return a.style < b.style;
-        return !a.ranged && b.ranged;
-    });
-
-    std::string prev;
-    for (const Item &it : items) {
-        const std::string key = field_key(it);
-        if (key == prev)
-            continue;
-        prev = key;
-        lib.add_catalog(it.family, it.style, it.path, it.index, it.weight, it.italic);
-    }
+    commit_items(lib, items);
 }
 
 } // namespace pagemade

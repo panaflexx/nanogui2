@@ -18,14 +18,19 @@
 
 namespace pagemade {
 
-/* Roboto and the icon font. A .app uses Contents/Resources/resources. */
+/* Roboto and the icon font. A .app uses Contents/Resources/resources;
+ * on Windows, resources/ beside the .exe when that copy is there. */
 std::string resource_dir();
-/* Hyphenation patterns. A .app uses Contents/Resources/pagemade/resources. */
+/* Hyphenation patterns. A .app uses Contents/Resources/pagemade/resources;
+ * on Windows, resources/ beside the .exe (it holds hyphenation/). */
 std::string data_dir();
 /* Finder starts a bundle with "/" as the working directory. Move to
  * Contents/Resources, and point libheif at the codecs shipped beside the
  * executable. No-op when this process is not a .app. */
 void prepare_app_bundle();
+/* The Windows build's names for resource_dir() and data_dir() */
+std::string bundled_font_dir();
+std::string bundled_data_dir();
 
 void register_default_fonts(FontLibrary &lib);
 

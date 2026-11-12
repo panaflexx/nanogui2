@@ -14,6 +14,7 @@
 #include "render_nvg.h"
 #include "vector.h"
 
+#include <nanogui/opengl.h>
 #include <GLFW/glfw3.h>
 #include <nanogui/button.h>
 #include <nanogui/dragdrop.h>
@@ -22,7 +23,6 @@
 #include <nanogui/layout.h>
 #include <nanogui/menu.h>
 #include <nanogui/messagedialog.h>
-#include <nanogui/opengl.h>
 #include <nanogui/screen.h>
 #include <nanogui/scrollpanel.h>
 #include <nanovg.h>

@@ -1135,7 +1135,13 @@ std::string output_condition(const std::string &path, const std::string &descrip
 void dates(std::string *pdf, std::string *xmp) {
     const std::time_t t = std::time(nullptr);
     std::tm tm{};
-    gmtime_r(&t, &tm);
+#if defined(_WIN32)
+    if (gmtime_s(&tm, &t) != 0)
+        return;
+#else
+    if (!gmtime_r(&t, &tm))
+        return;
+#endif
     char buf[64];
     std::strftime(buf, sizeof buf, "D:%Y%m%d%H%M%S+00'00'", &tm);
     *pdf = buf;

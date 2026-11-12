@@ -3,8 +3,9 @@
  *
  * Serif, Sans and Display stay the built-in families. Everything else the
  * system lists is added beside them and loaded the first time a story uses
- * it. Linux asks fc-list. macOS reads the name tables under the system
- * font folders, so a bundled app does not need fontconfig on PATH.
+ * it. Linux asks fc-list, Windows asks DirectWrite, and macOS reads the
+ * name tables under the system font folders, so a bundled app does not
+ * need fontconfig on PATH.
  */
 #pragma once
 
