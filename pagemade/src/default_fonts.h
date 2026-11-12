@@ -10,7 +10,16 @@
 
 #include "composer/font.h"
 
+#include <string>
+
 namespace pagemade {
+
+/* Directory of the built-in Roboto faces. resources/ beside the executable
+ * when that copy is present, otherwise the compile-time source tree. */
+std::string bundled_font_dir();
+
+/* Directory that contains hyphenation/. Same search order. */
+std::string bundled_data_dir();
 
 void register_default_fonts(FontLibrary &lib);
 

@@ -2,6 +2,7 @@
 # Build nmail (Release) and pack the Windows NSIS installer.
 # Usage: .\build_win_pkg.ps1
 #        .\build_win_pkg.ps1 -Version 0.1.1
+# pagemade: .\build_win_pagemade.ps1
 [CmdletBinding()]
 param(
     [string]$Version = "0.1.0",

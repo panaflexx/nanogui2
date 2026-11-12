@@ -623,6 +623,12 @@ target_include_directories(nanogui
     ${CMAKE_CURRENT_BINARY_DIR}
 )
 
+# windows.h macros near/far/small collide with identifiers in this tree.
+if (MSVC)
+  target_compile_options(nanogui PRIVATE
+    "/FI${CMAKE_CURRENT_SOURCE_DIR}/include/nanogui/win32_nolegacy.h")
+endif()
+
 if (NANOGUI_BUILD_SHARED)
   target_compile_definitions(nanogui
     PUBLIC
@@ -1006,6 +1012,46 @@ if (NANOGUI_BUILD_EXAMPLES)
 
   # pagemade: page layout. The composer is HarfBuzz only (no NanoVG); the
   # app draws it in a NanoGUI view. Moves to pagemade/CMakeLists.txt later.
+  # Windows has no pkg-config HarfBuzz. Build the vendored release the same
+  # way FreeType and SQLite are: source in ext/, static, and out of the
+  # default target so nmail does not build it.
+  if (WIN32 AND NOT HARFBUZZ_FOUND AND EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/ext/harfbuzz/CMakeLists.txt")
+    set(HB_BUILD_SUBSET ON CACHE BOOL "" FORCE)
+    set(HB_BUILD_UTILS OFF CACHE BOOL "" FORCE)
+    set(HB_BUILD_RASTER OFF CACHE BOOL "" FORCE)
+    set(HB_BUILD_VECTOR OFF CACHE BOOL "" FORCE)
+    set(HB_BUILD_GPU OFF CACHE BOOL "" FORCE)
+    set(HB_HAVE_GLIB OFF CACHE BOOL "" FORCE)
+    set(HB_HAVE_GOBJECT OFF CACHE BOOL "" FORCE)
+    set(HB_HAVE_ICU OFF CACHE BOOL "" FORCE)
+    set(HB_HAVE_GRAPHITE2 OFF CACHE BOOL "" FORCE)
+    set(HB_HAVE_CAIRO OFF CACHE BOOL "" FORCE)
+    set(HB_HAVE_UNISCRIBE OFF CACHE BOOL "" FORCE)
+    set(HB_HAVE_GDI OFF CACHE BOOL "" FORCE)
+    set(HB_HAVE_DIRECTWRITE OFF CACHE BOOL "" FORCE)
+    set(SKIP_INSTALL_ALL ON CACHE BOOL "" FORCE)
+    add_subdirectory(ext/harfbuzz EXCLUDE_FROM_ALL)
+    if (NOT TARGET harfbuzz OR NOT TARGET harfbuzz-subset)
+      message(FATAL_ERROR "pagemade: ext/harfbuzz did not produce harfbuzz and harfbuzz-subset")
+    endif()
+    # hb.h includes the generated hb-features.h, which is not next to the sources.
+    target_include_directories(harfbuzz PUBLIC
+        $<BUILD_INTERFACE:${harfbuzz_BINARY_DIR}/src>)
+    if (MSVC)
+      target_compile_options(harfbuzz PRIVATE /W0)
+      target_compile_options(harfbuzz-subset PRIVATE /W0)
+    endif()
+    set(HARFBUZZ_FOUND TRUE)
+    set(HARFBUZZ_INCLUDE_DIRS
+        "${CMAKE_CURRENT_SOURCE_DIR}/ext/harfbuzz/src"
+        "${harfbuzz_BINARY_DIR}/src")
+    set(HARFBUZZ_LIBRARY_DIRS "")
+    set(HARFBUZZ_LINK_LIBRARIES harfbuzz)
+    set(HARFBUZZ_SUBSET_FOUND TRUE)
+    set(HARFBUZZ_SUBSET_INCLUDE_DIRS "${HARFBUZZ_INCLUDE_DIRS}")
+    set(HARFBUZZ_SUBSET_LINK_LIBRARIES harfbuzz-subset)
+    message(STATUS "pagemade: using vendored HarfBuzz (ext/harfbuzz).")
+  endif()
   if (HARFBUZZ_FOUND)
     # Vendored libunibreak (ext/libunibreak, zlib licence): UAX #14 line
     # breaking plus grapheme and word boundaries for the editor.
@@ -1030,14 +1076,18 @@ if (NANOGUI_BUILD_EXAMPLES)
     target_link_directories(pagemade_composer PUBLIC ${HARFBUZZ_LIBRARY_DIRS})
     target_link_libraries(pagemade_composer PUBLIC unibreak ${HARFBUZZ_LINK_LIBRARIES})
 
-    pkg_check_modules(HARFBUZZ_SUBSET harfbuzz-subset)
+    if (NOT HARFBUZZ_SUBSET_FOUND)
+      pkg_check_modules(HARFBUZZ_SUBSET harfbuzz-subset)
+    endif()
     if (NOT HARFBUZZ_SUBSET_FOUND)
       message(STATUS "pagemade: harfbuzz-subset not found, PDF export needs it.")
     endif()
 
     # HEIC and AVIF pictures (phone photos). Optional: without it pagemade
     # opens PNG and JPEG only.
-    pkg_check_modules(LIBHEIF libheif)
+    if (PkgConfig_FOUND)
+      pkg_check_modules(LIBHEIF libheif)
+    endif()
     if (NOT LIBHEIF_FOUND)
       message(STATUS "pagemade: libheif not found, HEIC/AVIF pictures disabled.")
     endif()
@@ -1164,6 +1214,13 @@ if (NANOGUI_BUILD_EXAMPLES)
         target_link_directories(${_t} PRIVATE ${LIBHEIF_LIBRARY_DIRS})
         target_link_libraries(${_t} ${LIBHEIF_LIBRARIES})
       endif()
+      if (WIN32)
+        target_link_libraries(${_t} dwrite)
+      endif()
+      if (MSVC)
+        target_compile_options(${_t} PRIVATE
+          "/FI${CMAKE_CURRENT_SOURCE_DIR}/include/nanogui/win32_nolegacy.h")
+      endif()
     endforeach()
     target_link_libraries(pagemade_app pagemade_composer nanogui miniz
         ${HARFBUZZ_SUBSET_LINK_LIBRARIES} ${NANOGUI_LIBS})
@@ -1180,6 +1237,34 @@ if (NANOGUI_BUILD_EXAMPLES)
         RUNTIME_OUTPUT_DIRECTORY_DEBUG ${CMAKE_CURRENT_BINARY_DIR}/bin
         RUNTIME_OUTPUT_DIRECTORY_RELEASE ${CMAKE_CURRENT_BINARY_DIR}/bin
         RUNTIME_OUTPUT_DIRECTORY_RELWITHDEBINFO ${CMAKE_CURRENT_BINARY_DIR}/bin)
+    # Same Windows packaging as nmail: no console window, and the faces
+    # NanoGUI loads from resources/ sit next to the executable.
+    if (WIN32)
+      set_target_properties(pagemade_app PROPERTIES WIN32_EXECUTABLE TRUE)
+      if (MSVC)
+        target_link_options(pagemade_app PRIVATE "/ENTRY:mainCRTStartup")
+      endif()
+      # Explorer uses the lowest icon id; GLFW looks up the name GLFW_ICON.
+      target_sources(pagemade_app PRIVATE resources/pagemade.rc)
+      set(_PAGEMADE_HYPH
+          ${CMAKE_CURRENT_SOURCE_DIR}/pagemade/resources/hyphenation/hyph-en-us.pat.txt
+          ${CMAKE_CURRENT_SOURCE_DIR}/pagemade/resources/hyphenation/hyph-en-us.hyp.txt
+          ${CMAKE_CURRENT_SOURCE_DIR}/pagemade/resources/hyphenation/hyph-en-us.LICENSE.txt)
+      add_custom_command(TARGET pagemade_app POST_BUILD
+        COMMAND ${CMAKE_COMMAND} -E make_directory
+          "$<TARGET_FILE_DIR:pagemade_app>/resources/hyphenation"
+        COMMAND ${CMAKE_COMMAND} -E copy_if_different
+          ${_PAGEMADE_HYPH} "$<TARGET_FILE_DIR:pagemade_app>/resources/hyphenation"
+        VERBATIM)
+      if (_NMAIL_FONTS)
+        add_custom_command(TARGET pagemade_app POST_BUILD
+          COMMAND ${CMAKE_COMMAND} -E make_directory
+            "$<TARGET_FILE_DIR:pagemade_app>/resources"
+          COMMAND ${CMAKE_COMMAND} -E copy_if_different
+            ${_NMAIL_FONTS} "$<TARGET_FILE_DIR:pagemade_app>/resources"
+          VERBATIM)
+      endif()
+    endif()
   else()
     message(STATUS "pagemade: HarfBuzz not found, skipping.")
   endif()

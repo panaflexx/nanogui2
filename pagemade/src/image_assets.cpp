@@ -15,9 +15,9 @@
 #include "page.h"
 #include "uri.h"
 
+#include <nanogui/opengl.h>
 #include <GLFW/glfw3.h>
 #include <nanogui/button.h>
-#include <nanogui/opengl.h>
 #include <nanogui/imagestash.h>
 #include <nanogui/label.h>
 #include <nanogui/layout.h>

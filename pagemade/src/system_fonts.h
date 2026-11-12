@@ -2,7 +2,7 @@
  * pagemade/system_fonts.h — installed faces for the font menu.
  *
  * Serif, Sans and Display stay the built-in families. Everything else the
- * system lists (through fc-list) is added beside them and loaded the first
+ * system lists (fc-list, or DirectWrite on Windows) is added beside them and loaded the first
  * time a story uses it.
  */
 #pragma once

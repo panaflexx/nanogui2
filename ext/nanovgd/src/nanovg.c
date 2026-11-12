@@ -1601,13 +1601,14 @@ static int nvg__createImageFrom(NVGcontext* ctx, int imageFlags, unsigned char* 
 		int longest = w > h ? w : h;
 		int dw = (int)((long long)w * maxEdge / longest);
 		int dh = (int)((long long)h * maxEdge / longest);
-		unsigned char* small;
+		unsigned char* scaled;
 		if (dw < 1) dw = 1;
 		if (dh < 1) dh = 1;
-		small = nvg__downscaleRGBA(img, w, h, dw, dh);
-		if (small != NULL) {
+		/* windows.h (#define small char) is in scope via the GL headers. */
+		scaled = nvg__downscaleRGBA(img, w, h, dw, dh);
+		if (scaled != NULL) {
 			if (owned) free(img); else stbi_image_free(img);
-			img = small;
+			img = scaled;
 			owned = 1;
 			w = dw;
 			h = dh;

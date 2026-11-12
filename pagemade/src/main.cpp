@@ -100,7 +100,10 @@
 #include <unordered_map>
 #include <vector>
 
-#if !defined(_WIN32)
+#if defined(_WIN32)
+#include <windows.h>
+#include <shellapi.h>
+#else
 #include <fcntl.h>
 #include <unistd.h>
 #endif
@@ -674,7 +677,7 @@ public:
         register_system_fonts(m_fonts);
         font_menu_load_or_seed(m_font_menu, font_menu_config_path(), m_fonts.families());
         swatch_library_load_or_seed(m_swatch_lib, swatch_library_config_path());
-        const std::string hyph = std::string(PAGEMADE_DATA_DIR) + "/hyphenation/hyph-en-us";
+        const std::string hyph = bundled_data_dir() + "/hyphenation/hyph-en-us";
         if (!m_hyphenator.load(hyph + ".pat.txt", hyph + ".hyp.txt"))
             std::fprintf(stderr, "pagemade: no hyphenation patterns at %s.pat.txt\n", hyph.c_str());
 
@@ -2932,9 +2935,12 @@ public:
         });
     }
 
-    /* Hand a file to the desktop's viewer (xdg-open) */
+    /* Hand a file to the desktop's viewer. */
     void open_with_desktop(const std::string &path) {
-#if !defined(_WIN32)
+#if defined(_WIN32)
+        /* file_dialog() returns ACP paths (GetSaveFileNameA), same as this. */
+        ShellExecuteA(nullptr, "open", path.c_str(), nullptr, nullptr, SW_SHOWNORMAL);
+#else
         pid_t pid = fork();
         if (pid == 0) {
             setsid();
@@ -2947,8 +2953,6 @@ public:
 #endif
             _exit(127);
         }
-#else
-        (void) path;
 #endif
     }
 
