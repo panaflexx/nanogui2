@@ -5,10 +5,11 @@
  * picture frames to drop photos into, text blocks with their formatting,
  * shapes (rules, mats) and SVG graphics. Its margins say where the content
  * is: the box minus the margins. Placing a template fits that content area
- * into the page's live area (inside the page margins), scaled the same
- * both ways and centered, and the items it makes are grouped so the
- * layout moves as one. Elements may sit in the template's margins; they
- * land the same distance (scaled) outside the live area.
+ * into the page's live area (inside the page margins): scaled to fit, with
+ * the frames stretched to fill a page of another shape (see LayoutFit),
+ * and the items it makes are grouped so the layout moves as one. Elements
+ * may sit in the template's margins; they land the same distance (scaled)
+ * outside the live area.
  *
  * A spread template is two pages side by side, split down the middle of
  * its box; `inside` is the margin at the spine. On a facing spread each
@@ -135,13 +136,28 @@ bool layout_templates_save(const std::vector<LayoutTemplate> &templates, const s
 
 /* Where a template lands: for each page it touches, the scale and offset
  * from template box points to that page's points, and the elements
- * (indices) that go there. */
+ * (indices) that go there.
+ *
+ * A page of another shape than the template's is filled, not letterboxed.
+ * `scale` is the largest that fits the content area into the live area;
+ * type, strokes, gutters and the space around the frames scale by it.
+ * Along the axis with room to spare, the photo and text frames stretch to
+ * take it up, so the layout reaches the live area's edges both ways. A
+ * gutter is an interval no frame covers, or one between two frames side
+ * by side (a headline spanning both doesn't make it a frame). Shapes and
+ * graphics land where the same mapping puts their edges. */
 struct LayoutFit {
     struct Part {
         size_t page = 0;
         float scale = 1.f;
-        float dx = 0.f, dy = 0.f;        // page = box * scale + (dx, dy)
+        float dx = 0.f, dy = 0.f;        // page = box * scale + (dx, dy), with no stretch
+        /* Box -> page along each axis, piecewise linear through these
+         * points (ascending `from`). Empty: the uniform map above. Beyond
+         * either end the map runs on at `scale`. */
+        std::vector<float> x_from, x_to, y_from, y_to;
         std::vector<size_t> elements;
+        float map_x(float x) const;
+        float map_y(float y) const;
     };
     std::vector<Part> parts;
     bool ok() const { return !parts.empty(); }
@@ -150,8 +166,12 @@ struct LayoutFit {
 /* The fit of `t` dropped on `page`. A spread on a facing spread with both
  * pages present covers both; otherwise the one page. */
 LayoutFit fit_layout(const PageDoc &doc, const LayoutTemplate &t, size_t page);
-/* An element's rectangle on its page. */
+/* A rectangle of the box on its page. A line's rect (w, h may be
+ * negative) maps corner to corner. */
 LayoutRect layout_rect_on_page(const LayoutFit::Part &part, const LayoutRect &r);
+/* Where an element lands: its rect on the page, but a circle (an ellipse
+ * drawn square) stays round, centered in its stretched rect. */
+LayoutRect layout_element_on_page(const LayoutFit::Part &part, const LayoutElement &e);
 
 struct LayoutPlacement {
     std::vector<ItemId> items;           // every item made, in stacking order

@@ -11,6 +11,7 @@
 #include <cstring>
 #include <map>
 #include <string>
+#include <utility>
 #include <vector>
 
 namespace pagemade {
@@ -118,6 +119,35 @@ void add_path(NVGcontext *ctx, const Path &p) {
  * path with reversed inner contours), so each subpath is tagged as
  * fill_windings() says. `windings` is that list when it was worked out
  * ahead; null works it out here. */
+/* True when a curve's control points lie on one line through its ends.
+ * Such a curve covers no area: as part of a fill it is the straight
+ * segment to its end, plus perhaps an out-and-back spike past it. A spike
+ * has no inside, but NanoVG's antialiasing fringe still draws it as a
+ * hairline, where a coverage renderer (a browser, a PDF viewer) draws
+ * nothing. Seen in the wild as a cusp whose handle was dragged far off. */
+bool flat_curve(float x0, float y0, float x1, float y1, float x2, float y2, float x3, float y3) {
+    /* The line: from the start to whichever point lies farthest */
+    float dx = 0, dy = 0, len2 = 0;
+    for (const auto &[x, y] : {std::pair{x1, y1}, std::pair{x2, y2}, std::pair{x3, y3}}) {
+        const float ex = x - x0, ey = y - y0, e2 = ex * ex + ey * ey;
+        if (e2 > len2) {
+            dx = ex;
+            dy = ey;
+            len2 = e2;
+        }
+    }
+    if (len2 <= 0.f)
+        return true;
+    /* Each point's distance off the line, against 1/10000 of its length */
+    const float tol2 = 1e-8f * len2 * len2;
+    for (const auto &[x, y] : {std::pair{x1, y1}, std::pair{x2, y2}, std::pair{x3, y3}}) {
+        const float cross = dx * (y - y0) - dy * (x - x0);   // distance * len
+        if (cross * cross > tol2)
+            return false;
+    }
+    return true;
+}
+
 void add_fill_path(NVGcontext *ctx, const Path &p, const std::vector<uint8_t> *windings) {
     std::vector<uint8_t> own;
     if (!windings) {
@@ -126,6 +156,7 @@ void add_fill_path(NVGcontext *ctx, const Path &p, const std::vector<uint8_t> *w
     }
     size_t index = 0;
     bool open = false;
+    float px = 0, py = 0, sx = 0, sy = 0;   // current point, subpath start
     auto end_subpath = [&] {
         if (!open)
             return;
@@ -139,6 +170,8 @@ void add_fill_path(NVGcontext *ctx, const Path &p, const std::vector<uint8_t> *w
         case PathCmd::Move:
             end_subpath();
             nvgMoveTo(ctx, c.x, c.y);
+            sx = c.x;
+            sy = c.y;
             open = true;
             break;
         case PathCmd::Line:
@@ -146,18 +179,28 @@ void add_fill_path(NVGcontext *ctx, const Path &p, const std::vector<uint8_t> *w
             open = true;
             break;
         case PathCmd::Quad:
-            nvgQuadTo(ctx, c.cx1, c.cy1, c.x, c.y);
+            if (flat_curve(px, py, c.cx1, c.cy1, c.cx1, c.cy1, c.x, c.y))
+                nvgLineTo(ctx, c.x, c.y);
+            else
+                nvgQuadTo(ctx, c.cx1, c.cy1, c.x, c.y);
             open = true;
             break;
         case PathCmd::Cubic:
-            nvgBezierTo(ctx, c.cx1, c.cy1, c.cx2, c.cy2, c.x, c.y);
+            if (flat_curve(px, py, c.cx1, c.cy1, c.cx2, c.cy2, c.x, c.y))
+                nvgLineTo(ctx, c.x, c.y);
+            else
+                nvgBezierTo(ctx, c.cx1, c.cy1, c.cx2, c.cy2, c.x, c.y);
             open = true;
             break;
         case PathCmd::Close:
             nvgClosePath(ctx);
             end_subpath();
-            break;
+            px = sx;
+            py = sy;
+            continue;
         }
+        px = c.x;
+        py = c.y;
     }
     end_subpath();
 }
