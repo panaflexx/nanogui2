@@ -339,6 +339,30 @@ void Theme::draw_focus_ring(NVGcontext *ctx, float x, float y, float w, float h,
 }
 
 void Theme::load_fonts(NVGcontext *ctx) {
+    /* Every PopupMenu builds its own Theme. The faces already live in
+     * this context after the screen's theme; registering them again reads
+     * "resources/…" relative to the cwd. A file dialog may have changed
+     * that, the load fails, and the throw escapes a half-open modal. */
+    const int sans = nvgFindFont(ctx, "sans");
+    const int bold = nvgFindFont(ctx, "sans-bold");
+    const int italic = nvgFindFont(ctx, "sans-italic");
+    const int bolditalic = nvgFindFont(ctx, "sans-bolditalic");
+    const int icons = nvgFindFont(ctx, "icons");
+    const int mono = nvgFindFont(ctx, "mono");
+    const int emoji = nvgFindFont(ctx, "emoji");
+    if (sans >= 0 && bold >= 0 && italic >= 0 && bolditalic >= 0 &&
+        icons >= 0 && mono >= 0 && emoji >= 0) {
+        m_font_sans_regular = sans;
+        m_font_sans_bold = bold;
+        m_font_sans_italic = italic;
+        m_font_sans_bolditalic = bolditalic;
+        m_font_icons = icons;
+        m_font_mono_regular = mono;
+        m_font_emoji = emoji;
+        nvgSetEmojiFont(ctx, "emoji");
+        return;
+    }
+
     m_font_sans_regular = nvgCreateFontMem(ctx, "sans", (uint8_t *) roboto_regular_ttf,
                                            roboto_regular_ttf_size, 0);
     m_font_sans_bold = nvgCreateFontMem(ctx, "sans-bold", (uint8_t *) roboto_bold_ttf,

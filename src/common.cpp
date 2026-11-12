@@ -490,6 +490,31 @@ std::vector<std::string> file_dialog(const std::vector<std::pair<std::string, st
     filter.push_back('\0');
     ofn.lpstrFilter = filter.data();
 
+    /* The common dialog switches the process current directory to the
+     * folder the user browsed, and OFN_NOCHANGEDIR does not put it back
+     * for GetOpenFileName. A later relative load — a new menu theme
+     * opening "resources/Roboto-Italic.ttf" — then fails. That throw
+     * leaves the modal already on screen, so the window dims and no
+     * dialog is drawn. */
+    struct RestoreCwd {
+        std::wstring path;
+        RestoreCwd() {
+            DWORD n = GetCurrentDirectoryW(0, nullptr);
+            if (n == 0)
+                return;
+            path.resize(n);
+            DWORD wrote = GetCurrentDirectoryW(n, &path[0]);
+            if (wrote == 0 || wrote >= n)
+                path.clear();
+            else
+                path.resize(wrote);
+        }
+        ~RestoreCwd() {
+            if (!path.empty())
+                SetCurrentDirectoryW(path.c_str());
+        }
+    } restore_cwd;
+
     if (save) {
         ofn.Flags = OFN_EXPLORER | OFN_PATHMUSTEXIST | OFN_OVERWRITEPROMPT;
         if (GetSaveFileNameA(&ofn) == FALSE)
