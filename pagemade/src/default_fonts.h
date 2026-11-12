@@ -8,7 +8,7 @@
  *
  * On macOS the app is a bundle. resource_dir() and data_dir() prefer the
  * copies inside Contents/Resources, and prepare_app_bundle() points the
- * process at that folder before NanoGUI loads "resources/*.ttf".
+ * process at that folder before NanoGUI loads "resources/\*.ttf".
  */
 #pragma once
 
