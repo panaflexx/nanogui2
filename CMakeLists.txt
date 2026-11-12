@@ -1295,7 +1295,7 @@ if (NANOGUI_BUILD_EXAMPLES)
     # libheif codec plugins are dlopen'd; they are seeded separately and land
     # in Contents/Frameworks/heif.
     if (APPLE)
-      set(PAGEMADE_VERSION "0.1.0" CACHE STRING "PageMade version (Info.plist)")
+      set(PAGEMADE_VERSION "1.1.0" CACHE STRING "PageMade version (Info.plist)")
       set_target_properties(pagemade_app PROPERTIES
         MACOSX_BUNDLE TRUE
         MACOSX_BUNDLE_INFO_PLIST "${CMAKE_CURRENT_SOURCE_DIR}/resources/pagemade-Info.plist.in"
