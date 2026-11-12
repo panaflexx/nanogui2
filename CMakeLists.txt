@@ -1295,6 +1295,8 @@ if (NANOGUI_BUILD_EXAMPLES)
     # libheif codec plugins are dlopen'd; they are seeded separately and land
     # in Contents/Frameworks/heif.
     if (APPLE)
+      target_sources(pagemade_app PRIVATE pagemade/src/mac_open.mm)
+      target_link_libraries(pagemade_app "-framework Cocoa")
       set(PAGEMADE_VERSION "1.1.0" CACHE STRING "PageMade version (Info.plist)")
       set_target_properties(pagemade_app PROPERTIES
         MACOSX_BUNDLE TRUE

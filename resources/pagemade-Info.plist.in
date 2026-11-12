@@ -29,7 +29,30 @@
 	<true/>
 	<key>LSMinimumSystemVersion</key>
 	<string>10.12</string>
-	<!-- HEIC/AVIF place, and PDF export. -->
+	<!-- .pagemade is our own type. Listing public.data does not claim the
+	     extension: Launch Services ignores CFBundleTypeExtensions once
+	     LSItemContentTypes is set, and then no app owns the file. -->
+	<key>UTExportedTypeDeclarations</key>
+	<array>
+		<dict>
+			<key>UTTypeIdentifier</key>
+			<string>org.adamantine.pagemade.document</string>
+			<key>UTTypeDescription</key>
+			<string>PageMade Publication</string>
+			<key>UTTypeConformsTo</key>
+			<array>
+				<string>public.data</string>
+				<string>public.content</string>
+			</array>
+			<key>UTTypeTagSpecification</key>
+			<dict>
+				<key>public.filename-extension</key>
+				<array>
+					<string>pagemade</string>
+				</array>
+			</dict>
+		</dict>
+	</array>
 	<key>CFBundleDocumentTypes</key>
 	<array>
 		<dict>
@@ -37,13 +60,11 @@
 			<string>PageMade Publication</string>
 			<key>CFBundleTypeRole</key>
 			<string>Editor</string>
+			<key>LSHandlerRank</key>
+			<string>Owner</string>
 			<key>LSItemContentTypes</key>
 			<array>
-				<string>public.data</string>
-			</array>
-			<key>CFBundleTypeExtensions</key>
-			<array>
-				<string>pagemade</string>
+				<string>org.adamantine.pagemade.document</string>
 			</array>
 		</dict>
 	</array>

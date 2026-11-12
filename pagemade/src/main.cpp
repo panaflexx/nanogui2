@@ -67,6 +67,7 @@
 #include "uri.h"
 #include "docfile.h"
 #include "default_fonts.h"
+#include "mac_open.h"
 #include "font_menu_ui.h"
 #include "system_fonts.h"
 #include "page.h"
@@ -4071,10 +4072,22 @@ int main(int argc, char **argv) {
     prepare_app_bundle();
 
     nanogui::init();
+    /* Finder's open event arrives during init, before this app exists. */
+    if (open_path.empty()) {
+        const std::vector<std::string> opened = take_pending_mac_opens();
+        if (!opened.empty())
+            open_path = opened.front();
+    } else {
+        take_pending_mac_opens();
+    }
     {
         ref<PagemadeApp> app = new PagemadeApp();
         app->dec_ref();
         app->set_visible(true);
+        PagemadeApp *live = app.get();
+        set_mac_open_callback([live](const std::string &path) {
+            live->close_document_then([live, path] { live->open_any(path); });
+        });
         for (int k = 0; k < 3; ++k) { app->perform_layout(); app->draw_all(); }
         /* A scripted run (screenshot, export, actions) needs an imported file
          * in place before it goes on; otherwise it imports behind a
@@ -4201,6 +4214,7 @@ int main(int argc, char **argv) {
         } else {
             nanogui::mainloop(-1);
         }
+        set_mac_open_callback({});
     }
     nanogui::shutdown();
     return 0;
