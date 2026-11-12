@@ -6203,9 +6203,29 @@ static void test_pdf_import(const FontLibrary &fonts) {
     CHECK(vector_loader().decode(bytes.data(), bytes.size(), &scene, &err), "decode our PDF: %s", err.c_str());
     CHECK(scene.format == "pdf" && std::fabs(scene.width - 612.f) < 0.01f && std::fabs(scene.height - 792.f) < 0.01f,
           "Letter, in points (%g x %g)", scene.width, scene.height);
-    CHECK(scene.shapes.size() > 100 && scene.texts.empty() && scene.skipped.empty(),
-          "text as outlines from the embedded fonts (%zu shapes, %zu fallback texts)", scene.shapes.size(),
-          scene.texts.size());
+    /* Text in the embedded fonts is text, its glyphs the embedded outlines;
+     * the glyphs a PDF places one by one join into lines, spaces put back */
+    size_t inked = 0, runs = 0;
+    std::string all;
+    for (const VectorText &tx : scene.texts)
+        for (const VectorTextRun &run : tx.runs) {
+            ++runs;
+            inked += run.ink_set && (!run.ink.empty() || run.text == " ");
+            all += run.text;
+        }
+    CHECK(scene.texts.size() > 20 && runs > 0 && inked == runs && scene.skipped.empty(),
+          "text from embedded fonts is text drawn in their outlines (%zu lines, %zu of %zu runs inked)",
+          scene.texts.size(), inked, runs);
+    CHECK(all.find("WAVE AFTER WAVE OF TYPE") != std::string::npos || all.find("WAVE") != std::string::npos,
+          "and reads as the words, with their spaces");
+    bool headline = false;
+    for (const VectorText &tx : scene.texts) {
+        std::string line;
+        for (const VectorTextRun &run : tx.runs)
+            line += run.text;
+        headline = headline || line == "WAVE AFTER WAVE OF TYPE";
+    }
+    CHECK(headline, "the headline is one line of text, spaces and all");
     /* The rule sits where it was drawn: y 54 + 162 - 7 down the page */
     bool rule = false;
     for (const VectorShape &sh : scene.shapes)
@@ -6667,6 +6687,9 @@ static void test_pdf_cid_keyed(FontLibrary &fonts) {
         cmds = 0;
         for (const VectorShape &sh : scene.shapes)
             cmds += sh.path.size();
+        for (const VectorText &tx : scene.texts)   // text keeps its embedded outlines as ink
+            for (const VectorTextRun &run : tx.runs)
+                cmds += run.ink.size();
         std::remove(path.c_str());
         return true;
     };
@@ -6809,8 +6832,8 @@ static void test_import_publication(const FontLibrary &fonts) {
         CHECK(!decode_vector_pages(jobs, scenes, nullptr, [](size_t, size_t) { return false; }),
               "a tick that says stop cancels");
     }
-    ImportedPublication r =
-        import_publication(std::vector<uint8_t>(p3.begin(), p3.end()), "two.pdf", "", &fonts);
+    ImportedPublication r = import_publication(std::vector<uint8_t>(p3.begin(), p3.end()), "two.pdf", "", &fonts,
+                                               {}, ImportMode::Exact);
     CHECK(r.ok, "import a two-page PDF: %s", r.error.c_str());
     if (!r.ok)
         return;
@@ -6879,6 +6902,147 @@ static void test_import_publication(const FontLibrary &fonts) {
     const std::string junk = "not a drawing";
     ImportedPublication bad = import_publication(std::vector<uint8_t>(junk.begin(), junk.end()), "x.txt", "", &fonts);
     CHECK(!bad.ok && !bad.error.empty(), "a file that isn't a drawing is refused (%s)", bad.error.c_str());
+}
+
+/* Import, Editable: a PDF page comes apart into pieces that move on their
+ * own: the text in a text frame (reading as its words), a box as a
+ * rectangle, a rule as a line, the photo in a picture frame. None grouped. */
+static void test_import_editable(const FontLibrary &fonts) {
+    PageDoc doc;
+    CharStyle cs;
+    cs.size = 18;
+    StoryId sid = doc.add_story(one_para("Hello editable world", cs, ParaStyle()));
+    doc.add_text_frame(0, sid, 300, 40, Transform::translate(72, 72));
+    const SwatchId red = doc.add_swatch("Red", {0.8f, 0.1f, 0.1f, 1.f});
+    Item box;
+    box.w = 100;
+    box.h = 50;
+    box.xf = Transform::translate(72, 150);
+    Shape bs;
+    bs.kind = Shape::Kind::Rect;
+    bs.fill = {red, 100.f};
+    bs.stroke = Stroke{{kNoPaint, 100.f}, 0.f, LineStyle::Solid};
+    box.content = bs;
+    doc.add_item(0, box);
+    Item rule;
+    rule.w = 200;
+    rule.h = 0;
+    rule.xf = Transform::translate(72, 250);
+    Shape ls;
+    ls.kind = Shape::Kind::Line;
+    ls.stroke = Stroke{{kBlack, 100.f}, 2.f, LineStyle::Solid};
+    rule.content = ls;
+    doc.add_item(0, rule);
+    ImageStore store;
+    ImageMetadata meta;
+    std::string err;
+    const uint32_t pid = store.take_id();
+    CHECK(store.add(pid, make_jpeg_rgb(8, 4, 200, 10, 10), &meta, &err), "a jpeg: %s", err.c_str());
+    ImageAsset asset;
+    asset.id = pid;
+    asset.name = "photo.jpg";
+    asset.meta = meta;
+    doc.add_image(std::move(asset));
+    Item pic;
+    pic.w = 120;
+    pic.h = 60;
+    pic.xf = Transform::translate(300, 150);
+    pic.content = PlacedImage{pid, 0, 0, 120, 60};
+    doc.add_item(0, pic);
+
+    std::vector<Composition> comps;
+    comps.push_back(compose(doc.stories[0].story, doc.thread_frames(doc.stories[0]), fonts));
+    const std::string path = "/tmp/pagemade-editable.pdf";
+    CHECK(export_pdf(path, doc, comps, &store), "export the page");
+    const std::string pdf = read_bin(path);
+    std::remove(path.c_str());
+    ImportedPublication r =
+        import_publication(std::vector<uint8_t>(pdf.begin(), pdf.end()), "page.pdf", "", &fonts);
+    CHECK(r.ok, "import it, editable: %s", r.error.c_str());
+    if (!r.ok || r.doc.pages.empty())
+        return;
+    const PageDoc &d = r.doc;
+    std::string text;
+    int frames = 0, rects = 0, lines = 0, pictures = 0, grouped = 0;
+    for (const Item &it : d.pages[0].items) {
+        grouped += it.group != 0;
+        if (it.is_text()) {
+            ++frames;
+            size_t ti = 0;
+            if (const StoryEntry *se = d.story_of(it.id, &ti))
+                for (const Paragraph &para : se->story.paragraphs)
+                    for (const Run &run : para.runs)
+                        text += run.text;
+        } else if (const Shape *sh = std::get_if<Shape>(&it.content)) {
+            if (sh->kind == Shape::Kind::Rect) {
+                const Color c = d.resolve(sh->fill);
+                rects += near(it.xf.e, 72.f) && near(it.xf.f, 150.f) && near(it.w, 100.f) && near(it.h, 50.f) &&
+                         std::fabs(c.r - 0.8f) < 0.01f && std::fabs(c.g - 0.1f) < 0.01f;
+            } else if (sh->kind == Shape::Kind::Line) {
+                lines += near(it.xf.e, 72.f) && near(it.xf.f, 250.f) && near(it.w, 200.f) && near(it.h, 0.f) &&
+                         near(sh->stroke.weight, 2.f);
+            }
+        } else if (it.is_image()) {
+            pictures += near(it.xf.e, 300.f) && near(it.xf.f, 150.f) && near(it.w, 120.f) && near(it.h, 60.f);
+        }
+    }
+    CHECK(frames == 1 && text == "Hello editable world", "the text is a text frame, its words editable (%d, \"%s\")",
+          frames, text.c_str());
+    CHECK(rects == 1, "the box is a rectangle in its color, where it was");
+    CHECK(lines == 1, "the rule is a line, its weight kept");
+    CHECK(pictures == 1, "the photo is in a picture frame of its own");
+    CHECK(grouped == 0, "nothing is grouped: each piece moves on its own");
+    CHECK(d.vectors.empty(), "nothing is left as a drawing");
+
+    /* The sample newsletter, exported for print (bleed and crop marks on a
+     * larger sheet), comes back as a Letter page of text frames: tracked
+     * caps with no stray spaces, a contents line with its tab and leader,
+     * justified columns justified, and no crop marks */
+    {
+        PageDoc sd = sample_document();
+        sd.setup.bleed = 9.f;
+        std::vector<Composition> sc;
+        for (const StoryEntry &se : sd.stories)
+            sc.push_back(compose(se.story, sd.thread_frames(se), fonts));
+        PdfSettings o;
+        o.crop_marks = true;
+        const std::string spath = "/tmp/pagemade-editable-sample.pdf";
+        CHECK(export_pdf(spath, sd, sc, nullptr, &o), "export the sample for print");
+        const std::string spdf = read_bin(spath);
+        std::remove(spath.c_str());
+        ImportedPublication si =
+            import_publication(std::vector<uint8_t>(spdf.begin(), spdf.end()), "sample.pdf", "", &fonts);
+        CHECK(si.ok && near(si.doc.setup.width, 612.f) && near(si.doc.setup.height, 792.f),
+              "the page is the trim, not the sheet (%g x %g)", si.doc.setup.width, si.doc.setup.height);
+        CHECK(near(si.doc.setup.bleed, 9.f), "and keeps its bleed (%g)", si.doc.setup.bleed);
+        bool tracked = false, contents = false, justified = false, marks = false;
+        std::string headline;
+        if (si.ok)
+            for (const Item &it : si.doc.pages[0].items) {
+                const Bounds b = item_bounds(it);
+                marks = marks || b.x1 < -9.5f || b.y1 < -9.5f || b.x0 > 621.5f || b.y0 > 801.5f;
+                size_t ti = 0;
+                const StoryEntry *se = it.is_text() ? si.doc.story_of(it.id, &ti) : nullptr;
+                if (!se)
+                    continue;
+                for (const Paragraph &para : se->story.paragraphs) {
+                    std::string t;
+                    for (const Run &run : para.runs)
+                        t += run.text;
+                    tracked = tracked || t == "THE PASTEBOARD \u00B7 VOLUME 1, NUMBER 1 \u00B7 OCTOBER 2026";
+                    contents = contents || (t.find("Spacing attributes\t") == 0 && !para.style.tabs.empty() &&
+                                            !para.style.tabs[0].leader.empty());
+                    justified = justified || (para.style.align == Align::Justify && t.find("Justified type") == 0);
+                    if (t.find("WAVE") == 0)
+                        headline = t;
+                }
+            }
+        CHECK(headline == "WAVE AFTER WAVE OF TYPE", "the headline is text (%s)", headline.c_str());
+        CHECK(tracked, "letter-spaced caps read without stray spaces");
+        CHECK(contents, "a contents line is text, a tab and a leader");
+        CHECK(justified, "a justified column comes back justified");
+        CHECK(!marks, "the crop marks are left out");
+    }
 }
 
 int main(int argc, char **argv) {
@@ -6959,6 +7123,7 @@ int main(int argc, char **argv) {
     test_pdf_cid_keyed(fonts);
     test_pdf_picture_flags();
     test_import_publication(fonts);
+    test_import_editable(fonts);
     test_xml_validation();
     test_system_fonts();
     if (verbose)

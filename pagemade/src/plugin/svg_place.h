@@ -17,6 +17,7 @@
 #include <cstdint>
 #include <functional>
 #include <memory>
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -65,9 +66,16 @@ VectorPlacement place_svg_bytes(PageDoc &doc, VectorStore &store, std::vector<ui
 
 /* File > Import: a new publication made from a graphic file (SVG, PDF, or
  * any format vector_loader() reads). Its pages are the file's pages, sized
- * like its first; each page's drawing is placed on its page at full size.
- * A multi-page file's pages share one copy of its bytes. `source` is the
- * file: URI the graphics link to (empty: embedded only). */
+ * like its first.
+ *   Editable: each page is taken apart into pieces that move on their own,
+ *     not grouped: pictures in picture frames, text in text frames (lines
+ *     that line up become one frame), boxes and rules as rectangle and line
+ *     objects, and everything else as drawings (graphics).
+ *   Exact: each page's drawing is one graphic at full size, as it was; a
+ *     multi-page file's pages share one copy of its bytes.
+ * `source` is the file: URI the exact graphics link to. */
+enum class ImportMode { Editable, Exact };
+
 struct ImportedPublication {
     bool ok = false;
     bool cancelled = false;
@@ -75,14 +83,32 @@ struct ImportedPublication {
     std::string note;
     PageDoc doc;
     VectorStore vectors;
-    std::unique_ptr<ImageStore> images;  // pictures an SVG embeds, as frames
+    std::unique_ptr<ImageStore> images;  // the pictures it placed
 };
-/* `progress(done, total)` reports pages read (from the calling thread, a
- * few times a second); returning false cancels, and the result is not ok
- * with `cancelled` set. Safe to run off the UI thread when `fonts` is null
- * (they only measure an SVG's text, which is otherwise estimated). */
+
+/* The two halves of an import. read_import decodes the pages (on worker
+ * threads; safe off the UI thread); `progress(done, total)` runs on the
+ * calling thread and may return false to cancel. build_import makes the
+ * publication; it measures text with `fonts`, so it runs on the UI thread,
+ * calling `progress` between pages. */
+struct ImportPages {
+    bool ok = false;
+    bool cancelled = false;
+    std::string error;
+    std::string format;                  // "pdf", "svg", ...
+    int pages_in_file = 0;
+    std::shared_ptr<const std::vector<uint8_t>> bytes;
+    std::vector<std::optional<VectorScene>> scenes;   // empty where a page couldn't be read
+};
+ImportPages read_import(std::vector<uint8_t> bytes,
+                        const std::function<bool(size_t done, size_t total)> &progress = {});
+ImportedPublication build_import(ImportPages &pages, const std::string &name, const std::string &source,
+                                 const FontLibrary *fonts, ImportMode mode = ImportMode::Editable,
+                                 const std::function<bool(size_t done, size_t total)> &progress = {});
+/* Both, one after the other */
 ImportedPublication import_publication(std::vector<uint8_t> bytes, const std::string &name,
                                        const std::string &source, const FontLibrary *fonts,
-                                       const std::function<bool(size_t done, size_t total)> &progress = {});
+                                       const std::function<bool(size_t done, size_t total)> &progress = {},
+                                       ImportMode mode = ImportMode::Editable);
 
 } // namespace pagemade

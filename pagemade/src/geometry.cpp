@@ -5,6 +5,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <vector>
 
 namespace pagemade {
 
@@ -428,6 +429,48 @@ Path polyline_path(const std::vector<Polyline> &lines) {
 
 bool line_style_round_caps(LineStyle style) {
     return style == LineStyle::Dotted || style == LineStyle::DashDot;
+}
+
+bool path_axis_rect(const Path &p, float &x0, float &y0, float &x1, float &y1) {
+    std::vector<Point> pts;
+    bool closed = false;
+    for (size_t i = 0; i < p.size(); ++i) {
+        const PathCmd &c = p[i];
+        if (c.kind == PathCmd::Move) {
+            if (i != 0)
+                return false;            // one subpath only
+            pts.push_back({c.x, c.y});
+        } else if (c.kind == PathCmd::Line) {
+            pts.push_back({c.x, c.y});
+        } else if (c.kind == PathCmd::Close) {
+            closed = true;
+            if (i + 1 != p.size())
+                return false;
+        } else {
+            return false;                // a curve
+        }
+    }
+    const float eps = 1e-3f;
+    auto same = [&](Point a, Point b) { return std::fabs(a.x - b.x) <= eps && std::fabs(a.y - b.y) <= eps; };
+    if (pts.size() == 5 && same(pts[0], pts[4])) {
+        pts.pop_back();
+        closed = true;
+    }
+    if (pts.size() != 4 || !closed)
+        return false;
+    /* Each side horizontal or vertical, turning at every corner */
+    for (size_t i = 0; i < 4; ++i) {
+        const Point a = pts[i], b = pts[(i + 1) % 4], c = pts[(i + 2) % 4];
+        const bool ab_h = std::fabs(a.y - b.y) <= eps, ab_v = std::fabs(a.x - b.x) <= eps;
+        const bool bc_h = std::fabs(b.y - c.y) <= eps, bc_v = std::fabs(b.x - c.x) <= eps;
+        if (!((ab_h && bc_v) || (ab_v && bc_h)))
+            return false;
+    }
+    x0 = std::min({pts[0].x, pts[1].x, pts[2].x, pts[3].x});
+    x1 = std::max({pts[0].x, pts[1].x, pts[2].x, pts[3].x});
+    y0 = std::min({pts[0].y, pts[1].y, pts[2].y, pts[3].y});
+    y1 = std::max({pts[0].y, pts[1].y, pts[2].y, pts[3].y});
+    return x1 - x0 > eps && y1 - y0 > eps;
 }
 
 } // namespace pagemade

@@ -805,6 +805,7 @@ struct PasteLine {
     float k = 1.f;                       // M's uniform scale
     float left = 0, right = 0, baseline = 0, size = 0;   // text space
     bool justified = false;              // its words were placed one by one
+    bool positioned = false;             // its runs are where a PDF put them (no justification implied)
     std::vector<Run> runs;               // the type, at page scale
     std::string text;
     float qx = 0, qy = 0, qr = 0;        // left, baseline, right in the block's space
@@ -852,9 +853,67 @@ bool leader_run(const std::string &t, std::string &leader) {
  * Each frame is composed and widened until nothing in it is overset, and
  * set so its first baseline lands where the SVG put it. False leaves the
  * document alone. */
+/* A swatch for an imported color: Black or Paper when it is one, else an
+ * existing swatch of that color, else a new one named for it */
+SwatchId swatch_for(PageDoc &doc, const Color &c) {
+    auto near = [](const Color &a, const Color &b) {
+        return std::fabs(a.r - b.r) < 0.5f / 255.f && std::fabs(a.g - b.g) < 0.5f / 255.f &&
+               std::fabs(a.b - b.b) < 0.5f / 255.f && std::fabs(a.a - b.a) < 0.5f / 255.f;
+    };
+    for (const Swatch &sw : doc.swatches)
+        if (sw.id != kNoPaint && sw.id != kRegistration && near(sw.rgb, c))
+            return sw.id;
+    char name[64];
+    std::snprintf(name, sizeof name, "R=%d G=%d B=%d", (int) std::lround(c.r * 255.f), (int) std::lround(c.g * 255.f),
+                  (int) std::lround(c.b * 255.f));
+    std::string n = name;
+    if (c.a < 0.999f)
+        n += " " + std::to_string((int) std::lround(c.a * 100.f)) + "%";
+    return doc.add_swatch(n, c);
+}
+
+/* A drawn box or rule as an object of its own: an axis-aligned rectangle,
+ * or a straight line, painted in plain colors and not clipped. Its place
+ * and size are in the scene's space. False leaves it to the drawing. */
+bool simple_shape(const VectorShape &sh, Shape::Kind &kind, float &x0, float &y0, float &x1, float &y1) {
+    if (sh.clip >= 0 || sh.fill.gradient() || sh.stroke.paint.gradient() || !sh.stroke.dash.empty())
+        return false;
+    const bool filled = sh.fill.kind == PaintKind::Solid && sh.fill.color.a > 0.f;
+    const bool stroked = !sh.stroke.none() && sh.stroke.paint.kind == PaintKind::Solid && sh.stroke.paint.color.a > 0.f;
+    if (!filled && !stroked)
+        return false;
+    if (path_axis_rect(sh.path, x0, y0, x1, y1)) {
+        kind = Shape::Kind::Rect;
+        return true;
+    }
+    if (!filled && stroked && sh.path.size() == 2 && sh.path[0].kind == PathCmd::Move &&
+        sh.path[1].kind == PathCmd::Line) {
+        kind = Shape::Kind::Line;
+        x0 = sh.path[0].x;
+        y0 = sh.path[0].y;
+        x1 = sh.path[1].x;
+        y1 = sh.path[1].y;
+        return std::hypot(x1 - x0, y1 - y0) > 1e-3f;
+    }
+    return false;
+}
+
+/* How Import takes a page apart: the pieces not grouped; the scene put
+ * where `frame` says (its box at fx, fy, fw by fh, rather than fitted to a
+ * column); and anything wholly outside `keep` (scene space: a print PDF's
+ * crop marks, past its bleed) left out. */
+struct PlaceApart {
+    bool group = true;
+    bool have_frame = false;
+    float fx = 0, fy = 0, fw = 0, fh = 0;
+    bool have_keep = false;
+    float kx0 = 0, ky0 = 0, kx1 = 0, ky1 = 0;
+};
+
 bool place_as_text(PageDoc &doc, VectorStore &store, ImageStore *images, const FontLibrary *fonts,
                    const VectorScene &scene, const std::string &name, size_t page, const Point *at,
-                   bool paste, VectorPlacement &r) {
+                   bool paste, VectorPlacement &r, const PlaceApart *apart = nullptr) {
+    const bool group_pieces = !apart || apart->group;
     if (scene.texts.empty() && scene.shapes.empty() && scene.images.empty())
         return false;
     struct Pic {
@@ -891,8 +950,44 @@ bool place_as_text(PageDoc &doc, VectorStore &store, ImageStore *images, const F
 
     float fx, fy, fw, fh;
     vector_frame(doc.setup, page, scene.width, scene.height, at, fx, fy, fw, fh, !paste);
+    if (apart && apart->have_frame) {
+        fx = apart->fx;
+        fy = apart->fy;
+        fw = apart->fw;
+        fh = apart->fh;
+    }
     const float sx = fw / scene.width, sy = fh / scene.height;
     const Transform page_map{sx, 0, 0, sy, fx, fy};
+    /* Wholly outside the keep box (printer's marks): left out */
+    auto kept = [&](const Bounds &b) {
+        if (!apart || !apart->have_keep || b.empty())
+            return true;
+        return b.x1 >= apart->kx0 && b.x0 <= apart->kx1 && b.y1 >= apart->ky0 && b.y0 <= apart->ky1;
+    };
+    auto slot_bounds = [&](const VectorSlotRef &ref) {
+        Bounds b;
+        const size_t i = (size_t) ref.index;
+        if (ref.slot == VectorSlot::Shape && i < scene.shapes.size()) {
+            b = path_bounds(scene.shapes[i].path);
+        } else if (ref.slot == VectorSlot::Text && i < scene.texts.size()) {
+            const VectorText &tx = scene.texts[i];
+            for (const VectorTextRun &run : tx.runs)
+                if (run.ink_set && !run.ink.empty())
+                    b.add(path_bounds(run.ink));
+            if (b.empty()) {
+                const Point p = tx.xf.apply({0.f, 0.f});
+                b.add(Bounds{p.x, p.y, p.x, p.y});
+            }
+        } else if (ref.slot == VectorSlot::Image && i < scene.images.size()) {
+            const VectorImage &im = scene.images[i];
+            for (Point p : {Point{im.x, im.y}, Point{im.x + im.w, im.y + im.h}, Point{im.x + im.w, im.y},
+                            Point{im.x, im.y + im.h}}) {
+                const Point q = im.xf.apply(p);
+                b.add(Bounds{q.x, q.y, q.x, q.y});
+            }
+        }
+        return b;
+    };
     const std::string stem = file_stem(name);
     int drawing_n = 0, picture_n = 0;
 
@@ -1100,7 +1195,8 @@ bool place_as_text(PageDoc &doc, VectorStore &store, ImageStore *images, const F
                 stop.pos = 0.f;
             }
         }
-        L.justified = placed > 1 && L.tabs.empty();
+        L.positioned = tx.placed_runs;
+        L.justified = placed > 1 && L.tabs.empty() && !tx.placed_runs;
         return !L.runs.empty() && L.size > 0.f;
     };
 
@@ -1117,6 +1213,25 @@ bool place_as_text(PageDoc &doc, VectorStore &store, ImageStore *images, const F
         for (const PasteLine &L : block) {
             justified = justified || L.justified;
             right = std::max(right, L.qr);
+        }
+        /* Lines placed where a PDF put them say nothing about how they were
+         * set: three or more whose lines (but the last) mostly end at the
+         * same right edge were justified. Their widths are measured in the
+         * installed face, so "the same" is within a point and a half; the
+         * frame is then as wide as that edge, not the widest line. */
+        if (!justified && block.size() >= 3 && first.positioned) {
+            std::vector<float> rights;
+            for (size_t i = 0; i + 1 < block.size(); ++i)
+                rights.push_back(block[i].qr);
+            std::sort(rights.begin(), rights.end());
+            const float edge = rights[rights.size() / 2];
+            const float tol = std::max(1.5f, (edge - block_left) * 0.006f);
+            size_t flush = 0;
+            for (float r : rights)
+                flush += std::fabs(r - edge) <= tol;
+            justified = flush * 10 >= rights.size() * 7;
+            if (justified)
+                right = edge;
         }
         const float measure = right - block_left;
         /* Paragraphs: one ends where the next line is indented, or (justified
@@ -1227,10 +1342,12 @@ bool place_as_text(PageDoc &doc, VectorStore &store, ImageStore *images, const F
                 /* The same left edge; or a justified paragraph whose first
                  * line (indented) began the block */
                 const bool same_left = std::fabs(L.qx - block_left) <= 1.f;
-                const bool under_indent = block.size() == 1 && (L.justified || prev.justified) &&
-                                          L.qx < block_left && block_left - L.qx <= size * 4.f;
-                const bool indented = (L.justified || prev.justified) && L.qx > block_left &&
-                                      L.qx - block_left <= size * 4.f;
+                /* A first-line indent: in justified text, or in a PDF's
+                 * placed lines, where justification isn't known yet */
+                const bool prose = L.justified || prev.justified || L.positioned;
+                const bool under_indent = block.size() == 1 && prose && L.qx < block_left &&
+                                          block_left - L.qx <= size * 4.f;
+                const bool indented = prose && L.qx > block_left && L.qx - block_left <= size * 4.f;
                 joins = joins && (same_left || under_indent || indented);
                 if (joins) {
                     if (block.size() == 1)
@@ -1294,6 +1411,28 @@ bool place_as_text(PageDoc &doc, VectorStore &store, ImageStore *images, const F
         r.items.push_back(doc.add_item(page, std::move(it)));
     };
 
+    /* ---- Boxes and rules, as rectangle and line objects ---- */
+    const float ss = std::sqrt(std::fabs(sx * sy));
+    auto add_shape = [&](const VectorShape &vs, Shape::Kind kind, float x0, float y0, float x1, float y1) {
+        Shape sh;
+        sh.kind = kind;
+        sh.fill = vs.fill.kind == PaintKind::Solid && vs.fill.color.a > 0.f && kind != Shape::Kind::Line
+                      ? Paint{swatch_for(doc, vs.fill.color), 100.f}
+                      : Paint{kNoPaint, 100.f};
+        if (!vs.stroke.none() && vs.stroke.paint.kind == PaintKind::Solid && vs.stroke.paint.color.a > 0.f)
+            sh.stroke = Stroke{{swatch_for(doc, vs.stroke.paint.color), 100.f}, vs.stroke.width * ss, LineStyle::Solid};
+        else
+            sh.stroke = Stroke{{kNoPaint, 100.f}, 0.f, LineStyle::Solid};
+        /* A rectangle from its top-left corner; a line from its start, to
+         * (w, h), which may be negative */
+        Item it;
+        it.xf = Transform::translate(fx + x0 * sx, fy + y0 * sy);
+        it.w = (x1 - x0) * sx;
+        it.h = (y1 - y0) * sy;
+        it.content = sh;
+        r.items.push_back(doc.add_item(page, std::move(it)));
+    };
+
     std::vector<VectorSlotRef> order = scene.order;
     if (order.empty()) {
         for (size_t i = 0; i < scene.shapes.size(); ++i)
@@ -1307,7 +1446,7 @@ bool place_as_text(PageDoc &doc, VectorStore &store, ImageStore *images, const F
      * next drawing or picture, and a drawing ends at the next text or
      * picture that stands alone */
     for (const VectorSlotRef &ref : order) {
-        if (ref.index < 0)
+        if (ref.index < 0 || !kept(slot_bounds(ref)))
             continue;
         const size_t i = (size_t) ref.index;
         if (ref.slot == VectorSlot::Text) {
@@ -1328,7 +1467,14 @@ bool place_as_text(PageDoc &doc, VectorStore &store, ImageStore *images, const F
             if (i >= scene.shapes.size())
                 continue;
             flush_block();
-            drawing.push_back(ref);
+            Shape::Kind kind;
+            float x0, y0, x1, y1;
+            if (simple_shape(scene.shapes[i], kind, x0, y0, x1, y1)) {
+                flush_drawing();             // what's under it first
+                add_shape(scene.shapes[i], kind, x0, y0, x1, y1);
+            } else {
+                drawing.push_back(ref);
+            }
         } else if (i < scene.images.size()) {
             flush_block();
             if (pull[i]) {
@@ -1347,7 +1493,7 @@ bool place_as_text(PageDoc &doc, VectorStore &store, ImageStore *images, const F
         return true;
     if (r.items.empty())
         return false;
-    if (r.items.size() >= 2)
+    if (group_pieces && r.items.size() >= 2)
         r.group = doc.group_items(r.items);
     r.item = r.items.front();
     r.note = "placed " + (name.empty() ? std::string("graphic") : name) + " as text";
@@ -1394,30 +1540,82 @@ VectorPlacement place_svg_bytes(PageDoc &doc, VectorStore &store, std::vector<ui
 }
 
 
-ImportedPublication import_publication(std::vector<uint8_t> bytes, const std::string &name,
-                                       const std::string &source, const FontLibrary *fonts,
-                                       const std::function<bool(size_t done, size_t total)> &progress) {
-    ImportedPublication r;
-    r.images = std::make_unique<ImageStore>();
+ImportPages read_import(std::vector<uint8_t> bytes, const std::function<bool(size_t, size_t)> &progress) {
+    ImportPages p;
     const int pages = bytes.empty() ? 0 : vector_loader().page_count(bytes.data(), bytes.size());
     VectorScene first;
     std::string err;
     if (pages < 1 || !vector_loader().decode(bytes.data(), bytes.size(), &first, &err, 0)) {
-        r.error = err.empty() ? "pagemade can't read this kind of file" : err;
-        return r;
+        p.error = err.empty() ? "pagemade can't read this kind of file" : err;
+        return p;
     }
     if (!(first.width > 0.f) || !(first.height > 0.f)) {
-        r.error = "the file's page has no size";
+        p.error = "the file's page has no size";
+        return p;
+    }
+    p.pages_in_file = pages;
+    const int count = std::min(pages, 5000);   // a sane page count
+    p.bytes = std::make_shared<const std::vector<uint8_t>>(std::move(bytes));
+    p.format = first.format;
+    /* The first page is read; the rest on worker threads */
+    std::vector<VectorDecodeJob> jobs;
+    for (int i = 1; i < count; ++i)
+        jobs.push_back({p.bytes, i});
+    std::vector<std::optional<VectorScene>> rest;
+    const bool finished = decode_vector_pages(jobs, rest, nullptr, [&](size_t done, size_t) {
+        return !progress || progress(done + 1, (size_t) count);
+    });
+    if (!finished) {
+        p.cancelled = true;
+        p.error = "cancelled";
+        return p;
+    }
+    p.scenes.reserve((size_t) count);
+    p.scenes.push_back(std::move(first));
+    for (std::optional<VectorScene> &sc : rest)
+        p.scenes.push_back(sc && sc->width > 0.f && sc->height > 0.f ? std::move(sc) : std::nullopt);
+    p.ok = true;
+    return p;
+}
+
+ImportedPublication build_import(ImportPages &pages, const std::string &name, const std::string &source,
+                                 const FontLibrary *fonts, ImportMode mode,
+                                 const std::function<bool(size_t, size_t)> &progress) {
+    ImportedPublication r;
+    r.images = std::make_unique<ImageStore>();
+    if (!pages.ok || pages.scenes.empty() || !pages.scenes[0]) {
+        r.cancelled = pages.cancelled;
+        r.error = pages.error.empty() ? "nothing to import" : pages.error;
         return r;
     }
-    const int count = std::min(pages, 5000);   // a sane page count
+    const int count = (int) pages.scenes.size();
+    const VectorScene &first = *pages.scenes[0];
+    /* A print PDF's page is its trim, inside a larger sheet: the page is
+     * that size, the sheet shifted so the trim's corner is the page's, and
+     * what bleeds runs off the page as it does in a layout */
+    auto trimmed = [](const VectorScene &sc, float &x, float &y, float &w, float &h) {
+        if (sc.trim_w > 0.f && sc.trim_h > 0.f) {
+            x = sc.trim_x;
+            y = sc.trim_y;
+            w = sc.trim_w;
+            h = sc.trim_h;
+        } else {
+            x = y = 0.f;
+            w = sc.width;
+            h = sc.height;
+        }
+    };
+    float tx0, ty0, tw0, th0;
+    trimmed(first, tx0, ty0, tw0, th0);
 
     /* The pages are the file's, sized like its first. While placing, the
      * live area is the whole page, so each drawing goes in at full size at
      * the corner; ordinary margins and one column follow. */
     PageSetup setup;
-    setup.width = first.width;
-    setup.height = first.height;
+    setup.width = tw0;
+    setup.height = th0;
+    if (first.bleed_w > 0.f)
+        setup.bleed = std::max(0.f, std::min({first.trim_x - first.bleed_x, first.trim_y - first.bleed_y}));
     setup.facing = false;
     setup.columns = 1;
     PageSetup placing = setup;
@@ -1436,40 +1634,70 @@ ImportedPublication import_publication(std::vector<uint8_t> bytes, const std::st
                 remarks.push_back(s);
     };
 
-    if (count == 1 && first.format != "pdf") {
-        /* One page (an SVG): placed as Place does, so its pictures come out
-         * as frames of their own */
-        VectorPlacement pl = place_svg_bytes(r.doc, r.vectors, std::move(bytes), leaf, source, 0, nullptr,
-                                             r.images.get(), SvgPaste::Drawing, fonts);
+    if (mode == ImportMode::Editable) {
+        /* Each page taken apart: pictures in their own frames, text in text
+         * frames, boxes and rules as objects, the rest as drawings. Not
+         * grouped, so each piece moves on its own. */
+        size_t placed = 0;
+        for (int i = 0; i < count; ++i) {
+            if (progress && !progress((size_t) i, (size_t) count)) {
+                r.cancelled = true;
+                r.error = "cancelled";
+                return r;
+            }
+            if (!pages.scenes[(size_t) i])
+                continue;                // a page that can't be read stays empty
+            const VectorScene &scene = *pages.scenes[(size_t) i];
+            note_scene(scene);
+            VectorPlacement pr;
+            const std::string page_name = count > 1 ? file_stem(leaf) + "-p" + std::to_string(i + 1) : leaf;
+            float tx, ty, tw, th;
+            trimmed(scene, tx, ty, tw, th);
+            PlaceApart apart;
+            apart.group = false;
+            apart.have_frame = true;             // at full size, the trim's corner at the page's
+            apart.fx = -tx;
+            apart.fy = -ty;
+            apart.fw = scene.width;
+            apart.fh = scene.height;
+            if (scene.bleed_w > 0.f) {           // printer's marks lie past the bleed
+                apart.have_keep = true;
+                apart.kx0 = scene.bleed_x;
+                apart.ky0 = scene.bleed_y;
+                apart.kx1 = scene.bleed_x + scene.bleed_w;
+                apart.ky1 = scene.bleed_y + scene.bleed_h;
+            }
+            if (place_as_text(r.doc, r.vectors, r.images.get(), fonts, scene, page_name, (size_t) i, nullptr,
+                              false, pr, &apart)) {
+                placed += pr.items.size();
+                if (!pr.error.empty())
+                    remarks.push_back("page " + std::to_string(i + 1) + ": " + pr.error);
+            }
+        }
+        if (progress)
+            progress((size_t) count, (size_t) count);
+        if (placed == 0) {
+            r.error = "the file has nothing pagemade could place";
+            return r;
+        }
+    } else if (count == 1 && pages.format != "pdf") {
+        /* One page (an SVG), exact: placed as Place does, so its pictures
+         * come out as frames of their own */
+        VectorPlacement pl = place_svg_bytes(r.doc, r.vectors, std::vector<uint8_t>(*pages.bytes), leaf, source, 0,
+                                             nullptr, r.images.get(), SvgPaste::Drawing, fonts);
         if (!pl.ok) {
             r.error = pl.error;
             return r;
         }
         note_scene(first);
     } else {
-        const VectorStore::Bytes shared = std::make_shared<const std::vector<uint8_t>>(std::move(bytes));
+        /* Exact: each page one graphic, the pages sharing the file's bytes */
+        const VectorStore::Bytes shared = pages.bytes;
         const uint64_t hash = image_bytes_hash(shared->data(), shared->size());
-        /* The first page is read; the rest on worker threads */
-        std::vector<VectorDecodeJob> jobs;
-        for (int i = 1; i < count; ++i)
-            jobs.push_back({shared, i});
-        std::vector<std::optional<VectorScene>> scenes;
-        const bool finished = decode_vector_pages(jobs, scenes, nullptr, [&](size_t done, size_t) {
-            return !progress || progress(done + 1, (size_t) count);
-        });
-        if (!finished) {
-            r.cancelled = true;
-            r.error = "cancelled";
-            return r;
-        }
         for (int i = 0; i < count; ++i) {
-            VectorScene scene;
-            if (i == 0)
-                scene = std::move(first);
-            else if (scenes[(size_t) i - 1] && scenes[(size_t) i - 1]->width > 0.f && scenes[(size_t) i - 1]->height > 0.f)
-                scene = std::move(*scenes[(size_t) i - 1]);
-            else
-                continue;                // a page that can't be read stays empty
+            if (!pages.scenes[(size_t) i])
+                continue;
+            VectorScene scene = std::move(*pages.scenes[(size_t) i]);
             note_scene(scene);
             const uint32_t id = r.vectors.take_id();
             VectorAsset asset;
@@ -1482,19 +1710,31 @@ ImportedPublication import_publication(std::vector<uint8_t> bytes, const std::st
             asset.page = i;
             asset.source_size = shared->size();
             asset.hash = hash;
-            float x, y, w, h;
-            vector_frame(r.doc.setup, (size_t) i, scene.width, scene.height, nullptr, x, y, w, h, true);
+            /* The frame shows the bleed (or the whole box), the trim's
+             * corner at the page's; the marks past the bleed are cropped */
+            float tx, ty, tw, th;
+            trimmed(scene, tx, ty, tw, th);
+            float bx = 0.f, by = 0.f, bw = scene.width, bh = scene.height;
+            if (scene.bleed_w > 0.f) {
+                bx = scene.bleed_x;
+                by = scene.bleed_y;
+                bw = scene.bleed_w;
+                bh = scene.bleed_h;
+            }
+            const float sw = scene.width, sh = scene.height;
             if (!r.vectors.add(id, shared, std::move(scene)))
                 continue;
             r.doc.add_vector(asset);
             Item it;
-            it.w = w;
-            it.h = h;
-            it.xf = Transform::translate(x, y);
+            it.w = bw;
+            it.h = bh;
+            it.xf = Transform::translate(bx - tx, by - ty);
             PlacedVector pv;
             pv.asset = id;
-            pv.w = w;
-            pv.h = h;
+            pv.x = -bx;
+            pv.y = -by;
+            pv.w = sw;
+            pv.h = sh;
             it.content = pv;
             r.doc.add_item((size_t) i, std::move(it));
         }
@@ -1508,9 +1748,17 @@ ImportedPublication import_publication(std::vector<uint8_t> bytes, const std::st
     r.note.replace(0, 6, "imported");    // "placed x" -> "imported x"
     if (count > 1)
         r.note += " (" + std::to_string(count) + " pages" +
-                  (pages > count ? " of " + std::to_string(pages) : std::string()) + ")";
+                  (pages.pages_in_file > count ? " of " + std::to_string(pages.pages_in_file) : std::string()) + ")";
     r.ok = true;
     return r;
+}
+
+ImportedPublication import_publication(std::vector<uint8_t> bytes, const std::string &name,
+                                       const std::string &source, const FontLibrary *fonts,
+                                       const std::function<bool(size_t done, size_t total)> &progress,
+                                       ImportMode mode) {
+    ImportPages pages = read_import(std::move(bytes), progress);
+    return build_import(pages, name, source, fonts, mode);
 }
 
 } // namespace pagemade

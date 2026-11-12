@@ -84,6 +84,10 @@ struct VectorText {
     Transform xf;
     std::vector<VectorTextRun> runs;
     int clip = -1;                       // index into VectorScene::clips, or -1
+    /* The runs sit where the file put each one (a PDF places its text
+     * piece by piece). Unlike SVG words placed one by one, that says
+     * nothing about justification. */
+    bool placed_runs = false;
 };
 
 /* An SVG <image>. x, y, w, h are user units; xf maps them into the box.
@@ -128,6 +132,12 @@ struct VectorSlotRef {
 
 struct VectorScene {
     float width = 0, height = 0;         // the graphic's box, points
+    /* The finished page inside the box and how far its bleed reaches (a
+     * PDF's TrimBox and BleedBox), in the box's space. A width of 0: not
+     * given, the whole box. A PDF made for print is often a sheet larger
+     * than its page, with crop marks out past the bleed. */
+    float trim_x = 0, trim_y = 0, trim_w = 0, trim_h = 0;
+    float bleed_x = 0, bleed_y = 0, bleed_w = 0, bleed_h = 0;
     /* The decoder that made it ("svg", "pdf"): placement splits an SVG's
      * embedded pictures into frames, but keeps a PDF page whole. */
     std::string format;

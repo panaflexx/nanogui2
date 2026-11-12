@@ -30,6 +30,7 @@
  * FreeType and miniz: the same on macOS, Linux and Windows.
  */
 #include "plugin/pdf_parse.h"
+#include "composer/utf8.h"
 #include "plugin/plugin.h"
 
 #include "geometry.h"
@@ -889,6 +890,7 @@ public:
             }
         }
         run(data, res, gs, 0);
+        tidy_lines();
     }
 
 private:
@@ -978,6 +980,22 @@ private:
     void clip(GState &gs, const Path &path, FillRule rule) {
         if (path.empty())
             return;
+        /* A rectangle round the whole page (a bleed or page clip) cuts
+         * nothing. Leaving it out keeps text unclipped, so it can become
+         * a text frame when the page is taken apart. */
+        float x0, y0, x1, y1;
+        const float slack = 0.5f;
+        if (path_axis_rect(path, x0, y0, x1, y1)) {
+            /* The page's own box, or one round its trim (the bleed a print
+             * PDF clips to) */
+            const bool all = x0 <= slack && y0 <= slack && x1 >= m_scene.width - slack &&
+                             y1 >= m_scene.height - slack;
+            const bool trim = m_scene.trim_w > 0.f && x0 <= m_scene.trim_x + slack && y0 <= m_scene.trim_y + slack &&
+                              x1 >= m_scene.trim_x + m_scene.trim_w - slack &&
+                              y1 >= m_scene.trim_y + m_scene.trim_h - slack;
+            if (all || trim)
+                return;
+        }
         ClipLayers layers = gs.clip >= 0 ? m_scene.clips[(size_t) gs.clip] : ClipLayers();
         layers.push_back({ClipPath{path, rule}});
         m_scene.clips.push_back(std::move(layers));
@@ -1385,12 +1403,13 @@ private:
                 f.code_gid[(size_t) c] = gid;
             }
         }
-        if (!f.face) {
+        /* The installed faces it names: what a font that isn't embedded is
+         * drawn in, and what an embedded one's text is set in once edited */
+        if (!f.face)
             remark("fonts not embedded, drawn in installed faces");
-            fallback_families(m_doc.get(desc_holder, "BaseFont").str.empty() ? m_doc.get(fd, "BaseFont").str
-                                                                             : m_doc.get(desc_holder, "BaseFont").str,
-                              f);
-        }
+        fallback_families(m_doc.get(desc_holder, "BaseFont").str.empty() ? m_doc.get(fd, "BaseFont").str
+                                                                         : m_doc.get(desc_holder, "BaseFont").str,
+                          f);
         f.ok = true;
     }
 
@@ -1409,6 +1428,13 @@ private:
         const Transform text_to_page = gs.ctm * m_tm;
         run_text.xf = text_to_page * Transform{gs.hscale, 0, 0, -1, 0, gs.rise};   // y down, as SVG text
         run_text.clip = gs.clip;
+        /* An embedded font's plainly filled text whose characters are known
+         * is kept as text too: its glyphs, as drawn, are the embedded
+         * outlines (so it looks exactly as it did), and its characters let
+         * the page be taken apart into editable text. */
+        const bool as_text = f->face && visible && gs.render == 0 && !gs.fill_pattern;
+        std::string chars;
+        bool all_known = true;
         float pen = 0.f;                 // text space, along the line
         const int nb = f->composite ? f->code_bytes : 1;
         for (size_t i = 0; i + (size_t) nb <= bytes.size(); i += (size_t) nb) {
@@ -1443,6 +1469,13 @@ private:
                         }
                         ink.push_back(c);
                     }
+                    if (as_text) {
+                        auto t = f->text.find(code);
+                        if (t != f->text.end() && !t->second.empty())
+                            chars += t->second;
+                        else if (!it->second.empty())
+                            all_known = false;   // ink with no character: keep the outlines
+                    }
                 } else {
                     auto t = f->text.find(code);
                     if (t != f->text.end() && !t->second.empty() && t->second != " ") {
@@ -1466,6 +1499,11 @@ private:
                 tx += gs.word_space;
             pen += tx * gs.hscale;
         }
+        if (as_text && all_known && !chars.empty()) {
+            embedded_text(gs, *f, std::move(chars), std::move(ink), run_text.xf, pen / gs.hscale);
+            m_tm = m_tm * Transform::translate(pen, 0.f);
+            return;
+        }
         if (!ink.empty()) {
             m_path = std::move(ink);
             GState paint_gs = gs;
@@ -1477,6 +1515,163 @@ private:
             m_scene.texts.push_back(std::move(run_text));
         }
         m_tm = m_tm * Transform::translate(pen, 0.f);
+    }
+
+    /* Text in an embedded font, its glyphs already outlined (`ink`, page
+     * space). `xf` is the run's space (y down, baseline at y 0); `advance`
+     * is where the string ends in it. A string that goes on along the line
+     * the last one is on, a little after it, joins it: PDFs place words,
+     * or each glyph, on their own, and leave the spaces out. */
+    void embedded_text(const GState &gs, const PdfFont &f, std::string chars, Path ink, const Transform &xf,
+                       float advance) {
+        VectorTextRun run;
+        run.text = std::move(chars);
+        run.families = f.families;
+        run.size = gs.font_size;
+        run.weight = f.weight;
+        run.italic = f.italic;
+        run.fill = gs.fill;
+        run.fill.a *= gs.fill_alpha;
+        run.letter_spacing = gs.char_space;
+        if (!ink.empty())
+            run.windings = std::make_shared<const std::vector<uint8_t>>(fill_windings(ink));
+        run.ink = std::move(ink);
+        run.ink_set = true;              // drawn as the embedded glyphs, not re-shaped
+
+        const bool after_last = m_last_text >= 0 && !m_scene.order.empty() &&
+                                m_scene.order.back().slot == VectorSlot::Text &&
+                                m_scene.order.back().index == m_last_text;
+        if (after_last) {
+            /* The same baseline, painted next: part of the same line, even
+             * out of order (a contents line's page number before its
+             * leader dots). Its place is kept; tidy_lines() puts the runs
+             * in order and the spaces back once the page is read. */
+            VectorText &prev = m_scene.texts[(size_t) m_last_text];
+            const float size = std::max(prev.runs.empty() ? run.size : prev.runs.back().size, run.size);
+            const Point q = prev.xf.inverse().apply(xf.apply({0.f, 0.f}));
+            const bool same_line = same_linear(prev.xf, xf) && prev.clip == gs.clip &&
+                                   std::fabs(q.y) <= size * 0.2f && std::fabs(q.x - m_last_end) < size * 40.f;
+            if (same_line) {
+                run.has_x = true;
+                run.x = q.x;
+                run.has_y = false;
+                prev.runs.push_back(std::move(run));
+                m_run_ends[m_last_text].push_back(q.x + advance);
+                m_last_end = q.x + advance;
+                return;
+            }
+        }
+        VectorText text;
+        text.xf = xf;
+        text.clip = gs.clip;
+        text.placed_runs = true;
+        run.has_x = run.has_y = true;
+        run.x = run.y = 0.f;
+        text.runs.push_back(std::move(run));
+        m_last_text = (int) m_scene.texts.size();
+        m_last_end = advance;
+        m_run_ends[m_last_text] = {advance};
+        m_scene.order.push_back({VectorSlot::Text, m_last_text});
+        m_scene.texts.push_back(std::move(text));
+    }
+
+    /* After a page: each line built from strings placed one by one has its
+     * runs put in reading order; a gap wider than the line's own letter
+     * spacing by a word space gets the space the PDF left out; and runs of
+     * the same type that touch become one (a word, or a row of leader dots,
+     * which are kept apart from the words they lead from). */
+    void tidy_lines() {
+        auto leader_chars = [](const std::string &t) {
+            if (t.empty())
+                return false;
+            for (unsigned char c : t)
+                if (c != '.' && c != '_' && c != ' ')
+                    return false;
+            return true;
+        };
+        auto same_type = [](const VectorTextRun &a, const VectorTextRun &b) {
+            return a.families == b.families && a.size == b.size && a.weight == b.weight && a.italic == b.italic &&
+                   std::fabs(a.fill.r - b.fill.r) < 1e-3f && std::fabs(a.fill.g - b.fill.g) < 1e-3f &&
+                   std::fabs(a.fill.b - b.fill.b) < 1e-3f && std::fabs(a.fill.a - b.fill.a) < 1e-3f;
+        };
+        for (auto &kv : m_run_ends) {
+            VectorText &tx = m_scene.texts[(size_t) kv.first];
+            std::vector<float> &ends = kv.second;
+            const size_t n = tx.runs.size();
+            if (n < 2 || ends.size() != n)
+                continue;
+            std::vector<size_t> by_x(n);
+            for (size_t i = 0; i < n; ++i)
+                by_x[i] = i;
+            std::stable_sort(by_x.begin(), by_x.end(), [&](size_t a, size_t b) { return tx.runs[a].x < tx.runs[b].x; });
+            /* The line's letter spacing: placed glyph by glyph, the gaps
+             * between letters (a low quartile of them); placed by words,
+             * none */
+            std::vector<float> gaps;
+            size_t singles = 0;
+            for (size_t k = 0; k < n; ++k) {
+                const VectorTextRun &r = tx.runs[by_x[k]];
+                singles += utf8_len(r.text, 0) == r.text.size();
+                if (k)
+                    gaps.push_back(r.x - ends[by_x[k - 1]]);
+            }
+            float base = 0.f;
+            if (singles * 10 >= n * 6 && gaps.size() >= 3) {
+                std::vector<float> g = gaps;
+                std::sort(g.begin(), g.end());
+                base = std::max(0.f, g[g.size() / 4]);
+            }
+            std::vector<VectorTextRun> out;
+            std::vector<float> out_ends;
+            for (size_t k = 0; k < n; ++k) {
+                VectorTextRun r = std::move(tx.runs[by_x[k]]);
+                const float end = ends[by_x[k]];
+                if (k == 0) {
+                    out.push_back(std::move(r));
+                    out_ends.push_back(end);
+                    continue;
+                }
+                VectorTextRun &last = out.back();
+                const float gap = r.x - out_ends.back();
+                const float size = std::max(last.size, r.size);
+                const bool space = gap - base > size * 0.12f;
+                const bool tab = gap - base > size * 1.5f;
+                const bool touch = !tab && same_type(last, r) && leader_chars(last.text) == leader_chars(r.text);
+                if (space && !tab && !last.text.empty() && last.text.back() != ' ' && r.text[0] != ' ') {
+                    if (touch)
+                        last.text += ' ';
+                    else
+                        r.text = " " + r.text;
+                }
+                if (touch) {
+                    last.text += r.text;
+                    last.ink.insert(last.ink.end(), r.ink.begin(), r.ink.end());
+                    last.windings.reset();
+                    out_ends.back() = end;
+                } else {
+                    out.push_back(std::move(r));
+                    out_ends.push_back(end);
+                }
+            }
+            /* Tracking that is meant (letter-spaced caps), not the hair a
+             * justified line spreads between its letters */
+            const float tracked = !out.empty() && base > out[0].size * 0.05f ? base : 0.f;
+            for (size_t k = 0; k < out.size(); ++k) {
+                if (tracked > 0.f)
+                    out[k].letter_spacing = tracked;  // a tracked line stays tracked
+                if (!out[k].ink.empty() && !out[k].windings)
+                    out[k].windings = std::make_shared<const std::vector<uint8_t>>(fill_windings(out[k].ink));
+                out[k].has_y = k == 0;
+            }
+            tx.runs = std::move(out);
+        }
+        m_run_ends.clear();
+    }
+
+    static bool same_linear(const Transform &a, const Transform &b) {
+        const float tol = 1e-3f * std::max(1.f, std::fabs(a.a) + std::fabs(a.b) + std::fabs(a.c) + std::fabs(a.d));
+        return std::fabs(a.a - b.a) <= tol && std::fabs(a.b - b.b) <= tol && std::fabs(a.c - b.c) <= tol &&
+               std::fabs(a.d - b.d) <= tol;
     }
 
     void advance_only(GState &gs, const std::string &bytes) {
@@ -2036,6 +2231,9 @@ private:
     std::shared_ptr<ColorSpace> m_device_gray, m_device_rgb, m_device_cmyk;
     Path m_path;
     Point m_cur{0, 0}, m_start{0, 0};
+    int m_last_text = -1;                // the text a following string may join
+    float m_last_end = 0.f;              // where it ends, in its own space
+    std::map<int, std::vector<float>> m_run_ends;   // per text, where each run ends
     Transform m_base;                    // the page's default space -> the box (patterns use it)
     Transform m_tm, m_tlm;
 };
@@ -2043,7 +2241,8 @@ private:
 /* The page's box (crop box within the media box) and the transform from
  * PDF space (y up) to the scene (y down, the box's top-left at 0, turned
  * by /Rotate) */
-bool page_frame(const pdf::Document &doc, const Object &page, float &w, float &h, Transform &base) {
+bool page_frame(const pdf::Document &doc, const Object &page, float &w, float &h, Transform &base,
+                VectorScene *boxes = nullptr) {
     auto box = [&](const char *key, float b[4]) {
         const Object &a = doc.get(page, key);
         if (a.size() != 4)
@@ -2077,6 +2276,32 @@ bool page_frame(const pdf::Document &doc, const Object &page, float &w, float &h
     case 180: base = {-1, 0, 0, 1, x1, -y0}; w = bw; h = bh; break;
     case 270: base = {0, -1, -1, 0, y1, x1}; w = bh; h = bw; break;
     default: base = {1, 0, 0, -1, -x0, y1}; w = bw; h = bh; break;
+    }
+    /* The trim and bleed, in the box's space (cut to it) */
+    if (boxes) {
+        auto place = [&](const float b[4], float &ox, float &oy, float &ow, float &oh) {
+            const Point a = base.apply({b[0], b[1]}), c = base.apply({b[2], b[3]});
+            const float l = std::max(0.f, std::min(a.x, c.x)), t = std::max(0.f, std::min(a.y, c.y));
+            const float r = std::min(w, std::max(a.x, c.x)), btm = std::min(h, std::max(a.y, c.y));
+            if (r - l < 1.f || btm - t < 1.f)
+                return false;
+            ox = l;
+            oy = t;
+            ow = r - l;
+            oh = btm - t;
+            return true;
+        };
+        float trim[4], bleed[4];
+        const bool have_trim = box("TrimBox", trim) || box("ArtBox", trim);
+        if (have_trim && place(trim, boxes->trim_x, boxes->trim_y, boxes->trim_w, boxes->trim_h)) {
+            if (!(box("BleedBox", bleed) &&
+                  place(bleed, boxes->bleed_x, boxes->bleed_y, boxes->bleed_w, boxes->bleed_h))) {
+                boxes->bleed_x = boxes->trim_x;
+                boxes->bleed_y = boxes->trim_y;
+                boxes->bleed_w = boxes->trim_w;
+                boxes->bleed_h = boxes->trim_h;
+            }
+        }
     }
     return true;
 }
@@ -2117,7 +2342,7 @@ public:
         }
         const Object &page = doc.page(index);
         Transform base;
-        if (!page_frame(doc, page, out->width, out->height, base)) {
+        if (!page_frame(doc, page, out->width, out->height, base, out)) {
             if (error)
                 *error = "the PDF page has no size";
             return false;

@@ -41,6 +41,9 @@ Path shape_path(const Item &it);
 /* The item's box corners on the page (a line's two ends). */
 Bounds item_bounds(const Item &it);
 Bounds path_bounds(const Path &p);
+/* A path that is one axis-aligned rectangle (a move and three or four
+ * lines, closed or back at the start), and its corners. */
+bool path_axis_rect(const Path &p, float &x0, float &y0, float &x1, float &y1);
 
 /* For each subpath of a path to be filled, in order: should NanoVG keep it
  * counter-clockwise (1) or clockwise (0)? Each keeps its own winding, so

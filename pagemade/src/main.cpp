@@ -1246,18 +1246,17 @@ public:
         const std::string uri = file_uri(path);
         try {
             m_import_thread = std::thread([this, job, path, name, uri] {
-                auto result = std::make_shared<ImportedPublication>();
-                std::string read_error;
+                /* Here, off the UI thread: read the file and decode its
+                 * pages (the slow part). Laying the pages out measures
+                 * text, so that is done on the UI thread once this ends. */
+                auto pages = std::make_shared<ImportPages>();
                 try {
                     std::vector<uint8_t> bytes;
+                    std::string read_error;
                     if (!read_file(path, &bytes, &read_error) || bytes.empty()) {
-                        result->error = read_error.empty() ? "the file is empty" : read_error;
+                        pages->error = read_error.empty() ? "the file is empty" : read_error;
                     } else if (!job->cancel) {
-                        /* No font library off the UI thread: it loads faces
-                         * as they're asked for. Only an SVG's text width
-                         * would use it, and that is estimated instead. */
-                        *result = import_publication(std::move(bytes), name, uri, nullptr,
-                                                     [job](size_t done, size_t total) {
+                        *pages = read_import(std::move(bytes), [job](size_t done, size_t total) {
                             bool post = false;
                             {
                                 std::lock_guard<std::mutex> lock(job->mu);
@@ -1273,8 +1272,8 @@ public:
                                     if (job->bar && job->total)
                                         job->bar->set_value((float) job->done / (float) job->total);
                                     if (job->label && !job->cancel)
-                                        job->label->set_caption("Page " + std::to_string(job->done) + " of " +
-                                                                std::to_string(job->total));
+                                        job->label->set_caption("Reading page " + std::to_string(job->done) +
+                                                                " of " + std::to_string(job->total));
                                     if (job->dialog)
                                         if (Screen *screen = job->dialog->screen())
                                             screen->redraw();
@@ -1285,30 +1284,63 @@ public:
                         });
                     }
                 } catch (const std::exception &ex) {
-                    result->ok = false;
-                    result->error = ex.what();
+                    pages->ok = false;
+                    pages->error = ex.what();
                 } catch (...) {
-                    result->ok = false;
-                    result->error = "the import failed";
+                    pages->ok = false;
+                    pages->error = "the import failed";
                 }
                 if (job->cancel)
-                    result->cancelled = true;
-                nanogui::async([this, job, result, name] {
+                    pages->cancelled = true;
+                nanogui::async([this, job, pages, name, uri] {
                     if (m_import_thread.joinable())
                         m_import_thread.join();
-                    if (job->dialog)
-                        job->dialog->close();
-                    job->dialog = nullptr;
-                    job->label = nullptr;
-                    job->bar = nullptr;
-                    job->cancel_button = nullptr;
-                    m_import_job.reset();
-                    if (m_shutting_down)
+                    auto close_dialog = [&] {
+                        if (job->dialog)
+                            job->dialog->close();
+                        job->dialog = nullptr;
+                        job->label = nullptr;
+                        job->bar = nullptr;
+                        job->cancel_button = nullptr;
+                        m_import_job.reset();
+                    };
+                    if (m_shutting_down || pages->cancelled || !pages->ok) {
+                        close_dialog();
+                        if (m_shutting_down)
+                            return;
+                        if (pages->cancelled)
+                            set_note("import of " + name + " cancelled");
+                        else
+                            show_alert(this, "“" + name + "” couldn't be imported.", pages->error);
                         return;
-                    if (result->cancelled)
-                        set_note("import of " + name + " cancelled");
-                    else
-                        finish_import(name, *result);
+                    }
+                    /* Lay the pages out: text frames measured in the fonts.
+                     * The dialog stays up and the window keeps drawing;
+                     * input waits until it's done. */
+                    if (job->cancel_button) {
+                        job->cancel_button->set_enabled(false);
+                        job->cancel_button->propagate_cache_dirty();
+                    }
+                    ImportedPublication result;
+                    {
+                        struct Modal {
+                            Modal() { nanogui::begin_modal_work(); }
+                            ~Modal() { nanogui::end_modal_work(); }
+                        } modal;
+                        result = build_import(*pages, name, uri, &m_fonts, ImportMode::Editable,
+                                              [&](size_t done, size_t total) {
+                            if (job->label)
+                                job->label->set_caption("Laying out page " + std::to_string(done + 1 > total ? total : done + 1) +
+                                                        " of " + std::to_string(total));
+                            if (job->bar && total)
+                                job->bar->set_value((float) done / (float) total);
+                            redraw();
+                            nanogui::pump_modal_work();
+                            return true;
+                        });
+                    }
+                    close_dialog();
+                    finish_import(name, result);
                 });
                 glfwPostEmptyEvent();
             });
