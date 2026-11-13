@@ -63,6 +63,7 @@
 #include "layouts_panel.h"
 #include "tool_tabs.h"
 #include "layers_panel.h"
+#include "find_panel.h"
 #include "ruler.h"
 #include "uri.h"
 #include "docfile.h"
@@ -744,7 +745,7 @@ public:
         };
         tool_btn(Tool::Pointer, FA_MOUSE_POINTER,
                  "Pointer tool (Shift+click adds, drag a marquee; Delete removes; "
-                 "arrows nudge; Ctrl+F front, Ctrl+] forward, Ctrl+[ backward, Ctrl+B back)");
+                 "arrows nudge; Ctrl+Shift+] front, Ctrl+] forward, Ctrl+[ backward, Ctrl+B back)");
         tool_btn(Tool::Crop, FA_CROP,
                  "Crop tool (drag a handle to trim the frame, drag inside to slide; "
                  "Shift locks one axis; Ctrl+Shift+wheel scales the picture)");
@@ -930,7 +931,12 @@ public:
         m_rulers->set_content(m_scroll, m_view);
         m_view->set_image_store(&m_images);
         m_view->set_vector_store(&m_vectors);
-        m_view->on_recompose = [this] { update_status(); };
+        m_view->on_recompose = [this] {
+            update_status();
+            /* Find & Replace follows the text: typing, undo and redo land here */
+            if (ToolTabsWindow *w = ToolTabsWindow::host_of(m_find_panel); w && w->visible())
+                m_find_panel->refresh();
+        };
         m_view->on_tool_change = [this](ComposerView::Tool t) {
             sync_tool_buttons(t);
             show_type_palette(t == ComposerView::Tool::Text);
@@ -1746,6 +1752,10 @@ public:
         add_cmd(edit, "Select All", {{SYSTEM_COMMAND_MOD, GLFW_KEY_A}}, [this] { m_view->select_all(); });
         add_cmd(edit, "Deselect All", {{SYSTEM_COMMAND_MOD | GLFW_MOD_SHIFT, GLFW_KEY_A}},
                 [this] { m_view->deselect_all(); });
+        new Separator(edit->popup());
+        add_cmd(edit, "Find & Replace...", {{SYSTEM_COMMAND_MOD, GLFW_KEY_F},
+                                            {SYSTEM_COMMAND_MOD, GLFW_KEY_H}},
+                [this] { show_find(); });
 
         /* Type: typographer's quotes, and the characters a keyboard lacks.
          * Shortcuts follow InDesign's where it has them. Line and frame
@@ -1851,8 +1861,7 @@ public:
 
         Dropdown *element = m_menubar->add_menu("Element");
         m_to_front = add_cmd(element, "Bring to Front",
-                             {{SYSTEM_COMMAND_MOD, GLFW_KEY_F},
-                              {SYSTEM_COMMAND_MOD | GLFW_MOD_SHIFT, GLFW_KEY_RIGHT_BRACKET}},
+                             {{SYSTEM_COMMAND_MOD | GLFW_MOD_SHIFT, GLFW_KEY_RIGHT_BRACKET}},
                              [this] { m_view->arrange(ComposerView::Stack::Front); });
         m_forward = add_cmd(element, "Bring Forward",
                             {{SYSTEM_COMMAND_MOD, GLFW_KEY_RIGHT_BRACKET}},
@@ -2602,7 +2611,7 @@ public:
                 item("Make Same Size", FA_EXPAND_ARROWS_ALT, true, {}, [v] { v->match_size(M::Both); });
             }
             section();
-            item("Bring to Front", 0, true, {{C, GLFW_KEY_F}},
+            item("Bring to Front", 0, true, {{C | GLFW_MOD_SHIFT, GLFW_KEY_RIGHT_BRACKET}},
                  [v] { v->arrange(ComposerView::Stack::Front); });
             item("Send to Back", 0, true, {}, [v] { v->arrange(ComposerView::Stack::Back); });
             if (const ItemId frame = v->context_picture_frame()) {
@@ -2629,6 +2638,29 @@ public:
         if (!any)
             return;
         open_context_popup(at);
+    }
+
+    /* Find & Replace, like Layers: made once, hidden when closed. */
+    void show_find() {
+        ensure_tool_hooks();
+        if (!m_find_panel) {
+            auto *w = new ToolTabsWindow(this, "Find & Replace");
+            m_find_panel = w->add_panel<FindPanel>(m_view);
+            w->set_size(Vector2i(420, 440));
+            w->center();
+        }
+        ToolTabsWindow *w = ToolTabsWindow::host_of(m_find_panel);
+        if (!w)
+            return;
+        if (!w->visible()) {
+            w->set_visible(true);
+            apply_docks();
+        }
+        move_window_to_front(w);
+        w->show_panel(m_find_panel);
+        w->request_focus();
+        perform_layout();
+        m_find_panel->focus_find();
     }
 
     /* The Layers window, like Image Assets: made once, hidden when closed. */
@@ -3859,6 +3891,7 @@ private:
     ImageAssetsPanel *m_images_panel = nullptr;
     LayoutsPanel     *m_layouts_panel = nullptr;
     LayersPanel      *m_layers = nullptr;
+    FindPanel        *m_find_panel = nullptr;
     Window           *m_root_window = nullptr;
     PopupMenu        *m_context_popup = nullptr;   // the page's right-click menu
     /* Docked tool windows: the size each had floating, and the width it

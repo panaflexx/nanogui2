@@ -251,6 +251,14 @@ public:
     void deselect_all();
     /* Select a story's text block by position: story index, thread index. */
     void select_frame(size_t story, size_t frame);
+    /* Find & Replace: edit `story` with [a, b) selected, turned to the
+     * page that shows it and scrolled into view. Text in the overset stays
+     * selected where it is. False when the story is gone. */
+    bool show_text(pagemade::StoryId story, pagemade::TextPos a, pagemade::TextPos b);
+    /* A story's text was changed from outside (Find & Replace): keep the
+     * caret in it, end a typing run, recompose that story and redraw. Make
+     * the undo step (push_undo) before changing it. */
+    void story_text_changed(pagemade::StoryId story);
 
     /* ---- Pages ------------------------------------------------------ */
     /* Hidden pages can be shown and edited; printing skips them.

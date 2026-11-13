@@ -15,6 +15,7 @@
 #include "image.h"
 #include "image_color.h"
 #include "layout_templates.h"
+#include "find_replace.h"
 #include "plugin/svg_export.h"
 #include "plugin/svg_place.h"
 #include "plugin/pdf_parse.h"
@@ -5438,6 +5439,77 @@ static void test_system_fonts() {
 
 /* Layout templates: the built-in set, the file, turning, fitting into the
  * live area, grouping, spreads, and a template made from the page. */
+static void test_find_replace() {
+    PageDoc doc = new_publication(PageSetup(), 1);
+    Story st;
+    CharStyle plain, bold;
+    bold.bold = true;
+    TextPos at = insert_text(st, TextPos{}, "The theme of ", plain);
+    at = insert_text(st, at, "THE", bold);
+    at = insert_text(st, at, " end. Caf\xC3\xA9 and CAF\xC3\x89.\nthe second the", plain);
+    const StoryId sid = doc.add_story(st);
+    FindOptions any_case, words, exact;
+    words.whole_word = true;
+    exact.match_case = true;
+    const Story &s = doc.find_story(sid)->story;
+    CHECK(find_matches(s, "the", any_case).size() == 5, "any case finds The, the(me), THE and two more (%zu)",
+          find_matches(s, "the", any_case).size());
+    CHECK(find_matches(s, "the", words).size() == 4, "whole word skips theme (%zu)",
+          find_matches(s, "the", words).size());
+    CHECK(find_matches(s, "the", exact).size() == 3, "match case: theme and the two in paragraph 2");
+    CHECK(find_matches(s, "caf\xC3\xA9", any_case).size() == 2, "accented letters fold too");
+    CHECK(find_matches(s, "", any_case).empty(), "nothing to find finds nothing");
+
+    std::vector<FoundText> f = find_all(doc, "the", "a", words);
+    CHECK(f.size() == 4 && f[1].found == "THE" && f[2].para == 1, "find_all keeps the text as found");
+    /* Replace the second, then the first: the rest are found where they moved */
+    CHECK(apply_found(doc, f[1], true), "replace one");
+    resolve_found(doc, f);
+    CHECK(apply_found(doc, f[0], true), "and one before it");
+    resolve_found(doc, f);
+    const auto text = [&](size_t pi) { return paragraph_text(doc.find_story(sid)->story.paragraphs[pi]); };
+    CHECK(text(0) == "a theme of a end. Caf\xC3\xA9 and CAF\xC3\x89.", "two replaced (%s)", text(0).c_str());
+    CHECK(f[0].state == FoundText::State::Replaced && f[1].state == FoundText::State::Replaced &&
+              f[2].state == FoundText::State::Found && f[2].byte == 0,
+          "states follow, and the next paragraph's finds stay put");
+    bool kept_bold = false;
+    for (const Run &r : doc.find_story(sid)->story.paragraphs[0].runs)
+        if (r.text.find("a end") != std::string::npos || r.text == "a")
+            kept_bold = kept_bold || r.style.bold;
+    CHECK(kept_bold, "the replacement takes the style it replaced");
+
+    /* Undo: the document goes back, the list reads it again */
+    PageDoc before = doc;
+    CHECK(apply_found(doc, f[0], false), "revert one");
+    resolve_found(doc, f);
+    CHECK(text(0) == "The theme of a end. Caf\xC3\xA9 and CAF\xC3\x89." &&
+              f[0].state == FoundText::State::Found && f[1].state == FoundText::State::Replaced,
+          "reverted, the other still replaced");
+    doc = before;
+    resolve_found(doc, f);
+    CHECK(f[0].state == FoundText::State::Replaced, "an undo shows it replaced again");
+
+    /* Replace the rest last first, as Replace All does */
+    for (size_t i = f.size(); i-- > 0;)
+        if (f[i].state == FoundText::State::Found)
+            apply_found(doc, f[i], true);
+    resolve_found(doc, f);
+    CHECK(text(1) == "a second a", "replace all (%s)", text(1).c_str());
+
+    /* Typing inside a find makes it stale; the others still resolve */
+    {
+        Story &ms = doc.find_story(sid)->story;
+        insert_text(ms, TextPos{1, 0}, "X", plain);
+    }
+    resolve_found(doc, f);
+    CHECK(f[2].state == FoundText::State::Stale && !apply_found(doc, f[2], false),
+          "an edited find is stale and left alone");
+    std::string head, tail;
+    found_context(doc, f[1], 40, 80, head, tail);
+    CHECK(head == "a theme of " && tail.rfind(" end.", 0) == 0, "context around a find (%s|%s)",
+          head.c_str(), tail.c_str());
+}
+
 static void test_layout_templates(const FontLibrary &fonts) {
     auto near = [](float a, float b) { return std::fabs(a - b) < 0.01f; };
     auto find = [](const std::vector<LayoutTemplate> &ts, const char *name) -> const LayoutTemplate * {
@@ -7172,6 +7244,7 @@ int main(int argc, char **argv) {
     test_font_menu();
     test_swatch_library();
     test_layout_templates(fonts);
+    test_find_replace();
     test_svg_export(fonts);
     test_svg_paste(fonts);
     test_pdf_import(fonts);

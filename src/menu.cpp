@@ -1075,9 +1075,11 @@ MenuItem *Dropdown::add_item(const std::pair<std::string, std::string> &item_dat
 	ret->set_flags(m_mode == ComboBox ? Button::RadioButton : Button::NormalButton);
 	ret->set_visible(visible);
 	ret->set_callback([this, index = m_popup->child_count() - 1, callback, item_data] {
+		/* Select first: the callback may refill the menu (a font menu
+		   reorders its recents), and then `index` names another row. */
+		set_selected_index(index);
 		if (callback)
 			callback();
-		set_selected_index(index);
 		if (m_popup->selected_callback())
 			m_popup->selected_callback()(index);
 	});

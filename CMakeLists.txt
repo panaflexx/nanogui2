@@ -1159,6 +1159,8 @@ if (NANOGUI_BUILD_EXAMPLES)
         pagemade/src/tool_tabs.cpp
         pagemade/src/dock_window.cpp
         pagemade/src/layers_panel.cpp
+        pagemade/src/find_panel.cpp
+        pagemade/src/find_replace.cpp
         pagemade/src/pdf_dialog.cpp
         pagemade/src/print_dialog.cpp
         pagemade/src/ruler.cpp
@@ -1192,6 +1194,7 @@ if (NANOGUI_BUILD_EXAMPLES)
         pagemade/src/sample.cpp)
     add_executable(pagemade_compose_test
         pagemade/src/compose_test.cpp
+        pagemade/src/find_replace.cpp
         pagemade/src/layout_templates.cpp
         pagemade/src/plugin/svg_export.cpp
         pagemade/src/plugin/pdf_export.cpp

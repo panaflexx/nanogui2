@@ -273,6 +273,67 @@ void ComposerView::select_frame(size_t story, size_t frame) {
         select(m_doc.stories[story].thread[frame]);
 }
 
+bool ComposerView::show_text(StoryId story, TextPos a, TextPos b) {
+    const size_t si = m_doc.story_index(story);
+    if (si == SIZE_MAX)
+        return false;
+    flush_deferred();
+    const StoryEntry &se = m_doc.stories[si];
+    a = clamp(se.story, a);
+    b = clamp(se.story, b);
+    /* The frame the range starts in, and its page */
+    ItemId frame = se.thread.empty() ? 0 : se.thread.front();
+    Caret at;
+    if (si < m_comp.size()) {
+        at = caret_at(m_comp[si], se.story, a);
+        if (at.valid() && m_comp[si].lines[at.line].frame < se.thread.size())
+            frame = se.thread[m_comp[si].lines[at.line].frame];
+    }
+    size_t page = m_page;
+    const Item *it = frame ? m_doc.find_item(frame, &page) : nullptr;
+    if (it && page != m_page)
+        show_page(page);
+    set_tool(Tool::Text);
+    m_edit_story = story;
+    m_anchor = a;
+    m_caret = b;
+    m_typing_on = false;
+    m_goal_x = -1.f;
+    m_burst_open = false;
+    /* Scroll it into view: centered when it isn't already on screen */
+    if (it && at.valid()) {
+        if (auto *panel = dynamic_cast<ZoomScrollPanel *>(parent())) {
+            const Point p = it->xf.apply({at.x, (at.top + at.bottom) * 0.5f});
+            const Vector2f slot = page_slot_offset(page);
+            const Vector2f o = page_origin();
+            const double z = panel->zoom();
+            const double lx = (o.x() + slot.x() + p.x) * z, ly = (o.y() + slot.y() + p.y) * z;
+            const ZoomScrollPanel::Vector2d pan = panel->pan_offset();
+            const double sx = pan.x() + lx, sy = pan.y() + ly;
+            const double mx = panel->width() * 0.1, my = panel->height() * 0.1;
+            if (sx < mx || sx > panel->width() - mx || sy < my || sy > panel->height() - my)
+                panel->set_pan_offset(ZoomScrollPanel::Vector2d(panel->width() * 0.5 - lx,
+                                                                panel->height() * 0.5 - ly));
+        }
+    }
+    selection_changed();
+    if (screen())
+        screen()->redraw();
+    return true;
+}
+
+void ComposerView::story_text_changed(StoryId story) {
+    if (const StoryEntry *se = m_doc.find_story(story); se && story == m_edit_story) {
+        m_caret = clamp(se->story, m_caret);
+        m_anchor = clamp(se->story, m_anchor);
+    }
+    m_burst_open = false;
+    m_typing_on = false;
+    recompose_story(story);
+    if (screen())
+        screen()->redraw();
+}
+
 bool ComposerView::is_selected(ItemId id) const {
     return std::find(m_sel.begin(), m_sel.end(), id) != m_sel.end();
 }
@@ -4099,8 +4160,8 @@ bool ComposerView::keyboard_event(int key, int, int action, int modifiers) {
             delete_selection_items();
             return true;
         }
-        if (cmd && (key == GLFW_KEY_F || key == GLFW_KEY_B ||
-                    key == GLFW_KEY_LEFT_BRACKET || key == GLFW_KEY_RIGHT_BRACKET)) {
+        if (cmd && (key == GLFW_KEY_B || key == GLFW_KEY_LEFT_BRACKET ||
+                    key == GLFW_KEY_RIGHT_BRACKET)) {
             const bool shift = (modifiers & GLFW_MOD_SHIFT) != 0;
             Stack how = Stack::Front;
             if (key == GLFW_KEY_B || (key == GLFW_KEY_LEFT_BRACKET && shift))

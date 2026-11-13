@@ -830,15 +830,24 @@ void DataGrid::draw_body(NVGcontext* ctx) {
         alt_row_bg.b = std::clamp(alt_row_bg.b + delta, 0.0f, 1.0f);
         alt_row_bg.a = base_bg.a > 0.0f ? base_bg.a : 1.0f;
     }
-    NVGcolor sel_bg       = m_theme ? (NVGcolor)m_theme->m_button_gradient_top_focused
-                                    : nvgRGB(200, 220, 255);
-    sel_bg.a              = 0.85f;
     NVGcolor grid_color   = m_theme ? (NVGcolor)m_theme->m_border_light
                                     : nvgRGB(230, 230, 235);
     NVGcolor default_text = m_theme ? (NVGcolor)m_theme->m_text_color
                                     : nvgRGB(40, 40, 50);
     NVGcolor accent       = m_theme ? (NVGcolor)m_theme->m_proceed_color
                                     : nvgRGB(40, 110, 220);
+    /* The selected row: the accent mixed into the row background, so the
+     * theme's text stays readable on it (a light button colour made a
+     * washed-out band under light text in a dark theme) */
+    NVGcolor sel_bg;
+    {
+        const bool dark = (base_bg.r + base_bg.g + base_bg.b) / 3.0f < 0.5f;
+        const float k = dark ? 0.45f : 0.30f;
+        sel_bg.r = base_bg.r + (accent.r - base_bg.r) * k;
+        sel_bg.g = base_bg.g + (accent.g - base_bg.g) * k;
+        sel_bg.b = base_bg.b + (accent.b - base_bg.b) * k;
+        sel_bg.a = 1.0f;
+    }
 
     for (int row = m_first_visible_row; row < last_row; ++row) {
         float y = (float)(header_height + (row - m_first_visible_row) * row_height - y_offset);
