@@ -17,6 +17,7 @@
 #include <nanogui/fluent.h>
 #include <nanogui/dragdrop.h>
 #include <algorithm>
+#include <cstdint>
 #include <vector>
 
 
@@ -257,11 +258,17 @@ public:
     /// Set whether or not the widget is currently visible (assuming all parents are visible)
     Widget& set_visible(bool visible) { m_visible = visible; return *this; }
 
-    /// Check if this widget is currently visible, taking parent widgets into account
+    /// Check if this widget is currently visible, taking parent widgets into account.
+    /// A parent pointer that is not an object (null is the end of the chain;
+    /// -1 and other garbage show up after a menu outlives its window) stops
+    /// the walk. Treating that as hidden is what keeps draw() from faulting.
     bool visible_recursive() const {
         bool visible = true;
         const Widget* widget = this;
         while (widget) {
+            const auto addr = reinterpret_cast<std::uintptr_t>(widget);
+            if (addr < 0x1000u || (addr & (sizeof(void *) - 1)) != 0)
+                return false;
             visible &= widget->visible();
             widget = widget->parent();
         }

@@ -749,7 +749,7 @@ bool PopupMenu::mouse_button_event(const Vector2i &p, int button, bool down, int
             // close the menu and any parent menus
             PopupMenu *outer = this;
             Window *parent_window = m_parent_window;
-            while (parent_window)
+            while (Window::is_live(parent_window))
             {
                 if (auto i = dynamic_cast<PopupMenu *>(parent_window))
                 {
@@ -814,7 +814,8 @@ bool PopupMenu::keyboard_event(int key, int scancode, int action, int modifiers)
                     dd->set_pushed(false);
                 /* A root is not reordered. A modal dialog has to take focus
                    back; otherwise the next click lands behind it. */
-                if (m_parent_window && (m_parent_window->is_root() || m_parent_window->modal()))
+                if (Window::is_live(m_parent_window) &&
+                    (m_parent_window->is_root() || m_parent_window->modal()))
                     m_parent_window->request_focus();
                 else if (parent())
                     parent()->request_focus();
@@ -828,7 +829,7 @@ bool PopupMenu::keyboard_event(int key, int scancode, int action, int modifiers)
                 // close the menu and any parent menus
                 PopupMenu *outer = this;
                 Window *parent_window = m_parent_window;
-                while (parent_window)
+                while (Window::is_live(parent_window))
                 {
                     if (auto i = dynamic_cast<PopupMenu *>(parent_window))
                     {
@@ -885,7 +886,8 @@ bool PopupMenu::keyboard_event(int key, int scancode, int action, int modifiers)
                 {
                     set_visible(false);
                     set_highlighted_index(-1);
-                    m_parent_window->request_focus();
+                    if (Window::is_live(m_parent_window))
+                        m_parent_window->request_focus();
                     return true;
                 }
                 else if (menu->mode() == Dropdown::Menu || menu->mode() == Dropdown::Submenu)
@@ -954,7 +956,14 @@ bool PopupMenu::keyboard_character_event(unsigned int codepoint)
 
 void PopupMenu::draw(NVGcontext *ctx)
 {
-    // refresh_relative_placement();
+    /* m_parent_window is a raw pointer. The menu stays a Screen child after
+       its anchor is destroyed, and the next draw used to follow it
+       (KERN_INVALID_ADDRESS at 0x87 when the slot held -1). */
+    if (!Window::is_live(m_parent_window)) {
+        m_parent_window = nullptr;
+        m_visible = false;
+        return;
+    }
     m_visible &= m_parent_window->visible_recursive();
 
     if (!m_visible)
@@ -1380,7 +1389,8 @@ bool Dropdown::keyboard_event(int key, int scancode, int action, int modifiers) 
         // Close the menu on Escape
         m_popup->set_visible(false);
         m_popup->set_highlighted_index(-1);
-        m_popup->parent_window()->request_focus();
+        if (Window::is_live(m_popup->parent_window()))
+            m_popup->parent_window()->request_focus();
         set_pushed(false);
 		screen()->update_focus(this);
         return true;

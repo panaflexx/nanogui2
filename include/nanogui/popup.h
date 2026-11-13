@@ -32,6 +32,11 @@ NAMESPACE_BEGIN(nanogui)
 
         /// Create a new popup parented to a screen (first argument) and a parent window (if applicable)
         Popup(Widget* parent, Window* parent_window = nullptr, PopupButton* parent_button = nullptr);
+        ~Popup() override;
+
+        /// The anchor window is being destroyed. Hide every popup that still
+        /// points at it so the next draw does not follow a dead pointer.
+        static void detach_anchored_to(Window *anchor);
 
         /// Popups are highly interactive; keep display-list caching off even if a layout is set.
         Widget& set_layout(Layout* layout) override {

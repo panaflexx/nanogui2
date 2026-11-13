@@ -52,6 +52,12 @@ class NANOGUI_EXPORT Window : public WidgetCRTP<Window> {
 public:
     Window(Widget* parent, const WindowConfig& config);
     Window(Widget* parent, const std::string& title = "Untitled", bool resizable = true);
+    ~Window() override;
+
+    /// True while `window` is a Window that has been constructed and not yet
+    /// destroyed. Null, (Window*)-1, and freed windows are false, and the
+    /// check does not dereference `window`.
+    static bool is_live(const Window *window);
 
     /// Return the window title
     const std::string& title() const { return m_title; }

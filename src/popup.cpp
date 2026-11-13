@@ -15,12 +15,42 @@
 #include <nanogui/theme.h>
 #include <nanogui/opengl.h>
 #include <algorithm>
+#include <vector>
 
 NAMESPACE_BEGIN(nanogui)
 
+namespace {
+
+std::vector<Popup *> &live_popups() {
+    static auto *popups = new std::vector<Popup *>();
+    return *popups;
+}
+
+} // namespace
+
 Popup::Popup(Widget* parent, Window* parent_window, PopupButton* parent_button)
     : Window(parent, ""), m_parent_window(parent_window), m_parent_button(parent_button), m_anchor_pos(Vector2i(0)),
-    m_anchor_offset(30), m_anchor_size(10), m_side(Side::Right) { }
+    m_anchor_offset(30), m_anchor_size(10), m_side(Side::Right) {
+    live_popups().push_back(this);
+}
+
+Popup::~Popup() {
+    auto &popups = live_popups();
+    popups.erase(std::remove(popups.begin(), popups.end(), this), popups.end());
+}
+
+void Popup::detach_anchored_to(Window *anchor) {
+    if (!anchor)
+        return;
+    /* Copy: hiding a popup can destroy another one and edit the list. */
+    const std::vector<Popup *> popups = live_popups();
+    for (Popup *popup : popups) {
+        if (!popup || popup->m_parent_window != anchor)
+            continue;
+        popup->m_parent_window = nullptr;
+        popup->set_visible(false);
+    }
+}
 
 void Popup::perform_layout(NVGcontext* ctx) {
     if (m_layout || m_children.size() != 1) {
@@ -34,8 +64,11 @@ void Popup::perform_layout(NVGcontext* ctx) {
 }
 
 void Popup::refresh_relative_placement() {
-    if (!m_parent_window)
+    if (!Window::is_live(m_parent_window)) {
+        m_parent_window = nullptr;
+        m_visible = false;
         return;
+    }
     m_parent_window->refresh_relative_placement();
     m_visible &= m_parent_window->visible_recursive();
 

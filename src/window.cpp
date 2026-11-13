@@ -21,10 +21,19 @@
 #include <chrono>
 #include <algorithm>
 #include <cmath>
+#include <unordered_set>
 
 NAMESPACE_BEGIN(nanogui)
 
 namespace {
+
+/* Never destroyed: a window torn down during static shutdown must still be
+   able to erase itself. The set stores addresses only. */
+std::unordered_set<const Window *> &live_windows() {
+    static auto *windows = new std::unordered_set<const Window *>();
+    return *windows;
+}
+
 // macOS traffic-light geometry (logical pixels)
 constexpr float kTlRadius   = 6.0f;
 constexpr float kTlGap      = 20.0f;  // center-to-center
@@ -51,6 +60,7 @@ Window::Window(Widget* parent, const WindowConfig& config)
         set_layout(config.layout);
     if (m_root)
         set_root(true); // apply chrome + geometry
+    live_windows().insert(this);
 }
 
 Window::Window(Widget* parent, const std::string& title, bool resizable)
@@ -61,6 +71,23 @@ Window::Window(Widget* parent, const std::string& title, bool resizable)
       m_traffic_lights(!title.empty()), m_root(false)
 {
     DebugName = m_parent->DebugName + ",Window";
+    live_windows().insert(this);
+}
+
+Window::~Window() {
+    /* Drop the address before telling popups, so a re-entered draw sees a
+       dead anchor and hides instead of using this object. */
+    live_windows().erase(this);
+    Popup::detach_anchored_to(this);
+}
+
+bool Window::is_live(const Window *window) {
+    if (!window)
+        return false;
+    const auto addr = reinterpret_cast<std::uintptr_t>(window);
+    if (addr < 0x1000u || (addr & (sizeof(void *) - 1)) != 0)
+        return false;
+    return live_windows().find(window) != live_windows().end();
 }
 
 void Window::set_root(bool root) {
