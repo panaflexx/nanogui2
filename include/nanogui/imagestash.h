@@ -16,8 +16,10 @@
 #include <cstdint>
 #include <deque>
 #include <functional>
+#include <list>
 #include <string>
 #include <unordered_map>
+#include <unordered_set>
 #include <vector>
 
 #if defined(_WIN32)
@@ -57,13 +59,17 @@ enum class SectionAlign {
  *  - \ref set_animation_time -- fullscreen zoom duration, 0..2 s (0 = instant)
  *  - \ref set_show_labels    -- show/hide the per-photo text label
  *  - \ref set_spacing        -- x/y gap between photos
+ *  - \ref set_border         -- padding inside each cell, around the photo
+ *  - \ref set_cell_size      -- on-screen cell size; thumbnails stay as decoded
  *  - \ref set_crop           -- center-crop thumbnails to portrait (3:4)
  *
  * Scalability notes:
  *  - Only visible rows (plus a small margin) are drawn and loaded.
- *  - The atlas grows on demand up to a cap; once full, it is reset and the
- *    visible thumbnails are restored instantly from a small CPU-side LRU
- *    pixel cache, without disk reads.
+ *  - The atlas grows on demand up to a cap.  Once full it is compacted: the
+ *    thumbnails nearest the view (about half the atlas) are repacked from a
+ *    CPU-side LRU pixel cache, and the rest come back from that cache, not
+ *    the disk, when scrolled to.  The cache is sized in bytes
+ *    (\ref set_cache_budget) and is several times larger than the atlas.
  *  - While bulk-loading, the view is refreshed at most twice per second.
  *
  * Clicking a thumbnail selects it (and focuses the widget, so the arrow keys
@@ -136,6 +142,12 @@ public:
     void set_show_labels(bool show);                  ///< per-photo label text
     bool show_labels() const { return m_show_labels; }
     void set_spacing(int x, int y);                   ///< gap between photos
+    void set_border(int px);                          ///< padding inside each cell
+    int border() const { return m_border; }
+    /// On-screen cell size. Does not decode again: the constructor size is
+    /// the thumbnail that stays in the atlas.
+    void set_cell_size(int size);
+    int cell_size() const { return m_cell_size; }
     void set_crop(bool crop);                         ///< center-crop to portrait 3:4
     bool crop() const { return m_crop; }
 
@@ -143,6 +155,29 @@ public:
     const Entry &image_at(size_t i) const { return m_entries[i]; }
 
     int thumbnail_size() const { return m_thumb_size; }
+
+    /// Memory for decoded thumbnails kept off the GPU (default 256 MB, about
+    /// 4000 thumbnails at 128 px).  Past it the least recently shown go, and
+    /// are read from disk again when next shown.  Keep it well above the
+    /// atlas (2048 x 4096 x 4 = 32 MB), or an atlas compaction sends the
+    /// rows just scrolled past back to the disk.
+    void set_cache_budget(size_t bytes);
+    size_t cache_budget() const { return m_cache_budget; }
+    size_t cache_bytes() const { return m_cache_bytes; }
+
+    /// A few lines on the atlas (size, rows, where its pixels go), the CPU
+    /// cache (thumbnails, bytes against the budget) and how thumbnails got
+    /// there (decoded, decoded again, restored from the cache, compactions).
+    std::string stats() const;
+    /// Checks the cache, the per-photo atlas slots and the atlas itself are
+    /// consistent with each other. Returns the number of problems, and
+    /// lists them in `problems` when given. UI thread only.
+    int validate(std::string *problems = nullptr) const;
+    /// Print stats() and validate() to stderr each time the atlas grows,
+    /// is compacted or is cleared. On when IMGSW_STATS is set in the
+    /// environment.
+    void set_debug_stats(bool on) { m_debug_stats = on; }
+    bool debug_stats() const { return m_debug_stats; }
 
     /// Invoked when a thumbnail is clicked (index into the photo entries).
     std::function<void(int)> callback() const { return m_callback; }
@@ -166,6 +201,11 @@ public:
     /// this one): the callback gets the local paths and returns true if taken.
     void set_drop_callback(const std::function<bool(const std::vector<std::string> &)> &cb) {
         m_drop_callback = cb;
+    }
+
+    /// Right-click anywhere on the grid. The point is in screen coordinates.
+    void set_context_callback(const std::function<void(const Vector2i &)> &cb) {
+        m_context_callback = cb;
     }
 
     virtual bool drag_motion_event(const Vector2i &p, DragEvent &e) override;
@@ -276,7 +316,8 @@ protected:
     /// Rows above/below the viewport whose thumbnails are also loaded.
     static constexpr int kMarginRows = 2;
 
-    int m_thumb_size;
+    int m_thumb_size;                 ///< decode edge; fixed for the widget's life
+    int m_cell_size;                  ///< on-screen cell; may be smaller than the thumbnail
     int m_gap_x    = 10;
     int m_gap_y    = 10;
     int m_border   = 4;
@@ -312,16 +353,35 @@ protected:
 
     /* CPU thumbnail cache (UI thread only), keyed by Entry::key (or path)
        rather than position, and kept across clear(): a rebuilt grid takes
-       its thumbnails back from memory.  Front of LRU = most recent. */
+       its thumbnails back from memory.  Front of LRU = most recent; each
+       node keeps its place in the list, so a touch is O(1). */
     struct CachedThumb {
         unsigned char *pixels = nullptr;  ///< owned, stbi_image_free'd
         int w = 0, h = 0;
         int orig_w = 0, orig_h = 0;
         uint64_t file_size = 0;
+        size_t bytes() const { return (size_t) w * (size_t) h * 4; }
     };
-    static constexpr size_t kCacheEntries = 256;  ///< ~16 MB worst case
-    std::unordered_map<std::string, CachedThumb> m_thumb_cache;
-    std::deque<std::string> m_cache_lru;
+    struct CacheNode {
+        CachedThumb thumb;
+        std::list<std::string>::iterator lru;
+    };
+    std::unordered_map<std::string, CacheNode> m_thumb_cache;
+    std::list<std::string> m_cache_lru;
+    size_t m_cache_budget = size_t(256) << 20;
+    size_t m_cache_bytes  = 0;
+    void cache_trim();
+
+    /* How thumbnails reached the atlas (UI thread). A key decoded twice was
+       evicted from the cache in between: the reloads to keep at zero. */
+    std::unordered_set<std::string> m_decoded_keys;
+    size_t m_decoded   = 0;   ///< thumbnails from the loader
+    size_t m_redecoded = 0;   ///< ... whose key had been decoded before
+    size_t m_restored  = 0;   ///< put back into the atlas from the cache
+    size_t m_compactions = 0;
+    size_t m_last_kept = 0;   ///< thumbnails the last compaction repacked
+    bool m_debug_stats = false;
+    void debug_report(const char *event) const;
     static std::string cache_key(const Entry &e) { return e.key.empty() ? e.path : e.key; }
     const CachedThumb *cached(int entry) const;
     /// Takes ownership of `thumb.pixels`; frees them if the entry has no key.
@@ -380,6 +440,7 @@ protected:
     std::function<void(int)> m_selection_callback;
     std::function<void(int, DragData &)> m_drag_data_callback;
     std::function<bool(const std::vector<std::string> &)> m_drop_callback;
+    std::function<void(const Vector2i &)> m_context_callback;
     Loader m_loader;
     BadgeCallback m_badge;
 };

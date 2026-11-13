@@ -37,6 +37,7 @@
 #include <nanogui/imagestash.h>
 #include <nanogui/label.h>
 #include <nanogui/layout.h>
+#include <nanogui/menu.h>
 #include <nanogui/screen.h>
 #include <nanogui/scrollpanel.h>
 #include <nanogui/split.h>
@@ -66,6 +67,11 @@ using namespace pagemade;
 namespace {
 
 constexpr int kScanBatch = 100;
+constexpr int kIconPixels = 128;   // one thumbnail size for both views
+constexpr int kLargeIcons = 128;
+constexpr int kSmallIcons = 64;
+constexpr int kIconBorder = 4;       // room around a labelled cell
+constexpr int kIconBorderTight = 0;  // labels off: cells sit against each other
 
 struct ScanBox {
     std::mutex mu;
@@ -568,7 +574,8 @@ ImageAssetsPanel::ImageAssetsPanel(Widget *parent, ComposerView *view, ImageStor
     flex->set_flex_item(m_split, FlexLayout::FlexItem(1.f, 1.f, 0));
 
     auto *stash_scroll = new ScrollPanel(m_split, ScrollPanel::ScrollTypes::Vertical);
-    m_stash = new ImageStashWidget(stash_scroll, 112);
+    m_stash = new ImageStashWidget(stash_scroll, kIconPixels);
+    m_stash->set_context_callback([this](const Vector2i &at) { show_grid_menu(at); });
     m_stash->set_live(true);
     m_stash->set_spacing(0, 0);
     m_stash->set_animation_time(0.2f);
@@ -671,6 +678,12 @@ ImageAssetsPanel::ImageAssetsPanel(Widget *parent, ComposerView *view, ImageStor
 }
 
 ImageAssetsPanel::~ImageAssetsPanel() {
+    if (m_labels_item)
+        m_labels_item->set_change_callback(nullptr);
+    if (m_small_item)
+        m_small_item->set_change_callback(nullptr);
+    if (m_grid_menu)
+        m_grid_menu->set_visible(false);
     m_worker.stop();                     // a read in hand finishes; its result is dropped
     m_status_worker.stop();
     if (m_probe_gate) {
@@ -840,6 +853,50 @@ void ImageAssetsPanel::relayout() {
     if (Screen *s = screen())
         if (s->nvg_context())
             perform_layout(s->nvg_context());
+}
+
+void ImageAssetsPanel::apply_label_chrome(bool show) {
+    if (!m_stash)
+        return;
+    m_stash->set_show_labels(show);
+    m_stash->set_border(show ? kIconBorder : kIconBorderTight);
+    relayout();
+}
+
+void ImageAssetsPanel::show_grid_menu(const Vector2i &at) {
+    Screen *scr = screen();
+    Window *owner = window();
+    if (!scr || !owner || !m_stash)
+        return;
+    if (!m_grid_menu) {
+        m_grid_menu = new PopupMenu(scr, owner, nullptr, false);
+        m_labels_item = new MenuItem(m_grid_menu, "Show labels");
+        m_labels_item->set_flags(Button::ToggleButton);
+        m_labels_item->set_pushed(m_stash->show_labels());
+        m_labels_item->set_change_callback([this](bool on) { apply_label_chrome(on); });
+        m_small_item = new MenuItem(m_grid_menu, "Small icons");
+        m_small_item->set_flags(Button::ToggleButton);
+        m_small_item->set_pushed(m_stash->cell_size() <= kSmallIcons);
+        m_small_item->set_change_callback([this](bool on) {
+            if (!m_stash)
+                return;
+            m_stash->set_cell_size(on ? kSmallIcons : kLargeIcons);
+            relayout();
+        });
+    }
+    NVGcontext *ctx = scr->nvg_context();
+    const Vector2i pref = m_grid_menu->preferred_size(ctx);
+    m_grid_menu->set_size(pref);
+    m_grid_menu->perform_layout(ctx);
+    Vector2i pos = at;
+    pos.x() = std::min(pos.x(), std::max(0, scr->width() - pref.x()));
+    if (pos.y() + pref.y() > scr->height())
+        pos.y() = std::max(0, pos.y() - pref.y());
+    m_grid_menu->set_position(pos);
+    m_grid_menu->set_visible(true);
+    scr->set_popup_visible(m_grid_menu);
+    m_grid_menu->request_focus();
+    scr->redraw();
 }
 
 void ImageAssetsPanel::rebuild() {

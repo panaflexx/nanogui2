@@ -33,6 +33,8 @@ class ComposerView;
 namespace nanogui {
 class ImageStashWidget;
 class Button;
+class MenuItem;
+class PopupMenu;
 class Split;
 class TextArea;
 }
@@ -66,6 +68,9 @@ private:
     void show_metadata(int index);
     void apply_probe(uint64_t gen, uint32_t asset_id, const pagemade::ImageImport &imported);
     void relayout();
+    /* Right-click on the icon grid: show or hide names, and icon size. */
+    void show_grid_menu(const nanogui::Vector2i &at);
+    void apply_label_chrome(bool show);
     /* Fold the details pane away, or bring it back where it was. */
     void toggle_details();
     bool add_root(const std::string &path);
@@ -85,6 +90,9 @@ private:
 
     RootList *m_roots_list = nullptr;
     nanogui::ImageStashWidget *m_stash = nullptr;
+    nanogui::PopupMenu *m_grid_menu = nullptr;
+    nanogui::MenuItem *m_labels_item = nullptr;
+    nanogui::MenuItem *m_small_item = nullptr;
     nanogui::TextArea *m_meta = nullptr;
     nanogui::Split *m_split = nullptr;    // grid above, details below
     nanogui::Button *m_clean = nullptr;

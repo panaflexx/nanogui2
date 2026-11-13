@@ -12,6 +12,8 @@
 #include <nanogui/opengl.h>
 
 #include <algorithm>
+#include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <iostream>
 
@@ -147,17 +149,20 @@ nanogui::Color imgsw_alpha(nanogui::Color c, float a) {
 NAMESPACE_BEGIN(nanogui)
 
 ImageStashWidget::ImageStashWidget(Widget *parent, int thumb_size)
-    : Widget(parent), m_thumb_size(thumb_size) {
+    : Widget(parent), m_thumb_size(thumb_size), m_cell_size(thumb_size) {
     m_nvg_context = screen()->nvg_context();
     if (!m_nvg_context)
         throw std::runtime_error("ImageStashWidget: NanoVG context not initialized");
 
-    IMGSparams params = { 512, 512, nullptr, nullptr, nullptr, nullptr, nullptr, nullptr };
+    /* Photo packer: 2048 wide, one row tall to start, then a row at a time. */
+    IMGSparams params = { 2048, 256, nullptr, nullptr, nullptr, nullptr, nullptr, nullptr, IMGS_PACK_PHOTO };
     m_stash = imgsCreateInternal(&params);
     if (!m_stash)
         throw std::runtime_error("ImageStashWidget: failed to create imagestash");
 
     imgsGetAtlasSize(m_stash, &m_atlas_width, &m_atlas_height);
+    if (const char *env = std::getenv("IMGSW_STATS"))
+        m_debug_stats = env[0] != '\0' && env[0] != '0';
     m_atlas_image = nvgCreateImageRGBA(m_nvg_context, m_atlas_width, m_atlas_height, 0,
                                        imgsGetTextureData(m_stash, nullptr, nullptr));
     if (m_atlas_image == 0) {
@@ -187,8 +192,10 @@ ImageStashWidget::~ImageStashWidget() {
     m_pending.clear();
 
     for (auto &kv : m_thumb_cache)
-        stbi_image_free(kv.second.pixels);
+        stbi_image_free(kv.second.thumb.pixels);
     m_thumb_cache.clear();
+    m_cache_lru.clear();
+    m_cache_bytes = 0;
 
     /* Stop the high-res loader (finishes any decode in flight first) */
     pthread_mutex_lock(&m_highres_mutex);
@@ -323,6 +330,7 @@ void ImageStashWidget::clear() {
     imgsResetAtlas(m_stash, m_atlas_width, m_atlas_height);
     m_redraw = true;
     set_needs_redraw();
+    debug_report("clear");
 }
 
 /* ------------------------------------------------------------------ */
@@ -348,6 +356,26 @@ void ImageStashWidget::set_spacing(int x, int y) {
     set_needs_redraw();
 }
 
+void ImageStashWidget::set_border(int px) {
+    px = std::max(0, px);
+    if (px == m_border)
+        return;
+    m_border = px;
+    m_layout_dirty = true;
+    set_needs_redraw();
+}
+
+void ImageStashWidget::set_cell_size(int size) {
+    size = std::max(16, size);
+    if (size == m_cell_size)
+        return;
+    /* The atlas thumbnail stays at m_thumb_size. A smaller cell draws it
+       scaled down; a larger one draws the same pixels in a bigger box. */
+    m_cell_size = size;
+    m_layout_dirty = true;
+    set_needs_redraw();
+}
+
 void ImageStashWidget::set_crop(bool crop) {
     if (m_crop == crop)
         return;
@@ -360,11 +388,11 @@ void ImageStashWidget::set_crop(bool crop) {
 /* ------------------------------------------------------------------ */
 
 float ImageStashWidget::cell_stride_x() const {
-    return (float) (m_thumb_size + 2 * m_border + m_gap_x);
+    return (float) (m_cell_size + 2 * m_border + m_gap_x);
 }
 
 float ImageStashWidget::cell_stride_y() const {
-    return (float) (m_thumb_size + 2 * m_border + (m_show_labels ? m_label_h : 0) + m_gap_y);
+    return (float) (m_cell_size + 2 * m_border + (m_show_labels ? m_label_h : 0) + m_gap_y);
 }
 
 float ImageStashWidget::content_width() const {
@@ -496,7 +524,7 @@ int ImageStashWidget::item_at(const Vector2f &content_p) const {
         int mid = (lo + hi) / 2;
         if (m_item_pos[mid].y() > content_p.y()) hi = mid; else lo = mid + 1;
     }
-    float box = (float) (m_thumb_size + 2 * m_border);
+    float box = (float) (m_cell_size + 2 * m_border);
     float max_h = std::max(cell_stride_y(), section_height());
     for (int i = lo - 1; i >= 0 && m_item_pos[i].y() + max_h > content_p.y(); --i) {
         const Item &it = m_items[i];
@@ -607,16 +635,16 @@ bool ImageStashWidget::sync_atlas_size() {
                                        imgsGetTextureData(m_stash, nullptr, nullptr));
     m_atlas_width = cur_w;
     m_atlas_height = cur_h;
+    debug_report("expand");
     return true;
 }
 
 bool ImageStashWidget::add_to_atlas(int index, unsigned char *pixels, int w, int h) {
     std::string key = "img_" + std::to_string(index);
-    if (imgsAddPixels(m_stash, key.c_str(), pixels, w, h, 0)) {
-        sync_atlas_size();
-        return true;
-    }
-    return false;
+    /* CPU atlas only. The GL texture is resized once per frame, after every
+       insert, so a growing atlas does not delete the texture under the
+       thumbnails already packed. */
+    return imgsAddPixels(m_stash, key.c_str(), pixels, w, h, 0) != 0;
 }
 
 const ImageStashWidget::CachedThumb *ImageStashWidget::cached(int entry) const {
@@ -624,11 +652,12 @@ const ImageStashWidget::CachedThumb *ImageStashWidget::cached(int entry) const {
     if (key.empty())
         return nullptr;
     auto it = m_thumb_cache.find(key);
-    return it == m_thumb_cache.end() ? nullptr : &it->second;
+    return it == m_thumb_cache.end() ? nullptr : &it->second.thumb;
 }
 
 void ImageStashWidget::cache_put(int entry, const CachedThumb &thumb) {
-    /* Takes ownership of pixels (stbi_image_free'd on eviction/destruction). */
+    /* Takes ownership of pixels (stbi_image_free'd on eviction/destruction).
+       Putting a thumbnail that is already cached only marks it as used. */
     const std::string key = cache_key(m_entries[entry]);
     if (key.empty()) {
         stbi_image_free(thumb.pixels);
@@ -636,56 +665,252 @@ void ImageStashWidget::cache_put(int entry, const CachedThumb &thumb) {
     }
     auto it = m_thumb_cache.find(key);
     if (it != m_thumb_cache.end()) {
-        if (it->second.pixels != thumb.pixels)
-            stbi_image_free(it->second.pixels);
-        it->second = thumb;
-        m_cache_lru.erase(std::find(m_cache_lru.begin(), m_cache_lru.end(), key));
-    } else {
-        m_thumb_cache[key] = thumb;
-    }
-    m_cache_lru.push_front(key);
-
-    while (m_thumb_cache.size() > kCacheEntries) {
-        std::string victim = m_cache_lru.back();
-        m_cache_lru.pop_back();
-        auto vit = m_thumb_cache.find(victim);
-        if (vit != m_thumb_cache.end()) {
-            stbi_image_free(vit->second.pixels);
-            m_thumb_cache.erase(vit);
+        CacheNode &node = it->second;
+        if (node.thumb.pixels != thumb.pixels) {
+            m_cache_bytes -= node.thumb.bytes();
+            stbi_image_free(node.thumb.pixels);
+            node.thumb = thumb;
+            m_cache_bytes += thumb.bytes();
         }
+        m_cache_lru.splice(m_cache_lru.begin(), m_cache_lru, node.lru);
+    } else {
+        m_cache_lru.push_front(key);
+        m_thumb_cache.emplace(key, CacheNode{ thumb, m_cache_lru.begin() });
+        m_cache_bytes += thumb.bytes();
+    }
+    cache_trim();
+}
+
+void ImageStashWidget::cache_trim() {
+    /* The front entry is the one just put: never evicted, even when the
+       budget is smaller than one thumbnail, as the caller still uses it. */
+    while (m_cache_bytes > m_cache_budget && m_cache_lru.size() > 1) {
+        auto vit = m_thumb_cache.find(m_cache_lru.back());
+        m_cache_lru.pop_back();
+        if (vit == m_thumb_cache.end())
+            continue;
+        m_cache_bytes -= vit->second.thumb.bytes();
+        stbi_image_free(vit->second.thumb.pixels);
+        m_thumb_cache.erase(vit);
     }
 }
 
+void ImageStashWidget::set_cache_budget(size_t bytes) {
+    m_cache_budget = bytes;
+    cache_trim();
+}
+
 void ImageStashWidget::reset_atlas() {
-    /* Atlas is full at its cap: evict everything, then immediately
-       re-materialize the visible window from the CPU thumbnail cache so
-       the current view does not flash placeholders or re-read disks. */
+    /* The atlas is full at its cap. Wiping it and restoring only the view
+       makes every row just scrolled past miss again, and a long scroll
+       hits the cap every few hundred thumbnails. So compact instead:
+       repack the view, then the cached thumbnails nearest it, alternating
+       below and above, until about half the atlas is used. The other half
+       is room for what comes next; what was dropped comes back from the
+       CPU cache when it is scrolled to. */
     int first, last;
     visible_items(first, last, kMarginRows * cell_stride_y());
 
     imgsResetAtlas(m_stash, m_atlas_width, m_atlas_height);
     sync_atlas_size();
 
+    /* Drop the waiting requests: the view is asked for again next frame.
+       The one the loader is decoding stays requested, or the next frame
+       would queue it again and it would be decoded twice; its result
+       arrives through m_pending as usual. */
     pthread_mutex_lock(&m_mutex);
+    for (int e : m_queue)
+        m_slots[e].requested = false;
     m_queue.clear();
-    for (auto &s : m_slots) {
+    for (auto &s : m_slots)
         s.atlas_x = s.atlas_y = -1;
-        s.requested = false;
-    }
     pthread_mutex_unlock(&m_mutex);
 
-    for (int i = first; i <= last; ++i) {
-        int e = m_items[i].entry;
-        if (e < 0)
-            continue;
-        if (const CachedThumb *ct = cached(e))
-            materialize(e, *ct);
+    const double budget = 0.5 * (double) m_atlas_width * (double) m_atlas_height;
+    double used = 0.0;
+    size_t kept = 0;
+    /* False once the atlas will take no more */
+    auto keep = [&](int i) {
+        const int e = m_items[i].entry;
+        if (e < 0 || m_slots[e].atlas_x >= 0)
+            return true;
+        const CachedThumb *ct = cached(e);
+        if (!ct)
+            return true;
+        if (!materialize(e, *ct))
+            return false;
+        ++m_restored;
+        ++kept;
+        used += (double) (ct->w + 2) * (double) (ct->h + 2);   // IMGS_PAD each side
+        return true;
+    };
+
+    const int n = (int) m_items.size();
+    if (first <= last) {
+        for (int i = first; i <= last; ++i)
+            if (!keep(i))
+                break;
+        int below = last + 1, above = first - 1;
+        bool room = true;
+        while (room && used < budget && (below < n || above >= 0)) {
+            if (below < n)
+                room = keep(below++);
+            if (room && above >= 0 && used < budget)
+                room = keep(above--);
+        }
     }
 
     /* Upload the rebuilt atlas now so no stale texture is ever shown */
     nvgUpdateImage(m_nvg_context, m_atlas_image,
                    imgsGetTextureData(m_stash, nullptr, nullptr));
     m_redraw = true;
+    ++m_compactions;
+    m_last_kept = kept;
+    debug_report("compact");
+}
+
+std::string ImageStashWidget::stats() const {
+    IMGSstats st;
+    imgsGetStats(m_stash, &st);
+    const double mb = 1024.0 * 1024.0;
+    const double band = std::max(1.0, (double) st.width * st.used_height);
+    auto pct = [band](long long a) { return 100.0 * (double) a / band; };
+
+    size_t in_atlas = 0, atlas_only = 0, failed = 0, queued = 0;
+    for (size_t e = 0; e < m_slots.size(); ++e) {
+        const Slot &s = m_slots[e];
+        if (s.failed) ++failed;
+        if (s.requested) ++queued;
+        if (s.atlas_x < 0) continue;
+        ++in_atlas;
+        if (!cached((int) e)) ++atlas_only;
+    }
+    const double avg = st.images > 0 ? (double) st.inner / st.images : 0.0;
+
+    char buf[1024];
+    std::snprintf(buf, sizeof buf,
+        "  atlas %dx%d %s, %.1f MB texture (%.1f MB on the CPU)\n"
+        "        %d thumbs in %d rows, avg %.0f px^2 (%.0f%% of a %d px square), band %d/%d (%.1f%% of the atlas)\n"
+        "        band: pixels %.1f%%  padding %.1f%%  under shorter thumbs %.1f%%  row ends %.1f%%\n"
+        "  cache %zu thumbs, %.1f / %.1f MB (%.1f%%), %zu in the atlas, %zu in the atlas only\n"
+        "  loads %zu decoded, %zu decoded again, %zu restored from the cache, %zu compactions (last kept %zu)\n"
+        "        %zu photos, %zu waiting, %zu failed",
+        st.width, st.height, st.packer == IMGS_PACK_PHOTO ? "photo" : "skyline",
+        st.tex_bytes / mb, st.cpu_bytes / mb,
+        st.images, st.rows, avg, 100.0 * avg / std::max(1, m_thumb_size * m_thumb_size),
+        m_thumb_size, st.used_height, st.height,
+        100.0 * st.used_height / std::max(1, st.height),
+        pct(st.inner), pct(st.padding), pct(st.under_rows), pct(st.row_ends),
+        m_thumb_cache.size(), m_cache_bytes / mb, m_cache_budget / mb,
+        100.0 * (double) m_cache_bytes / (double) std::max<size_t>(1, m_cache_budget),
+        in_atlas, atlas_only,
+        m_decoded, m_redecoded, m_restored, m_compactions, m_last_kept,
+        m_entries.size(), queued, failed);
+    return buf;
+}
+
+int ImageStashWidget::validate(std::string *problems) const {
+    int count = 0;
+    auto problem = [&](const std::string &what) {
+        ++count;
+        if (problems && count <= 20)
+            *problems += what + "\n";
+    };
+    if (problems)
+        problems->clear();
+
+    /* The cache: map and LRU list agree, and the byte count adds up */
+    if (m_thumb_cache.size() != m_cache_lru.size())
+        problem("cache has " + std::to_string(m_thumb_cache.size()) + " thumbs but " +
+                std::to_string(m_cache_lru.size()) + " in the LRU list");
+    size_t bytes = 0;
+    for (auto it = m_cache_lru.begin(); it != m_cache_lru.end(); ++it) {
+        auto node = m_thumb_cache.find(*it);
+        if (node == m_thumb_cache.end()) {
+            problem("LRU key " + *it + " is not in the cache");
+            continue;
+        }
+        if (node->second.lru != it)
+            problem("cache node " + *it + " points at another LRU entry");
+        const CachedThumb &t = node->second.thumb;
+        if (!t.pixels)
+            problem("cache node " + *it + " has no pixels");
+        if (t.w <= 0 || t.h <= 0 || t.w > m_thumb_size || t.h > m_thumb_size)
+            problem("cache node " + *it + " is " + std::to_string(t.w) + "x" +
+                    std::to_string(t.h) + ", past the " + std::to_string(m_thumb_size) + " px thumbnail");
+        bytes += t.bytes();
+    }
+    if (bytes != m_cache_bytes)
+        problem("cache bytes are counted as " + std::to_string(m_cache_bytes) + ", the thumbs add to " +
+                std::to_string(bytes));
+    if (m_cache_bytes > m_cache_budget && m_cache_lru.size() > 1)
+        problem("cache holds " + std::to_string(m_cache_bytes) + " bytes, over the " +
+                std::to_string(m_cache_budget) + " budget");
+
+    /* Slots: each placed photo is in the atlas where the slot says, at its
+       thumbnail size, and nothing else is in the atlas */
+    if (m_slots.size() != m_entries.size())
+        problem(std::to_string(m_slots.size()) + " slots for " + std::to_string(m_entries.size()) +
+                " photos");
+    int placed = 0;
+    for (size_t e = 0; e < m_slots.size() && e < m_entries.size(); ++e) {
+        const Slot &s = m_slots[e];
+        if ((s.atlas_x < 0) != (s.atlas_y < 0))
+            problem("photo " + std::to_string(e) + " is half placed");
+        if (s.atlas_x < 0)
+            continue;
+        ++placed;
+        if (s.failed)
+            problem("photo " + std::to_string(e) + " failed but is in the atlas");
+        const std::string key = "img_" + std::to_string(e);
+        IMGimage *img = imgsGet(m_stash, key.c_str());
+        if (!img) {
+            problem("photo " + std::to_string(e) + " has a slot but no atlas image");
+            continue;
+        }
+        if (img->atlasX != s.atlas_x || img->atlasY != s.atlas_y)
+            problem("photo " + std::to_string(e) + " slot is at " + std::to_string(s.atlas_x) + "," +
+                    std::to_string(s.atlas_y) + ", the atlas has it at " + std::to_string(img->atlasX) +
+                    "," + std::to_string(img->atlasY));
+        const Entry &en = m_entries[e];
+        if (img->width != en.thumb_width || img->height != en.thumb_height)
+            problem("photo " + std::to_string(e) + " is " + std::to_string(en.thumb_width) + "x" +
+                    std::to_string(en.thumb_height) + ", its atlas image " + std::to_string(img->width) +
+                    "x" + std::to_string(img->height));
+        if (const CachedThumb *ct = cached((int) e))
+            if (ct->w != img->width || ct->h != img->height)
+                problem("photo " + std::to_string(e) + "'s cached thumb is " + std::to_string(ct->w) + "x" +
+                        std::to_string(ct->h) + ", its atlas image " + std::to_string(img->width) + "x" +
+                        std::to_string(img->height));
+        imgsDeleteImage(img);
+    }
+    IMGSstats st;
+    imgsGetStats(m_stash, &st);
+    if (st.images != placed)
+        problem("the atlas holds " + std::to_string(st.images) + " images, " + std::to_string(placed) +
+                " photos are placed in it");
+    if (st.width != m_atlas_width || st.height != m_atlas_height)
+        problem("the atlas is " + std::to_string(st.width) + "x" + std::to_string(st.height) +
+                ", its texture " + std::to_string(m_atlas_width) + "x" + std::to_string(m_atlas_height));
+
+    /* The atlas itself */
+    char msg[2048];
+    const int atlas = imgsValidate(m_stash, msg, (int) sizeof msg);
+    if (atlas > 0) {
+        count += atlas;
+        if (problems)
+            *problems += msg;
+    }
+    return count;
+}
+
+void ImageStashWidget::debug_report(const char *event) const {
+    if (!m_debug_stats)
+        return;
+    std::string problems;
+    const int n = validate(&problems);
+    std::fprintf(stderr, "imagestash: %s\n%s\n  check %s\n", event, stats().c_str(),
+                 n == 0 ? "ok" : (std::to_string(n) + " problems:\n" + problems).c_str());
 }
 
 void ImageStashWidget::flush_pending(NVGcontext *ctx) {
@@ -710,17 +935,28 @@ void ImageStashWidget::flush_pending(NVGcontext *ctx) {
         thumb.orig_h = p.orig_h;
         thumb.file_size = p.file_size;
         if (!materialize(p.index, thumb)) {
-            /* Atlas is at its cap and full: evict everything and retry.
-               The visible window will be re-materialized on demand. */
-            reset_atlas();
-            if (!materialize(p.index, thumb)) {
+            /* A miss while the atlas can still grow is a pack failure for
+               this thumbnail. Wiping the atlas here would drop every
+               thumbnail already packed. Evict only at the cap. */
+            int aw = 0, ah = 0;
+            imgsGetAtlasSize(m_stash, &aw, &ah);
+            if (aw >= 4096 || ah >= 4096)
+                reset_atlas();
+            if ((aw < 4096 && ah < 4096) || !materialize(p.index, thumb)) {
                 std::cerr << "ImageStashWidget: cannot fit thumbnail "
                           << m_entries[p.index].name << std::endl;
                 stbi_image_free(p.pixels);
+                m_slots[p.index].failed = true;
                 continue;
             }
         }
         m_slots[p.index].requested = false;
+        ++m_decoded;
+        {
+            const std::string key = cache_key(m_entries[p.index]);
+            if (!key.empty() && !m_decoded_keys.insert(key).second)
+                ++m_redecoded;
+        }
 
         /* Keep the pixels in the CPU cache (takes ownership) so an atlas
            reset or a rebuilt grid restores thumbnails without disk reads */
@@ -760,9 +996,14 @@ void ImageStashWidget::ensure_items_visible(int first, int last) {
         if (!ct)
             continue;
         if (!materialize(e, *ct)) {
-            reset_atlas();               // full: restores the window from the cache
+            int aw = 0, ah = 0;
+            imgsGetAtlasSize(m_stash, &aw, &ah);
+            if (aw < 4096 && ah < 4096)
+                break;                   /* still growing: keep what is packed */
+            reset_atlas();               // cap: restores the window from the cache
             break;
         }
+        ++m_restored;
         cache_put(e, *ct);               // most recently used
     }
 
@@ -1012,6 +1253,12 @@ int ImageStashWidget::neighbor_item(int item, int dx, int dy) const {
 
 bool ImageStashWidget::mouse_button_event(const Vector2i &p, int button, bool down,
                                           int modifiers) {
+    if (button == GLFW_MOUSE_BUTTON_RIGHT) {
+        if (down && m_context_callback && screen())
+            m_context_callback(screen()->mouse_pos());
+        return m_context_callback ? true
+                                  : Widget::mouse_button_event(p, button, down, modifiers);
+    }
     if (button != GLFW_MOUSE_BUTTON_LEFT)
         return Widget::mouse_button_event(p, button, down, modifiers);
     if (!down) {
@@ -1222,11 +1469,11 @@ void ImageStashWidget::thumb_source(int entry, float crop, float &sx0, float &sy
 void ImageStashWidget::cell_rect(int item, float sw, float sh,
                                  float &x, float &y, float &w, float &h) const {
     Vector2f cell = m_item_pos[item];
-    float scale = std::min((float) m_thumb_size / sw, (float) m_thumb_size / sh);
+    float scale = std::min((float) m_cell_size / sw, (float) m_cell_size / sh);
     w = sw * scale;
     h = sh * scale;
-    x = cell.x() + m_border + ((float) m_thumb_size - w) * 0.5f;
-    y = cell.y() + m_border + ((float) m_thumb_size - h) * 0.5f;
+    x = cell.x() + m_border + ((float) m_cell_size - w) * 0.5f;
+    y = cell.y() + m_border + ((float) m_cell_size - h) * 0.5f;
 }
 
 /* Centered fullscreen rect for an entry (never cropped), sized from the
@@ -1442,7 +1689,7 @@ void ImageStashWidget::draw(NVGcontext *ctx) {
         nvgFill(ctx);
     }
 
-    float box = (float) (m_thumb_size + 2 * m_border);
+    float box = (float) (m_cell_size + 2 * m_border);
 
     /* Visible range (culling: thousands of images, O(visible) draw) */
     int first, last;
@@ -1455,6 +1702,10 @@ void ImageStashWidget::draw(NVGcontext *ctx) {
         visible_items(m_first, m_last, kMarginRows * cell_stride_y());
         ensure_items_visible(m_first, m_last);
     }
+
+    /* One GPU resize after this frame's inserts. Placements stay put. */
+    if (sync_atlas_size())
+        propagate_cache_dirty();
 
     float content_w = (float) width();
     float grid_x0 = grid_offset_x();
