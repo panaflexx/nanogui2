@@ -64,7 +64,10 @@ enum class SectionAlign {
  *  - \ref set_crop           -- center-crop thumbnails to portrait (3:4)
  *
  * Scalability notes:
- *  - Only visible rows (plus a small margin) are drawn and loaded.
+ *  - Only visible rows (plus a small margin) are drawn. They load first;
+ *    then, while the view has nothing waiting, the photos around it load
+ *    too, nearest first, until the atlas is full at its cap
+ *    (\ref set_prefetch).
  *  - The atlas grows on demand up to a cap.  Once full it is compacted: the
  *    thumbnails nearest the view (about half the atlas) are repacked from a
  *    CPU-side LRU pixel cache, and the rest come back from that cache, not
@@ -162,6 +165,14 @@ public:
     /// atlas (2048 x 4096 x 4 = 32 MB), or an atlas compaction sends the
     /// rows just scrolled past back to the disk.
     void set_cache_budget(size_t bytes);
+
+    /// Keep loading once the visible rows are in: the photos nearest the
+    /// view, outward in both directions, until the atlas is full at its cap
+    /// (2048 x 4096, 32 MB) or every photo is in. Only the view's own loads
+    /// compact the atlas; loading ahead stops when it is full. Visible rows
+    /// always go first. On by default.
+    void set_prefetch(bool on);
+    bool prefetch() const { return m_prefetch; }
     size_t cache_budget() const { return m_cache_budget; }
     size_t cache_bytes() const { return m_cache_bytes; }
 
@@ -302,6 +313,7 @@ protected:
         int  atlas_x   = -1;    ///< x in atlas, -1 when not materialized
         int  atlas_y   = -1;    ///< y in atlas, -1 when not materialized
         bool requested = false; ///< queued or in flight
+        bool prefetch  = false; ///< requested ahead of the view, not for it
         bool failed    = false; ///< file could not be decoded
     };
 
@@ -380,8 +392,20 @@ protected:
     size_t m_restored  = 0;   ///< put back into the atlas from the cache
     size_t m_compactions = 0;
     size_t m_last_kept = 0;   ///< thumbnails the last compaction repacked
+    size_t m_prefetched = 0;  ///< thumbnails loaded ahead of the view
     bool m_debug_stats = false;
     void debug_report(const char *event) const;
+
+    /* Loading ahead (UI thread). Stops when the atlas is full at its cap
+       (until a compaction or clear() makes room) or nothing is left (until
+       photos are added or a request is dropped). */
+    static constexpr int kPrefetchBatch = 16;     ///< decodes queued ahead at once
+    static constexpr int kPrefetchRestores = 64;  ///< cache restores per frame
+    bool m_prefetch      = true;
+    bool m_prefetch_full = false;
+    bool m_prefetch_done = false;
+    void prefetch_around(int first, int last);
+    bool atlas_at_cap() const;
     static std::string cache_key(const Entry &e) { return e.key.empty() ? e.path : e.key; }
     const CachedThumb *cached(int entry) const;
     /// Takes ownership of `thumb.pixels`; frees them if the entry has no key.

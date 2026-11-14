@@ -328,6 +328,7 @@ void ImageStashWidget::clear() {
     m_press_entry = m_last_click_entry = -1;
     set_selected(-1);
     imgsResetAtlas(m_stash, m_atlas_width, m_atlas_height);
+    m_prefetch_full = m_prefetch_done = false;
     m_redraw = true;
     set_needs_redraw();
     debug_report("clear");
@@ -429,6 +430,7 @@ void ImageStashWidget::rebuild_layout() {
             it.entry = (int) m_entries.size();
             m_entries.push_back(std::move(pi.photo));
             m_slots.push_back(Slot());
+            m_prefetch_done = false;
         }
         if (pi.insert_pos >= 0 && pi.insert_pos < (int) m_items.size())
             m_items.insert(m_items.begin() + pi.insert_pos, it);
@@ -563,6 +565,8 @@ void *ImageStashWidget::load_thumbnails(void *arg) {
         int index = self->m_queue.front();
         self->m_queue.pop_front();
         bool last_item = self->m_queue.empty();
+        /* Slot flags change under m_mutex (the queue code), so read here */
+        const bool for_view = !self->m_slots[index].prefetch;
         Entry entry = self->m_entries[index];
         Loader loader = self->m_loader;
         int generation = self->m_generation;
@@ -612,9 +616,20 @@ void *ImageStashWidget::load_thumbnails(void *arg) {
         }
 
         /* Throttle view updates to twice a second during bulk loading;
-           post immediately when the queue drains (interactive requests). */
+           post immediately when the queue drains (interactive requests), or
+           when the view's last thumbnail is in while loads ahead still wait
+           behind it: those would otherwise hold it back for the interval. */
+        bool view_done = false;
+        if (for_view) {
+            view_done = true;
+            for (int e : self->m_queue)
+                if (!self->m_slots[e].prefetch) {
+                    view_done = false;
+                    break;
+                }
+        }
         auto now = std::chrono::steady_clock::now();
-        if (last_item || now - last_post >= IMGSW_REFRESH_INTERVAL) {
+        if (last_item || view_done || now - last_post >= IMGSW_REFRESH_INTERVAL) {
             self->set_needs_redraw();
             last_post = now;
         }
@@ -720,8 +735,9 @@ void ImageStashWidget::reset_atlas() {
        arrives through m_pending as usual. */
     pthread_mutex_lock(&m_mutex);
     for (int e : m_queue)
-        m_slots[e].requested = false;
+        m_slots[e].requested = m_slots[e].prefetch = false;
     m_queue.clear();
+    m_prefetch_full = m_prefetch_done = false;   // half the atlas is free again
     for (auto &s : m_slots)
         s.atlas_x = s.atlas_y = -1;
     pthread_mutex_unlock(&m_mutex);
@@ -794,7 +810,8 @@ std::string ImageStashWidget::stats() const {
         "        band: pixels %.1f%%  padding %.1f%%  under shorter thumbs %.1f%%  row ends %.1f%%\n"
         "  cache %zu thumbs, %.1f / %.1f MB (%.1f%%), %zu in the atlas, %zu in the atlas only\n"
         "  loads %zu decoded, %zu decoded again, %zu restored from the cache, %zu compactions (last kept %zu)\n"
-        "        %zu photos, %zu waiting, %zu failed",
+        "        %zu photos, %zu waiting, %zu failed\n"
+        "  ahead %zu loaded ahead of the view, %s",
         st.width, st.height, st.packer == IMGS_PACK_PHOTO ? "photo" : "skyline",
         st.tex_bytes / mb, st.cpu_bytes / mb,
         st.images, st.rows, avg, 100.0 * avg / std::max(1, m_thumb_size * m_thumb_size),
@@ -805,7 +822,9 @@ std::string ImageStashWidget::stats() const {
         100.0 * (double) m_cache_bytes / (double) std::max<size_t>(1, m_cache_budget),
         in_atlas, atlas_only,
         m_decoded, m_redecoded, m_restored, m_compactions, m_last_kept,
-        m_entries.size(), queued, failed);
+        m_entries.size(), queued, failed,
+        m_prefetched, !m_prefetch ? "off" : m_prefetch_full ? "stopped: the atlas is full"
+                      : m_prefetch_done ? "done: every photo is in" : "loading");
     return buf;
 }
 
@@ -855,6 +874,10 @@ int ImageStashWidget::validate(std::string *problems) const {
     int placed = 0;
     for (size_t e = 0; e < m_slots.size() && e < m_entries.size(); ++e) {
         const Slot &s = m_slots[e];
+        if (s.prefetch && !s.requested)
+            problem("photo " + std::to_string(e) + " is loaded ahead but not requested");
+        if (s.prefetch && s.atlas_x >= 0)
+            problem("photo " + std::to_string(e) + " is in the atlas and still loading ahead");
         if ((s.atlas_x < 0) != (s.atlas_y < 0))
             problem("photo " + std::to_string(e) + " is half placed");
         if (s.atlas_x < 0)
@@ -924,6 +947,7 @@ void ImageStashWidget::flush_pending(NVGcontext *ctx) {
     for (auto &p : batch) {
         if (!p.pixels) {
             m_slots[p.index].failed = true;
+            m_slots[p.index].prefetch = false;
             m_redraw = true;
             continue;
         }
@@ -934,23 +958,31 @@ void ImageStashWidget::flush_pending(NVGcontext *ctx) {
         thumb.orig_w = p.orig_w;
         thumb.orig_h = p.orig_h;
         thumb.file_size = p.file_size;
-        if (!materialize(p.index, thumb)) {
+        bool placed = materialize(p.index, thumb);
+        if (!placed && m_slots[p.index].prefetch && atlas_at_cap()) {
+            /* Loaded ahead into a full atlas: compacting would push out
+               rows near the view for a photo nobody is looking at. Keep it
+               in the cache, and stop loading ahead until there is room. */
+            m_prefetch_full = true;
+        } else if (!placed) {
             /* A miss while the atlas can still grow is a pack failure for
                this thumbnail. Wiping the atlas here would drop every
                thumbnail already packed. Evict only at the cap. */
-            int aw = 0, ah = 0;
-            imgsGetAtlasSize(m_stash, &aw, &ah);
-            if (aw >= 4096 || ah >= 4096)
+            const bool cap = atlas_at_cap();
+            if (cap)
                 reset_atlas();
-            if ((aw < 4096 && ah < 4096) || !materialize(p.index, thumb)) {
+            if (!cap || !materialize(p.index, thumb)) {
                 std::cerr << "ImageStashWidget: cannot fit thumbnail "
                           << m_entries[p.index].name << std::endl;
                 stbi_image_free(p.pixels);
                 m_slots[p.index].failed = true;
+                m_slots[p.index].prefetch = false;
                 continue;
             }
         }
-        m_slots[p.index].requested = false;
+        if (m_slots[p.index].prefetch)
+            ++m_prefetched;
+        m_slots[p.index].requested = m_slots[p.index].prefetch = false;
         ++m_decoded;
         {
             const std::string key = cache_key(m_entries[p.index]);
@@ -996,9 +1028,7 @@ void ImageStashWidget::ensure_items_visible(int first, int last) {
         if (!ct)
             continue;
         if (!materialize(e, *ct)) {
-            int aw = 0, ah = 0;
-            imgsGetAtlasSize(m_stash, &aw, &ah);
-            if (aw < 4096 && ah < 4096)
+            if (!atlas_at_cap())
                 break;                   /* still growing: keep what is packed */
             reset_atlas();               // cap: restores the window from the cache
             break;
@@ -1011,11 +1041,13 @@ void ImageStashWidget::ensure_items_visible(int first, int last) {
     pthread_mutex_lock(&m_mutex);
 
     /* Drop requests that scrolled out of the window, so fast scrolling does
-       not leave a backlog of off-screen decodes ahead of the visible ones */
+       not leave a backlog of off-screen decodes ahead of the visible ones.
+       Loads ahead stay: they are queued behind the view's anyway. */
     for (auto it = m_queue.begin(); it != m_queue.end();) {
         int item = m_item_of_entry[*it];
-        if (item < first || item > last) {
+        if (!m_slots[*it].prefetch && (item < first || item > last)) {
             m_slots[*it].requested = false;
+            m_prefetch_done = false;     // it can be loaded ahead later
             it = m_queue.erase(it);
         } else {
             ++it;
@@ -1028,15 +1060,138 @@ void ImageStashWidget::ensure_items_visible(int first, int last) {
         if (e < 0)
             continue;
         Slot &s = m_slots[e];
-        if (s.atlas_x < 0 && !s.requested && !s.failed) {
+        if (s.atlas_x >= 0 || s.failed)
+            continue;
+        if (s.requested && s.prefetch) {
+            /* Asked for ahead of the view, and now in it: to the front, and
+               a full atlas may compact for it. In flight, it is not queued. */
+            s.prefetch = false;
+            auto it = std::find(m_queue.begin(), m_queue.end(), e);
+            if (it != m_queue.end()) {
+                m_queue.erase(it);
+                m_queue.push_front(e);
+                any = true;
+            }
+        } else if (!s.requested) {
             s.requested = true;
             m_queue.push_front(e);
             any = true;
         }
     }
+    bool view_waiting = false;
+    for (int e : m_queue)
+        if (!m_slots[e].prefetch) {
+            view_waiting = true;
+            break;
+        }
     pthread_mutex_unlock(&m_mutex);
     if (any)
         pthread_cond_signal(&m_cond);
+
+    /* The view's own thumbnails first; then the photos around it */
+    if (!view_waiting)
+        prefetch_around(first, last);
+}
+
+bool ImageStashWidget::atlas_at_cap() const {
+    int aw = 0, ah = 0;
+    imgsGetAtlasSize(m_stash, &aw, &ah);
+    return aw >= 4096 || ah >= 4096;
+}
+
+void ImageStashWidget::set_prefetch(bool on) {
+    m_prefetch = on;
+    m_prefetch_done = false;
+    if (on) {
+        m_redraw = true;
+        set_needs_redraw();
+        return;
+    }
+    /* Off: drop the loads queued ahead (one in flight still lands) */
+    pthread_mutex_lock(&m_mutex);
+    for (auto it = m_queue.begin(); it != m_queue.end();) {
+        if (m_slots[*it].prefetch) {
+            m_slots[*it].requested = m_slots[*it].prefetch = false;
+            it = m_queue.erase(it);
+        } else {
+            ++it;
+        }
+    }
+    pthread_mutex_unlock(&m_mutex);
+}
+
+void ImageStashWidget::prefetch_around(int first, int last) {
+    /* Nearest first, alternating below and above the view (`first`..`last`,
+       the margin included). A photo already in the CPU cache goes straight
+       into the atlas; the rest are queued for the loader, a batch at a
+       time, behind anything the view asks for. */
+    if (!m_prefetch || m_prefetch_full || m_prefetch_done || m_items.empty())
+        return;
+    const int n = (int) m_items.size();
+
+    int queued = 0;
+    pthread_mutex_lock(&m_mutex);
+    for (int e : m_queue)
+        if (m_slots[e].prefetch)
+            ++queued;
+    pthread_mutex_unlock(&m_mutex);
+    if (queued >= kPrefetchBatch)
+        return;
+
+    std::vector<int> want;
+    int restored = 0;
+    int below = first <= last ? last + 1 : 0;
+    int above = first <= last ? first - 1 : -1;
+    bool down = true;
+    while ((below < n || above >= 0) && queued + (int) want.size() < kPrefetchBatch &&
+           restored < kPrefetchRestores) {
+        int i;
+        if ((down && below < n) || above < 0)
+            i = below++;
+        else
+            i = above--;
+        down = !down;
+
+        const int e = m_items[i].entry;
+        if (e < 0)
+            continue;
+        const Slot &s = m_slots[e];
+        if (s.atlas_x >= 0 || s.requested || s.failed)
+            continue;
+        if (const CachedThumb *ct = cached(e)) {
+            if (!materialize(e, *ct)) {
+                if (atlas_at_cap()) {
+                    m_prefetch_full = true;
+                    break;
+                }
+                continue;                // a pack failure below the cap
+            }
+            ++restored;
+            ++m_restored;
+            ++m_prefetched;
+            cache_put(e, *ct);
+            continue;
+        }
+        want.push_back(e);
+    }
+
+    const bool scanned_all = below >= n && above < 0;
+    if (!m_prefetch_full && scanned_all && want.empty() && restored == 0 && queued == 0)
+        m_prefetch_done = true;          // every photo is in, or failed
+    if (restored > 0) {
+        m_redraw = true;                 // show them, and come back for more
+        set_needs_redraw();
+    }
+    if (want.empty())
+        return;
+
+    pthread_mutex_lock(&m_mutex);
+    for (int e : want) {
+        m_slots[e].requested = m_slots[e].prefetch = true;
+        m_queue.push_back(e);
+    }
+    pthread_mutex_unlock(&m_mutex);
+    pthread_cond_signal(&m_cond);
 }
 
 /* ------------------------------------------------------------------ */
