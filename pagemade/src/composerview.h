@@ -322,7 +322,14 @@ public:
     /* Name, prefix, based on, margins and columns from `opts` (its pages
      * and id are ignored). */
     void set_master_options(pagemade::MasterId id, const pagemade::MasterPage &opts);
-    void delete_master(pagemade::MasterId id, bool keep_items);
+    /* Pages that used it switch to `replacement` (0: none; see
+     * PageDoc::remove_master). */
+    void delete_master(pagemade::MasterId id, bool keep_items, pagemade::MasterId replacement = 0);
+    /* "Delete [None]": every page without a master uses `to`, and, with
+     * `make_default`, so do new pages. One undo step. */
+    void replace_no_master(pagemade::MasterId to, bool make_default);
+    /* Publication pages using `id` that have content of their own. */
+    size_t master_pages_with_content(pagemade::MasterId id) const;
     /* `id` (0: none) for each page in `pages`. */
     void apply_master(pagemade::MasterId id, const std::vector<size_t> &pages);
     void set_default_master(pagemade::MasterId id);

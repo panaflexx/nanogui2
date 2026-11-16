@@ -4114,7 +4114,7 @@ void ComposerView::set_master_options(MasterId id, const MasterPage &opts) {
     master_changed(this);
 }
 
-void ComposerView::delete_master(MasterId id, bool keep_items) {
+void ComposerView::delete_master(MasterId id, bool keep_items, MasterId replacement) {
     if (!m_doc.find_master(id))
         return;
     end_placement(false);
@@ -4127,7 +4127,7 @@ void ComposerView::delete_master(MasterId id, bool keep_items) {
         if (m_doc.find_layer(m_layer_before_master))
             m_doc.active_layer = m_layer_before_master;
     }
-    m_doc.remove_master(id, keep_items);
+    m_doc.remove_master(id, keep_items, replacement);
     m_sel.clear();
     m_edit_story = 0;
     recompose();
@@ -4221,6 +4221,32 @@ size_t ComposerView::master_use_count(MasterId id) const {
     for (const Page &p : pub.pages)
         n += p.master == id;
     return n;
+}
+
+void ComposerView::replace_no_master(MasterId to, bool make_default) {
+    if (m_doc.editing_master || !m_doc.find_master(to))
+        return;
+    bool any = make_default && m_doc.default_master != to;
+    for (const Page &p : m_doc.pages)
+        any = any || p.master == 0;
+    if (!any)
+        return;
+    push_undo();
+    for (Page &p : m_doc.pages)
+        if (p.master == 0) {
+            p.master = to;
+            p.master_hidden.clear();
+        }
+    if (make_default)
+        m_doc.default_master = to;
+    sync_masters();
+    recompose();
+    selection_changed();
+    master_changed(this);
+}
+
+size_t ComposerView::master_pages_with_content(MasterId id) const {
+    return publication().master_pages_with_content(id);
 }
 
 std::vector<size_t> ComposerView::parse_page_range(const std::string &text) const {

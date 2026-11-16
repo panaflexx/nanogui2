@@ -53,6 +53,8 @@ private:
     pagemade::MasterId chosen(bool *none = nullptr) const;
     void edit_or_done();
     void delete_chosen();
+    /* Delete with [None] chosen: its pages go to a master. */
+    void delete_none();
     std::vector<std::pair<pagemade::MasterId, std::string>> parents_for(pagemade::MasterId id) const;
 
     ComposerView *m_view = nullptr;

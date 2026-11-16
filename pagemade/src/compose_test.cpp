@@ -7445,6 +7445,39 @@ static void test_masters(const FontLibrary &fonts) {
     CHECK(left == 0 && drop.default_master == 0, "removed with its copies");
     CHECK(!drop.remove_layer(drop.master_layer()), "the Master layer stays while masters exist");
 
+    /* Removing a master in favor of another: its pages switch over */
+    {
+        PageDoc swap = doc;
+        swap.default_master = a;
+        const size_t on_a = std::count_if(swap.pages.begin(), swap.pages.end(),
+                                          [&](const Page &p) { return p.master == a; });
+        const size_t on_b = std::count_if(swap.pages.begin(), swap.pages.end(),
+                                          [&](const Page &p) { return p.master == b; });
+        CHECK(on_a > 0, "A is in use before it's replaced");
+        CHECK(swap.remove_master(a, true, b), "remove A in favor of B");
+        bool all_b = true, links_ok = true;
+        const MasterPage *mb = swap.find_master(b);
+        for (const Page &p : swap.pages) {
+            all_b = all_b && p.master != a;
+            for (const Item &it : p.items) {
+                if (!it.master_item || it.overridden)
+                    continue;
+                bool from_b = false;
+                for (const Page &mp : mb->pages)
+                    for (const Item &mi : mp.items)
+                        from_b = from_b || mi.id == it.master_item;
+                links_ok = links_ok && from_b && p.master == b;
+            }
+        }
+        const size_t now_b = std::count_if(swap.pages.begin(), swap.pages.end(),
+                                           [&](const Page &p) { return p.master == b; });
+        CHECK(all_b && now_b == on_a + on_b, "A's pages use B now");
+        CHECK(links_ok, "every copy left is B's (keep is ignored with a replacement)");
+        CHECK(swap.default_master == b, "the default passes to B");
+        CHECK(!swap.remove_master(b, false, b) || swap.find_master(b) == nullptr,
+              "a master can't replace itself");
+    }
+
     /* An overridden copy moved to another page is that page's own */
     {
         PageDoc t = doc;

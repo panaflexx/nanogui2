@@ -12,9 +12,11 @@
 
 #include <nanogui/opengl.h>
 #include <nanogui/button.h>
+#include <nanogui/checkbox.h>
 #include <nanogui/dragdrop.h>
 #include <nanogui/icons.h>
 #include <nanogui/label.h>
+#include <nanogui/menu.h>
 #include <nanogui/layout.h>
 #include <nanogui/messagedialog.h>
 #include <nanogui/screen.h>
@@ -469,8 +471,18 @@ MastersPanel::MastersPanel(Widget *parent, ComposerView *view) : ToolPanel(paren
     m_info = new Label(this, "", "sans", 13);
     m_info->set_live(true);
 
-    auto grid_row = [this]() {
-        Widget *row = new Widget(this);
+    /* The buttons sit in one group at its natural width, centered: a wide
+     * panel doesn't stretch them, a narrow one still squeezes them. */
+    Widget *buttons = new Widget(this);
+    buttons->set_layout(new FlexLayout(FlexDirection::Column, JustifyContent::FlexStart,
+                                       AlignItems::Stretch, 0, 6));
+    buttons->set_min_size(Vector2i(1, 0));   // min:auto would stop it shrinking
+    FlexLayout::FlexItem centered(0.f, 1.f);
+    centered.align_self = AlignItems::Center;
+    flex->set_flex_item(buttons, centered);
+
+    auto grid_row = [buttons]() {
+        Widget *row = new Widget(buttons);
         row->set_layout(new FlexLayout(FlexDirection::Row, JustifyContent::FlexStart,
                                        AlignItems::Stretch, 0, 6));
         return row;
@@ -560,7 +572,11 @@ void MastersPanel::selection_changed() {
     m_apply->set_enabled((id != 0 || none) && !editing);
     m_default->set_enabled((id != 0 || none) && doc.default_master != id);
     m_options->set_enabled(id != 0);
-    m_delete->set_enabled(id != 0);
+    /* [None] isn't a master, but "deleting" it moves its pages to one */
+    m_delete->set_enabled(id != 0 || (none && !editing && !m_view->masters().empty()));
+    m_delete->set_tooltip(none ? "Pages without a master use a master you choose instead "
+                                 "([None] stays, to take a page's master away)"
+                               : "Take the chosen master out of the publication");
     m_from_page->set_enabled(!editing);
     m_numbering->set_enabled(!editing);
     if (editing) {
@@ -739,17 +755,85 @@ void MastersPanel::apply_to_pages(MasterId id) {
     });
 }
 
+void MastersPanel::delete_none() {
+    const std::vector<MasterPage> &ms = m_view->masters();
+    if (!screen() || ms.empty() || m_view->editing_master())
+        return;
+    const size_t uses = m_view->master_use_count(0);
+    const size_t with_content = m_view->master_pages_with_content(0);
+    auto targets = std::make_shared<std::vector<MasterId>>();
+    std::vector<std::string> captions;
+    for (auto it = ms.rbegin(); it != ms.rend(); ++it) {   // the newest first
+        targets->push_back(it->id);
+        captions.push_back(it->label());
+    }
+
+    auto *d = new ModalDialog(screen(), "Replace [None]");
+    Widget *body = d->body();
+    const std::string pages = std::to_string(uses) + (uses == 1 ? " page" : " pages");
+    Label *what = new Label(body,
+                            "[None] isn't a master; it's pages without one. " +
+                                (uses ? "Its " + pages + " will use the master you choose."
+                                      : std::string("No page is without a master now.")) +
+                                " [None] stays in the list, to take a page's master away.",
+                            "sans", 15);
+    what->set_fixed_size(Vector2i(400, 0));
+    if (with_content) {
+        Label *warn = new Label(body,
+                                "Warning: " + std::to_string(with_content) + " of " + pages +
+                                    (with_content == 1 ? " has" : " have") +
+                                    " content. It stays, with the master's items added "
+                                    "underneath (on the Master layer).",
+                                "sans-bold", 14);
+        warn->set_fixed_size(Vector2i(400, 0));
+        warn->set_color(nanogui::Color(230, 150, 30, 255));
+    }
+    Widget *row = new Widget(body);
+    row->set_layout(new BoxLayout(Orientation::Horizontal, Alignment::Middle, 0, 8));
+    new Label(row, "Use master:", "sans", 15);
+    auto *how = new Dropdown(row, captions, {}, Dropdown::ComboBox, captions.front());
+    how->set_fixed_size(Vector2i(260, 28));
+    auto pick = std::make_shared<int>(0);
+    how->set_selected_callback([pick](int i) { *pick = i; });
+    auto *dflt = new CheckBox(body, "New pages use it too (make it the default)");
+    auto make_default = std::make_shared<bool>(m_view->default_master() == 0);
+    dflt->set_checked(*make_default);
+    dflt->set_callback([make_default](bool on) { *make_default = on; });
+
+    d->add_button("Cancel", {}, ModalDialog::Role::Cancel);
+    d->add_button("Replace", [this, targets, pick, make_default] {
+        const MasterId to =
+            (*targets)[(size_t) std::clamp(*pick, 0, (int) targets->size() - 1)];
+        m_view->replace_no_master(to, *make_default);
+        refresh();
+    }, ModalDialog::Role::Default);
+    d->open();
+}
+
 void MastersPanel::delete_chosen() {
-    const MasterId id = chosen();
+    bool none = false;
+    const MasterId id = chosen(&none);
+    if (none) {
+        delete_none();
+        return;
+    }
     const MasterPage *m = m_view->document().find_master(id);
     if (!m || !screen())
         return;
     const size_t uses = m_view->master_use_count(id);
+    const size_t with_content = m_view->master_pages_with_content(id);
     const std::string name = m->label();
+    std::string children;                // masters based on this one
+    for (const MasterPage &o : m_view->masters())
+        if (o.based_on == id)
+            children += (children.empty() ? "" : ", ") + o.label();
+    const std::string child_note =
+        children.empty() ? std::string()
+                         : " Masters based on it (" + children + ") lose what they take from it.";
     if (uses == 0) {
         auto *dlg = new MessageDialog(screen(), MessageDialog::Type::Warning, "Delete Master",
-                                      "Delete master “" + name + "”?", "Delete", "Cancel",
-                                      true);
+                                      "Delete master “" + name + "”?" + child_note, "Delete",
+                                      "Cancel", true);
         dlg->set_callback([this, id](int result) {
             if (result == 0)
                 m_view->delete_master(id, false);
@@ -757,20 +841,52 @@ void MastersPanel::delete_chosen() {
         });
         return;
     }
+
+    /* What its pages do instead: another master (the newest first, the
+     * usual reason to delete one), keep its items, or none */
+    struct Choice { MasterId replacement; bool keep; std::string caption; };
+    auto choices = std::make_shared<std::vector<Choice>>();
+    const std::vector<MasterPage> &ms = m_view->masters();
+    for (auto it = ms.rbegin(); it != ms.rend(); ++it)
+        if (it->id != id)
+            choices->push_back({it->id, false, "Use “" + it->label() + "” instead"});
+    choices->push_back({0, true, "Keep its items as the pages' own"});
+    choices->push_back({0, false, "Remove its items (no master)"});
+
     auto *d = new ModalDialog(screen(), "Delete Master");
-    Label *what = new Label(d->body(),
-                            "“" + name + "” is used by " + std::to_string(uses) +
-                                (uses == 1 ? " page" : " pages") +
-                                ". Keep its items on those pages as their own, or remove them?",
+    Widget *body = d->body();
+    const std::string pages = std::to_string(uses) + (uses == 1 ? " page" : " pages");
+    Label *what = new Label(body, "“" + name + "” is used by " + pages + "." + child_note,
                             "sans", 15);
-    what->set_fixed_size(Vector2i(380, 0));
+    what->set_fixed_size(Vector2i(400, 0));
+    if (with_content) {
+        Label *warn = new Label(body,
+                                "Warning: " + std::to_string(with_content) + " of " + pages +
+                                    (with_content == 1 ? " has" : " have") +
+                                    " content of its own. That content stays, but the page "
+                                    "loses the master's look unless another master takes over.",
+                                "sans-bold", 14);
+        warn->set_fixed_size(Vector2i(400, 0));
+        warn->set_color(nanogui::Color(230, 150, 30, 255));
+    }
+    Widget *row = new Widget(body);
+    row->set_layout(new BoxLayout(Orientation::Horizontal, Alignment::Middle, 0, 8));
+    new Label(row, "Its pages:", "sans", 15);
+    std::vector<std::string> captions;
+    for (const Choice &c : *choices)
+        captions.push_back(c.caption);
+    auto *how = new Dropdown(row, captions, {}, Dropdown::ComboBox, captions.front());
+    how->set_fixed_size(Vector2i(300, 28));
+    how->set_tooltip("Another master: the pages switch to it; items edited on a page stay.\n"
+                     "Keep: the master's items stay on the pages as ordinary items.\n"
+                     "Remove: the master's items go; items edited on a page stay.");
+    auto pick = std::make_shared<int>(0);
+    how->set_selected_callback([pick](int i) { *pick = i; });
+
     d->add_button("Cancel", {}, ModalDialog::Role::Cancel);
-    d->add_button("Remove Items", [this, id] {
-        m_view->delete_master(id, false);
-        refresh();
-    });
-    d->add_button("Keep Items", [this, id] {
-        m_view->delete_master(id, true);
+    d->add_button("Delete", [this, id, choices, pick] {
+        const Choice &c = (*choices)[(size_t) std::clamp(*pick, 0, (int) choices->size() - 1)];
+        m_view->delete_master(id, c.keep, c.replacement);
         refresh();
     }, ModalDialog::Role::Default);
     d->open();

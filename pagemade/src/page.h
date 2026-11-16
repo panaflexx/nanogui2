@@ -683,10 +683,15 @@ struct PageDoc {
      * there's no room for the Master layer. */
     MasterId add_master(const std::string &name, const std::string &prefix, bool spread,
                         MasterId based_on = 0);
-    /* Take a master out. Pages that used it use none; with `keep_items`
-     * their copies of its items stay, as the pages' own, else they go.
-     * Masters based on it are based on nothing. Not while editing. */
-    bool remove_master(MasterId id, bool keep_items);
+    /* Take a master out. Pages that used it use `replacement` (0: none);
+     * with `keep_items` (no replacement) their copies of its items stay, as
+     * the pages' own, else they go. Overridden copies always stay, as the
+     * pages' own. Masters based on it are based on nothing; the default
+     * passes to the replacement. Not while editing. */
+    bool remove_master(MasterId id, bool keep_items, MasterId replacement = 0);
+    /* Pages using master `id` that hold content of their own: items that
+     * aren't master copies, or overridden copies. */
+    size_t master_pages_with_content(MasterId id) const;
     /* The next free prefix: A, B, ... Z, then AA, BB, ... */
     std::string next_master_prefix() const;
     /* Which of the master's pages page `index` takes: 0, or 1 for the right

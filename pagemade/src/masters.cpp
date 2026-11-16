@@ -243,17 +243,21 @@ static void drop_from_threads(PageDoc &doc, const std::set<ItemId> &gone) {
                       doc.stories.end());
 }
 
-bool PageDoc::remove_master(MasterId id, bool keep_items) {
+bool PageDoc::remove_master(MasterId id, bool keep_items, MasterId replacement) {
     if (editing_master)
         return false;
     auto mi = std::find_if(masters.begin(), masters.end(),
                            [&](const MasterPage &m) { return m.id == id; });
     if (mi == masters.end())
         return false;
+    if (replacement == id || !find_master(replacement))
+        replacement = 0;
+    if (replacement)
+        keep_items = false;              // else the new master's copies double them
     for (Page &p : pages) {
         if (p.master != id)
             continue;
-        p.master = 0;
+        p.master = replacement;
         p.master_hidden.clear();
         for (Item &it : p.items)
             if (it.master_item && keep_items) {
@@ -271,9 +275,20 @@ bool PageDoc::remove_master(MasterId id, bool keep_items) {
         if (m.based_on == id)
             m.based_on = 0;
     if (default_master == id)
-        default_master = 0;
+        default_master = replacement;
     sync_masters();
     return true;
+}
+
+size_t PageDoc::master_pages_with_content(MasterId id) const {
+    size_t n = 0;
+    for (const Page &p : pages) {
+        if (p.master != id)
+            continue;
+        n += std::any_of(p.items.begin(), p.items.end(),
+                         [](const Item &it) { return !it.master_item || it.overridden; });
+    }
+    return n;
 }
 
 size_t PageDoc::master_side(size_t index, const MasterPage &m) const {
