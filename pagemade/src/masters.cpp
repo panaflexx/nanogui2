@@ -246,6 +246,7 @@ static void drop_from_threads(PageDoc &doc, const std::set<ItemId> &gone) {
 bool PageDoc::remove_master(MasterId id, bool keep_items, MasterId replacement) {
     if (editing_master)
         return false;
+    end_linked_edit();
     auto mi = std::find_if(masters.begin(), masters.end(),
                            [&](const MasterPage &m) { return m.id == id; });
     if (mi == masters.end())
@@ -401,6 +402,10 @@ size_t parent_side(const MasterPage &child, size_t side, const MasterPage &paren
 void PageDoc::sync_masters() {
     if (editing_master)
         return;
+    if (linked_editing()) {
+        end_linked_edit();               // its edits reach the master first; it syncs
+        return;
+    }
     const LayerId layer = master_layer();
     std::set<ItemId> gone;
     /* Parents first. A loop in based_on is cut where it is found. */
@@ -508,6 +513,7 @@ size_t PageDoc::detach_master_items(const std::vector<ItemId> &ids) {
 bool PageDoc::begin_master_edit(MasterId id) {
     if (editing_master == id && id)
         return true;
+    end_linked_edit();
     if (editing_master)
         end_master_edit();
     MasterPage *m = find_master(id);
@@ -532,6 +538,130 @@ void PageDoc::end_master_edit() {
         m->pages.resize(1);
     if (m->pages.size() > 2)
         m->pages.resize(2);
+    sync_masters();
+}
+
+/* ---- Edit Master Here ---------------------------------------------------- */
+
+bool PageDoc::begin_linked_edit(size_t page) {
+    if (editing_master)
+        return false;
+    end_linked_edit();
+    if (page >= pages.size())
+        return false;
+    const MasterPage *m = find_master(pages[page].master);
+    if (!m || m->pages.empty())
+        return false;
+    const Page &side = m->pages[std::min(master_side(page, *m), m->pages.size() - 1)];
+    /* The master's own items; what it shows from a parent is the parent's */
+    std::set<ItemId> own;
+    for (const Item &it : side.items)
+        if (!it.master_copy())
+            own.insert(it.id);
+    linked_masters.clear();
+    for (Item &it : pages[page].items)
+        if (it.master_copy() && own.count(it.master_item)) {
+            it.linked = true;
+            linked_masters.push_back(it.master_item);
+        }
+    linked_page = page;
+    linked_first_new = next_id;
+    return true;
+}
+
+void PageDoc::end_linked_edit() {
+    if (!linked_editing())
+        return;
+    const size_t page = linked_page;
+    linked_page = SIZE_MAX;
+    const std::set<ItemId> start(linked_masters.begin(), linked_masters.end());
+    linked_masters.clear();
+    MasterPage *m = page < pages.size() ? find_master(pages[page].master) : nullptr;
+    if (m && !m->pages.empty()) {
+        Page &p = pages[page];
+        Page &side = m->pages[std::min(master_side(page, *m), m->pages.size() - 1)];
+        const LayerId ml = master_layer();
+        std::map<ItemId, const Item *> originals;
+        for (const Item &it : side.items)
+            originals[it.id] = &it;
+
+        /* What the page holds for the master now, in its stacking order:
+         * the copies (by their master item), and the new items */
+        std::vector<std::pair<ItemId, const Item *>> now;
+        std::set<ItemId> present, fresh;
+        for (const Item &it : p.items) {
+            const bool copy = it.linked && it.master_copy() && start.count(it.master_item) &&
+                              originals.count(it.master_item);
+            if (copy && it.id < linked_first_new && !present.count(it.master_item)) {
+                now.push_back({it.master_item, &it});
+                present.insert(it.master_item);
+            } else if (it.id >= linked_first_new && ml && layer_of(it) == ml &&
+                       (copy || !it.master_item)) {
+                now.push_back({it.id, &it});     // new here, or a copy of a copy
+                fresh.insert(it.id);
+            }
+        }
+
+        /* The copies' groups are their own ids; the master's are its */
+        std::map<uint32_t, uint32_t> group_back;
+        for (const auto &e : now) {
+            if (fresh.count(e.first))
+                continue;
+            const Item &c = *e.second, &o = *originals[e.first];
+            if (c.group && o.group)
+                group_back[c.group] = o.group;
+            for (size_t k = 0; k < c.outer_groups.size() && k < o.outer_groups.size(); ++k)
+                group_back[c.outer_groups[k]] = o.outer_groups[k];
+        }
+        auto back = [&](uint32_t g) {
+            auto f = group_back.find(g);
+            return f == group_back.end() ? g : f->second;
+        };
+
+        /* The master's page: what wasn't edited here as it was (its parent's
+         * items, what this page doesn't show), then the edited and new ones */
+        std::vector<Item> out;
+        out.reserve(side.items.size() + fresh.size());
+        for (const Item &it : side.items)
+            if (!start.count(it.id))
+                out.push_back(it);
+        std::set<ItemId> gone(start);
+        for (const auto &e : now) {
+            Item x = *e.second;
+            x.linked = false;
+            x.group = back(x.group);
+            for (uint32_t &g : x.outer_groups)
+                g = back(g);
+            if (fresh.count(e.first)) {
+                x.layer = ml;            // moves, id and story thread and all
+                x.master_item = 0;
+                x.overridden = false;
+            } else {
+                const Item &o = *originals[e.first];
+                gone.erase(e.first);
+                if (const StoryEntry *sc = story_of(x.id))
+                    if (StoryEntry *sm = story_of(o.id); sm && sm != sc)
+                        sm->story = sc->story;   // retyped here
+                x.id = o.id;
+                x.master_item = o.master_item;
+                x.overridden = o.overridden;
+                x.layer = o.layer;
+            }
+            out.push_back(std::move(x));
+        }
+        side.items = std::move(out);
+        p.items.erase(std::remove_if(p.items.begin(), p.items.end(),
+                                     [&](const Item &it) { return fresh.count(it.id) != 0; }),
+                      p.items.end());
+        /* Deleted here: gone from the master, not just hidden on the page */
+        p.master_hidden.erase(std::remove_if(p.master_hidden.begin(), p.master_hidden.end(),
+                                             [&](ItemId id) { return start.count(id) != 0; }),
+                              p.master_hidden.end());
+        drop_from_threads(*this, gone);
+    }
+    for (Page &pg : pages)
+        for (Item &it : pg.items)
+            it.linked = false;
     sync_masters();
 }
 

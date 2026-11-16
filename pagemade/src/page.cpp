@@ -721,8 +721,17 @@ bool PageDoc::item_visible(const Item &it) const {
 }
 
 bool PageDoc::item_editable(const Item &it) const {
-    if (it.master_copy())
+    if (linked_editing()) {
+        /* Edit Master Here: the master's items on that page, and new ones
+         * on the Master layer; nothing else */
+        const bool mine = (it.linked && it.master_copy()) ||
+                          (!it.master_item && it.id >= linked_first_new &&
+                           layer_of(it) == master_layer() && master_layer());
+        if (!mine)
+            return false;
+    } else if (it.master_copy()) {
         return false;                    // the master's until overridden
+    }
     const Layer *l = find_layer(layer_of(it));
     return !l || (l->visible && !l->locked);
 }
@@ -1172,6 +1181,7 @@ void PageDoc::tidy_groups() {
 }
 
 size_t PageDoc::insert_page(size_t index) {
+    end_linked_edit();                   // its page index is about to move
     if (index > pages.size())
         index = pages.size();
     Page page;
@@ -1184,6 +1194,7 @@ size_t PageDoc::insert_page(size_t index) {
 bool PageDoc::remove_page(size_t index) {
     if (index >= pages.size() || pages.size() <= 1)
         return false;
+    end_linked_edit();
     std::vector<ItemId> ids;
     for (const Item &it : pages[index].items)
         ids.push_back(it.id);
@@ -1197,6 +1208,7 @@ bool PageDoc::remove_page(size_t index) {
 void PageDoc::move_page(size_t from, size_t to) {
     if (from >= pages.size() || to >= pages.size() || from == to)
         return;
+    end_linked_edit();
     if (to > from)
         std::rotate(pages.begin() + (long) from, pages.begin() + (long) from + 1,
                     pages.begin() + (long) to + 1);
@@ -1208,6 +1220,7 @@ void PageDoc::move_page(size_t from, size_t to) {
 size_t PageDoc::duplicate_pages(size_t first, size_t count) {
     if (first >= pages.size() || count == 0)
         return SIZE_MAX;
+    end_linked_edit();
     count = std::min(count, pages.size() - first);
     std::map<ItemId, ItemId> new_id;
     std::map<uint32_t, uint32_t> new_group;

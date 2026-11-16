@@ -60,7 +60,10 @@ private:
     ComposerView *m_view = nullptr;
     nanogui::ScrollPanel *m_scroll = nullptr;
     Grid *m_grid = nullptr;
-    nanogui::Label *m_info = nullptr, *m_banner = nullptr;
+    nanogui::Label *m_info = nullptr, *m_banner = nullptr, *m_banner_where = nullptr,
+                   *m_banner_info = nullptr, *m_banner_hint = nullptr;
+    nanogui::Widget *m_banner_box = nullptr;
+    nanogui::Button *m_revert = nullptr;
     nanogui::Button *m_new = nullptr, *m_from_page = nullptr, *m_edit = nullptr, *m_apply = nullptr,
                     *m_default = nullptr, *m_options = nullptr, *m_delete = nullptr,
                     *m_numbering = nullptr;

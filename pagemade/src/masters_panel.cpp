@@ -455,9 +455,24 @@ MastersPanel::MastersPanel(Widget *parent, ComposerView *view) : ToolPanel(paren
                                 AlignItems::Stretch, 8, 6);
     set_layout(flex);
 
-    m_banner = new Label(this, "", "sans-bold", 14);
+    /* Editing a master (either way): which, how far it reaches, Revert */
+    m_banner_box = new Widget(this);
+    m_banner_box->set_layout(new BoxLayout(Orientation::Vertical, Alignment::Minimum, 0, 2));
+    m_banner = new Label(m_banner_box, "", "sans-bold", 14);
     m_banner->set_color(nanogui::Color(230, 150, 30, 255));
-    m_banner->set_visible(false);
+    m_banner_where = new Label(m_banner_box, "", "sans", 13);
+    m_banner_where->set_color(nanogui::Color(230, 150, 30, 255));
+    m_banner_info = new Label(m_banner_box, "", "sans", 13);
+    m_banner_hint = new Label(m_banner_box, "", "sans", 12);
+    m_banner_hint->set_color(nanogui::Color(150, 150, 150, 255));
+    m_revert = new Button(m_banner_box, "Revert", FA_UNDO);
+    m_revert->set_tooltip("Put back everything since you began editing this master, "
+                          "and stop editing it");
+    m_revert->set_callback([this] {
+        m_view->revert_master_mode();
+        refresh();
+    });
+    m_banner_box->set_visible(false);
 
     m_scroll = new ScrollPanel(this, ScrollPanel::ScrollTypes::Vertical);
     flex->set_flex_item(m_scroll, FlexLayout::FlexItem(1.f, 1.f, 0));
@@ -535,7 +550,8 @@ MastersPanel::MastersPanel(Widget *parent, ComposerView *view) : ToolPanel(paren
 
 void MastersPanel::refresh() {
     std::string sig = std::to_string(m_view->editing_master()) + "|" +
-                      std::to_string(m_view->default_master()) + "|";
+                      std::to_string(m_view->linked_editing() ? m_view->linked_page() + 1 : 0) +
+                      "|" + std::to_string(m_view->default_master()) + "|";
     for (const MasterPage &m : m_view->masters())
         sig += std::to_string(m.id) + ":" + m.label() + ":" +
                std::to_string(m_view->document().master_pages(m).size()) + ";";
@@ -564,7 +580,7 @@ MasterId MastersPanel::chosen(bool *none) const {
 void MastersPanel::selection_changed() {
     bool none = false;
     const MasterId id = chosen(&none);
-    const MasterId editing = m_view->editing_master();
+    const MasterId editing = m_view->mode_master();   // either way of editing one
     const PageDoc &doc = m_view->document();
     m_edit->set_enabled(id != 0 || editing != 0);
     m_edit->set_caption(editing && (id == editing || !id) ? "Done" : "Edit");
@@ -581,11 +597,28 @@ void MastersPanel::selection_changed() {
     m_numbering->set_enabled(!editing);
     if (editing) {
         const MasterPage *m = doc.find_master(editing);
-        m_banner->set_caption("Editing master " + (m ? m->label() : std::string()) +
-                              ". Done puts the pages back.");
-        m_banner->set_visible(true);
+        const size_t uses = m_view->master_use_count(editing);
+        const std::string pages = std::to_string(uses) + (uses == 1 ? " page" : " pages");
+        m_banner->set_caption("Editing master " + (m ? m->label() : std::string()));
+        std::string info;
+        if (m_view->linked_editing()) {
+            m_banner_where->set_caption("Here, on page " + m_view->page_label(m_view->linked_page()));
+            info = "Changes reach " + pages + ".";
+            m_banner_hint->set_caption("The page's own items are locked; new ones join the master.");
+        } else {
+            m_banner_where->set_caption(m && m->spread() ? "On the pasteboard (a spread)"
+                                                         : "On the pasteboard");
+            info = "Used by " + pages;
+            if (const MasterPage *p = m ? doc.find_master(m->based_on) : nullptr)
+                info += ", based on " + p->label();
+            info += ".";
+            m_banner_hint->set_caption("Drag a margin guide to change it. Done (or Esc) ends.");
+        }
+        m_banner_info->set_caption(info);
+        m_revert->set_enabled(m_view->can_revert_master_mode());
+        m_banner_box->set_visible(true);
     } else {
-        m_banner->set_visible(false);
+        m_banner_box->set_visible(false);
     }
     if (const MasterPage *m = doc.find_master(id)) {
         std::string info = m->spread() ? "Spread" : "Single page";
@@ -607,9 +640,9 @@ void MastersPanel::selection_changed() {
 
 void MastersPanel::edit_or_done() {
     const MasterId id = chosen();
-    const MasterId editing = m_view->editing_master();
+    const MasterId editing = m_view->mode_master();
     if (editing && (id == editing || !id))
-        m_view->finish_master_edit();
+        m_view->finish_master_edit();    // either way of editing it
     else if (id)
         m_view->edit_master(id);
     refresh();
@@ -656,6 +689,7 @@ void MastersPanel::new_master() {
         }
         if (m.own_margins)
             m_view->set_master_options(id, m);
+        m_view->edit_master(id);         // a new master opens for editing
         refresh();
         const std::vector<MasterPage> &ms = m_view->masters();
         for (size_t i = 0; i < ms.size(); ++i)

@@ -7176,6 +7176,136 @@ static void test_import_editable(const FontLibrary &fonts) {
 /* Master pages: copies made by sync_masters, locked until overridden, live
  * when the master changes; based-on chains, spreads by side, sections and
  * page labels, the markers composing per page, and the file. */
+/* Edit Master Here: a page's copies of its master's items are edited in
+ * place, and the edits go into the master and every page that uses it. */
+static void test_linked_edit() {
+    PageDoc doc = new_publication(PageSetup(), 3);
+    const MasterId a = doc.add_master("Body", "", false);
+    const MasterId parent = doc.add_master("Base", "", false);
+    doc.find_master(a)->based_on = parent;
+
+    auto shape = [](float x, float y) {
+        Item it;
+        it.w = 100;
+        it.h = 50;
+        it.xf = Transform::translate(x, y);
+        Shape sh;
+        sh.kind = Shape::Kind::Rect;
+        it.content = sh;
+        return it;
+    };
+    /* The parent: one box. A: a box to move, a box to delete, a text frame */
+    doc.begin_master_edit(parent);
+    doc.active_layer = doc.master_layer();
+    const ItemId from_parent = doc.add_item(0, shape(300, 300));
+    doc.end_master_edit();
+    doc.begin_master_edit(a);
+    doc.active_layer = doc.master_layer();
+    const ItemId box = doc.add_item(0, shape(10, 10));
+    const ItemId doomed = doc.add_item(0, shape(10, 100));
+    Paragraph para;
+    para.runs.push_back({CharStyle(), std::string("Header")});
+    Story st;
+    st.paragraphs.push_back(para);
+    const StoryId sid = doc.add_story(st);
+    const ItemId head = doc.add_text_frame(0, sid, 200, 20, Transform::translate(10, 200));
+    doc.end_master_edit();
+    doc.active_layer = doc.layers.back().id;
+    for (Page &p : doc.pages)
+        p.master = a;
+    doc.sync_masters();
+    const ItemId own = doc.add_item(1, shape(400, 400));   // page 2's own
+
+    auto copy_of = [&](size_t page, ItemId master_item) -> Item * {
+        for (Item &it : doc.pages[page].items)
+            if (it.master_item == master_item && !it.overridden)
+                return &it;
+        return nullptr;
+    };
+    /* find_item looks at the publication's pages; a master's are apart */
+    auto in_master = [&](MasterId m, ItemId id) -> const Item * {
+        for (const Page &p : doc.find_master(m)->pages)
+            for (const Item &it : p.items)
+                if (it.id == id)
+                    return &it;
+        return nullptr;
+    };
+    /* A shows Base's box as a copy of its own; pages copy that copy */
+    ItemId via_a = 0;
+    for (const Item &it : doc.find_master(a)->pages[0].items)
+        if (it.master_item == from_parent)
+            via_a = it.id;
+    CHECK(via_a && copy_of(1, box) && copy_of(1, via_a), "page 2 shows A's items and Base's");
+
+    CHECK(doc.begin_linked_edit(1) && doc.linked_editing(), "Edit Master Here on page 2");
+    CHECK(copy_of(1, box) && doc.item_editable(*copy_of(1, box)), "A's copy is editable there");
+    CHECK(!doc.item_editable(*doc.find_item(own)), "the page's own item is locked meanwhile");
+    CHECK(copy_of(1, via_a) && !doc.item_editable(*copy_of(1, via_a)),
+          "what A takes from Base stays locked (edit Base for that)");
+    CHECK(copy_of(0, box) && !doc.item_editable(*copy_of(0, box)), "other pages' copies stay locked");
+
+    /* Move one, delete one, retype the header, add a new item */
+    copy_of(1, box)->xf = Transform::translate(60, 70);
+    doc.remove_item(copy_of(1, doomed)->id);
+    StoryEntry *cs = doc.story_of(copy_of(1, head)->id);
+    CHECK(cs && cs->id != sid, "the header copy has a story of its own");
+    if (cs)
+        cs->story.paragraphs[0].runs[0].text = "Chapter";
+    Item extra = shape(200, 500);
+    extra.layer = doc.master_layer();
+    const ItemId added = doc.add_item(1, extra);
+    CHECK(doc.item_editable(*doc.find_item(added)), "a new item on the Master layer is editable");
+
+    doc.end_linked_edit();
+    CHECK(!doc.linked_editing(), "done");
+    const Item *mb = in_master(a, box);
+    CHECK(mb && std::fabs(mb->xf.apply(Point{0, 0}).x - 60.f) < 0.01f, "the master's box moved");
+    CHECK(in_master(a, head) && !in_master(a, doomed), "the deleted one is gone from the master");
+    const StoryEntry *ms = doc.story_of(head);
+    CHECK(ms && ms->story.paragraphs[0].runs[0].text == "Chapter", "the master's header retyped");
+    bool added_to_master = false;
+    for (const Page &p : doc.find_master(a)->pages)
+        for (const Item &it : p.items)
+            added_to_master = added_to_master || it.id == added;
+    CHECK(added_to_master, "the new item joined the master");
+    /* A's copy of Base's box is made again by each sync, with a new id */
+    via_a = 0;
+    for (const Item &it : doc.find_master(a)->pages[0].items)
+        if (it.master_item == from_parent)
+            via_a = it.id;
+    bool all = via_a != 0;
+    for (size_t pg = 0; pg < doc.pages.size(); ++pg) {
+        const Item *c = copy_of(pg, box);
+        all = all && c && std::fabs(c->xf.apply(Point{0, 0}).x - 60.f) < 0.01f;
+        all = all && !copy_of(pg, doomed) && copy_of(pg, added) && copy_of(pg, via_a);
+        all = all && doc.pages[pg].master_hidden.empty();
+        if (const Item *h = copy_of(pg, head)) {
+            const StoryEntry *se = doc.story_of(h->id);
+            all = all && se && se->story.paragraphs[0].runs[0].text == "Chapter";
+        } else {
+            all = false;
+        }
+    }
+    CHECK(all, "every page follows: moved, deleted, retyped, added");
+    CHECK(doc.find_item(own) && doc.item_editable(*doc.find_item(own)),
+          "the page's own item is untouched and editable again");
+    bool linked_left = false;
+    for (const Page &p : doc.pages)
+        for (const Item &it : p.items)
+            linked_left = linked_left || it.linked;
+    CHECK(!linked_left, "no item stays marked for linked editing");
+
+    /* An operation that changes pages ends it first, with the edits kept */
+    CHECK(doc.begin_linked_edit(0), "Edit Master Here on page 1");
+    copy_of(0, box)->xf = Transform::translate(5, 5);
+    doc.insert_page(0);
+    CHECK(!doc.linked_editing(), "inserting a page ends it");
+    mb = in_master(a, box);
+    CHECK(mb && std::fabs(mb->xf.apply(Point{0, 0}).x - 5.f) < 0.01f,
+          "... after the edit reached the master");
+    CHECK(!doc.begin_linked_edit(99), "no such page");
+}
+
 static void test_masters(const FontLibrary &fonts) {
     PageDoc doc = new_publication(PageSetup(), 4);
     doc.setup.facing = true;
@@ -7579,6 +7709,7 @@ int main(int argc, char **argv) {
     test_groups(fonts);
     test_page_markers(fonts);
     test_masters(fonts);
+    test_linked_edit();
     test_layers(fonts);
     test_document_setup(fonts);
     test_pdf_settings(fonts);

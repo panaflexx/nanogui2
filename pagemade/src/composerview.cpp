@@ -44,6 +44,8 @@ constexpr uint32_t kSelectionBox = 0xFFFFFFFFu;
 constexpr float kPi         = 3.14159265f;
 
 const NVGcolor kPasteboardColor = nvgRGB(214, 214, 214);
+const NVGcolor kMasterPasteboardColor = nvgRGB(228, 214, 188);
+const NVGcolor kMasterAmber = nvgRGB(220, 140, 20);
 
 size_t page_under(const std::vector<PageSlot> &slots, float x, float y,
                   float pw, float ph, size_t fallback) {
@@ -256,9 +258,13 @@ void ComposerView::set_document(PageDoc doc) {
     m_last_live.clear();
     m_doc = std::move(doc);
     m_doc.end_master_edit();             // never opened mid-edit
+    m_doc.end_linked_edit();
     m_doc.sync_masters();
     m_shown_setup = m_doc.setup;
     m_shown_master = 0;
+    m_shown_linked = false;
+    m_mode_snapshot_valid = false;
+    m_mode_snapshot = PageDoc();
     m_page = 0;
     m_sel.clear();
     m_edit_story = 0;
@@ -361,6 +367,15 @@ bool ComposerView::is_selected(ItemId id) const {
 
 void ComposerView::selection_changed() {
     m_pending_selection = false;
+    if (m_doc.linked_editing() != m_shown_linked) {
+        /* Edit Master Here began or ended under an operation (a page
+         * change syncs the masters): the mode bar follows */
+        m_shown_linked = m_doc.linked_editing();
+        if (!m_shown_linked)
+            m_mode_snapshot_valid = m_doc.editing_master != 0 && m_mode_snapshot_valid;
+        if (on_master_edit_change)
+            on_master_edit_change();
+    }
     if (on_selection_change)
         on_selection_change();
 }
@@ -507,7 +522,9 @@ void ComposerView::check_setup_change() {
                          s.bleed != o.bleed || master_changed;
     m_shown_setup = s;
     m_shown_master = m_doc.editing_master;
-    if (master_changed && on_master_edit_change)
+    const bool linked_changed = m_doc.linked_editing() != m_shown_linked;
+    m_shown_linked = m_doc.linked_editing();
+    if ((master_changed || linked_changed) && on_master_edit_change)
         on_master_edit_change();
     if (!changed)
         return;
@@ -517,6 +534,8 @@ void ComposerView::check_setup_change() {
 
 void ComposerView::change_setup(const PageSetup &setup, SetupAdjust how) {
     push_undo();
+    m_doc.end_linked_edit();
+    m_mode_snapshot_valid = false;
     if (m_doc.editing_master) {          // Document Setup works on the publication
         m_doc.end_master_edit();
         m_page = std::min(m_page_before_master, m_doc.pages.size() - 1);
@@ -810,6 +829,10 @@ void ComposerView::turn_page_keeping_selection(size_t i) {
     end_placement(false);
     if (m_creating)
         finish_creation();
+    if (m_doc.linked_editing()) {
+        finish_linked_edit();            // Edit Master Here stays on its page
+        m_sel.clear();
+    }
     m_page = i;
     m_edit_story = 0;
     m_typing_on = false;
@@ -1477,6 +1500,19 @@ bool ComposerView::mouse_button_event(const Vector2i &p, int button, bool down, 
     }
     if (button != GLFW_MOUSE_BUTTON_1)
         return Widget::mouse_button_event(p, button, down, modifiers);
+    if (!down && m_margin_drag.active) {
+        const bool saved = m_margin_drag.saved;
+        m_margin_drag = MarginDrag();
+        m_pointer_down = false;
+        if (saved) {
+            recompose();                 // fitted frames and columns follow
+            if (on_document_change)
+                on_document_change();
+        }
+        if (screen())
+            screen()->redraw();
+        return true;
+    }
     if (!down && m_guide_drag.active) {
         /* A guide moved with the pointer tool (a ruler's own drag ends on
            the ruler, before this) */
@@ -1619,7 +1655,8 @@ bool ComposerView::mouse_button_event(const Vector2i &p, int button, bool down, 
         return true;
     }
 
-    if (m_tool == Tool::Pointer && shift && (modifiers & SYSTEM_COMMAND_MOD)) {
+    if (m_tool == Tool::Pointer && shift && (modifiers & SYSTEM_COMMAND_MOD) &&
+        !m_doc.linked_editing()) {
         /* Cmd+Shift+click: take over the master item under the pointer
          * (with its group) for this page, and pick it up */
         if (const ItemId copy = master_copy_at(pt, m_page)) {
@@ -1632,9 +1669,36 @@ bool ComposerView::mouse_button_event(const Vector2i &p, int button, bool down, 
         }
     }
     Hit hit = hit_test(pt, m_page);
+    if (m_tool == Tool::Pointer && !hit.item && !shift && !master_mode()) {
+        /* Double-click a master item: Edit Master Here */
+        const ItemId copy = master_copy_at(pt, m_page);
+        const double now = glfwGetTime();
+        if (copy && copy == m_copy_click && now - m_copy_click_time < 0.4) {
+            m_copy_click = 0;
+            m_pointer_down = false;
+            edit_master_here(copy);
+            if (screen())
+                screen()->redraw();
+            return true;
+        }
+        m_copy_click = copy;
+        m_copy_click_time = now;
+    }
     bool all_pages = false;
     const int guide = m_tool == Tool::Pointer && !hit.item && m_show_guides && !m_lock_guides
                       ? guide_at(pt, m_page, all_pages) : -1;
+    if (guide < 0 && m_tool == Tool::Pointer && !hit.item && !shift && mode_master() &&
+        m_show_guides && !m_lock_guides) {
+        /* Editing a master: its margin guides move with the pointer */
+        const int edge = margin_edge_at(pt, m_page);
+        if (edge >= 0) {
+            m_margin_drag = MarginDrag();
+            m_margin_drag.active = true;
+            m_margin_drag.edge = edge;
+            m_margin_drag.page = m_page;
+            return true;
+        }
+    }
     if (guide >= 0) {
         /* Pick up a ruler guide: it moves along its axis, and dropped off
            the pages it goes */
@@ -1705,6 +1769,10 @@ bool ComposerView::mouse_drag_event(const Vector2i &p, const Vector2i &, int, in
     }
     const Point pt = page_point_from_screen(p + parent()->absolute_position());
     const bool shift = (modifiers & GLFW_MOD_SHIFT) != 0;
+    if (m_margin_drag.active) {
+        margin_drag_to(pt);
+        return true;
+    }
     if (m_selecting && editing()) {
         m_caret = text_pos_at(pt);
         m_goal_x = -1.f;
@@ -3849,6 +3917,8 @@ void ComposerView::show_page(size_t i) {
     end_placement(false);
     if (m_creating)
         finish_creation();
+    if (m_doc.linked_editing())
+        finish_linked_edit();            // Edit Master Here stays on its page
     m_page = i;
     page_changed();
 }
@@ -3995,6 +4065,8 @@ ItemId ComposerView::master_copy_at(const Point &pt, size_t page) const {
 bool ComposerView::frame_fillable(const Item &it) const {
     if (m_doc.item_editable(it))
         return true;
+    if (m_doc.linked_editing())
+        return false;                    // Edit Master Here: only the master's
     if (!it.master_copy() || !m_doc.item_visible(it))
         return false;
     const Layer *l = m_doc.find_layer(m_doc.layer_of(it));
@@ -4004,16 +4076,17 @@ bool ComposerView::frame_fillable(const Item &it) const {
 void ComposerView::override_for_edit(ItemId frame) {
     size_t pg = 0;
     const Item *it = m_doc.find_item(frame, &pg);
-    if (it && it->master_copy())
+    if (it && it->master_copy() && !it->linked)   // a linked one is the master's
         m_doc.override_master_items(pg, {frame});
 }
 
 const PageDoc &ComposerView::publication() const {
-    if (!m_doc.editing_master)
+    if (!m_doc.editing_master && !m_doc.linked_editing())
         return m_doc;
     if (m_publication_version != m_version || !m_publication.pages.size()) {
         m_publication = m_doc;
         m_publication.end_master_edit();
+        m_publication.end_linked_edit();
         m_publication_version = m_version;
     }
     return m_publication;
@@ -4053,6 +4126,7 @@ MasterId ComposerView::master_from_page(const std::string &name, const std::stri
     if (m_creating)
         finish_creation();
     push_undo();
+    m_doc.end_linked_edit();
     const MasterId id = m_doc.add_master(name, prefix, count == 2);
     MasterPage *m = m_doc.find_master(id);
     const LayerId layer = m_doc.master_layer();
@@ -4108,8 +4182,8 @@ void ComposerView::set_master_options(MasterId id, const MasterPage &opts) {
     m->margin_outside = opts.margin_outside;
     m->columns = std::clamp(opts.columns, 1, 20);
     m->gutter = std::max(0.f, opts.gutter);
-    if (!m_doc.editing_master)
-        sync_masters();
+    if (!m_doc.editing_master && !m_doc.linked_editing())
+        sync_masters();                  // Edit Master Here syncs when it's done
     recompose();
     master_changed(this);
 }
@@ -4145,6 +4219,7 @@ void ComposerView::apply_master(MasterId id, const std::vector<size_t> &pages) {
     if (!any)
         return;
     push_undo();
+    m_doc.end_linked_edit();             // its edits, into the master it had
     for (size_t i : pages)
         if (i < m_doc.pages.size() && m_doc.pages[i].master != id) {
             m_doc.pages[i].master = id;
@@ -4172,6 +4247,8 @@ bool ComposerView::edit_master(MasterId id) {
     end_placement(false);
     if (m_creating)
         finish_creation();
+    if (m_doc.linked_editing())
+        finish_linked_edit();            // its own step: the master has its edits
     push_undo();
     if (!m_doc.editing_master) {
         m_page_before_master = m_page;
@@ -4179,6 +4256,11 @@ bool ComposerView::edit_master(MasterId id) {
     } else {
         m_doc.end_master_edit();
     }
+    /* Revert goes back to here: this master's edits, not the last one's */
+    m_mode_snapshot = m_doc;
+    m_mode_snapshot_valid = true;
+    m_mode_page = m_page_before_master;
+    m_mode_layer = m_layer_before_master;
     m_doc.begin_master_edit(id);
     if (const LayerId ml = m_doc.ensure_master_layer())
         m_doc.active_layer = ml;         // a master's items live on the Master layer
@@ -4195,8 +4277,11 @@ bool ComposerView::edit_master(MasterId id) {
 }
 
 void ComposerView::finish_master_edit() {
+    if (m_doc.linked_editing())
+        finish_linked_edit();
     if (!m_doc.editing_master)
         return;
+    m_mode_snapshot_valid = false;
     end_placement(false);
     if (m_creating)
         finish_creation();
@@ -4213,6 +4298,167 @@ void ComposerView::finish_master_edit() {
     master_changed(this);
     if (screen())
         screen()->perform_layout();
+}
+
+int ComposerView::margin_edge_at(const Point &pt, size_t page) const {
+    if (page >= m_doc.pages.size())
+        return -1;
+    const PageSetup &s = m_doc.setup;
+    const PageMargins pm = m_doc.page_margins(page);
+    const float tol = kPickPx / zoom();
+    const float l = pm.left, r = s.width - pm.right, t = pm.top, b = s.height - pm.bottom;
+    const bool in_x = pt.x >= l - tol && pt.x <= r + tol;
+    const bool in_y = pt.y >= t - tol && pt.y <= b + tol;
+    if (in_x && std::fabs(pt.y - t) <= tol) return 0;
+    if (in_x && std::fabs(pt.y - b) <= tol) return 1;
+    if (in_y && std::fabs(pt.x - l) <= tol) return 2;
+    if (in_y && std::fabs(pt.x - r) <= tol) return 3;
+    return -1;
+}
+
+void ComposerView::margin_drag_to(const Point &pt) {
+    MasterPage *m = m_doc.find_master(mode_master());
+    if (!m)
+        return;
+    if (!m_margin_drag.saved) {
+        push_undo();                     // one step for the whole drag
+        m_margin_drag.saved = true;
+        m = m_doc.find_master(mode_master());
+        if (!m->own_margins) {           // start from Document Setup's
+            const PageSetup &s = m_doc.setup;
+            m->own_margins = true;
+            m->margin_top = s.margin_top;
+            m->margin_bottom = s.margin_bottom;
+            m->margin_inside = s.margin_inside;
+            m->margin_outside = s.margin_outside;
+            m->columns = s.columns;
+            m->gutter = s.gutter;
+        }
+    }
+    const PageSetup &s = m_doc.setup;
+    const PageMargins pm = m_doc.page_margins(m_margin_drag.page);
+    const float kMin = 18.f;             // the live area keeps some room
+    const bool verso = m_doc.is_verso(m_margin_drag.page);
+    auto snap = [](float v) { return std::max(0.f, std::round(v)); };
+    switch (m_margin_drag.edge) {
+    case 0:
+        m->margin_top = snap(std::min(pt.y, s.height - pm.bottom - kMin));
+        break;
+    case 1:
+        m->margin_bottom = snap(std::min(s.height - pt.y, s.height - pm.top - kMin));
+        break;
+    case 2: {                            // left: outside on a left-hand page
+        const float v = snap(std::min(pt.x, s.width - pm.right - kMin));
+        (verso ? m->margin_outside : m->margin_inside) = v;
+        break;
+    }
+    case 3: {
+        const float v = snap(std::min(s.width - pt.x, s.width - pm.left - kMin));
+        (verso ? m->margin_inside : m->margin_outside) = v;
+        break;
+    }
+    default: break;
+    }
+    if (on_page_change)
+        on_page_change();                // the status bar
+    if (screen())
+        screen()->redraw();
+}
+
+bool ComposerView::edit_master_here(ItemId pick) {
+    if (m_doc.editing_master || m_page >= m_doc.pages.size() ||
+        !m_doc.find_master(m_doc.pages[m_page].master))
+        return false;
+    end_placement(false);
+    if (m_creating)
+        finish_creation();
+    if (m_doc.linked_editing() && m_doc.linked_page == m_page)
+        return true;
+    if (m_doc.linked_editing())
+        finish_linked_edit();
+    push_undo();
+    m_mode_snapshot = m_doc;
+    m_mode_snapshot_valid = true;
+    m_mode_page = m_page;
+    m_mode_layer = m_doc.active_layer;
+    m_layer_before_linked = m_doc.active_layer;
+    if (!m_doc.begin_linked_edit(m_page)) {
+        m_mode_snapshot_valid = false;
+        return false;
+    }
+    if (const LayerId ml = m_doc.ensure_master_layer())
+        m_doc.active_layer = ml;         // new items join the master
+    m_edit_story = 0;
+    m_typing_on = false;
+    m_sel.clear();
+    if (const Item *it = pick ? m_doc.find_item(pick) : nullptr)
+        if (m_doc.item_editable(*it))
+            m_sel = with_groups({pick});
+    recompose();
+    selection_changed();                 // the mode bar
+    master_changed(this);
+    return true;
+}
+
+void ComposerView::finish_linked_edit() {
+    if (!m_doc.linked_editing())
+        return;
+    end_placement(false);
+    if (m_creating)
+        finish_creation();
+    push_undo();
+    m_doc.end_linked_edit();             // into the master; every page follows
+    if (m_doc.find_layer(m_layer_before_linked))
+        m_doc.active_layer = m_layer_before_linked;
+    m_mode_snapshot_valid = m_doc.editing_master != 0 && m_mode_snapshot_valid;
+    m_sel.clear();
+    m_edit_story = 0;
+    m_typing_on = false;
+    recompose();
+    selection_changed();
+    master_changed(this);
+}
+
+MasterId ComposerView::linked_master() const {
+    if (!m_doc.linked_editing() || m_doc.linked_page >= m_doc.pages.size())
+        return 0;
+    return m_doc.pages[m_doc.linked_page].master;
+}
+
+MasterId ComposerView::mode_master() const {
+    return m_doc.editing_master ? m_doc.editing_master : linked_master();
+}
+
+void ComposerView::revert_master_mode() {
+    if (!can_revert_master_mode())
+        return;
+    end_placement(false);
+    if (m_creating)
+        finish_creation();
+    push_undo();                         // Revert itself can be undone
+    m_doc = m_mode_snapshot;
+    m_mode_snapshot_valid = false;
+    m_mode_snapshot = PageDoc();
+    m_doc.end_master_edit();             // the snapshot predates the mode
+    m_doc.end_linked_edit();
+    m_page = std::min(m_mode_page, m_doc.pages.size() - 1);
+    if (m_doc.find_layer(m_mode_layer))
+        m_doc.active_layer = m_mode_layer;
+    m_sel.clear();
+    m_edit_story = 0;
+    m_typing_on = false;
+    recompose();
+    page_changed();
+    check_setup_change();
+    master_changed(this);
+    if (screen())
+        screen()->perform_layout();
+}
+
+ItemId ComposerView::context_master_copy() const {
+    if (m_doc.editing_master || m_doc.linked_editing())
+        return 0;
+    return master_copy_at(m_context_pt, m_page);
 }
 
 size_t ComposerView::master_use_count(MasterId id) const {
@@ -4232,6 +4478,7 @@ void ComposerView::replace_no_master(MasterId to, bool make_default) {
     if (!any)
         return;
     push_undo();
+    m_doc.end_linked_edit();
     for (Page &p : m_doc.pages)
         if (p.master == 0) {
             p.master = to;
@@ -4337,6 +4584,8 @@ bool ComposerView::selection_has_overrides() const {
 }
 
 void ComposerView::override_all_master_items() {
+    if (m_doc.linked_editing())
+        return;                          // they're the master's, being edited
     if (!page_has_master_copies())
         return;
     push_undo();
@@ -4648,6 +4897,22 @@ bool ComposerView::keyboard_event(int key, int, int action, int modifiers) {
         return true;
     }
     if (!editing()) {
+        if (key == GLFW_KEY_ESCAPE && master_mode() && !cmd) {
+            /* Editing a master: Esc lets go of the selection, then is Done */
+            if (action == GLFW_PRESS) {
+                if (!m_sel.empty()) {
+                    m_sel.clear();
+                    selection_changed();
+                    if (screen())
+                        screen()->redraw();
+                } else if (m_doc.linked_editing()) {
+                    finish_linked_edit();
+                } else {
+                    finish_master_edit();
+                }
+            }
+            return true;
+        }
         /* Item tools: Delete, arrow-key nudges, PageMaker's Arrange keys. */
         if (m_tool == Tool::Text || m_sel.empty())
             return false;
@@ -5116,6 +5381,25 @@ void ComposerView::adopt_moved_items() {
     selection_changed();
     if (screen())
         screen()->redraw();
+}
+
+void ComposerView::draw_linked_outlines(NVGcontext *ctx, float px, size_t page) {
+    if (page >= m_doc.pages.size())
+        return;
+    nvgBeginPath(ctx);
+    for (const Item &it : m_doc.pages[page].items) {
+        if (!m_doc.item_editable(it) || !m_doc.item_visible(it) || is_selected(it.id))
+            continue;
+        const Point c[4] = {it.xf.apply(Point{0, 0}), it.xf.apply(Point{it.w, 0}),
+                            it.xf.apply(Point{it.w, it.h}), it.xf.apply(Point{0, it.h})};
+        nvgMoveTo(ctx, c[0].x, c[0].y);
+        for (int k = 1; k < 4; ++k)
+            nvgLineTo(ctx, c[k].x, c[k].y);
+        nvgClosePath(ctx);
+    }
+    nvgStrokeColor(ctx, nvgRGBA(220, 140, 20, 200));
+    nvgStrokeWidth(ctx, 1.f * px);
+    nvgStroke(ctx);
 }
 
 void ComposerView::draw_chrome(NVGcontext *ctx, float px, size_t page,
@@ -6682,7 +6966,8 @@ void ComposerView::draw(NVGcontext *ctx) {
     /* The panel scissors to its viewport, so an oversized fill covers it. */
     nvgBeginPath(ctx);
     nvgRect(ctx, -1e5f, -1e5f, 2e5f, 2e5f);
-    nvgFillColor(ctx, kPasteboardColor);
+    /* Editing a master, either way: a warm pasteboard says so everywhere */
+    nvgFillColor(ctx, master_mode() ? kMasterPasteboardColor : kPasteboardColor);
     nvgFill(ctx);
 
     std::vector<PageSlot> slots;
@@ -6756,7 +7041,23 @@ void ComposerView::draw(NVGcontext *ctx) {
             nvgBeginPath(ctx);
             nvgRect(ctx, -3.f * px, -3.f * px, m_doc.setup.width + 6.f * px,
                     m_doc.setup.height + 6.f * px);
-            nvgStrokeColor(ctx, nvgRGB(220, 140, 20));
+            nvgStrokeColor(ctx, kMasterAmber);
+            nvgStrokeWidth(ctx, 2.f * px);
+            nvgStroke(ctx);
+        } else if (m_doc.linked_editing() && sl.index == m_doc.linked_page) {
+            /* Edit Master Here: the page, ringed, says whose items are live */
+            const MasterPage *lm = m_doc.find_master(linked_master());
+            const std::string what = "Master " + (lm ? lm->label() : std::string()) +
+                                     " \u2014 editing here";
+            nvgFontFace(ctx, "sans-bold");
+            nvgFontSize(ctx, 12.f * px);
+            nvgTextAlign(ctx, NVG_ALIGN_LEFT | NVG_ALIGN_BOTTOM);
+            nvgFillColor(ctx, nvgRGB(200, 120, 10));
+            nvgText(ctx, 0, -5.f * px, what.c_str(), nullptr);
+            nvgBeginPath(ctx);
+            nvgRect(ctx, -3.f * px, -3.f * px, m_doc.setup.width + 6.f * px,
+                    m_doc.setup.height + 6.f * px);
+            nvgStrokeColor(ctx, kMasterAmber);
             nvgStrokeWidth(ctx, 2.f * px);
             nvgStroke(ctx);
         }
@@ -6781,6 +7082,8 @@ void ComposerView::draw(NVGcontext *ctx) {
                         draw_text_overlays(ctx, it, px);
             if (!only)
                 draw_ruler_guides(ctx, px, sl.index);
+            if (!only && m_doc.linked_editing() && sl.index == m_doc.linked_page)
+                draw_linked_outlines(ctx, px, sl.index);
             draw_chrome(ctx, px, sl.index, hand, only);
             nvgRestore(ctx);
         }

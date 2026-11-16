@@ -1223,10 +1223,11 @@ std::vector<char> extract(mz_zip_archive &zip, const std::string &entry, bool *f
 
 /* The publication as it is saved: with a master being edited put back. */
 const PageDoc &publication_of(const PageDoc &doc, PageDoc &scratch) {
-    if (!doc.editing_master)
+    if (!doc.editing_master && !doc.linked_editing())
         return doc;
     scratch = doc;
     scratch.end_master_edit();
+    scratch.end_linked_edit();           // Edit Master Here's edits, in the master
     return scratch;
 }
 

@@ -337,7 +337,29 @@ public:
      * the edits that follow); finish puts the publication back and updates
      * every page that uses it. */
     bool edit_master(pagemade::MasterId id);
+    /* Also ends Edit Master Here: everything that needs the publication
+     * (save, export, print) calls this first. */
     void finish_master_edit();
+    /* Edit Master Here: on the current page, its master's items become
+     * editable in place (and nothing else there); `pick` (a copy) is
+     * selected. Done writes the edits into the master and every page that
+     * uses it follows. Ends on its own when the page turns or pages change. */
+    bool edit_master_here(pagemade::ItemId pick = 0);
+    void finish_linked_edit();
+    bool linked_editing() const { return m_doc.linked_editing(); }
+    size_t linked_page() const { return m_doc.linked_page; }
+    /* The master Edit Master Here is editing, or 0. */
+    pagemade::MasterId linked_master() const;
+    /* Either way of editing a master is on: the mode bar shows. */
+    bool master_mode() const { return m_doc.editing_master || m_doc.linked_editing(); }
+    /* Leave either mode, putting back everything since it began. */
+    void revert_master_mode();
+    bool can_revert_master_mode() const { return master_mode() && m_mode_snapshot_valid; }
+    /* The master copy under the last right-click (Edit Master Here), or 0. */
+    pagemade::ItemId context_master_copy() const;
+    /* The master being edited (either mode): its margins and columns,
+     * directly on the canvas; one undo step per drag. */
+    pagemade::MasterId mode_master() const;
     /* How many pages use the master. */
     size_t master_use_count(pagemade::MasterId id) const;
     /* Pages "1-5, 8, even, odd, all" (by page label or position) as indices. */
@@ -887,6 +909,28 @@ private:
     pagemade::Point m_context_pt;         // where the last right-click was
     pagemade::PageSetup m_shown_setup;    // the setup the pasteboard was laid out for
     pagemade::MasterId m_shown_master = 0; // ... and the master being edited then
+    bool m_shown_linked = false;           // ... and whether Edit Master Here was on
+    /* The document as it was when a master mode began (Revert) */
+    pagemade::PageDoc m_mode_snapshot;
+    bool m_mode_snapshot_valid = false;
+    size_t m_mode_page = 0;
+    pagemade::LayerId m_mode_layer = 0;
+    pagemade::LayerId m_layer_before_linked = 0;
+    /* A pointer double-click on a master copy: Edit Master Here */
+    double m_copy_click_time = -1.0;
+    pagemade::ItemId m_copy_click = 0;
+    /* Dragging a margin guide of the master being edited */
+    struct MarginDrag {
+        bool active = false;
+        int edge = 0;                    // 0 top, 1 bottom, 2 left, 3 right (on screen)
+        size_t page = 0;
+        bool saved = false;              // the undo step is taken
+    } m_margin_drag;
+    /* The margin edge (MarginDrag::edge) near a page point, or -1. */
+    int margin_edge_at(const pagemade::Point &pt, size_t page) const;
+    /* Edit Master Here: a thin amber outline on each of the master's items */
+    void draw_linked_outlines(NVGcontext *ctx, float px, size_t page);
+    void margin_drag_to(const pagemade::Point &pt);
     mutable pagemade::PageDoc m_publication;   // publication() while editing a master
     mutable uint64_t m_publication_version = 0;
     /* After a change to pages or masters: copies made again, stories recomposed. */

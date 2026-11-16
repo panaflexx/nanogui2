@@ -195,6 +195,28 @@ public:
 
         sync_buttons();
         place_buttons();
+        /* Editing a master: the strip is the masters, to switch between */
+        const bool masters = m_view->editing_master() != 0;
+        if (masters != m_showing_masters) {
+            m_showing_masters = masters;
+            m_add->set_visible(!masters);
+            set_tooltip(masters ? "Masters. Click one to edit it instead; Done (or Esc) "
+                                  "goes back to the pages."
+                                : "Pages. Click to turn to a page, drag to rearrange, "
+                                  "right-click for more.");
+        }
+        if (masters) {
+            draw_masters(ctx);
+            nvgSave(ctx);
+            nvgTranslate(ctx, (float) m_pos.x(), (float) m_pos.y());
+            for (Widget *c : children())
+                if (c->visible())
+                    c->draw(ctx);
+            nvgRestore(ctx);
+            if (self_animating())
+                set_self_animating(false);
+            return;
+        }
         sync_slots();
         const bool moving = step(dt);
 
@@ -256,6 +278,22 @@ public:
                 child->mouse_button_event(p - m_pos, button, down, modifiers))
                 return true;
         }
+        if (m_view->editing_master()) {
+            /* The masters: a click edits that one (that side of a spread) */
+            if (button == GLFW_MOUSE_BUTTON_1 && down && p.x() - m_pos.x() < view_width()) {
+                const float x = (float) (p.x() - m_pos.x());
+                for (const MasterHit &h : m_master_hits)
+                    if (x >= h.x0 && x <= h.x1) {
+                        if (h.id != m_view->editing_master())
+                            m_view->edit_master(h.id);
+                        m_view->show_page(h.side);
+                        if (on_turned)
+                            on_turned();
+                        break;
+                    }
+            }
+            return true;
+        }
         /* Right-click: turn to the page under it, then its menu. */
         if (button == GLFW_MOUSE_BUTTON_2) {
             if (!down || m_press >= 0 || p.x() - m_pos.x() >= view_width())
@@ -315,6 +353,8 @@ public:
     }
 
     bool mouse_drag_event(const Vector2i &p, const Vector2i &, int, int) override {
+        if (m_view->editing_master())
+            return true;
         if (m_thumb_grab >= 0) {
             float tx, tw;
             thumb(tx, tw);
@@ -462,6 +502,51 @@ public:
 private:
     bool m_drop_hover = false;
     std::vector<size_t> m_drop_pages;
+
+    /* Editing a master: one icon per master page, a spread's two touching,
+     * the master on the pasteboard dark and the side on screen ringed */
+    struct MasterHit { float x0, x1; MasterId id; size_t side; };
+    std::vector<MasterHit> m_master_hits;
+    bool m_showing_masters = false;
+
+    void draw_masters(NVGcontext *ctx) {
+        m_master_hits.clear();
+        const PageDoc &doc = m_view->document();
+        const float left = (float) m_pos.x();
+        const float right = (float) (m_pos.x() + view_width());
+        const float y = (float) m_pos.y() + kIconTop;
+        nvgSave(ctx);
+        nvgIntersectScissor(ctx, left, (float) m_pos.y(), right - left, (float) m_size.y());
+        nvgFontFace(ctx, "sans");
+        nvgTextAlign(ctx, NVG_ALIGN_CENTER | NVG_ALIGN_MIDDLE);
+        float x = left + kPad;
+        for (const MasterPage &m : doc.masters) {
+            const size_t sides = std::max<size_t>(1, doc.master_pages(m).size());
+            const bool current = m.id == doc.editing_master;
+            for (size_t side = 0; side < sides; ++side) {
+                const bool on = current && side == m_view->page_index();
+                nvgBeginPath(ctx);
+                nvgRect(ctx, x + 1, y + 1, kW, kH);
+                nvgFillColor(ctx, nvgRGBA(0, 0, 0, 40));
+                nvgFill(ctx);
+                nvgBeginPath(ctx);
+                nvgRect(ctx, x, y, kW, kH);
+                nvgFillColor(ctx, on ? nvgRGB(0, 0, 0)
+                                     : current ? nvgRGB(250, 214, 140) : nvgRGB(255, 255, 255));
+                nvgFill(ctx);
+                nvgStrokeColor(ctx, current ? nvgRGB(220, 140, 20) : nvgRGB(0, 0, 0));
+                nvgStrokeWidth(ctx, current ? 1.5f : 1.f);
+                nvgStroke(ctx);
+                nvgFontSize(ctx, m.prefix.size() > 2 ? 8 : 11);
+                nvgFillColor(ctx, on ? nvgRGB(255, 210, 130) : nvgRGB(150, 80, 0));
+                nvgText(ctx, x + kW * 0.5f, y + kH * 0.5f, m.prefix.substr(0, 3).c_str(), nullptr);
+                m_master_hits.push_back({x - (float) m_pos.x(), x + kW - (float) m_pos.x(), m.id, side});
+                x += kW;
+            }
+            x += kSpreadGap * 2;
+        }
+        nvgRestore(ctx);
+    }
 
     bool master_drag(const DragData &data, MasterId &id) const {
         const std::string *bytes = data.get(kMasterPageDragType);
@@ -1975,8 +2060,11 @@ public:
             if (m_masters_panel)
                 m_masters_panel->numbering_options();
         });
+        m_edit_here = add_cmd(layout, "Edit Master Here", {}, [this] {
+            m_view->edit_master_here();
+        });
         m_done_master = add_cmd(layout, "Done Editing Master", {}, [this] {
-            m_view->finish_master_edit();
+            m_view->finish_master_edit();   // either way of editing it
         });
 
         Dropdown *element = m_menubar->add_menu("Element");
@@ -2680,10 +2768,12 @@ public:
                     m_masters_panel->numbering_options();
             });
             context_item("Masters...", FA_CLONE, true, {}, [this] { show_masters(); });
+            if (!v->linked_editing() && v->document().master_of(v->page_index()))
+                context_item("Edit Master Here", FA_PEN, true, {}, [v] { v->edit_master_here(); });
             if (v->page_has_overrides())
                 context_item("Remove Local Overrides", 0, true, {},
                              [v] { v->remove_local_overrides(); });
-            if (v->page_has_master_copies())
+            if (v->page_has_master_copies() && !v->linked_editing())
                 context_item("Override All Master Items", 0, true, {},
                              [v] { v->override_all_master_items(); });
         }
@@ -2714,6 +2804,14 @@ public:
 
         ComposerView *v = m_view;
         const Point here = v->context_point();
+        if (const ItemId copy = v->context_master_copy()) {
+            /* A master item under the pointer: edit its master right here */
+            item("Edit Master Here", FA_PEN, true, {}, [v, copy] { v->edit_master_here(copy); });
+            section();
+        } else if (v->master_mode() && !v->text_context()) {
+            item("Done Editing Master", FA_CHECK, true, {}, [v] { v->finish_master_edit(); });
+            section();
+        }
         if (v->text_context()) {
             item("Cut", FA_CUT, v->can_copy(), {{C, GLFW_KEY_X}}, [v] { v->edit_cut(); });
             item("Copy", FA_COPY, v->can_copy(), {{C, GLFW_KEY_C}}, [v] { v->edit_copy(); });
@@ -3349,7 +3447,8 @@ public:
             if (label != std::to_string(page + 1))
                 where += " (" + label + ")";
             if (const MasterPage *pm = doc.master_of(page))
-                where += ", master " + pm->label();
+                where += m_view->linked_editing() ? ", editing master " + pm->label() + " here"
+                                                  : ", master " + pm->label();
         }
         std::snprintf(buf, sizeof buf,
                       "  %s%s   |   %zu items, %zu stories, %zu lines, composed in %.2f ms%s   |   zoom %.0f%%",
@@ -3374,9 +3473,12 @@ public:
             m_hide_page->set_caption(hidden ? "Show Page" : "Hide Page");
             m_dup_spread->set_enabled(m_view->can_duplicate_spread() && !master);
             if (m_done_master) {
-                m_done_master->set_enabled(master);
+                m_done_master->set_enabled(m_view->master_mode());
+                m_edit_here->set_enabled(!m_view->master_mode() && page < np &&
+                                         doc.master_of(page) != nullptr);
                 m_numbering->set_enabled(!master);
-                m_override_all->set_enabled(m_view->page_has_master_copies());
+                m_override_all->set_enabled(m_view->page_has_master_copies() &&
+                                            !m_view->linked_editing());
                 m_remove_overrides->set_enabled(m_view->page_has_overrides() ||
                                                 m_view->selection_has_overrides());
                 m_detach->set_enabled(m_view->selection_has_overrides());
@@ -4100,7 +4202,7 @@ private:
     MenuItem        *m_to_front = nullptr, *m_forward = nullptr, *m_backward = nullptr, *m_to_back = nullptr;
     MenuItem        *m_group = nullptr, *m_ungroup = nullptr;
     MenuItem        *m_frame_opts = nullptr;
-    MenuItem        *m_numbering = nullptr, *m_done_master = nullptr;
+    MenuItem        *m_numbering = nullptr, *m_done_master = nullptr, *m_edit_here = nullptr;
     MenuItem        *m_override_all = nullptr, *m_remove_overrides = nullptr, *m_detach = nullptr;
     Label           *m_status = nullptr;
     std::string     m_note;

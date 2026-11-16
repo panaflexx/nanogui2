@@ -161,6 +161,12 @@ void LayersPanel::rebuild() {
                 "every master item.");
             r.eye->set_tooltip(l.visible ? "Shown: click to hide every master item"
                                          : "Hidden: click to show the master items");
+            r.lock->set_tooltip(
+                l.locked ? "Locked: overridden master items and items added here can't be "
+                           "edited. Click to unlock."
+                         : "Unlocked: overridden master items and items added here can be "
+                           "edited. Copies from the master stay locked either way: "
+                           "Cmd+Shift+click to override one, or double-click to edit the master here.");
         }
         r.name->set_text_color(l.visible ? nanogui::Color(0, 0, 0, 0)        // theme color
                                          : nanogui::Color(150, 150, 150, 255));

@@ -313,6 +313,9 @@ struct Item {
      * item it came from, so the next sync doesn't add it again. */
     ItemId    master_item = 0;
     bool      overridden = false;
+    /* Not saved: a copy being edited in place, for its master (Edit Master
+     * Here; see PageDoc::begin_linked_edit). */
+    bool      linked = false;
     bool master_copy() const { return master_item != 0 && !overridden; }
     float     w = 0, h = 0;
     Transform xf;                // item space -> page
@@ -550,6 +553,13 @@ struct PageDoc {
      * the publication's pages wait in that master's `pages` meanwhile, so
      * every tool works on the master as on any page. See begin_master_edit. */
     MasterId                editing_master = 0;
+    /* Edit Master Here (not saved): the page whose copies of its master's
+     * items are being edited in place (SIZE_MAX: none). The master items
+     * they stood for when it began, and the first id made since (a new
+     * item on the Master layer there joins the master). */
+    size_t                  linked_page = SIZE_MAX;
+    std::vector<ItemId>     linked_masters;
+    ItemId                  linked_first_new = 0;
 
     /* ---- Layers ---- */
     const Layer *find_layer(LayerId id) const;
@@ -716,6 +726,15 @@ struct PageDoc {
      * end_master_edit swaps the publication's back and syncs. */
     bool begin_master_edit(MasterId id);
     void end_master_edit();
+    /* Edit Master Here: on `page`, the copies of its master's own items
+     * (not those it takes from a parent) become editable, and nothing else
+     * there is; new items on the Master layer join the master. Ends any
+     * other linked edit first; not while editing a master. */
+    bool begin_linked_edit(size_t page);
+    /* Write the page's edits back into its master (moved, restyled,
+     * retyped, deleted, new items) and sync every page that uses it. */
+    void end_linked_edit();
+    bool linked_editing() const { return linked_page != SIZE_MAX; }
     /* The page's master (the edited master itself while editing), or null. */
     const MasterPage *master_of(size_t index) const;
 
