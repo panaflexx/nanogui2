@@ -582,7 +582,7 @@ LayoutFit fit_layout(const PageDoc &doc, const LayoutTemplate &t, size_t page) {
     /* The spread around `page`: with facing pages, odd indices are left-hand */
     size_t left = SIZE_MAX, right = SIZE_MAX;
     if (t.spread && s.facing) {
-        if (page % 2 == 1) {
+        if (doc.is_verso(page)) {
             left = page;
             if (page + 1 < doc.pages.size())
                 right = page + 1;
@@ -596,7 +596,7 @@ LayoutFit fit_layout(const PageDoc &doc, const LayoutTemplate &t, size_t page) {
         const Area cl = content(m.left, half - m.inside, m.top, t.height - m.bottom, 0.f, half, t.height);
         const Area cr = content(half + m.inside, t.width - m.right, m.top, t.height - m.bottom,
                                 half, t.width, t.height);
-        const Area ll = live_area(s, left), lr = live_area(s, right);
+        const Area ll = live_area(doc.setup_for(left), left), lr = live_area(doc.setup_for(right), right);
         /* One scale for both pages, so the spread stays in proportion */
         const float k = std::min(fit_scale(cl, ll), fit_scale(cr, lr));
         LayoutFit::Part pl = part_for(left, cl, ll, k), pr = part_for(right, cr, lr, k);
@@ -609,7 +609,7 @@ LayoutFit fit_layout(const PageDoc &doc, const LayoutTemplate &t, size_t page) {
         return fit;
     }
     const Area c = content(m.left, t.width - m.right, m.top, t.height - m.bottom, 0.f, t.width, t.height);
-    const Area live = live_area(s, page);
+    const Area live = live_area(doc.setup_for(page), page);
     LayoutFit::Part p = part_for(page, c, live, fit_scale(c, live));
     for (size_t i = 0; i < t.elements.size(); ++i)
         p.elements.push_back(i);
@@ -886,7 +886,7 @@ LayoutTemplate layout_from_items(const PageDoc &doc, const VectorStore *vectors,
     t.category = category;
     if (page >= doc.pages.size())
         return t;
-    const PageSetup &s = doc.setup;
+    const PageSetup s = doc.setup_for(page);
     t.width = s.width;
     t.height = s.height;
     float left = 0.f, right = 0.f;

@@ -61,6 +61,7 @@
 #include "dialogs.h"
 #include "image_assets.h"
 #include "layouts_panel.h"
+#include "masters_panel.h"
 #include "tool_tabs.h"
 #include "layers_panel.h"
 #include "find_panel.h"
@@ -388,11 +389,111 @@ private:
         nvgStrokeColor(ctx, nvgRGB(0, 0, 0));
         nvgStrokeWidth(ctx, 1);
         nvgStroke(ctx);
-        char num[16];
-        std::snprintf(num, sizeof num, "%d", i + 1);
+        /* A master page in hand over this icon: it would go here */
+        if (m_drop_hover && std::find(m_drop_pages.begin(), m_drop_pages.end(), (size_t) i) !=
+                                m_drop_pages.end()) {
+            nvgBeginPath(ctx);
+            nvgRect(ctx, x - 1.5f, y - 1.5f, kW + 3.f, kH + 3.f);
+            nvgStrokeColor(ctx, nvgRGB(220, 140, 20));
+            nvgStrokeWidth(ctx, 2.5f);
+            nvgStroke(ctx);
+        }
+        /* The page's label (its section's numbering), or its number when the
+         * label won't fit; the master's prefix small at the top */
+        const PageDoc &doc = m_view->document();
+        std::string num = m_view->page_label((size_t) i);
+        if (num.size() > 3 || num.empty())
+            num = std::to_string(i + 1);
+        const MasterPage *mp = doc.master_of((size_t) i);
         nvgFillColor(ctx, on ? nvgRGB(255, 255, 255) : nvgRGB(0, 0, 0));
-        nvgText(ctx, x + kW * 0.5f, y + kH * 0.5f, num, nullptr);
+        if (mp && !doc.editing_master) {
+            nvgFontSize(ctx, 8);
+            nvgFillColor(ctx, on ? nvgRGB(255, 210, 130) : nvgRGB(170, 100, 10));
+            nvgText(ctx, x + kW * 0.5f, y + 5.5f, mp->prefix.substr(0, 3).c_str(), nullptr);
+            nvgFontSize(ctx, num.size() > 2 ? 9 : 11);
+            nvgFillColor(ctx, on ? nvgRGB(255, 255, 255) : nvgRGB(0, 0, 0));
+            nvgText(ctx, x + kW * 0.5f, y + kH * 0.62f, num.c_str(), nullptr);
+            nvgFontSize(ctx, 11);
+        } else {
+            nvgFontSize(ctx, num.size() > 2 ? 9 : 11);
+            nvgText(ctx, x + kW * 0.5f, y + kH * 0.5f, num.c_str(), nullptr);
+            nvgFontSize(ctx, 11);
+        }
         nvgRestore(ctx);
+    }
+
+public:
+    /* A master from the Masters panel dropped on an icon: that page, or
+     * with Shift its spread */
+    bool drag_motion_event(const Vector2i &p, DragEvent &e) override {
+        MasterId id = 0;
+        if (!master_drag(e.data, id) || m_view->editing_master() || !e.accept(this, DropCopy)) {
+            drag_leave_event();
+            return false;
+        }
+        sync_slots();
+        m_drop_pages = drop_pages(p, e.modifiers);
+        m_drop_hover = true;
+        if (screen())
+            screen()->redraw();
+        return true;
+    }
+    void drag_leave_event() override {
+        if (!m_drop_hover)
+            return;
+        m_drop_hover = false;
+        m_drop_pages.clear();
+        if (screen())
+            screen()->redraw();
+    }
+    bool drag_drop_event(const Vector2i &p, DragEvent &e) override {
+        drag_leave_event();
+        MasterId id = 0;
+        if (!master_drag(e.data, id) || m_view->editing_master())
+            return false;
+        sync_slots();
+        const std::vector<size_t> pages = drop_pages(p, e.modifiers);
+        if (pages.empty())
+            return false;
+        m_view->apply_master(id, pages);
+        return e.accept(this, DropCopy);
+    }
+
+private:
+    bool m_drop_hover = false;
+    std::vector<size_t> m_drop_pages;
+
+    bool master_drag(const DragData &data, MasterId &id) const {
+        const std::string *bytes = data.get(kMasterPageDragType);
+        if (!bytes)
+            return false;
+        id = (MasterId) std::strtoul(bytes->c_str(), nullptr, 10);
+        return true;
+    }
+    std::vector<size_t> drop_pages(const Vector2i &p, int modifiers) const {
+        std::vector<size_t> out;
+        const int i = index_at(p);
+        if (i < 0)
+            return out;
+        out.push_back((size_t) i);
+        if (modifiers & GLFW_MOD_SHIFT) {
+            /* The spread: facing pages pair 2-3, 4-5 (1 alone); else 1-2, 3-4 */
+            const size_t n = m_view->page_count();
+            size_t first = (size_t) i, count = 1;
+            if (m_view->document().setup.facing) {
+                if (i > 0) {
+                    first = 1 + (((size_t) i - 1) / 2) * 2;
+                    count = std::min<size_t>(2, n - first);
+                }
+            } else {
+                first = (size_t) i - (size_t) i % 2;
+                count = std::min<size_t>(2, n - first);
+            }
+            out.clear();
+            for (size_t k = first; k < first + count; ++k)
+                out.push_back(k);
+        }
+        return out;
     }
 
     void draw_scrollbar(NVGcontext *ctx) {
@@ -956,6 +1057,13 @@ public:
         };
         m_view->on_context_menu = [this](const Vector2i &at) { show_context_menu(at); };
         m_view->on_page_change = [this] { update_status(); };
+        /* Editing a master or done: the Masters tab's Edit/Done, the banner */
+        m_view->on_master_edit_change = [this] {
+            for (ToolTabsWindow *w : ToolTabsWindow::live())
+                if (w->parent() == this && w->visible())
+                    w->refresh();
+            update_status();
+        };
         m_view->on_document_change = [this] {
             for (ToolTabsWindow *w : ToolTabsWindow::live())
                 if (w->parent() == this && w->visible())
@@ -1076,6 +1184,7 @@ public:
         m_assets = nullptr;
         m_images_panel = nullptr;
         m_layouts_panel = nullptr;
+        m_masters_panel = nullptr;
         m_layers = nullptr;
         m_type_panel = nullptr;
         m_frame_panel = nullptr;
@@ -1819,6 +1928,7 @@ public:
              * are, wherever the text lands */
             {"Page Number", "\uE000", {{C | A, GLFW_KEY_P}}},
             {"Page Count", "\uE001", {}},
+            {"Section Name", "\uE003", {}},
         };
         for (const Special &sp : specials) {
             const std::string text = sp.text;
@@ -1858,6 +1968,16 @@ public:
         m_hide_page = add_cmd(layout, "Hide Page", {}, [this] {
             m_view->set_page_hidden(!m_view->page_hidden(m_view->page_index()));
         });
+        new Separator(layout->popup());
+        add_cmd(layout, "Masters...", {}, [this] { show_masters(); });
+        m_numbering = add_cmd(layout, "Numbering & Section Options...", {}, [this] {
+            show_masters();
+            if (m_masters_panel)
+                m_masters_panel->numbering_options();
+        });
+        m_done_master = add_cmd(layout, "Done Editing Master", {}, [this] {
+            m_view->finish_master_edit();
+        });
 
         Dropdown *element = m_menubar->add_menu("Element");
         m_to_front = add_cmd(element, "Bring to Front",
@@ -1878,6 +1998,16 @@ public:
                           [this] { m_view->group_selection(); });
         m_ungroup = add_cmd(element, "Ungroup", {{SYSTEM_COMMAND_MOD | GLFW_MOD_SHIFT, GLFW_KEY_G}},
                             [this] { m_view->ungroup_selection(); });
+        new Separator(element->popup());
+        m_override_all = add_cmd(element, "Override All Master Items", {}, [this] {
+            m_view->override_all_master_items();
+        });
+        m_remove_overrides = add_cmd(element, "Remove Local Overrides", {}, [this] {
+            m_view->remove_local_overrides();
+        });
+        m_detach = add_cmd(element, "Detach from Master", {}, [this] {
+            m_view->detach_selection_from_master();
+        });
         new Separator(element->popup());
         m_frame_opts = add_cmd(element, "Text Frame Options...", {},
                                [this] { text_frame_options_dialog(); });
@@ -2359,9 +2489,10 @@ public:
     /* The Image Assets window is made once and only hidden when closed, so
      * its folders, library and thumbnails are all there when it reopens.
      * Its tabs are tool panels (tool_tabs.h): Images, then Layouts. */
-    enum class AssetTab { Images, Layouts };
+    enum class AssetTab { Images, Layouts, Masters };
     void show_image_assets() { show_asset_tab(AssetTab::Images); }
     void show_layouts() { show_asset_tab(AssetTab::Layouts); }
+    void show_masters() { show_asset_tab(AssetTab::Masters); }
 
     void ensure_tool_hooks() {
         if (m_tool_hooks)
@@ -2434,6 +2565,7 @@ public:
         m_assets = new ToolTabsWindow(this, "Image Assets");
         m_images_panel = m_assets->add_panel<ImageAssetsPanel>(m_view, &m_images);
         m_layouts_panel = m_assets->add_panel<LayoutsPanel>(m_view);
+        m_masters_panel = m_assets->add_panel<MastersPanel>(m_view);
         m_assets->center();
         m_assets->set_visible(false);    // show_asset_tab puts it up
     }
@@ -2442,7 +2574,8 @@ public:
         ensure_tool_hooks();
         const bool fresh = !m_images_panel;
         make_assets_window();
-        ToolPanel *tab = which == AssetTab::Layouts ? (ToolPanel *) m_layouts_panel
+        ToolPanel *tab = which == AssetTab::Layouts   ? (ToolPanel *) m_layouts_panel
+                       : which == AssetTab::Masters ? (ToolPanel *) m_masters_panel
                                                     : (ToolPanel *) m_images_panel;
         ToolTabsWindow *w = ToolTabsWindow::host_of(tab);
         if (!w)
@@ -2539,6 +2672,21 @@ public:
             v->remove_page();
             after_page_command();
         });
+        if (!v->editing_master()) {
+            new Separator(m_context_popup);
+            context_item("Numbering & Section Options...", FA_LIST_OL, true, {}, [this] {
+                show_masters();
+                if (m_masters_panel)
+                    m_masters_panel->numbering_options();
+            });
+            context_item("Masters...", FA_CLONE, true, {}, [this] { show_masters(); });
+            if (v->page_has_overrides())
+                context_item("Remove Local Overrides", 0, true, {},
+                             [v] { v->remove_local_overrides(); });
+            if (v->page_has_master_copies())
+                context_item("Override All Master Items", 0, true, {},
+                             [v] { v->override_all_master_items(); });
+        }
         open_context_popup(at);
     }
 
@@ -2595,6 +2743,10 @@ public:
             if (v->can_ungroup())
                 item("Ungroup", FA_OBJECT_UNGROUP, true, {{C | S, GLFW_KEY_G}},
                      [v] { v->ungroup_selection(); });
+            if (v->selection_has_overrides()) {
+                item("Remove Local Overrides", 0, true, {}, [v] { v->remove_local_overrides(); });
+                item("Detach from Master", 0, true, {}, [v] { v->detach_selection_from_master(); });
+            }
             if (v->can_align()) {
                 section();
                 using A = ComposerView::AlignTo;
@@ -3184,9 +3336,24 @@ public:
         const size_t np = doc.pages.size();
         const size_t nitems = page < np ? doc.pages[page].items.size() : 0;
         const bool hidden = m_view->page_hidden(page);
+        /* Which page: its label when its section numbers it otherwise, the
+         * master it follows; or the master being edited */
+        std::string where;
+        if (const MasterPage *em = doc.find_master(doc.editing_master)) {
+            where = "Master " + em->label();
+            if (em->spread())
+                where += page == 0 ? " (left)" : " (right)";
+        } else {
+            where = "Page " + std::to_string(page + 1) + " of " + std::to_string(np);
+            const std::string label = doc.page_label(page);
+            if (label != std::to_string(page + 1))
+                where += " (" + label + ")";
+            if (const MasterPage *pm = doc.master_of(page))
+                where += ", master " + pm->label();
+        }
         std::snprintf(buf, sizeof buf,
-                      "  Page %zu of %zu%s   |   %zu items, %zu stories, %zu lines, composed in %.2f ms%s   |   zoom %.0f%%",
-                      page + 1, np, hidden ? " (hidden)" : "", nitems, comps.size(), lines, ms,
+                      "  %s%s   |   %zu items, %zu stories, %zu lines, composed in %.2f ms%s   |   zoom %.0f%%",
+                      where.c_str(), hidden ? " (hidden)" : "", nitems, comps.size(), lines, ms,
                       overset ? "   |   story overset (red arrow)" : "", m_scroll->zoom() * 100.0);
         std::string picture;
         if (m_view->selection().size() == 1)
@@ -3200,11 +3367,20 @@ public:
                     }
         m_status->set_caption(std::string(buf) + picture + m_note);
         if (m_remove_page) {
-            m_remove_page->set_enabled(np > 1);
-            m_move_earlier->set_enabled(page > 0);
-            m_move_later->set_enabled(page + 1 < np);
+            const bool master = doc.editing_master != 0;
+            m_remove_page->set_enabled(np > 1 && !master);
+            m_move_earlier->set_enabled(page > 0 && !master);
+            m_move_later->set_enabled(page + 1 < np && !master);
             m_hide_page->set_caption(hidden ? "Show Page" : "Hide Page");
-            m_dup_spread->set_enabled(m_view->can_duplicate_spread());
+            m_dup_spread->set_enabled(m_view->can_duplicate_spread() && !master);
+            if (m_done_master) {
+                m_done_master->set_enabled(master);
+                m_numbering->set_enabled(!master);
+                m_override_all->set_enabled(m_view->page_has_master_copies());
+                m_remove_overrides->set_enabled(m_view->page_has_overrides() ||
+                                                m_view->selection_has_overrides());
+                m_detach->set_enabled(m_view->selection_has_overrides());
+            }
         }
         if (m_to_front) {
             const bool can = !m_view->selection().empty();
@@ -3233,6 +3409,8 @@ public:
      * for scripted runs. The menus use run_pdf_export. Linked pictures the
      * store has unloaded are read from their files by the export. */
     bool export_pdf_to(const std::string &path, const PdfSettings *settings = nullptr) {
+        if (m_view)
+            m_view->finish_master_edit();   // the publication's pages, not a master's
         PdfExportHooks hooks;
         NVGcontext *ctx = nvg_context();
         hooks.rasterize = [ctx](const DrawList &list,
@@ -3315,6 +3493,8 @@ public:
     /* The second half of run_pdf_export: the copies and the thread. */
     void start_pdf_job(std::shared_ptr<PdfJob> job, const std::string &path,
                        const PdfSettings &settings, std::function<void(bool, bool)> done) {
+        if (m_view)
+            m_view->finish_master_edit();
         if (m_pdf_job != job)
             return;
         if (m_shutting_down || job->cancel) {
@@ -3503,6 +3683,8 @@ public:
 
     /* File > Export PDF: the settings, the check, then where to write it */
     void export_pdf_dialog() {
+        if (m_view)
+            m_view->finish_master_edit();
         const PageDoc &doc = m_view->document();
         ask_pdf_settings(this, doc.pdf, (int) doc.pages.size(), doc.setup.bleed,
                          "Export\u2026", [this](const PdfSettings &s) {
@@ -3575,6 +3757,8 @@ public:
     /* File > Print. The dialog only records the choice. The PDF for that
      * page range is written here, then print_pdf hands it to the spooler. */
     void print_document() {
+        if (m_view)
+            m_view->finish_master_edit();
         if (!m_view || m_view->document().pages.empty()) {
             set_note("nothing to print");
             return;
@@ -3890,6 +4074,7 @@ private:
     bool             m_tool_hooks = false;
     ImageAssetsPanel *m_images_panel = nullptr;
     LayoutsPanel     *m_layouts_panel = nullptr;
+    MastersPanel     *m_masters_panel = nullptr;
     LayersPanel      *m_layers = nullptr;
     FindPanel        *m_find_panel = nullptr;
     Window           *m_root_window = nullptr;
@@ -3915,6 +4100,8 @@ private:
     MenuItem        *m_to_front = nullptr, *m_forward = nullptr, *m_backward = nullptr, *m_to_back = nullptr;
     MenuItem        *m_group = nullptr, *m_ungroup = nullptr;
     MenuItem        *m_frame_opts = nullptr;
+    MenuItem        *m_numbering = nullptr, *m_done_master = nullptr;
+    MenuItem        *m_override_all = nullptr, *m_remove_overrides = nullptr, *m_detach = nullptr;
     Label           *m_status = nullptr;
     std::string     m_note;
     /* The last Print dialog choice, for the next time it opens. */

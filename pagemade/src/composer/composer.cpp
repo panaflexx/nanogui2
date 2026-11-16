@@ -156,11 +156,8 @@ public:
     }
     ~Shaper() { hb_buffer_destroy(m_buf); }
 
-    /* The page the text being shaped lands on, for the page markers. */
-    void set_page(int page, int pages) {
-        m_page = page;
-        m_pages = pages;
-    }
+    /* The frame the text being shaped lands in, for the page markers. */
+    void set_frame(const Frame &f) { m_frame = f; }
     Shaper(const Shaper &) = delete;
     Shaper &operator=(const Shaper &) = delete;
 
@@ -228,16 +225,16 @@ public:
                 sc = sm;
             if (i < scale_at.size())
                 scale_at[i] = sc;
-            /* A page marker becomes its digits, all on the marker's byte,
-             * so the caret steps over the number as one character */
+            /* A page marker becomes what it shows, all on the marker's
+             * byte, so the caret steps over it as one character */
             if (is_page_marker(cp)) {
-                const int v = cp == kPageNumberChar ? m_page : m_pages;
                 cps.clear();
-                if (v > 0)
-                    for (char c : std::to_string(v))
-                        cps.push_back((uint32_t) c);
-                else
-                    cps.push_back('#');
+                const std::string shown = marker_text(m_frame, cp);
+                for (size_t k = 0; k < shown.size();) {
+                    const uint32_t c = utf8_decode(shown, k);
+                    k += std::max<size_t>(1, utf8_len(shown, k));
+                    cps.push_back(c);
+                }
             }
             for (uint32_t o : cps)
                 hb_buffer_add(m_buf, o, (unsigned) i);
@@ -318,7 +315,7 @@ private:
     std::vector<uint32_t> m_start;
     std::vector<const Font *> m_font;
     hb_buffer_t *m_buf = nullptr;
-    int m_page = 0, m_pages = 0;
+    Frame m_frame;
 };
 
 /* ---- Layout of one line's glyphs ---------------------------------------- */
@@ -1105,6 +1102,19 @@ void place_line(Shaper &sh, const Paragraph &para, const LineCandidate &c, float
 
 } // namespace
 
+std::string marker_text(const Frame &f, uint32_t cp) {
+    if (cp == kPageNumberChar) {
+        if (!f.page_label.empty())
+            return f.page_label;
+        return f.page > 0 ? std::to_string(f.page) : std::string("#");
+    }
+    if (cp == kPageCountChar)
+        return f.pages > 0 ? std::to_string(f.pages) : std::string("#");
+    if (cp == kSectionNameChar)
+        return f.section_name;
+    return std::string();
+}
+
 std::string list_marker(const ParaStyle &ps, int n) {
     if (ps.list == ListKind::Bullet)
         return ps.bullet;
@@ -1250,7 +1260,7 @@ Composition compose(const Story &story, const std::vector<Frame> &frames,
         Shaper sh(para, fonts);
         if (!frames.empty()) {
             const Frame &pf = frames[std::min(fi, frames.size() - 1)];
-            sh.set_page(pf.page, pf.pages);
+            sh.set_frame(pf);
         }
         Breaker br(sh, para, hyphenator);
 
@@ -1404,7 +1414,7 @@ Composition compose(const Story &story, const std::vector<Frame> &frames,
                     return false;
                 }
                 const Frame &f = frames[fi];
-                sh.set_page(f.page, f.pages);    // markers show this frame's page
+                sh.set_frame(f);                 // markers show this frame's page
                 ComposedLine line;
                 line.frame = fi;
                 line.para = pi;

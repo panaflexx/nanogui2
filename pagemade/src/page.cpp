@@ -505,6 +505,8 @@ std::vector<Frame> PageDoc::thread_frames(const StoryEntry &s) const {
             }
             f.page = (int) pg + 1;
             f.pages = (int) pages.size();
+            f.page_label = page_label(pg);
+            f.section_name = section_name(pg);
             /* The document's baseline grid, in the frame's item space
              * (exact for upright frames). */
             if (setup.grid_step > 0.f) {
@@ -602,12 +604,13 @@ uint32_t PageDoc::add_image(ImageAsset asset) {
 }
 
 bool PageDoc::image_placed(uint32_t id) const {
-    for (const Page &p : pages)
+    bool found = false;
+    for_each_page([&](const Page &p) {
         for (const Item &it : p.items)
             if (const PlacedImage *im = it.image())
-                if (im->asset == id)
-                    return true;
-    return false;
+                found = found || im->asset == id;
+    });
+    return found;
 }
 
 const VectorAsset *PageDoc::find_vector(uint32_t id) const {
@@ -629,12 +632,13 @@ uint32_t PageDoc::add_vector(VectorAsset asset) {
 }
 
 bool PageDoc::vector_placed(uint32_t id) const {
-    for (const Page &p : pages)
+    bool found = false;
+    for_each_page([&](const Page &p) {
         for (const Item &it : p.items)
             if (const PlacedVector *v = it.vector())
-                if (v->asset == id)
-                    return true;
-    return false;
+                found = found || v->asset == id;
+    });
+    return found;
 }
 
 bool PageDoc::transfer_item(ItemId id, size_t page) {
@@ -649,6 +653,13 @@ bool PageDoc::transfer_item(ItemId id, size_t page) {
                 return false;
             Item moved = std::move(items[i]);
             items.erase(items.begin() + (long) i);
+            if (moved.master_item) {
+                /* An overridden copy moved to another page is that page's
+                 * own; the page it left doesn't get the master's back */
+                pages[pi].master_hidden.push_back(moved.master_item);
+                moved.master_item = 0;
+                moved.overridden = false;
+            }
             pages[page].items.push_back(std::move(moved));
             sort_by_layer();             // the top of its own layer there
             return true;
@@ -710,6 +721,8 @@ bool PageDoc::item_visible(const Item &it) const {
 }
 
 bool PageDoc::item_editable(const Item &it) const {
+    if (it.master_copy())
+        return false;                    // the master's until overridden
     const Layer *l = find_layer(layer_of(it));
     return !l || (l->visible && !l->locked);
 }
@@ -735,6 +748,8 @@ bool PageDoc::remove_layer(LayerId id) {
     const size_t i = layer_index(id);
     if (i == SIZE_MAX || layers.size() <= 1)
         return false;
+    if (layers[i].master && !masters.empty())
+        return false;                    // the masters' items live there
     const LayerId to = layers[i > 0 ? i - 1 : 1].id;
     /* The items go to the top of the layer below (the bottom of the one
      * above), keeping their order */
@@ -758,6 +773,8 @@ void PageDoc::move_layer(LayerId id, int dir) {
         return;
     if (j >= layers.size())
         return;
+    if (layers[i].master || layers[j].master)
+        return;                          // the Master layer stays at the bottom
     std::swap(layers[i], layers[j]);
     sort_by_layer();
 }
@@ -803,8 +820,23 @@ void PageDoc::tidy_layers() {
             keep.push_back(l);
     }
     layers = std::move(keep);
-    if (layers.empty())
-        layers.push_back(Layer{1, "Default"});
+    /* One Master layer, at the bottom */
+    bool seen_master = false;
+    for (Layer &l : layers) {
+        if (l.master && seen_master)
+            l.master = false;
+        seen_master = seen_master || l.master;
+    }
+    std::stable_partition(layers.begin(), layers.end(), [](const Layer &l) { return l.master; });
+    if (layers.empty() || (layers.size() == 1 && layers[0].master))
+        layers.push_back(Layer{0, "Default"});
+    for (Layer &l : layers)
+        if (l.id == 0) {
+            LayerId id = 1;
+            while (find_layer(id))
+                ++id;
+            l.id = id;
+        }
     for (const Layer &l : layers)
         next_layer = std::max(next_layer, l.id + 1);
     if (!find_layer(active_layer))
@@ -812,6 +844,10 @@ void PageDoc::tidy_layers() {
     for (Page &p : pages)
         for (Item &it : p.items)
             it.layer = layer_of(it);
+    for (MasterPage &m : masters)
+        for (Page &p : m.pages)
+            for (Item &it : p.items)
+                it.layer = layer_of(it);
     sort_by_layer();
 }
 
@@ -839,6 +875,12 @@ ItemId PageDoc::add_text_frame(size_t page, StoryId story, float w, float h,
 }
 
 void PageDoc::remove_item(ItemId id) {
+    for (Page &p : pages)
+        for (const Item &it : p.items)
+            if (it.id == id && it.master_item &&
+                std::find(p.master_hidden.begin(), p.master_hidden.end(), it.master_item) ==
+                    p.master_hidden.end())
+                p.master_hidden.push_back(it.master_item);
     for (Page &p : pages)
         p.items.erase(std::remove_if(p.items.begin(), p.items.end(),
                                      [&](const Item &it) { return it.id == id; }),
@@ -1132,7 +1174,10 @@ void PageDoc::tidy_groups() {
 size_t PageDoc::insert_page(size_t index) {
     if (index > pages.size())
         index = pages.size();
-    pages.insert(pages.begin() + (long) index, Page{});
+    Page page;
+    if (!editing_master && find_master(default_master))
+        page.master = default_master;
+    pages.insert(pages.begin() + (long) index, std::move(page));
     return index;
 }
 
@@ -1171,6 +1216,7 @@ size_t PageDoc::duplicate_pages(size_t first, size_t count) {
         Page copy;                       // a fresh uid
         copy.hidden = pages[p].hidden;
         copy.guides = pages[p].guides;
+        copy.master = pages[p].master;   // a section doesn't start again
         for (const Item &o : pages[p].items) {
             Item it = o;
             it.id = next_id++;

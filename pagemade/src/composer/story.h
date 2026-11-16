@@ -173,10 +173,14 @@ constexpr float kMinDropScale = 25.f, kMaxDropScale = 400.f;
 constexpr int   kMaxKeepLines = 9;     // widows and orphans
 constexpr uint32_t kFrameBreak = 0x0C; // ends the line and the text block
 /* Page markers (Private Use Area). The text keeps the marker; composing
- * sets the number of the page the line lands on, or the page count. */
+ * sets the number of the page the line lands on (in its section's style,
+ * with the section's prefix), the page count, or the section's name. */
 constexpr uint32_t kPageNumberChar = 0xE000;
 constexpr uint32_t kPageCountChar = 0xE001;
-inline bool is_page_marker(uint32_t cp) { return cp == kPageNumberChar || cp == kPageCountChar; }
+constexpr uint32_t kSectionNameChar = 0xE003;
+inline bool is_page_marker(uint32_t cp) {
+    return cp == kPageNumberChar || cp == kPageCountChar || cp == kSectionNameChar;
+}
 /* A right-indent tab (Shift+Tab): jumps to the right indent whatever the
  * stops, right aligned, with the leader of the paragraph's last right stop. */
 constexpr uint32_t kRightIndentTab = 0xE002;

@@ -73,6 +73,11 @@
 
 namespace pagemade { class BackgroundWorker; struct LayoutTemplate; }
 
+/* Drag and drop: a master page from the Masters panel. The bytes are its id
+ * in decimal ("0" for [None]). Dropped on a page it goes on that page; with
+ * Shift, on the page's spread. */
+constexpr const char *kMasterPageDragType = "application/x-pagemade-master";
+
 class ComposerView : public nanogui::Widget {
 public:
     ComposerView(nanogui::Widget *parent, const pagemade::FontLibrary *fonts,
@@ -297,6 +302,60 @@ public:
      * so the whole drag is one undo step. */
     void move_page_to(size_t index, bool record_undo);
     void set_page_hidden(bool hidden);
+
+    /* ---- Master pages (the Masters panel) ----------------------------- *
+     * Each change is one undo step. A page shows its master's items as
+     * locked copies on the Master layer (PageDoc::sync_masters); Cmd+Shift+
+     * click overrides one (its whole group), and a picture dropped on an
+     * empty master frame overrides that frame and fills it. */
+    const std::vector<pagemade::MasterPage> &masters() const { return m_doc.masters; }
+    pagemade::MasterId default_master() const { return m_doc.default_master; }
+    /* The master being edited (its pages are on the pasteboard), or 0. */
+    pagemade::MasterId editing_master() const { return m_doc.editing_master; }
+    /* A blank master; returns its id (0 when the Master layer can't be made). */
+    pagemade::MasterId new_master(const std::string &name, const std::string &prefix, bool spread,
+                                  pagemade::MasterId based_on);
+    /* The current page (with `spread` and facing pages, its spread) becomes
+     * a new master: its items move onto the master, and the page uses it. */
+    pagemade::MasterId master_from_page(const std::string &name, const std::string &prefix,
+                                        bool spread);
+    /* Name, prefix, based on, margins and columns from `opts` (its pages
+     * and id are ignored). */
+    void set_master_options(pagemade::MasterId id, const pagemade::MasterPage &opts);
+    void delete_master(pagemade::MasterId id, bool keep_items);
+    /* `id` (0: none) for each page in `pages`. */
+    void apply_master(pagemade::MasterId id, const std::vector<size_t> &pages);
+    void set_default_master(pagemade::MasterId id);
+    /* Put the master's pages on the pasteboard to edit (one undo step with
+     * the edits that follow); finish puts the publication back and updates
+     * every page that uses it. */
+    bool edit_master(pagemade::MasterId id);
+    void finish_master_edit();
+    /* How many pages use the master. */
+    size_t master_use_count(pagemade::MasterId id) const;
+    /* Pages "1-5, 8, even, odd, all" (by page label or position) as indices. */
+    std::vector<size_t> parse_page_range(const std::string &text) const;
+    /* The current page has master copies (not overridden). */
+    bool page_has_master_copies() const;
+    /* The current page has overrides (or master items it let go of). */
+    bool page_has_overrides() const;
+    /* Some selected item is an overridden master copy. */
+    bool selection_has_overrides() const;
+    void override_all_master_items();
+    /* The selected overridden copies go back to the master's; with none
+     * selected, every override on the page. */
+    void remove_local_overrides();
+    /* The selected overridden copies become the page's own items. */
+    void detach_selection_from_master();
+    /* The page's label ("iv", "A-3"), as page markers show it. */
+    std::string page_label(size_t i) const { return m_doc.page_label(i); }
+    /* Numbering & Section Options for page `i` (start: a section begins there). */
+    void set_section(size_t i, bool start, const pagemade::Section &section);
+    /* The publication without a master being edited (what is saved,
+     * printed and exported). */
+    const pagemade::PageDoc &publication() const;
+    /* The Masters panel follows these. */
+    std::function<void()> on_master_edit_change;
 
     /* ---- Arrange ---------------------------------------------------- */
     enum class Stack { Forward, Backward, Front, Back };
@@ -685,7 +744,7 @@ private:
     std::vector<float> guides_y(size_t page) const;
     /* Page edges, margins and columns of `page` (what a ruler guide snaps to) */
     std::vector<float> base_guides_x(size_t page) const;
-    std::vector<float> base_guides_y() const;
+    std::vector<float> base_guides_y(size_t page) const;
 
     /* ---- Ruler guides (see the public section) ----------------------- */
     struct GuideDrag {
@@ -820,6 +879,19 @@ private:
     pagemade::ItemId m_last_caption = 0; // set by place_frame
     pagemade::Point m_context_pt;         // where the last right-click was
     pagemade::PageSetup m_shown_setup;    // the setup the pasteboard was laid out for
+    pagemade::MasterId m_shown_master = 0; // ... and the master being edited then
+    mutable pagemade::PageDoc m_publication;   // publication() while editing a master
+    mutable uint64_t m_publication_version = 0;
+    /* After a change to pages or masters: copies made again, stories recomposed. */
+    void sync_masters();
+    /* The topmost master copy under a page point (visible, layer unlocked). */
+    pagemade::ItemId master_copy_at(const pagemade::Point &pt, size_t page) const;
+    /* A picture frame a drop can fill: editable, or a master copy to override. */
+    bool frame_fillable(const pagemade::Item &it) const;
+    /* Override `frame` (and its group) when it is a master copy. */
+    void override_for_edit(pagemade::ItemId frame);
+    pagemade::LayerId m_layer_before_master = 0;   // active layer before master editing
+    size_t m_page_before_master = 0;               // ... and the page on screen
     void check_setup_change();            // tell on_setup_change when it differs
     /* Items copied (Cut, Copy): their stories with only the copied blocks
      * threaded, the pictures they show, and where they were. */
@@ -890,6 +962,7 @@ private:
     bool delete_selection(bool compose = true);
     /* One story's layout, now; the others are untouched. */
     void recompose_story(pagemade::StoryId id);
+    pagemade::Composition compose_entry(const pagemade::StoryEntry &s) const;
     void insert_string(const std::string &utf8, bool burst);
     bool m_smart_quotes = true;
     bool m_caption_pictures = false;
@@ -1016,6 +1089,11 @@ private:
     bool m_drop_hover = false;
     pagemade::ItemId m_drop_replace = 0;  // the frame a Ctrl-drop would refill
     std::shared_ptr<const pagemade::LayoutTemplate> m_drop_layout;   // a layout in hand
+    pagemade::MasterId m_drop_master = 0;        // a master in hand (0: none) ...
+    bool m_drop_master_none = false;             // ... or [None]
+    std::vector<size_t> m_drop_master_pages;     // ... and the pages it would go on
+    bool dragged_master(const nanogui::DragData &data, pagemade::MasterId &id) const;
+    std::vector<size_t> master_drop_pages(int modifiers) const;
     size_t m_drop_page = 0;
     pagemade::Point m_drop_at;
     float m_drop_w = 0.f, m_drop_h = 0.f;

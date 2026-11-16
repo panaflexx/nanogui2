@@ -111,10 +111,11 @@ LayersPanel::LayersPanel(Widget *parent, ComposerView *view)
 
 std::string LayersPanel::signature() const {
     std::string sig = std::to_string(m_view->active_layer()) + "|" +
-                      std::to_string(m_view->selection().empty()) + "|";
+                      std::to_string(m_view->selection().empty()) + "|" +
+                      std::to_string(m_view->masters().size()) + "|";
     for (const Layer &l : m_view->layers())
         sig += std::to_string(l.id) + ":" + l.name + ":" + (l.visible ? "v" : "h") +
-               (l.locked ? "l" : "u") + ":" + std::to_string(m_view->layer_item_count(l.id)) + ";";
+               (l.locked ? "l" : "u") + (l.master ? "m" : "") + ":" + std::to_string(m_view->layer_item_count(l.id)) + ";";
     return sig;
 }
 
@@ -149,6 +150,18 @@ void LayersPanel::rebuild() {
         r.name->set_pushed(id == active);
         r.name->set_tooltip(id == active ? "The active layer: new items go here"
                                          : "Click to make this the active layer");
+        /* The Master layer stands out: its items come from the master pages */
+        r.name->set_background_color(l.master ? nanogui::Color(205, 140, 30, 110)
+                                              : nanogui::Color(0, 0, 0, 0));
+        if (l.master) {
+            r.name->set_tooltip(
+                "Master items: what each page's master page puts there. On a page they are "
+                "locked; Cmd+Shift+click one to override it for that page. Edit the masters "
+                "themselves in the Masters panel. Hide or lock this layer to hide or lock "
+                "every master item.");
+            r.eye->set_tooltip(l.visible ? "Shown: click to hide every master item"
+                                         : "Hidden: click to show the master items");
+        }
         r.name->set_text_color(l.visible ? nanogui::Color(0, 0, 0, 0)        // theme color
                                          : nanogui::Color(150, 150, 150, 255));
     }
@@ -160,9 +173,11 @@ void LayersPanel::rebuild() {
     m_new->set_enabled(layers.size() < kMaxLayers);
     m_new->set_tooltip(layers.size() < kMaxLayers ? "New layer, above the active one"
                                                   : "A publication has at most 8 layers");
-    m_delete->set_enabled(layers.size() > 1);
-    m_up->set_enabled(ai + 1 < layers.size());
-    m_down->set_enabled(ai > 0);
+    /* The Master layer stays at the bottom, and while there are masters */
+    const bool master_active = ai < layers.size() && layers[ai].master;
+    m_delete->set_enabled(layers.size() > 1 && !(master_active && !m_view->masters().empty()));
+    m_up->set_enabled(ai + 1 < layers.size() && !master_active);
+    m_down->set_enabled(ai > 0 && !(ai == 1 && layers[0].master));
     m_move_here->set_enabled(!m_view->selection().empty());
 
     if (auto *frame = ToolTabsWindow::host_of(this)) {

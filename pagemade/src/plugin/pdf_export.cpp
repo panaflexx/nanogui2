@@ -390,6 +390,8 @@ void collect_unicodes(const PageDoc &doc, const std::vector<Composition> &comps,
                       std::map<const Font *, PdfFont> &fonts, const std::set<size_t> &pages) {
     for (size_t si = 0; si < comps.size() && si < doc.stories.size(); ++si) {
         const Story &story = doc.stories[si].story;
+        std::vector<Frame> frames;       // for page markers, made when one is met
+        bool have_frames = false;
         for (const ComposedLine &l : comps[si].lines) {
             if (l.para >= story.paragraphs.size())
                 continue;
@@ -415,18 +417,30 @@ void collect_unicodes(const PageDoc &doc, const std::vector<Composition> &comps,
                     pf.gids.insert(g.gid);
                     if (pf.unicode.count(g.gid) || (g.flags & PlacedGlyph::Inserted))
                         continue;
-                    /* A page marker's glyphs are the digits it shows: map each
-                     * to its digit, not to the marker in the text */
+                    /* A page marker's glyphs are the characters it shows on
+                     * this frame's page (digits, a roman numeral, a section
+                     * name): map each to its character, not to the marker */
                     if (g.cluster < text.size()) {
                         size_t at = g.cluster;
-                        if (is_page_marker(utf8_decode(text, at))) {
-                            for (char c : std::string("0123456789#")) {
+                        const uint32_t mcp = utf8_decode(text, at);
+                        if (is_page_marker(mcp)) {
+                            if (!have_frames) {
+                                frames = doc.thread_frames(doc.stories[si]);
+                                have_frames = true;
+                            }
+                            const std::string shown =
+                                marker_text(l.frame < frames.size() ? frames[l.frame] : Frame(), mcp);
+                            for (size_t k = 0; k < shown.size();) {
+                                const size_t n = std::max<size_t>(1, utf8_len(shown, k));
                                 hb_codepoint_t gid = 0;
-                                if (hb_font_get_nominal_glyph(r.font->hb(), (hb_codepoint_t) c, &gid) &&
+                                if (hb_font_get_nominal_glyph(r.font->hb(),
+                                                              (hb_codepoint_t) utf8_decode(shown, k),
+                                                              &gid) &&
                                     gid == g.gid) {
-                                    pf.unicode[g.gid] = std::string(1, c);
+                                    pf.unicode[g.gid] = shown.substr(k, n);
                                     break;
                                 }
+                                k += n;
                             }
                             continue;
                         }

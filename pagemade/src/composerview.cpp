@@ -16,6 +16,7 @@
 #include <GLFW/glfw3.h>
 
 #include <algorithm>
+#include <cctype>
 #include <chrono>
 #include <map>
 #include <system_error>
@@ -65,6 +66,23 @@ size_t page_under(const std::vector<PageSlot> &slots, float x, float y,
 
 void arrangement(const PageDoc &doc, size_t current, PageView view,
                  std::vector<PageSlot> &slots, float &w, float &h) {
+    if (doc.editing_master) {
+        /* A master: its one page, or its spread side by side (meeting at
+         * the spine with facing pages), whatever the view */
+        slots.clear();
+        const float pw = std::max(1.f, doc.setup.width), ph = std::max(1.f, doc.setup.height);
+        const float split = doc.setup.facing ? 0.f : kPageGap;
+        slots.push_back({0, 0.f, 0.f});
+        w = pw;
+        h = ph;
+        if (doc.pages.size() >= 2) {
+            slots.push_back({1, pw + split, 0.f});
+            w = pw * 2.f + split;
+        }
+        (void) current;
+        (void) view;
+        return;
+    }
     arrange_pages(doc.setup, doc.pages.size(), current, view, slots, w, h);
 }
 
@@ -237,7 +255,10 @@ void ComposerView::set_document(PageDoc doc) {
     m_probing.clear();
     m_last_live.clear();
     m_doc = std::move(doc);
+    m_doc.end_master_edit();             // never opened mid-edit
+    m_doc.sync_masters();
     m_shown_setup = m_doc.setup;
+    m_shown_master = 0;
     m_page = 0;
     m_sel.clear();
     m_edit_story = 0;
@@ -364,8 +385,7 @@ void ComposerView::flush_deferred() {
     } else if (!m_pending_stories.empty()) {
         for (size_t si : m_pending_stories)
             if (si < m_doc.stories.size())
-                m_comp[si] = compose(m_doc.stories[si].story, m_doc.thread_frames(m_doc.stories[si]),
-                                     *m_fonts, m_hyphenator);
+                m_comp[si] = compose_entry(m_doc.stories[si]);
         m_pending_stories.clear();
         if (on_recompose)
             on_recompose();
@@ -482,9 +502,13 @@ void ComposerView::restore_snapshot() {
 
 void ComposerView::check_setup_change() {
     const PageSetup &s = m_doc.setup, &o = m_shown_setup;
+    const bool master_changed = m_doc.editing_master != m_shown_master;
     const bool changed = s.width != o.width || s.height != o.height || s.facing != o.facing ||
-                         s.bleed != o.bleed;
+                         s.bleed != o.bleed || master_changed;
     m_shown_setup = s;
+    m_shown_master = m_doc.editing_master;
+    if (master_changed && on_master_edit_change)
+        on_master_edit_change();
     if (!changed)
         return;
     if (on_setup_change)
@@ -493,7 +517,14 @@ void ComposerView::check_setup_change() {
 
 void ComposerView::change_setup(const PageSetup &setup, SetupAdjust how) {
     push_undo();
+    if (m_doc.editing_master) {          // Document Setup works on the publication
+        m_doc.end_master_edit();
+        m_page = std::min(m_page_before_master, m_doc.pages.size() - 1);
+        if (m_doc.find_layer(m_layer_before_master))
+            m_doc.active_layer = m_layer_before_master;
+    }
     pagemade::change_setup(m_doc, setup, how);
+    m_doc.sync_masters();                // facing pages: sides may change
     recompose();
     selection_changed();
     check_setup_change();
@@ -573,12 +604,24 @@ void ComposerView::set_tool(Tool t) {
         screen()->redraw();
 }
 
+Composition ComposerView::compose_entry(const StoryEntry &s) const {
+    /* A story none of whose frames is on these pages (a master's, while
+     * the publication is shown, or the publication's while a master is)
+     * composes to nothing rather than to an overset */
+    bool here = false;
+    for (ItemId f : s.thread)
+        here = here || m_doc.find_item(f) != nullptr;
+    if (!here)
+        return Composition();
+    return compose(s.story, m_doc.thread_frames(s), *m_fonts, m_hyphenator);
+}
+
 void ComposerView::recompose() {
     m_pending_stories.clear();           // all of them, now
     m_pending_full = false;
     m_comp.clear();
     for (const StoryEntry &s : m_doc.stories)
-        m_comp.push_back(compose(s.story, m_doc.thread_frames(s), *m_fonts, m_hyphenator));
+        m_comp.push_back(compose_entry(s));
     if (on_recompose)
         on_recompose();
 }
@@ -794,7 +837,7 @@ std::vector<float> ComposerView::guides_x(size_t page) const {
 }
 
 std::vector<float> ComposerView::guides_y(size_t page) const {
-    std::vector<float> g = base_guides_y();
+    std::vector<float> g = base_guides_y(page);
     auto add = [&](const std::vector<Guide> &gs) {
         for (const Guide &rg : gs)
             if (!rg.vertical)
@@ -807,7 +850,7 @@ std::vector<float> ComposerView::guides_y(size_t page) const {
 }
 
 std::vector<float> ComposerView::base_guides_x(size_t page) const {
-    const PageSetup &s = m_doc.setup;
+    const PageSetup s = m_doc.setup_for(page);
     float left = 0.f, right = 0.f;
     page_side_margins(s, page, left, right);
     const float l = left, r = s.width - right;
@@ -823,8 +866,8 @@ std::vector<float> ComposerView::base_guides_x(size_t page) const {
     return g;
 }
 
-std::vector<float> ComposerView::base_guides_y() const {
-    const PageSetup &s = m_doc.setup;
+std::vector<float> ComposerView::base_guides_y(size_t page) const {
+    const PageSetup s = m_doc.setup_for(page);
     return {0, s.height, s.margin_top, s.height - s.margin_bottom};
 }
 
@@ -1094,7 +1137,7 @@ void ComposerView::guide_drag_to(const Vector2i &screen_p, bool all_pages) {
     const Point pt = point_on_page(screen_p, g.page);
     float pos = g.vertical ? pt.x : pt.y;
     if (m_snap) {                        // onto the page edges, margins and columns
-        const std::vector<float> base = g.vertical ? base_guides_x(g.page) : base_guides_y();
+        const std::vector<float> base = g.vertical ? base_guides_x(g.page) : base_guides_y(g.page);
         const float tol = kSnapPx / zoom();
         float best = tol;
         for (float b : base)
@@ -1576,6 +1619,18 @@ bool ComposerView::mouse_button_event(const Vector2i &p, int button, bool down, 
         return true;
     }
 
+    if (m_tool == Tool::Pointer && shift && (modifiers & SYSTEM_COMMAND_MOD)) {
+        /* Cmd+Shift+click: take over the master item under the pointer
+         * (with its group) for this page, and pick it up */
+        if (const ItemId copy = master_copy_at(pt, m_page)) {
+            push_undo();
+            m_doc.override_master_items(m_page, {copy});
+            m_sel.clear();
+            recompose();
+            if (on_document_change)
+                on_document_change();
+        }
+    }
     Hit hit = hit_test(pt, m_page);
     bool all_pages = false;
     const int guide = m_tool == Tool::Pointer && !hit.item && m_show_guides && !m_lock_guides
@@ -3322,7 +3377,7 @@ bool ComposerView::paste_plain_text(const std::string &text, const Point *at) {
             break;
         at_ = nl + 1;
     }
-    const PageSetup &s = m_doc.setup;
+    const PageSetup s = m_doc.setup_for(m_page);
     float col_x, col_w;
     column_at(m_page, at ? &at->x : nullptr, col_x, col_w);
     const float x = at ? at->x : col_x;
@@ -3491,6 +3546,8 @@ void ComposerView::paste_items(const Point *at) {
     for (const Item &o : m_clip.items) {
         Item it = o;
         it.layer = 0;                    // the active layer
+        it.master_item = 0;              // a pasted master item is the page's own
+        it.overridden = false;
         auto remap_group = [&](uint32_t g) {
             if (!g)
                 return 0u;
@@ -3800,9 +3857,12 @@ void ComposerView::insert_page(bool after) {
     end_placement(false);
     if (m_creating)
         finish_creation();
+    if (m_doc.editing_master)
+        return;                          // a master keeps its one page or two
     push_undo();
     size_t at = std::min(m_page + (after ? 1 : 0), m_doc.pages.size());
     m_page = m_doc.insert_page(at);
+    m_doc.sync_masters();                // its master, and the sides after it
     recompose();                         // page numbers after it move up
     page_changed();
     if (m_page_view == PageView::Stack && screen())
@@ -3834,10 +3894,11 @@ void ComposerView::duplicate_page(bool spread) {
     size_t first = m_page, count = 1;
     if (spread)
         spread_of(m_doc, m_page, first, count);
-    if (first >= m_doc.pages.size())
+    if (first >= m_doc.pages.size() || m_doc.editing_master)
         return;
     push_undo();
     m_page = m_doc.duplicate_pages(first, count);
+    m_doc.sync_masters();
     recompose();                         // page numbers after it move up
     page_changed();
     if (on_document_change)
@@ -3847,7 +3908,7 @@ void ComposerView::duplicate_page(bool spread) {
 }
 
 void ComposerView::remove_page() {
-    if (m_doc.pages.size() <= 1)
+    if (m_doc.pages.size() <= 1 || m_doc.editing_master)
         return;
     end_placement(false);
     if (m_creating)
@@ -3856,6 +3917,7 @@ void ComposerView::remove_page() {
     m_doc.remove_page(m_page);
     if (m_page >= m_doc.pages.size())
         m_page = m_doc.pages.size() - 1;
+    m_doc.sync_masters();
     recompose();
     page_changed();
     if (m_page_view == PageView::Stack && screen())
@@ -3872,12 +3934,13 @@ void ComposerView::move_page_by(int delta) {
 }
 
 void ComposerView::move_page_to(size_t index, bool record_undo) {
-    if (index >= m_doc.pages.size() || index == m_page)
+    if (index >= m_doc.pages.size() || index == m_page || m_doc.editing_master)
         return;
     if (record_undo)
         push_undo();
     m_doc.move_page(m_page, index);
     m_page = index;
+    m_doc.sync_masters();                // a page that changed sides
     recompose();                         // page numbers follow the new order
     if (on_page_change)
         on_page_change();
@@ -3894,6 +3957,414 @@ void ComposerView::set_page_hidden(bool hidden) {
         on_page_change();
     if (screen())
         screen()->redraw();
+}
+
+/* ---- Master pages ---------------------------------------------------------- */
+
+void ComposerView::sync_masters() {
+    m_doc.sync_masters();
+    /* Copies are made again: a selection can only hold overrides and the
+     * page's own items, which keep their ids */
+    m_sel.erase(std::remove_if(m_sel.begin(), m_sel.end(),
+                               [&](ItemId id) { return !m_doc.find_item(id); }),
+                m_sel.end());
+    if (m_edit_story && !m_doc.find_story(m_edit_story))
+        m_edit_story = 0;
+}
+
+ItemId ComposerView::master_copy_at(const Point &pt, size_t page) const {
+    if (page >= m_doc.pages.size())
+        return 0;
+    const std::vector<Item> &items = m_doc.pages[page].items;
+    for (auto i = items.rbegin(); i != items.rend(); ++i) {
+        if (!i->master_copy() || !m_doc.item_visible(*i))
+            continue;
+        const Layer *l = m_doc.find_layer(m_doc.layer_of(*i));
+        if (l && l->locked)
+            continue;
+        const Point lp = i->xf.inverse().apply(pt);
+        const float tol = kPickPx / (zoom() * item_scale(i->xf));
+        const float x0 = std::min(0.f, i->w), x1 = std::max(0.f, i->w);
+        const float y0 = std::min(0.f, i->h), y1 = std::max(0.f, i->h);
+        if (lp.x >= x0 - tol && lp.x <= x1 + tol && lp.y >= y0 - tol && lp.y <= y1 + tol)
+            return i->id;
+    }
+    return 0;
+}
+
+bool ComposerView::frame_fillable(const Item &it) const {
+    if (m_doc.item_editable(it))
+        return true;
+    if (!it.master_copy() || !m_doc.item_visible(it))
+        return false;
+    const Layer *l = m_doc.find_layer(m_doc.layer_of(it));
+    return !l || !l->locked;
+}
+
+void ComposerView::override_for_edit(ItemId frame) {
+    size_t pg = 0;
+    const Item *it = m_doc.find_item(frame, &pg);
+    if (it && it->master_copy())
+        m_doc.override_master_items(pg, {frame});
+}
+
+const PageDoc &ComposerView::publication() const {
+    if (!m_doc.editing_master)
+        return m_doc;
+    if (m_publication_version != m_version || !m_publication.pages.size()) {
+        m_publication = m_doc;
+        m_publication.end_master_edit();
+        m_publication_version = m_version;
+    }
+    return m_publication;
+}
+
+static void master_changed(ComposerView *v) {
+    if (v->on_document_change)
+        v->on_document_change();
+    if (v->on_page_change)
+        v->on_page_change();             // page icons show their masters
+    if (v->screen())
+        v->screen()->redraw();
+}
+
+MasterId ComposerView::new_master(const std::string &name, const std::string &prefix, bool spread,
+                                  MasterId based_on) {
+    if (!m_doc.master_layer() && m_doc.layers.size() >= kMaxLayers)
+        return 0;                        // no room for the Master layer
+    push_undo();
+    const MasterId id = m_doc.add_master(name, prefix, spread, based_on);
+    m_doc.sync_masters();                // a based-on master shows its parent
+    recompose();
+    master_changed(this);
+    return id;
+}
+
+MasterId ComposerView::master_from_page(const std::string &name, const std::string &prefix,
+                                        bool spread) {
+    if (m_doc.editing_master || m_page >= m_doc.pages.size())
+        return 0;
+    if (!m_doc.master_layer() && m_doc.layers.size() >= kMaxLayers)
+        return 0;
+    size_t first = m_page, count = 1;
+    if (spread && m_doc.setup.facing)
+        spread_of(m_doc, m_page, first, count);
+    end_placement(false);
+    if (m_creating)
+        finish_creation();
+    push_undo();
+    const MasterId id = m_doc.add_master(name, prefix, count == 2);
+    MasterPage *m = m_doc.find_master(id);
+    const LayerId layer = m_doc.master_layer();
+    if (!m)
+        return 0;
+    for (size_t k = 0; k < count; ++k) {
+        Page &p = m_doc.pages[first + k];
+        Page &side = m->pages[count == 2 ? k : 0];
+        /* Everything on the page, its old master's copies too, as the
+         * master's own items; the threads keep their ids */
+        for (Item &it : p.items) {
+            it.master_item = 0;
+            it.overridden = false;
+            it.layer = layer;
+            side.items.push_back(std::move(it));
+        }
+        p.items.clear();
+        p.master_hidden.clear();
+        p.master = id;
+    }
+    m_doc.sync_masters();
+    m_sel.clear();
+    m_edit_story = 0;
+    recompose();
+    selection_changed();
+    master_changed(this);
+    return id;
+}
+
+void ComposerView::set_master_options(MasterId id, const MasterPage &opts) {
+    MasterPage *m = m_doc.find_master(id);
+    if (!m)
+        return;
+    push_undo();
+    m = m_doc.find_master(id);
+    m->name = opts.name.empty() ? m->name : opts.name;
+    m->prefix = opts.prefix.empty() ? m->prefix : opts.prefix;
+    /* Based on: not itself, nor one of its own descendants */
+    MasterId parent = m_doc.find_master(opts.based_on) ? opts.based_on : 0;
+    for (MasterId up = parent, steps = 0; up && steps < 64; ++steps) {
+        if (up == id) {
+            parent = 0;
+            break;
+        }
+        const MasterPage *u = m_doc.find_master(up);
+        up = u ? u->based_on : 0;
+    }
+    m->based_on = parent;
+    m->own_margins = opts.own_margins;
+    m->margin_top = opts.margin_top;
+    m->margin_bottom = opts.margin_bottom;
+    m->margin_inside = opts.margin_inside;
+    m->margin_outside = opts.margin_outside;
+    m->columns = std::clamp(opts.columns, 1, 20);
+    m->gutter = std::max(0.f, opts.gutter);
+    if (!m_doc.editing_master)
+        sync_masters();
+    recompose();
+    master_changed(this);
+}
+
+void ComposerView::delete_master(MasterId id, bool keep_items) {
+    if (!m_doc.find_master(id))
+        return;
+    end_placement(false);
+    if (m_creating)
+        finish_creation();
+    push_undo();
+    if (m_doc.editing_master) {
+        m_doc.end_master_edit();
+        m_page = std::min(m_page_before_master, m_doc.pages.size() - 1);
+        if (m_doc.find_layer(m_layer_before_master))
+            m_doc.active_layer = m_layer_before_master;
+    }
+    m_doc.remove_master(id, keep_items);
+    m_sel.clear();
+    m_edit_story = 0;
+    recompose();
+    selection_changed();
+    check_setup_change();
+    master_changed(this);
+}
+
+void ComposerView::apply_master(MasterId id, const std::vector<size_t> &pages) {
+    if (m_doc.editing_master || (id && !m_doc.find_master(id)))
+        return;
+    bool any = false;
+    for (size_t i : pages)
+        any = any || (i < m_doc.pages.size() && m_doc.pages[i].master != id);
+    if (!any)
+        return;
+    push_undo();
+    for (size_t i : pages)
+        if (i < m_doc.pages.size() && m_doc.pages[i].master != id) {
+            m_doc.pages[i].master = id;
+            m_doc.pages[i].master_hidden.clear();
+        }
+    sync_masters();
+    recompose();
+    selection_changed();
+    master_changed(this);
+}
+
+void ComposerView::set_default_master(MasterId id) {
+    if ((id && !m_doc.find_master(id)) || m_doc.default_master == id)
+        return;
+    push_undo();
+    m_doc.default_master = id;
+    master_changed(this);
+}
+
+bool ComposerView::edit_master(MasterId id) {
+    if (!m_doc.find_master(id))
+        return false;
+    if (m_doc.editing_master == id)
+        return true;
+    end_placement(false);
+    if (m_creating)
+        finish_creation();
+    push_undo();
+    if (!m_doc.editing_master) {
+        m_page_before_master = m_page;
+        m_layer_before_master = m_doc.active_layer;
+    } else {
+        m_doc.end_master_edit();
+    }
+    m_doc.begin_master_edit(id);
+    if (const LayerId ml = m_doc.ensure_master_layer())
+        m_doc.active_layer = ml;         // a master's items live on the Master layer
+    m_page = 0;
+    m_sel.clear();
+    m_edit_story = 0;
+    recompose();
+    page_changed();
+    check_setup_change();                // the pasteboard: the master's pages
+    master_changed(this);
+    if (screen())
+        screen()->perform_layout();
+    return true;
+}
+
+void ComposerView::finish_master_edit() {
+    if (!m_doc.editing_master)
+        return;
+    end_placement(false);
+    if (m_creating)
+        finish_creation();
+    push_undo();
+    m_doc.end_master_edit();             // and every page that uses it follows
+    if (m_doc.find_layer(m_layer_before_master))
+        m_doc.active_layer = m_layer_before_master;
+    m_page = std::min(m_page_before_master, m_doc.pages.size() - 1);
+    m_sel.clear();
+    m_edit_story = 0;
+    recompose();
+    page_changed();
+    check_setup_change();
+    master_changed(this);
+    if (screen())
+        screen()->perform_layout();
+}
+
+size_t ComposerView::master_use_count(MasterId id) const {
+    const PageDoc &pub = publication();
+    size_t n = 0;
+    for (const Page &p : pub.pages)
+        n += p.master == id;
+    return n;
+}
+
+std::vector<size_t> ComposerView::parse_page_range(const std::string &text) const {
+    std::vector<size_t> out;
+    const size_t n = m_doc.pages.size();
+    auto add = [&](size_t i) {
+        if (i < n && std::find(out.begin(), out.end(), i) == out.end())
+            out.push_back(i);
+    };
+    auto trim = [](std::string t) {
+        while (!t.empty() && std::isspace((unsigned char) t.front())) t.erase(t.begin());
+        while (!t.empty() && std::isspace((unsigned char) t.back())) t.pop_back();
+        return t;
+    };
+    auto lower = [](std::string t) {
+        for (char &c : t) c = (char) std::tolower((unsigned char) c);
+        return t;
+    };
+    /* A page by its label ("iv", "A-3"), else by its position (1-based) */
+    auto page_of = [&](const std::string &t, size_t &i) {
+        for (size_t k = 0; k < n; ++k)
+            if (m_doc.page_label(k) == t) {
+                i = k;
+                return true;
+            }
+        char *end = nullptr;
+        const long v = std::strtol(t.c_str(), &end, 10);
+        if (end && *end == 0 && v >= 1 && (size_t) v <= n) {
+            i = (size_t) v - 1;
+            return true;
+        }
+        return false;
+    };
+    size_t at = 0;
+    while (at <= text.size()) {
+        size_t comma = text.find(',', at);
+        if (comma == std::string::npos)
+            comma = text.size();
+        const std::string tok = trim(text.substr(at, comma - at));
+        at = comma + 1;
+        if (tok.empty())
+            continue;
+        const std::string l = lower(tok);
+        if (l == "all") {
+            for (size_t i = 0; i < n; ++i) add(i);
+        } else if (l == "even" || l == "odd") {
+            for (size_t i = l == "even" ? 1 : 0; i < n; i += 2) add(i);
+        } else {
+            size_t a = 0, b = 0;
+            const size_t dash = tok.find('-', 1);
+            if (page_of(tok, a)) {
+                add(a);
+            } else if (dash != std::string::npos && page_of(trim(tok.substr(0, dash)), a) &&
+                       page_of(trim(tok.substr(dash + 1)), b)) {
+                if (a > b) std::swap(a, b);
+                for (size_t i = a; i <= b; ++i) add(i);
+            }
+        }
+    }
+    std::sort(out.begin(), out.end());
+    return out;
+}
+
+bool ComposerView::page_has_master_copies() const {
+    for (const Item &it : items())
+        if (it.master_copy())
+            return true;
+    return false;
+}
+
+bool ComposerView::page_has_overrides() const {
+    if (m_page >= m_doc.pages.size() || m_doc.editing_master)
+        return false;
+    if (!m_doc.pages[m_page].master_hidden.empty())
+        return true;
+    for (const Item &it : items())
+        if (it.master_item && it.overridden)
+            return true;
+    return false;
+}
+
+bool ComposerView::selection_has_overrides() const {
+    for (ItemId id : m_sel)
+        if (const Item *it = m_doc.find_item(id))
+            if (it->master_item && it->overridden)
+                return true;
+    return false;
+}
+
+void ComposerView::override_all_master_items() {
+    if (!page_has_master_copies())
+        return;
+    push_undo();
+    m_doc.override_master_items(m_page, {});
+    recompose();
+    master_changed(this);
+}
+
+void ComposerView::remove_local_overrides() {
+    if (m_doc.editing_master)
+        return;
+    std::map<size_t, std::vector<ItemId>> by_page;
+    for (ItemId id : m_sel) {
+        size_t pg = 0;
+        if (const Item *it = m_doc.find_item(id, &pg))
+            if (it->master_item && it->overridden)
+                by_page[pg].push_back(id);
+    }
+    if (by_page.empty()) {
+        if (!page_has_overrides())
+            return;
+        by_page[m_page];                 // the whole page
+    }
+    push_undo();
+    for (auto &kv : by_page)
+        m_doc.remove_overrides(kv.first, kv.second);
+    sync_masters();
+    recompose();
+    selection_changed();
+    master_changed(this);
+}
+
+void ComposerView::detach_selection_from_master() {
+    std::vector<ItemId> ids;
+    for (ItemId id : m_sel)
+        if (const Item *it = m_doc.find_item(id))
+            if (it->master_item && it->overridden)
+                ids.push_back(id);
+    if (ids.empty())
+        return;
+    push_undo();
+    m_doc.detach_master_items(ids);
+    selection_changed();
+    master_changed(this);
+}
+
+void ComposerView::set_section(size_t i, bool start, const Section &section) {
+    if (m_doc.editing_master || i >= m_doc.pages.size())
+        return;
+    push_undo();
+    m_doc.pages[i].section_start = start;
+    m_doc.pages[i].section = section;
+    recompose();                         // the markers show the new numbers
+    master_changed(this);
 }
 
 /* ---- Text tool: model glue ---------------------------------------------- */
@@ -3978,7 +4449,7 @@ void ComposerView::recompose_story(StoryId id) {
     }
     m_pending_stories.erase(si);
     const StoryEntry &se = m_doc.stories[si];
-    m_comp[si] = compose(se.story, m_doc.thread_frames(se), *m_fonts, m_hyphenator);
+    m_comp[si] = compose_entry(se);
     if (on_recompose)
         on_recompose();
 }
@@ -4364,7 +4835,7 @@ void ComposerView::draw_page(NVGcontext *ctx, float px, size_t page) {
         return;
     /* Facing pages: a soft fold shade on the spine side (left of a
      * right-hand page, right of a left-hand page). Screen only. */
-    const bool verso = s.facing && page % 2 == 1;
+    const bool verso = m_doc.is_verso(page);
     if (s.facing) {
         const float fold = std::min(14.f, s.width * 0.04f);
         const float sx = verso ? s.width : 0.f;
@@ -4398,22 +4869,21 @@ void ComposerView::draw_page(NVGcontext *ctx, float px, size_t page) {
         nvgStrokeColor(ctx, nvgRGBA(220, 60, 60, 160));
         nvgStroke(ctx);
     }
-    float left = 0.f, right = 0.f;
-    page_side_margins(s, page, left, right);
-    const float l = left, t = s.margin_top;
-    const float r = s.width - right, b = s.height - s.margin_bottom;
+    const PageMargins pm = m_doc.page_margins(page);   // the master's, or Document Setup's
+    const float l = pm.left, t = pm.top;
+    const float r = s.width - pm.right, b = s.height - pm.bottom;
     nvgBeginPath(ctx);
     nvgRect(ctx, l, t, r - l, b - t);
     nvgStrokeColor(ctx, kMarginGuide);
     nvgStroke(ctx);
 
-    if (s.columns > 1) {
-        const float col = (r - l - s.gutter * (s.columns - 1)) / s.columns;
+    if (pm.columns > 1) {
+        const float col = (r - l - pm.gutter * (pm.columns - 1)) / pm.columns;
         nvgBeginPath(ctx);
-        for (int c = 1; c < s.columns; ++c) {
-            float x = l + c * col + (c - 1) * s.gutter;
+        for (int c = 1; c < pm.columns; ++c) {
+            float x = l + c * col + (c - 1) * pm.gutter;
             nvgMoveTo(ctx, x, t);              nvgLineTo(ctx, x, b);
-            nvgMoveTo(ctx, x + s.gutter, t);   nvgLineTo(ctx, x + s.gutter, b);
+            nvgMoveTo(ctx, x + pm.gutter, t);  nvgLineTo(ctx, x + pm.gutter, b);
         }
         nvgStrokeColor(ctx, kColumnGuide);
         nvgStroke(ctx);
@@ -4756,7 +5226,7 @@ void ComposerView::set_vector_store(VectorStore *vectors) {
 }
 
 void ComposerView::frame_size(const ImageMetadata &meta, size_t page, float &pw, float &ph) const {
-    const PageSetup &s = m_doc.setup;
+    const PageSetup s = m_doc.setup_for(page);
     pw = image_print_points(meta.width_px, meta.ppi_x);
     ph = image_print_points(meta.height_px, meta.ppi_y);
     if (!(pw > 0.f)) pw = 36.f;
@@ -4778,13 +5248,11 @@ void ComposerView::place_frame(uint32_t asset, const ImageMetadata &meta,
         return;
     float pw, ph;
     frame_size(meta, page, pw, ph);
-    float left = 0.f, right = 0.f;
-    page_side_margins(m_doc.setup, page, left, right);
+    const PageMargins pm = m_doc.page_margins(page);
     Item it;
     it.w = pw;
     it.h = ph;
-    it.xf = at ? Transform::translate(at->x, at->y)
-               : Transform::translate(left, m_doc.setup.margin_top);
+    it.xf = at ? Transform::translate(at->x, at->y) : Transform::translate(pm.left, pm.top);
     m_last_column = false;
     if (m_fit_columns && pw > 0.f) {
         /* The column under the drop, as wide as it, and kept on the page
@@ -4852,7 +5320,7 @@ float ComposerView::caption_depth() const {
 }
 
 void ComposerView::column_at(size_t page, const float *x, float &col_x, float &col_w) const {
-    const PageSetup &s = m_doc.setup;
+    const PageSetup s = m_doc.setup_for(page);
     float left = 0.f, right = 0.f;
     page_side_margins(s, page, left, right);
     const int n = std::max(1, s.columns);
@@ -4875,9 +5343,9 @@ void ComposerView::column_at(size_t page, const float *x, float &col_x, float &c
     col_x = left + (float) i * (col_w + gutter);
 }
 
-void ComposerView::fit_column(size_t, float col_x, float col_w, float aspect,
+void ComposerView::fit_column(size_t page, float col_x, float col_w, float aspect,
                               float &x, float &w, float &h) const {
-    const PageSetup &s = m_doc.setup;
+    const PageSetup s = m_doc.setup_for(page);
     const float live_h = std::max(36.f, s.height - s.margin_top - s.margin_bottom - caption_depth());
     w = col_w;
     h = col_w * aspect;
@@ -5027,7 +5495,7 @@ ItemId ComposerView::picture_frame_at(size_t page, const Point &at) const {
         return 0;
     const std::vector<Item> &items = m_doc.pages[page].items;
     for (auto i = items.rbegin(); i != items.rend(); ++i) {
-        if (!i->is_image() || !m_doc.item_editable(*i))
+        if (!i->is_image() || !frame_fillable(*i))
             continue;
         const Point l = i->xf.inverse().apply(at);
         if (l.x >= 0.f && l.x <= i->w && l.y >= 0.f && l.y <= i->h)
@@ -5084,12 +5552,13 @@ void ComposerView::refill_frame(ItemId frame, uint32_t asset, const ImageMetadat
 bool ComposerView::replace_picture(ItemId frame, uint32_t asset) {
     const ImageAsset *a = m_doc.find_image(asset);
     const Item *it = m_doc.find_item(frame);
-    if (!a || !it || !it->image() || !m_doc.item_editable(*it))
+    if (!a || !it || !it->image() || !frame_fillable(*it))
         return false;
     const ImageMetadata meta = a->meta;
     m_load_failed.erase(asset);
     m_load_want.erase(asset);
     push_undo();
+    override_for_edit(frame);            // a master's frame becomes the page's
     refill_frame(frame, asset, meta);
     m_sel = with_groups({frame});
     m_edit_story = 0;
@@ -5105,7 +5574,7 @@ void ComposerView::replace_picture_file(ItemId frame, const std::string &path,
                                         std::function<void(const std::string &error)> done,
                                         Vector2i px_hint) {
     const Item *it = m_doc.find_item(frame);
-    if (!it || !it->image() || !m_doc.item_editable(*it)) {
+    if (!it || !it->image() || !frame_fillable(*it)) {
         if (done) done("that frame can't be changed");
         return;
     }
@@ -5128,6 +5597,7 @@ void ComposerView::replace_picture_file(ItemId frame, const std::string &path,
     asset.source = file_uri(path);
     asset.meta = guess;
     push_undo();
+    override_for_edit(frame);
     m_doc.add_image(std::move(asset));
     refill_frame(frame, id, guess);
     Probing probing;
@@ -5829,8 +6299,8 @@ void ComposerView::drop_target(const DragData &data, Point &at, size_t &page,
 }
 
 ItemId ComposerView::drop_replace_target(const DragEvent &e) {
-    if (!key_held(e.modifiers, GLFW_MOD_CONTROL, GLFW_KEY_LEFT_CONTROL, GLFW_KEY_RIGHT_CONTROL))
-        return 0;
+    const bool ctrl =
+        key_held(e.modifiers, GLFW_MOD_CONTROL, GLFW_KEY_LEFT_CONTROL, GLFW_KEY_RIGHT_CONTROL);
     if (!dragged_asset(e.data)) {
         if (!e.data.has("text/uri-list"))
             return 0;
@@ -5847,7 +6317,13 @@ ItemId ComposerView::drop_replace_target(const DragEvent &e) {
             return 0;
     }
     const Point at = page_point_from_screen(screen()->mouse_pos());
-    return picture_frame_at(m_point_page, at);
+    const ItemId frame = picture_frame_at(m_point_page, at);
+    if (ctrl || !frame)
+        return frame;
+    /* Without Ctrl, only an empty frame (a template's, a master's) fills */
+    const Item *it = m_doc.find_item(frame);
+    const PlacedImage *im = it ? it->image() : nullptr;
+    return im && im->asset == 0 ? frame : 0;
 }
 
 std::shared_ptr<const LayoutTemplate> ComposerView::dragged_layout(const DragData &data) const {
@@ -5857,7 +6333,50 @@ std::shared_ptr<const LayoutTemplate> ComposerView::dragged_layout(const DragDat
     return t ? *t : nullptr;
 }
 
+bool ComposerView::dragged_master(const DragData &data, MasterId &id) const {
+    const std::string *bytes = data.get(kMasterPageDragType);
+    if (!bytes)
+        return false;
+    id = (MasterId) std::strtoul(bytes->c_str(), nullptr, 10);
+    return id == 0 || m_doc.find_master(id) != nullptr;
+}
+
+/* The page under the pointer, or with Shift its facing spread */
+std::vector<size_t> ComposerView::master_drop_pages(int modifiers) const {
+    std::vector<size_t> out;
+    if (m_point_page >= m_doc.pages.size())
+        return out;
+    size_t first = m_point_page, count = 1;
+    if (key_held(modifiers, GLFW_MOD_SHIFT, GLFW_KEY_LEFT_SHIFT, GLFW_KEY_RIGHT_SHIFT)) {
+        if (m_doc.setup.facing)
+            spread_of(m_doc, m_point_page, first, count);
+        else {
+            first = m_point_page - m_point_page % 2;
+            count = std::min<size_t>(2, m_doc.pages.size() - first);
+        }
+    }
+    for (size_t i = first; i < first + count; ++i)
+        out.push_back(i);
+    return out;
+}
+
 bool ComposerView::drag_motion_event(const Vector2i &, DragEvent &e) {
+    MasterId master = 0;
+    if (dragged_master(e.data, master)) {
+        if (m_placing || m_doc.editing_master || !e.accept(this, DropCopy)) {
+            drag_leave_event();
+            return false;
+        }
+        (void) page_point_from_screen(screen()->mouse_pos());
+        m_drop_master = master;
+        m_drop_master_none = master == 0;
+        m_drop_master_pages = master_drop_pages(e.modifiers);
+        m_drop_replace = 0;
+        m_drop_layout.reset();
+        m_drop_hover = true;
+        screen()->redraw();
+        return true;
+    }
     if (std::shared_ptr<const LayoutTemplate> layout = dragged_layout(e.data)) {
         if (m_placing || !e.accept(this, DropCopy)) {
             drag_leave_event();
@@ -5890,12 +6409,27 @@ void ComposerView::drag_leave_event() {
     m_drop_hover = false;
     m_drop_replace = 0;
     m_drop_layout.reset();
+    m_drop_master = 0;
+    m_drop_master_none = false;
+    m_drop_master_pages.clear();
     if (screen())
         screen()->redraw();
 }
 
 bool ComposerView::drag_drop_event(const Vector2i &, DragEvent &e) {
     drag_leave_event();
+    MasterId master = 0;
+    if (dragged_master(e.data, master)) {
+        if (m_placing || m_doc.editing_master)
+            return false;
+        (void) page_point_from_screen(screen()->mouse_pos());
+        const std::vector<size_t> pages = master_drop_pages(e.modifiers);
+        if (pages.empty())
+            return false;
+        apply_master(master, pages);
+        request_focus();
+        return e.accept(this, DropCopy);
+    }
     if (std::shared_ptr<const LayoutTemplate> layout = dragged_layout(e.data)) {
         if (m_placing)
             return false;
@@ -6183,6 +6717,23 @@ void ComposerView::draw(NVGcontext *ctx) {
             nvgFillColor(ctx, nvgRGB(140, 40, 40));
             nvgText(ctx, 0, -4.f * px, "Hidden \u2014 not printed", nullptr);
         }
+        if (const MasterPage *em = m_doc.find_master(m_doc.editing_master)) {
+            /* A master on the pasteboard: say so above it, and ring it */
+            std::string what = "Master " + em->label();
+            if (em->spread())
+                what += sl.index == 0 ? " \u2014 left page" : " \u2014 right page";
+            nvgFontFace(ctx, "sans-bold");
+            nvgFontSize(ctx, 12.f * px);
+            nvgTextAlign(ctx, NVG_ALIGN_LEFT | NVG_ALIGN_BOTTOM);
+            nvgFillColor(ctx, nvgRGB(200, 120, 10));
+            nvgText(ctx, 0, -5.f * px, what.c_str(), nullptr);
+            nvgBeginPath(ctx);
+            nvgRect(ctx, -3.f * px, -3.f * px, m_doc.setup.width + 6.f * px,
+                    m_doc.setup.height + 6.f * px);
+            nvgStrokeColor(ctx, nvgRGB(220, 140, 20));
+            nvgStrokeWidth(ctx, 2.f * px);
+            nvgStroke(ctx);
+        }
         draw_page(ctx, px, sl.index);
         nvgRestore(ctx);
     }
@@ -6254,6 +6805,20 @@ void ComposerView::draw(NVGcontext *ctx) {
             nvgStrokeWidth(ctx, 3.f * lpx);
             nvgStroke(ctx);
             nvgRestore(ctx);
+        }
+    } else if (m_drop_hover && (m_drop_master || m_drop_master_none)) {
+        /* A master in hand: the pages it would go on */
+        for (const PageSlot &sl : slots) {
+            if (std::find(m_drop_master_pages.begin(), m_drop_master_pages.end(), sl.index) ==
+                m_drop_master_pages.end())
+                continue;
+            nvgBeginPath(ctx);
+            nvgRect(ctx, o.x() + sl.x, o.y() + sl.y, m_doc.setup.width, m_doc.setup.height);
+            nvgFillColor(ctx, nvgRGBA(230, 160, 40, 30));
+            nvgFill(ctx);
+            nvgStrokeColor(ctx, nvgRGB(220, 140, 20));
+            nvgStrokeWidth(ctx, 3.f * px);
+            nvgStroke(ctx);
         }
     } else if (m_drop_hover && m_drop_layout) {
         /* A layout in hand: each frame it would make, on the pages it fits */

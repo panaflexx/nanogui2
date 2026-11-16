@@ -120,6 +120,22 @@ void ask_document_setup(nanogui::Screen *screen, const pagemade::PageSetup &curr
                         size_t page_count,
                         std::function<void(const pagemade::PageSetup &, pagemade::SetupAdjust)> done);
 
+/* Master Options (and New Master, `creating`): name, prefix, based on (one
+ * of `parents`: id and label; 0 is none), single page or spread (only when
+ * creating, with facing pages), and margins and columns of its own (else
+ * Document Setup's). `done` gets the form back as a MasterPage (no pages)
+ * and the spread choice. */
+void ask_master_options(nanogui::Screen *screen, bool creating, const pagemade::MasterPage &initial,
+                        bool spread, bool facing,
+                        const std::vector<std::pair<pagemade::MasterId, std::string>> &parents,
+                        std::function<void(const pagemade::MasterPage &, bool spread)> done);
+
+/* Layout > Numbering & Section Options for page `label`: start a section
+ * there, its numbering style, first number, prefix and name. */
+void ask_section_options(nanogui::Screen *screen, const std::string &label, bool start,
+                         const pagemade::Section &initial,
+                         std::function<void(bool start, const pagemade::Section &)> done);
+
 namespace pagemade {
 class FontLibrary;
 class FontMenuModel;

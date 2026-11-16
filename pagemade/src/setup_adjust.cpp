@@ -181,13 +181,18 @@ void change_setup(PageDoc &doc, const PageSetup &to, SetupAdjust how) {
         Bounds old_page;
         old_page.add(Point{0.f, 0.f});
         old_page.add(Point{from.width, from.height});
-        for (Page &p : doc.pages) {
+        auto scale_page = [&](Page &p) {
             std::vector<size_t> all(p.items.size());
             for (size_t i = 0; i < all.size(); ++i)
                 all[i] = i;
             refit(p, all, old_page, cx, cy, s, s, true);
             map_guides(p.guides, mx, my);
-        }
+        };
+        for (Page &p : doc.pages)
+            scale_page(p);
+        for (MasterPage &m : doc.masters)    // the masters' pages scale alike
+            for (Page &p : m.pages)
+                scale_page(p);
         map_guides(doc.guides, mx, my);
         /* The type, everywhere it is set or defined */
         for (StoryEntry &se : doc.stories)
@@ -205,9 +210,24 @@ void change_setup(PageDoc &doc, const PageSetup &to, SetupAdjust how) {
         return;
     }
 
-    /* Adjust: page by page, as the margins of facing pages differ */
-    for (size_t pi = 0; pi < doc.pages.size(); ++pi) {
-        Page &p = doc.pages[pi];
+    /* Adjust: page by page, as the margins of facing pages differ. A
+     * master's pages adjust as a right-hand page (single) or as the two
+     * sides of a spread, unless it keeps margins of its own. */
+    struct Target {
+        Page *page;
+        size_t index;                    // its place, for the facing side
+        bool doc_page;
+    };
+    std::vector<Target> targets;
+    for (size_t pi = 0; pi < doc.pages.size(); ++pi)
+        targets.push_back({&doc.pages[pi], pi, true});
+    for (MasterPage &m : doc.masters)
+        if (!m.own_margins)
+            for (size_t side = 0; side < m.pages.size(); ++side)
+                targets.push_back({&m.pages[side], m.spread() ? side + 1 : 0, false});
+    for (const Target &t : targets) {
+        Page &p = *t.page;
+        const size_t pi = t.index;
         AxisMap mx, my;
         page_maps(from, to, pi, mx, my);
         for (const std::vector<size_t> &unit : units(p)) {
@@ -223,7 +243,7 @@ void change_setup(PageDoc &doc, const PageSetup &to, SetupAdjust how) {
                 sy = sx;                 // a picture keeps its proportions
             refit(p, unit, b, nx0, ny0, sx, sy, false);
         }
-        if (pi == 0)
+        if (pi == 0 && t.doc_page)
             map_guides(doc.guides, mx, my);
         map_guides(p.guides, mx, my);
     }

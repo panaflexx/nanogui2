@@ -329,7 +329,15 @@ public:
     /// Return whether or not this widget is currently enabled
     bool enabled() const { return m_enabled; }
     /// Set whether or not this widget is currently enabled
-    Widget& set_enabled(bool enabled) { m_enabled = enabled; return *this; }
+    /* Enabled widgets draw differently (greyed captions, no hover), so a
+     * change marks cached ancestors' display lists stale, like the visual
+     * setters do; otherwise it showed only once the pointer moved over it. */
+    Widget& set_enabled(bool enabled) {
+        if (m_enabled == enabled) return *this;
+        m_enabled = enabled;
+        propagate_cache_dirty();
+        return *this;
+    }
 
     /// Return whether or not this widget is currently focused
     bool focused() const { return m_focused; }

@@ -7173,6 +7173,321 @@ static void test_import_editable(const FontLibrary &fonts) {
     }
 }
 
+/* Master pages: copies made by sync_masters, locked until overridden, live
+ * when the master changes; based-on chains, spreads by side, sections and
+ * page labels, the markers composing per page, and the file. */
+static void test_masters(const FontLibrary &fonts) {
+    PageDoc doc = new_publication(PageSetup(), 4);
+    doc.setup.facing = true;
+    const MasterId a = doc.add_master("Body", "", true);
+    CHECK(a && doc.master_layer() && doc.layers.front().master,
+          "a master makes the Master layer, at the bottom");
+    CHECK(doc.find_master(a)->prefix == "A" && doc.next_master_prefix() == "B", "prefixes A, then B");
+
+    /* Edit A: a folio on each side, a rule on the right */
+    auto folio = [&](size_t side, float x) {
+        Paragraph p;
+        p.runs.push_back({CharStyle(), std::string("\xEE\x80\x80")});
+        Story st;
+        st.paragraphs.push_back(p);
+        const StoryId sid = doc.add_story(st);
+        return doc.add_text_frame(side, sid, 100, 20, Transform::translate(x, 750));
+    };
+    CHECK(doc.begin_master_edit(a) && doc.pages.size() == 2, "editing A shows its two pages");
+    doc.active_layer = doc.master_layer();
+    const ItemId left_folio = folio(0, 54), right_folio = folio(1, 450);
+    Item rule;
+    rule.w = 500;
+    rule.h = 0;
+    rule.xf = Transform::translate(54, 40);
+    Shape line;
+    line.kind = Shape::Kind::Line;
+    rule.content = line;
+    const ItemId rule_id = doc.add_item(1, rule);
+    CHECK(doc.page_label(0) == "A", "a marker on a master shows its prefix");
+    doc.end_master_edit();
+    CHECK(doc.pages.size() == 4 && !doc.editing_master, "done: the publication's four pages are back");
+
+    for (size_t i = 0; i < doc.pages.size(); ++i)
+        doc.pages[i].master = a;
+    doc.sync_masters();
+    auto copies = [&](size_t page) {
+        size_t n = 0;
+        for (const Item &it : doc.pages[page].items)
+            n += it.master_copy();
+        return n;
+    };
+    /* Page 1 (index 0) is a right-hand page: folio and rule; page 2 the left folio */
+    CHECK(copies(0) == 2 && copies(1) == 1 && copies(2) == 2 && copies(3) == 1,
+          "each page copies its side of the spread (%zu %zu %zu %zu)", copies(0), copies(1),
+          copies(2), copies(3));
+    const Item *c0 = nullptr;
+    for (const Item &it : doc.pages[0].items)
+        if (it.master_item == rule_id)
+            c0 = &it;
+    CHECK(c0 && !doc.item_editable(*c0) && doc.item_visible(*c0), "a copy is drawn but locked");
+    CHECK(c0 && c0->layer == doc.master_layer(), "copies sit on the Master layer");
+
+    /* The folio copies compose each page's own number */
+    std::string labels;
+    for (size_t i = 0; i < doc.pages.size(); ++i)
+        for (const Item &it : doc.pages[i].items)
+            if (it.is_text() && it.master_copy()) {
+                const StoryEntry *se = doc.story_of(it.id);
+                CHECK(se != nullptr, "a copied text frame has a story of its own");
+                if (se) {
+                    const std::vector<Frame> fr = doc.thread_frames(*se);
+                    labels += marker_text(fr[0], kPageNumberChar) + " ";
+                }
+            }
+    CHECK(labels == "1 2 3 4 ", "folios read 1 2 3 4 (%s)", labels.c_str());
+    (void) left_folio;
+    (void) right_folio;
+
+    /* Live: move the rule on the master, and every right page follows */
+    doc.begin_master_edit(a);
+    doc.find_item(rule_id)->xf = Transform::translate(54, 60);
+    doc.end_master_edit();
+    bool moved = true;
+    for (size_t i : {0, 2})
+        for (const Item &it : doc.pages[i].items)
+            if (it.master_item == rule_id)
+                moved &= it.xf.f == 60.f;
+    CHECK(moved, "an edited master reaches its pages");
+
+    /* Override the rule on page 3, then edit the master: page 3 keeps its own */
+    ItemId copy3 = 0;
+    for (const Item &it : doc.pages[2].items)
+        if (it.master_item == rule_id)
+            copy3 = it.id;
+    CHECK(doc.override_master_items(2, {copy3}) == 1 && doc.item_editable(*doc.find_item(copy3)),
+          "an overridden copy can be edited");
+    doc.find_item(copy3)->xf = Transform::translate(54, 100);
+    doc.begin_master_edit(a);
+    doc.find_item(rule_id)->xf = Transform::translate(54, 70);
+    doc.end_master_edit();
+    size_t rules3 = 0;
+    float y3 = 0;
+    for (const Item &it : doc.pages[2].items)
+        if (it.master_item == rule_id) {
+            ++rules3;
+            y3 = it.xf.f;
+        }
+    CHECK(rules3 == 1 && y3 == 100.f, "the override stays, and isn't doubled (%zu, %g)", rules3, y3);
+    CHECK(doc.remove_overrides(2, {}) == 1, "remove local overrides");
+    doc.sync_masters();
+    y3 = 0;
+    for (const Item &it : doc.pages[2].items)
+        if (it.master_item == rule_id)
+            y3 = it.xf.f;
+    CHECK(y3 == 70.f, "... and the master's rule is back (%g)", y3);
+
+    /* Deleting an overridden copy keeps it gone; detaching keeps a plain item */
+    for (const Item &it : doc.pages[0].items)
+        if (it.master_item == rule_id)
+            copy3 = it.id;
+    doc.override_master_items(0, {copy3});
+    doc.remove_item(copy3);
+    doc.sync_masters();
+    size_t rules0 = 0;
+    for (const Item &it : doc.pages[0].items)
+        rules0 += it.master_item == rule_id;
+    CHECK(rules0 == 0, "a deleted override doesn't come back on the next sync");
+    ItemId on2 = 0;
+    for (const Item &it : doc.pages[2].items)
+        if (it.master_item == rule_id)
+            on2 = it.id;
+    doc.override_master_items(2, {on2});
+    CHECK(doc.detach_master_items({on2}) == 1, "detach");
+    doc.sync_masters();
+    size_t plain = 0, linked = 0;
+    for (const Item &it : doc.pages[2].items) {
+        plain += it.id == on2 && it.master_item == 0;
+        linked += it.master_item == rule_id;
+    }
+    CHECK(plain == 1 && linked == 0, "a detached item is the page's own, with no copy beside it");
+
+    /* Based on: B adds a running head over A's items */
+    const MasterId b = doc.add_master("Chapter", "", true, a);
+    doc.sync_masters();
+    CHECK(doc.find_master(b)->pages[1].items.size() == 2, "B shows A's items (%zu)",
+          doc.find_master(b)->pages[1].items.size());
+    doc.begin_master_edit(b);
+    Item head;
+    head.w = 200;
+    head.h = 30;
+    head.xf = Transform::translate(200, 20);
+    head.content = Shape{};
+    doc.add_item(1, head);
+    doc.end_master_edit();
+    doc.pages[0].master = b;
+    doc.pages[0].master_hidden.clear();
+    doc.sync_masters();
+    CHECK(copies(0) == 3, "a page on B gets A's items and B's own (%zu)", copies(0));
+    doc.find_master(a)->based_on = b;    // a loop
+    doc.sync_masters();
+    CHECK(doc.find_master(a)->based_on == 0 || doc.find_master(b)->based_on == 0,
+          "a based-on loop is cut");
+    doc.find_master(a)->based_on = 0;
+    doc.find_master(b)->based_on = a;
+    doc.sync_masters();
+
+    /* Facing sides follow the page when one is inserted before it */
+    doc.pages[1].master = a;
+    doc.pages[2].master = a;
+    doc.insert_page(1);
+    doc.pages[1].master = a;
+    doc.sync_masters();
+    size_t rules_on_3rd = 0;             // index 2 is a right page now
+    for (const Item &it : doc.pages[2].items)
+        rules_on_3rd += it.master_item == rule_id;
+    CHECK(rules_on_3rd == 1, "a page that moved to the right takes the right master page");
+
+    /* Sections: i, ii, then 1, 2 ... with a prefix and a name */
+    doc.pages[0].section_start = true;
+    doc.pages[0].section.style = PageNumbering::RomanLower;
+    doc.pages[2].section_start = true;
+    doc.pages[2].section.start = 1;
+    doc.pages[2].section.prefix = "A-";
+    doc.pages[2].section.name = "Chapter One";
+    CHECK(doc.page_label(0) == "i" && doc.page_label(1) == "ii" && doc.page_label(2) == "A-1" &&
+          doc.page_label(4) == "A-3", "labels: %s %s %s %s", doc.page_label(0).c_str(),
+          doc.page_label(1).c_str(), doc.page_label(2).c_str(), doc.page_label(4).c_str());
+    CHECK(doc.section_name(3) == "Chapter One" && doc.section_name(1).empty(), "section names");
+    CHECK(format_page_number(14, PageNumbering::RomanUpper) == "XIV" &&
+          format_page_number(28, PageNumbering::AlphaLower) == "bb" &&
+          format_page_number(0, PageNumbering::RomanLower) == "0", "number styles");
+
+    /* A section marker composes the name, as glyphs on its one character */
+    {
+        Paragraph p;
+        p.runs.push_back({CharStyle(), std::string("\xEE\x80\x83")});
+        Story st;
+        st.paragraphs.push_back(p);
+        Frame f{0, 0, 300, 100};
+        f.section_name = "Chapter One";
+        Composition c = compose(st, {f}, fonts);
+        Paragraph q;
+        q.runs.push_back({CharStyle(), "Chapter One"});
+        Story qs;
+        qs.paragraphs.push_back(q);
+        Composition d = compose(qs, {Frame{0, 0, 300, 100}}, fonts);
+        size_t gc = 0, gd = 0;
+        for (const ComposedLine &l : c.lines)
+            for (const GlyphRun &r : l.runs)
+                gc += r.glyphs.size();
+        for (const ComposedLine &l : d.lines)
+            for (const GlyphRun &r : l.runs)
+                gd += r.glyphs.size();
+        CHECK(gc == gd && gc > 0, "the section marker shows the name (%zu glyphs)", gc);
+    }
+
+    /* Master margins */
+    MasterPage *ma = doc.find_master(a);
+    ma->own_margins = true;
+    ma->margin_inside = 72;
+    ma->margin_outside = 36;
+    ma->columns = 3;
+    const PageMargins m1 = doc.page_margins(1), m2 = doc.page_margins(2);
+    CHECK(m1.columns == 3 && m1.left == 36 && m1.right == 72 && m2.left == 72 && m2.right == 36,
+          "a master's margins, sided (%g %g / %g %g)", m1.left, m1.right, m2.left, m2.right);
+    CHECK(doc.page_margins(0).columns == doc.setup.columns, "a page on B uses Document Setup's");
+
+    /* The file: masters, links, overrides, sections; editing doesn't leak */
+    doc.default_master = a;
+    doc.begin_master_edit(a);
+    std::string err;
+    const std::string path = "/tmp/pagemade_test_masters.pagemade";
+    CHECK(save_document(doc, fonts, path, SaveOptions{false}, &err), "save masters: %s", err.c_str());
+    doc.end_master_edit();
+    OpenResult back = open_document(path, fonts);
+    CHECK(back.ok && back.doc.masters.size() == 2 && !back.doc.editing_master &&
+          back.doc.pages.size() == doc.pages.size(),
+          "masters round-trip (%zu masters, %zu pages)", back.doc.masters.size(), back.doc.pages.size());
+    if (back.ok) {
+        const PageDoc &r = back.doc;
+        CHECK(r.default_master == a && r.find_master(b) && r.find_master(b)->based_on == a &&
+              r.find_master(a)->own_margins && r.find_master(a)->columns == 3,
+              "default, based on and margins come back");
+        CHECK(r.page_label(2) == "A-1" && r.page_label(0) == "i", "sections come back");
+        bool same = true;
+        for (size_t i = 0; i < r.pages.size(); ++i) {
+            size_t n = 0, m = 0;
+            for (const Item &it : r.pages[i].items) n += it.master_item != 0;
+            for (const Item &it : doc.pages[i].items) m += it.master_item != 0;
+            same &= n == m && r.pages[i].master == doc.pages[i].master;
+        }
+        CHECK(same, "each page keeps its master and its copies");
+        size_t stories_ok = 0;
+        for (const StoryEntry &se : r.stories)
+            stories_ok += !se.thread.empty();
+        CHECK(stories_ok == r.stories.size(), "no story lost its frames (master stories too)");
+        CHECK(r.layers.front().master && r.master_layer(), "the Master layer comes back");
+    }
+
+    /* Removing a master: keep the items as the pages' own, or not */
+    PageDoc keep = doc, drop = doc;
+    size_t before = 0;
+    for (const Item &it : keep.pages[2].items)
+        before += it.master_item != 0;
+    CHECK(keep.remove_master(a, true), "remove A, keeping its items");
+    size_t kept = 0, linked_after = 0;
+    for (const Item &it : keep.pages[2].items) {
+        kept += 1;
+        linked_after += it.master_item != 0;
+    }
+    CHECK(kept >= before && linked_after == 0 && keep.pages[2].master == 0 &&
+          keep.find_master(b)->based_on == 0, "kept as plain items; B is based on nothing");
+    drop.remove_master(a, false);
+    size_t left = 0;
+    for (const Item &it : drop.pages[2].items)
+        left += it.master_item != 0;
+    CHECK(left == 0 && drop.default_master == 0, "removed with its copies");
+    CHECK(!drop.remove_layer(drop.master_layer()), "the Master layer stays while masters exist");
+
+    /* An overridden copy moved to another page is that page's own */
+    {
+        PageDoc t = doc;
+        ItemId moved = 0;
+        for (const Item &it : t.pages[2].items)
+            if (it.master_item == rule_id)
+                moved = it.id;
+        t.override_master_items(2, {moved});
+        CHECK(moved && t.transfer_item(moved, 3), "move an override to another page");
+        const Item *m = t.find_item(moved);
+        t.sync_masters();
+        size_t back = 0;
+        for (const Item &it : t.pages[2].items)
+            back += it.master_item == rule_id;
+        CHECK(m && t.find_item(moved)->master_item == 0 && back == 0,
+              "it is plain there, and its old page doesn't get the master's back");
+    }
+
+    /* Find skips the locked copies' text (it can't be edited there) */
+    {
+        size_t copy_stories = 0;
+        for (const StoryEntry &se : doc.stories)
+            for (ItemId f : se.thread)
+                if (const Item *it = doc.find_item(f))
+                    copy_stories += it->master_copy();
+        CHECK(copy_stories > 0 && find_all(doc, "\xEE\x80\x80", "", FindOptions()).empty(),
+              "find doesn't land in master copies (%zu copy stories)", copy_stories);
+    }
+
+    /* Document Setup scales the masters' items with the pages' */
+    {
+        PageDoc t = doc;
+        PageSetup bigger = t.setup;
+        bigger.width *= 2.f;
+        bigger.height *= 2.f;
+        const float before_e = t.find_master(a)->pages[1].items.back().xf.e;
+        change_setup(t, bigger, SetupAdjust::Scale);
+        const float after_e = t.find_master(a)->pages[1].items.back().xf.e;
+        CHECK(std::fabs(after_e - before_e * 2.f) < 0.5f, "master items scale (%g -> %g)", before_e,
+              after_e);
+    }
+}
+
 int main(int argc, char **argv) {
     bool verbose = argc > 1 && std::strcmp(argv[1], "-v") == 0;
     FontLibrary fonts;
@@ -7230,6 +7545,7 @@ int main(int argc, char **argv) {
     test_picture_style(fonts);
     test_groups(fonts);
     test_page_markers(fonts);
+    test_masters(fonts);
     test_layers(fonts);
     test_document_setup(fonts);
     test_pdf_settings(fonts);

@@ -1619,3 +1619,216 @@ void TypeSpecsPanel::load(const CharStyle &style, bool mixed,
         st.reset_btn->set_enabled(st.enabled && !(st.style == st.origin));
     relayout();
 }
+
+/* ---- Master pages and sections -------------------------------------------- */
+
+void ask_master_options(Screen *screen, bool creating, const pagemade::MasterPage &initial,
+                        bool spread, bool facing,
+                        const std::vector<std::pair<pagemade::MasterId, std::string>> &parents,
+                        std::function<void(const pagemade::MasterPage &, bool)> done) {
+    struct State {
+        pagemade::MasterPage m;
+        bool spread = false;
+        std::vector<Widget *> margin_rows;
+    };
+    auto st = std::make_shared<State>();
+    st->m = initial;
+    st->m.pages.clear();
+    st->spread = spread && facing;
+
+    auto *d = new ModalDialog(screen, creating ? "New Master" : "Master Options");
+    Widget *form = d->body();
+    form->set_fixed_size(Vector2i(470, 0));
+
+    Widget *r1 = form_row(form);
+    form_label(r1, "Prefix", 88);
+    TextBox *prefix = new TextBox(r1, st->m.prefix);
+    prefix->set_editable(true);
+    prefix->set_alignment(TextBox::Alignment::Left);
+    prefix->set_fixed_size(Vector2i(60, 28));
+    prefix->set_callback([st](const std::string &v) {
+        std::string t = v;
+        t.erase(std::remove_if(t.begin(), t.end(), [](char c) { return std::isspace((unsigned char) c); }),
+                t.end());
+        if (t.size() > 4)
+            t.resize(4);
+        st->m.prefix = t;
+        return true;
+    });
+    form_label(r1, "Name", 52);
+    TextBox *name = new TextBox(r1, st->m.name);
+    name->set_editable(true);
+    name->set_alignment(TextBox::Alignment::Left);
+    name->set_fixed_size(Vector2i(200, 28));
+    name->set_callback([st](const std::string &v) {
+        st->m.name = v;
+        return true;
+    });
+
+    Widget *r2 = form_row(form);
+    form_label(r2, "Based on", 88);
+    std::vector<std::string> names{"[None]"};
+    int at = 0;
+    for (size_t i = 0; i < parents.size(); ++i) {
+        names.push_back(parents[i].second);
+        if (parents[i].first == st->m.based_on)
+            at = (int) i + 1;
+    }
+    auto *based = new Dropdown(r2, names, {}, Dropdown::ComboBox, names[(size_t) at]);
+    based->set_fixed_size(Vector2i(270, 28));
+    based->set_selected_index(at);
+    based->set_tooltip("Show another master's items too: change that master and this one follows");
+    based->set_selected_callback([st, parents](int i) {
+        st->m.based_on = i > 0 && (size_t) i <= parents.size() ? parents[(size_t) i - 1].first : 0;
+    });
+
+    if (creating && facing) {
+        Widget *r3 = form_row(form);
+        form_label(r3, "Pages", 88);
+        Button *one = new Button(r3, "Single Page");
+        Button *two = new Button(r3, "Spread");
+        for (Button *b : {one, two}) {
+            b->set_flags(Button::RadioButton | Button::ToggleButton);
+            b->set_fixed_size(Vector2i(120, 28));
+        }
+        one->set_pushed(!st->spread);
+        two->set_pushed(st->spread);
+        one->set_callback([st] { st->spread = false; });
+        two->set_callback([st] { st->spread = true; });
+    }
+
+    CheckBox *own = new CheckBox(form, "Its own margins and columns");
+    own->set_checked(st->m.own_margins);
+    Widget *tb = form_row(form);
+    form_label(tb, "Top", 88);
+    inch_box(tb, st->m.margin_top / kPt, 0.05f, 0.f, 20.f,
+             [st](float v) { st->m.margin_top = std::max(0.f, v * kPt); });
+    form_label(tb, "Bottom", 64);
+    inch_box(tb, st->m.margin_bottom / kPt, 0.05f, 0.f, 20.f,
+             [st](float v) { st->m.margin_bottom = std::max(0.f, v * kPt); });
+    Widget *lr = form_row(form);
+    form_label(lr, facing ? "Inside" : "Left", 88);
+    inch_box(lr, st->m.margin_inside / kPt, 0.05f, 0.f, 20.f,
+             [st](float v) { st->m.margin_inside = std::max(0.f, v * kPt); });
+    form_label(lr, facing ? "Outside" : "Right", 64);
+    inch_box(lr, st->m.margin_outside / kPt, 0.05f, 0.f, 20.f,
+             [st](float v) { st->m.margin_outside = std::max(0.f, v * kPt); });
+    Widget *col = form_row(form);
+    form_label(col, "Columns", 88);
+    IntSpin *cols = new IntSpin(col, st->m.columns, 1, 1, 20);
+    cols->set_fixed_size(Vector2i(72, 28));
+    cols->set_callback([st](int n) { st->m.columns = std::max(1, n); });
+    form_label(col, "Gutter", 64);
+    inch_box(col, st->m.gutter / kPt, 0.01f, 0.f, 5.f,
+             [st](float v) { st->m.gutter = std::max(0.f, v * kPt); });
+    st->margin_rows = {tb, lr, col};
+    auto enable = [st](bool on) {
+        for (Widget *row : st->margin_rows)
+            for (Widget *c : row->children())
+                c->set_enabled(on);
+    };
+    enable(st->m.own_margins);
+    own->set_callback([st, enable](bool on) {
+        st->m.own_margins = on;
+        enable(on);
+    });
+    Label *hint = new Label(form,
+                            "Pages that use this master take its margins and column guides; "
+                            "without its own, they use Document Setup's.",
+                            "sans", 14);
+    hint->set_fixed_size(Vector2i(440, 0));
+    hint->set_color(kHintText);
+
+    d->add_button("Cancel", {}, ModalDialog::Role::Cancel);
+    d->add_button(creating ? "Create" : "OK", [st, done] {
+        if (st->m.name.empty())
+            st->m.name = "Master";
+        if (done)
+            done(st->m, st->spread);
+    }, ModalDialog::Role::Default);
+    d->open();
+    name->request_focus();
+}
+
+void ask_section_options(Screen *screen, const std::string &label, bool start,
+                         const pagemade::Section &initial,
+                         std::function<void(bool, const pagemade::Section &)> done) {
+    struct State {
+        bool start = false;
+        pagemade::Section s;
+        std::vector<Widget *> rows;
+    };
+    auto st = std::make_shared<State>();
+    st->start = start;
+    st->s = initial;
+
+    auto *d = new ModalDialog(screen, "Numbering & Section Options");
+    Widget *form = d->body();
+    form->set_fixed_size(Vector2i(440, 0));
+    CheckBox *begin = new CheckBox(form, "Start a section at page " + label);
+    begin->set_checked(st->start);
+
+    Widget *r1 = form_row(form);
+    form_label(r1, "Style", 96);
+    const std::vector<std::string> styles{"1, 2, 3, 4", "i, ii, iii, iv", "I, II, III, IV",
+                                          "a, b, c, d", "A, B, C, D"};
+    auto *style = new Dropdown(r1, styles, {}, Dropdown::ComboBox, styles[(size_t) st->s.style]);
+    style->set_fixed_size(Vector2i(200, 28));
+    style->set_selected_index((int) st->s.style);
+    style->set_selected_callback([st](int i) {
+        st->s.style = (pagemade::PageNumbering) std::clamp(i, 0, 4);
+    });
+
+    Widget *r2 = form_row(form);
+    form_label(r2, "Start at", 96);
+    IntSpin *first = new IntSpin(r2, st->s.start, 1, 1, 9999);
+    first->set_fixed_size(Vector2i(90, 28));
+    first->set_callback([st](int n) { st->s.start = std::max(1, n); });
+
+    Widget *r3 = form_row(form);
+    form_label(r3, "Prefix", 96);
+    TextBox *prefix = new TextBox(r3, st->s.prefix);
+    prefix->set_editable(true);
+    prefix->set_alignment(TextBox::Alignment::Left);
+    prefix->set_fixed_size(Vector2i(90, 28));
+    prefix->set_callback([st](const std::string &v) {
+        st->s.prefix = v.size() > 8 ? v.substr(0, 8) : v;
+        return true;
+    });
+
+    Widget *r4 = form_row(form);
+    form_label(r4, "Section name", 96);
+    TextBox *name = new TextBox(r4, st->s.name);
+    name->set_editable(true);
+    name->set_alignment(TextBox::Alignment::Left);
+    name->set_fixed_size(Vector2i(300, 28));
+    name->set_callback([st](const std::string &v) {
+        st->s.name = v;
+        return true;
+    });
+    st->rows = {r1, r2, r3, r4};
+    auto enable = [st](bool on) {
+        for (Widget *row : st->rows)
+            for (Widget *c : row->children())
+                c->set_enabled(on);
+    };
+    enable(st->start);
+    begin->set_callback([st, enable](bool on) {
+        st->start = on;
+        enable(on);
+    });
+    Label *hint = new Label(form,
+                            "The Page Number marker shows the prefix and the number in this "
+                            "style (“A-iv”); the Section Name marker shows the name. "
+                            "The section runs to the next one.",
+                            "sans", 14);
+    hint->set_fixed_size(Vector2i(420, 0));
+    hint->set_color(kHintText);
+
+    d->add_button("Cancel", {}, ModalDialog::Role::Cancel);
+    d->add_button("OK", [st, done] {
+        if (done)
+            done(st->start, st->s);
+    }, ModalDialog::Role::Default);
+    d->open();
+}

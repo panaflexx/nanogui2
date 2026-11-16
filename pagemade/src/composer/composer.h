@@ -29,6 +29,7 @@
 #include <algorithm>
 #include <cstddef>
 #include <cstdint>
+#include <string>
 #include <vector>
 
 namespace pagemade {
@@ -42,6 +43,8 @@ enum class VAlign : uint8_t { Top, Center, Bottom, Justify };
 
 /* A text block's rectangle in page points (y down), and the page it is on
  * (1-based) out of `pages`, for the page markers. 0 shows them as "#".
+ * `page_label`, when set, is what the page number marker shows instead
+ * ("iv", "A-3"), and `section_name` what the section marker shows.
  * The rectangle is the block's inset box: x, y, w, h already have the
  * block's text insets taken out.
  *
@@ -52,6 +55,7 @@ enum class VAlign : uint8_t { Top, Center, Bottom, Justify };
 struct Frame {
     float x = 0, y = 0, w = 0, h = 0;
     int page = 0, pages = 0;
+    std::string page_label{}, section_name{};
     VAlign valign = VAlign::Top;
     float grid_origin = 0, grid_step = 0;
 };
@@ -156,6 +160,9 @@ std::string list_marker(const ParaStyle &ps, int n);
 /* Each paragraph's list number (0 when it is not numbered). */
 std::vector<int> list_numbers(const Story &story);
 
+/* What page marker `cp` shows in frame `f`: the page's label (or number,
+ * "#" when unknown), the page count, or the section name. */
+std::string marker_text(const Frame &f, uint32_t cp);
 /* Concatenated run texts of a paragraph; clusters index into this. */
 std::string paragraph_text(const Paragraph &p);
 

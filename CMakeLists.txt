@@ -1140,6 +1140,7 @@ if (NANOGUI_BUILD_EXAMPLES)
         pagemade/src/font_menu.cpp
         pagemade/src/font_menu_ui.cpp
         pagemade/src/page.cpp
+        pagemade/src/masters.cpp
         pagemade/src/geometry.cpp
         pagemade/src/drawlist.cpp
         pagemade/src/uri.cpp
@@ -1158,6 +1159,7 @@ if (NANOGUI_BUILD_EXAMPLES)
         pagemade/src/image_assets.cpp
         pagemade/src/layout_templates.cpp
         pagemade/src/layouts_panel.cpp
+        pagemade/src/masters_panel.cpp
         pagemade/src/plugin/svg_export.cpp
         pagemade/src/tool_tabs.cpp
         pagemade/src/dock_window.cpp
@@ -1178,6 +1180,7 @@ if (NANOGUI_BUILD_EXAMPLES)
         pagemade/src/system_fonts.cpp
         pagemade/src/font_menu.cpp
         pagemade/src/page.cpp
+        pagemade/src/masters.cpp
         pagemade/src/geometry.cpp
         pagemade/src/drawlist.cpp
         pagemade/src/uri.cpp
@@ -1205,6 +1208,7 @@ if (NANOGUI_BUILD_EXAMPLES)
         pagemade/src/system_fonts.cpp
         pagemade/src/font_menu.cpp
         pagemade/src/page.cpp
+        pagemade/src/masters.cpp
         pagemade/src/geometry.cpp
         pagemade/src/drawlist.cpp
         pagemade/src/uri.cpp
@@ -1229,6 +1233,7 @@ if (NANOGUI_BUILD_EXAMPLES)
         pagemade/src/default_fonts.cpp
         pagemade/src/system_fonts.cpp
         pagemade/src/page.cpp
+        pagemade/src/masters.cpp
         pagemade/src/geometry.cpp
         pagemade/src/drawlist.cpp
         pagemade/src/uri.cpp

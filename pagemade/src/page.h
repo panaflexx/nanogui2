@@ -41,6 +41,7 @@ namespace pagemade {
 using ItemId = uint32_t;     // 0 = none
 using StoryId = uint32_t;
 using LayerId = uint32_t;    // 0 = none
+using MasterId = uint32_t;   // 0 = none
 
 struct Point {
     float x = 0, y = 0;
@@ -283,6 +284,10 @@ struct Layer {
     std::string name;
     bool        visible = true;
     bool        locked = false;
+    /* The Master layer: every master page's items, and their copies on the
+     * pages that use those masters. There is at most one, always the
+     * bottom layer, made with the first master. */
+    bool        master = false;
 };
 
 struct Item {
@@ -302,6 +307,13 @@ struct Item {
     bool in_group(uint32_t g) const {
         return g && (group == g || std::find(outer_groups.begin(), outer_groups.end(), g) != outer_groups.end());
     }
+    /* A copy of a master page's item (its id), made by sync_masters: drawn
+     * and printed, but locked until overridden. An overridden copy is the
+     * page's own (it no longer follows the master) but remembers which
+     * item it came from, so the next sync doesn't add it again. */
+    ItemId    master_item = 0;
+    bool      overridden = false;
+    bool master_copy() const { return master_item != 0 && !overridden; }
     float     w = 0, h = 0;
     Transform xf;                // item space -> page
     std::variant<TextFrame, Shape, PlacedImage, PlacedVector> content;
@@ -373,6 +385,22 @@ inline uint32_t next_page_uid() {
     return ++next;
 }
 
+/* How a section numbers its pages. */
+enum class PageNumbering { Arabic, RomanLower, RomanUpper, AlphaLower, AlphaUpper };
+/* n in that style: 4 -> "4", "iv", "IV", "d", "D" (letters go on as aa, bb,
+ * ...). Roman and letters need n >= 1; below that they fall back to digits. */
+std::string format_page_number(int n, PageNumbering style);
+
+/* Numbering & Section Options: a section starts at a page and runs to the
+ * next one. Its pages are numbered from `start` in `style`, after `prefix`
+ * ("A-"); the Section Name marker shows `name`. */
+struct Section {
+    PageNumbering style = PageNumbering::Arabic;
+    int start = 1;
+    std::string prefix;
+    std::string name;
+};
+
 struct Page {
     /* Session-only identity, not saved: copies (undo snapshots) keep it,
      * so a page can be followed across undo and reordering. */
@@ -380,6 +408,45 @@ struct Page {
     std::vector<Item> items;     // bottom to top
     bool hidden = false;         // kept, and shown, but not printed
     std::vector<Guide> guides;   // ruler guides on this page only
+    MasterId master = 0;         // the master page it follows (0: none)
+    /* Master items this page has let go of (an overridden copy deleted, or
+     * detached): the sync doesn't copy them back until the page's local
+     * overrides are removed. */
+    std::vector<ItemId> master_hidden;
+    /* A section starts here (the first page always starts one: without
+     * this, page 1 numbers 1, 2, 3, ...). */
+    bool section_start = false;
+    Section section;
+};
+
+/* A page's margins and columns, left and right already sided for facing
+ * pages. */
+struct PageMargins {
+    float top = 54.f, bottom = 54.f, left = 54.f, right = 54.f;
+    int   columns = 1;
+    float gutter = 18.f;
+};
+
+/* A master page: items every page that uses it shows (copied, locked until
+ * overridden; see PageDoc::sync_masters). A single master is one page and
+ * serves both sides; a spread is a left and a right page, and facing
+ * pages take the side they sit on. A master can be based on another: it
+ * shows the parent's items too, and can override them. It can bring its
+ * own margins and columns; otherwise its pages use Document Setup's. */
+struct MasterPage {
+    MasterId id = 0;
+    std::string prefix = "A";    // the page icons' letter, and its page number marker
+    std::string name = "Master";
+    MasterId based_on = 0;
+    std::vector<Page> pages;     // 1, or 2 for a spread (left, right)
+    bool own_margins = false;
+    float margin_top = 54.f, margin_bottom = 54.f;
+    float margin_inside = 54.f, margin_outside = 54.f;
+    int   columns = 1;
+    float gutter = 18.f;
+
+    bool spread() const { return pages.size() == 2; }
+    std::string label() const { return prefix + "-" + name; }
 };
 
 struct StoryEntry {
@@ -476,6 +543,13 @@ struct PageDoc {
     uint32_t                next_id = 1;   // shared by items and stories
     uint32_t                next_asset = 1;
     LayerId                 next_layer = 2;
+    std::vector<MasterPage> masters;
+    MasterId                default_master = 0;    // new pages follow it
+    MasterId                next_master = 1;
+    /* Editing a master (not saved): its pages are swapped into `pages`, and
+     * the publication's pages wait in that master's `pages` meanwhile, so
+     * every tool works on the master as on any page. See begin_master_edit. */
+    MasterId                editing_master = 0;
 
     /* ---- Layers ---- */
     const Layer *find_layer(LayerId id) const;
@@ -559,7 +633,8 @@ struct PageDoc {
     ItemId  add_text_frame(size_t page, StoryId story, float w, float h, const Transform &xf,
                            size_t thread_index = SIZE_MAX);
     /* Removes the item and takes it out of its thread; a story left with no
-     * frames is removed too. A picture's asset stays, unused, after its
+     * frames is removed too. An overridden master copy is remembered in its
+     * page's master_hidden, so the master's doesn't come back. A picture's asset stays, unused, after its
      * last frame goes (remove_image takes it out). */
     void    remove_item(ItemId id);
     /* Move an item onto `page`, on top of that page's stack. The id and the
@@ -594,6 +669,77 @@ struct PageDoc {
      * parts (items or groups directly inside): an item alone in a group
      * leaves it, and a group holding just one group goes away. */
     void     tidy_groups();
+
+    /* ---- Master pages ---- */
+    const MasterPage *find_master(MasterId id) const;
+    MasterPage       *find_master(MasterId id);
+    /* The master's pages as they are now: `pages` while it is being edited. */
+    const std::vector<Page> &master_pages(const MasterPage &m) const;
+    /* The Master layer, or 0 when there is none. */
+    LayerId master_layer() const;
+    /* The Master layer, made at the bottom when missing (0 at kMaxLayers). */
+    LayerId ensure_master_layer();
+    /* A new master, blank: one page, or two for a spread. Its id, or 0 when
+     * there's no room for the Master layer. */
+    MasterId add_master(const std::string &name, const std::string &prefix, bool spread,
+                        MasterId based_on = 0);
+    /* Take a master out. Pages that used it use none; with `keep_items`
+     * their copies of its items stay, as the pages' own, else they go.
+     * Masters based on it are based on nothing. Not while editing. */
+    bool remove_master(MasterId id, bool keep_items);
+    /* The next free prefix: A, B, ... Z, then AA, BB, ... */
+    std::string next_master_prefix() const;
+    /* Which of the master's pages page `index` takes: 0, or 1 for the right
+     * page of a spread (facing: the side it's on; else always the right). */
+    size_t master_side(size_t index, const MasterPage &m) const;
+    /* Every master's items onto the masters based on it, then every page's
+     * master onto the page: copies that aren't overridden are made again
+     * from the master, at the bottom of the Master layer; overridden ones
+     * stay, and lose their link when the master item is gone. Does nothing
+     * while a master is being edited. */
+    void sync_masters();
+    /* Copies on `page` (or every copy on it when `ids` is empty) become
+     * overridden: editable, and no longer following the master. Returns
+     * how many changed. */
+    size_t override_master_items(size_t page, const std::vector<ItemId> &ids);
+    /* The overridden copies among `ids` (all of them on `page` when empty)
+     * go, so the next sync puts the master's back. Returns how many. */
+    size_t remove_overrides(size_t page, const std::vector<ItemId> &ids);
+    /* The items stop being copies at all: plain items of the page. */
+    size_t detach_master_items(const std::vector<ItemId> &ids);
+    /* Swap the master's pages in for editing (ending any other edit first).
+     * end_master_edit swaps the publication's back and syncs. */
+    bool begin_master_edit(MasterId id);
+    void end_master_edit();
+    /* The page's master (the edited master itself while editing), or null. */
+    const MasterPage *master_of(size_t index) const;
+
+    /* ---- Page numbers and margins ---- */
+    /* What the Page Number marker shows on page `index`: its section's
+     * prefix and number in the section's style ("iv", "A-3"); a master's
+     * prefix while editing one. */
+    std::string page_label(size_t index) const;
+    /* What the Section Name marker shows on page `index`. */
+    std::string section_name(size_t index) const;
+    /* The section in force at `index`, and the index of its first page. */
+    const Section &section_at(size_t index, size_t *first = nullptr) const;
+    /* The page's margins and columns: its master's own, else Document
+     * Setup's. Facing pages take the inside margin toward the spine. */
+    PageMargins page_margins(size_t index) const;
+    /* Document Setup as page `index` sees it: its margins and columns (the
+     * master's when it has its own), inside set to the page's left margin
+     * and outside to its right, and facing off, so page_side_margins()
+     * reads them for any index. For margins only. */
+    PageSetup setup_for(size_t index) const;
+    /* Page `index` is a left-hand page (a master spread's left page too). */
+    bool is_verso(size_t index) const;
+    /* Each page in `pages` and in every master, in one pass (pictures
+     * placed on masters are in use too). */
+    template <typename F> void for_each_page(F &&fn) const {
+        for (const Page &p : pages) fn(p);
+        for (const MasterPage &m : masters)
+            for (const Page &p : m.pages) fn(p);
+    }
 
     /* Insert a blank page at `index` (clamped to the end). */
     size_t  insert_page(size_t index);

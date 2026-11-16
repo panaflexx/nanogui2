@@ -521,6 +521,8 @@ void write_text_frame(Svg &svg, const PageDoc &doc, const Item &frame,
         return;
     const Story &story = se->story;
     const std::vector<int> numbers = list_numbers(story);
+    const std::vector<Frame> frames = doc.thread_frames(*se);
+    const Frame shown_frame = thread_index < frames.size() ? frames[thread_index] : Frame();
     bool any = false;
     std::string lines;
     for (const ComposedLine &line : comps[si].lines) {
@@ -620,11 +622,8 @@ void write_text_frame(Svg &svg, const PageDoc &doc, const Item &frame,
                 const uint32_t cp = utf8_decode(text, at);
                 const size_t n = std::max<size_t>(1, utf8_len(text, at));
                 if (is_page_marker(cp)) {
-                    /* Its glyphs are the digits it shows */
-                    for (size_t j = i; j < glyphs.size() && glyphs[j].g->cluster == g.cluster; ++j)
-                        if (uint32_t d = char_for_glyph(glyphs[j].run->font, glyphs[j].g->gid,
-                                                        U"0123456789#"))
-                            append_utf8(segs.back().text, d);
+                    /* What it shows on this frame's page */
+                    segs.back().text += marker_text(shown_frame, cp);
                 } else if (!layout_only(cp)) {
                     segs.back().text.append(text, at, n);
                 }
@@ -685,6 +684,8 @@ std::string items_text(const PageDoc &doc, size_t page, const std::vector<ItemId
             continue;
         const Story &story = se->story;
         const std::vector<int> numbers = list_numbers(story);
+        const std::vector<Frame> frames = doc.thread_frames(*se);
+        const Frame shown_frame = thread_index < frames.size() ? frames[thread_index] : Frame();
         std::string block;
         for (const ComposedLine &line : comps[si].lines) {
             if (line.frame != thread_index || line.para >= story.paragraphs.size())
@@ -702,12 +703,7 @@ std::string items_text(const PageDoc &doc, size_t page, const std::vector<ItemId
                 else if (cp == '\t' || cp == kRightIndentTab)
                     block += '\t';
                 else if (is_page_marker(cp)) {
-                    /* The number it shows: its glyphs on this line are digits */
-                    for (const GlyphRun &r : line.runs)
-                        for (const PlacedGlyph &g : r.glyphs)
-                            if (g.cluster == at)
-                                if (uint32_t d = char_for_glyph(r.font, g.gid, U"0123456789#"))
-                                    append_utf8(block, d);
+                    block += marker_text(shown_frame, cp);   // what it shows on that page
                 } else if (cp != 0xAD && cp != '\r')
                     block.append(text, at, n);
                 at += n;

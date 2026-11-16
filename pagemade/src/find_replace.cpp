@@ -168,6 +168,14 @@ std::vector<FoundText> find_all(const PageDoc &doc, const std::string &needle,
                                 const std::string &replacement, const FindOptions &opt) {
     std::vector<FoundText> out;
     for (const StoryEntry &se : doc.stories) {
+        /* Only text on these pages that can be edited: not a master's
+         * locked copies (the master itself is searched while it is edited) */
+        bool editable = se.thread.empty();
+        for (ItemId f : se.thread)
+            if (const Item *it = doc.find_item(f))
+                editable = editable || !it->master_copy();
+        if (!editable)
+            continue;
         size_t para = SIZE_MAX;
         uint32_t end = 0;
         std::string text;

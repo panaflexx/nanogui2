@@ -192,6 +192,10 @@ void write_item(JsonOut &j, const Item &it) {
             j.value(g);
         j.end_array();
     }
+    if (it.master_item) {                // a master page's item, copied here
+        j.key("master_item").value(it.master_item);
+        if (it.overridden) j.key("overridden").value(true);
+    }
     j.key("w").value(it.w);
     j.key("h").value(it.h);
     j.key("xf").numbers({it.xf.a, it.xf.b, it.xf.c, it.xf.d, it.xf.e, it.xf.f});
@@ -490,6 +494,50 @@ ImagePlan plan_images(const PageDoc &doc, const SaveOptions &opts, const ImageSt
     return plan;
 }
 
+const char *numbering_name(PageNumbering n) {
+    switch (n) {
+    case PageNumbering::RomanLower: return "roman";
+    case PageNumbering::RomanUpper: return "ROMAN";
+    case PageNumbering::AlphaLower: return "alpha";
+    case PageNumbering::AlphaUpper: return "ALPHA";
+    default: return "arabic";
+    }
+}
+
+PageNumbering numbering_from(const std::string &s) {
+    if (s == "roman") return PageNumbering::RomanLower;
+    if (s == "ROMAN") return PageNumbering::RomanUpper;
+    if (s == "alpha") return PageNumbering::AlphaLower;
+    if (s == "ALPHA") return PageNumbering::AlphaUpper;
+    return PageNumbering::Arabic;
+}
+
+void write_page(JsonOut &j, const Page &p) {
+    j.begin_object();
+    if (p.hidden) j.key("hidden").value(true);
+    if (p.master) j.key("master").value(p.master);
+    if (!p.master_hidden.empty()) {
+        j.key("master_hidden").begin_array();
+        for (ItemId id : p.master_hidden)
+            j.value(id);
+        j.end_array();
+    }
+    if (p.section_start) {
+        j.key("section").begin_object();
+        j.key("style").value(numbering_name(p.section.style));
+        j.key("start").value(p.section.start);
+        if (!p.section.prefix.empty()) j.key("prefix").value(p.section.prefix);
+        if (!p.section.name.empty()) j.key("name").value(p.section.name);
+        j.end_object();
+    }
+    write_guides(j, "guides", p.guides);
+    j.key("items").begin_array();
+    for (const Item &it : p.items)
+        write_item(j, it);
+    j.end_array();
+    j.end_object();
+}
+
 std::string make_json(const PageDoc &doc, const SaveOptions &opts, const std::vector<FontRef> &refs,
                       const FontPlan &plan, const ImagePlan &images, const ImagePlan &vectors) {
     JsonOut j;
@@ -560,6 +608,7 @@ std::string make_json(const PageDoc &doc, const SaveOptions &opts, const std::ve
         j.key("name").value(l.name);
         if (!l.visible) j.key("visible").value(false);
         if (l.locked) j.key("locked").value(true);
+        if (l.master) j.key("master").value(true);
         j.end_object();
     }
     j.end_array();
@@ -699,17 +748,33 @@ std::string make_json(const PageDoc &doc, const SaveOptions &opts, const std::ve
     j.end_array();
 
     j.key("pages").begin_array();
-    for (const Page &p : doc.pages) {
-        j.begin_object();
-        if (p.hidden) j.key("hidden").value(true);
-        write_guides(j, "guides", p.guides);
-        j.key("items").begin_array();
-        for (const Item &it : p.items)
-            write_item(j, it);
-        j.end_array();
-        j.end_object();
-    }
+    for (const Page &p : doc.pages)
+        write_page(j, p);
     j.end_array();
+    if (!doc.masters.empty()) {
+        j.key("masters").begin_array();
+        for (const MasterPage &m : doc.masters) {
+            j.begin_object();
+            j.key("id").value(m.id);
+            j.key("prefix").value(m.prefix);
+            j.key("name").value(m.name);
+            if (m.based_on) j.key("based_on").value(m.based_on);
+            if (m.own_margins) {
+                j.key("margins").numbers(
+                    {m.margin_top, m.margin_bottom, m.margin_inside, m.margin_outside});
+                j.key("columns").value(m.columns);
+                j.key("gutter").value(m.gutter);
+            }
+            j.key("pages").begin_array();
+            for (const Page &p : m.pages)
+                write_page(j, p);
+            j.end_array();
+            j.end_object();
+        }
+        j.end_array();
+        if (doc.default_master) j.key("default_master").value(doc.default_master);
+        j.key("next_master").value(doc.next_master);
+    }
     write_guides(j, "guides", doc.guides);
 
     j.key("next_id").value(doc.next_id);
@@ -865,6 +930,8 @@ bool read_item(const DictValue *o, Item &it) {
     get(o, "id", it.id);
     get(o, "layer", it.layer);
     get(o, "group", it.group);
+    get(o, "master_item", it.master_item);
+    get(o, "overridden", it.overridden);
     if (const DictValue *og = field(o, "outer_groups")) {
         for (size_t k = 0; k < count(og); ++k) {
             double g = 0;
@@ -958,9 +1025,56 @@ bool read_item(const DictValue *o, Item &it) {
 /* Keep the model's promises whatever the file says: unique ids, every
  * text frame in exactly one thread, threads naming only text frames,
  * at least one page, the built-in swatches. */
+void repair_pages(PageDoc &d, std::vector<std::string> &warnings);
+
+/* Master pages are pages too: repaired with the publication's (ids unique
+ * across both, threads and groups checked alike), then put back. */
 void repair(PageDoc &d, std::vector<std::string> &warnings) {
     if (d.pages.empty())
         d.pages.resize(1);
+    d.editing_master = 0;
+    /* Master ids: unique and nonzero; based_on and page masters must exist */
+    std::set<MasterId> mids;
+    d.masters.erase(std::remove_if(d.masters.begin(), d.masters.end(),
+                                   [&](const MasterPage &m) {
+                                       return m.id == 0 || !mids.insert(m.id).second;
+                                   }),
+                    d.masters.end());
+    for (MasterPage &m : d.masters) {
+        d.next_master = std::max(d.next_master, m.id + 1);
+        if (!mids.count(m.based_on) || m.based_on == m.id)
+            m.based_on = 0;
+        m.columns = std::clamp(m.columns, 1, 20);
+    }
+    if (!mids.count(d.default_master))
+        d.default_master = 0;
+    for (Page &p : d.pages)
+        if (!mids.count(p.master))
+            p.master = 0;
+    const size_t own = d.pages.size();
+    std::vector<size_t> counts;
+    for (MasterPage &m : d.masters) {
+        counts.push_back(m.pages.size());
+        for (Page &p : m.pages)
+            d.pages.push_back(std::move(p));
+        m.pages.clear();
+    }
+    repair_pages(d, warnings);
+    size_t at = own;
+    for (size_t i = 0; i < d.masters.size(); ++i) {
+        for (size_t k = 0; k < counts[i]; ++k)
+            d.masters[i].pages.push_back(std::move(d.pages[at + k]));
+        at += counts[i];
+    }
+    d.pages.resize(own);
+    /* A master page item that is itself a stale copy is fine: the sync
+     * makes copies again. Master items need the Master layer */
+    if (!d.masters.empty() && !d.master_layer())
+        d.ensure_master_layer();
+    d.sync_masters();
+}
+
+void repair_pages(PageDoc &d, std::vector<std::string> &warnings) {
     for (const Swatch &s : default_swatches())
         if (s.id <= kRegistration && !d.find_swatch(s.id))
             d.swatches.push_back(s);
@@ -1107,16 +1221,29 @@ std::vector<char> extract(mz_zip_archive &zip, const std::string &entry, bool *f
 
 /* ---- Public API ------------------------------------------------------------ */
 
-std::string document_json(const PageDoc &doc, const FontLibrary &fonts, const SaveOptions &opts,
+/* The publication as it is saved: with a master being edited put back. */
+const PageDoc &publication_of(const PageDoc &doc, PageDoc &scratch) {
+    if (!doc.editing_master)
+        return doc;
+    scratch = doc;
+    scratch.end_master_edit();
+    return scratch;
+}
+
+std::string document_json(const PageDoc &edited, const FontLibrary &fonts, const SaveOptions &opts,
                           const ImageStore *images, const VectorStore *vectors) {
+    PageDoc scratch;
+    const PageDoc &doc = publication_of(edited, scratch);
     const std::vector<FontRef> refs = used_fonts(doc, fonts);
     return make_json(doc, opts, refs, plan_fonts(refs, opts), plan_images(doc, opts, images),
                      plan_vectors(doc, opts, vectors));
 }
 
-bool save_document(const PageDoc &doc, const FontLibrary &fonts, const std::string &path,
+bool save_document(const PageDoc &edited, const FontLibrary &fonts, const std::string &path,
                    const SaveOptions &opts, std::string *error, const ImageStore *images,
                    const VectorStore *vectors) {
+    PageDoc scratch;
+    const PageDoc &doc = publication_of(edited, scratch);
     const std::vector<FontRef> refs = used_fonts(doc, fonts);
     const FontPlan plan = plan_fonts(refs, opts);
     const ImagePlan pictures = plan_images(doc, opts, images);
@@ -1311,6 +1438,7 @@ OpenResult open_document(const std::string &path, const FontLibrary &installed,
             get(at(ls, i), "name", l.name);
             get(at(ls, i), "visible", l.visible);
             get(at(ls, i), "locked", l.locked);
+            get(at(ls, i), "master", l.master);
             d.layers.push_back(l);
         }
     }
@@ -1404,11 +1532,27 @@ OpenResult open_document(const std::string &path, const FontLibrary &installed,
     if (count(pages))
         d.pages.clear();
     size_t unknown = 0;
-    for (size_t i = 0; i < count(pages); ++i) {
+    auto read_page = [&](const DictValue *po) {
         Page page;
-        get(at(pages, i), "hidden", page.hidden);
-        page.guides = read_guides(field(at(pages, i), "guides"));
-        const DictValue *items = field(at(pages, i), "items");
+        get(po, "hidden", page.hidden);
+        get(po, "master", page.master);
+        if (const DictValue *mh = field(po, "master_hidden"))
+            for (size_t k = 0; k < count(mh); ++k) {
+                double v = 0;
+                if (number(at(mh, k), v) && v > 0)
+                    page.master_hidden.push_back((ItemId) v);
+            }
+        if (const DictValue *sec = field(po, "section")) {
+            page.section_start = true;
+            std::string style;
+            get(sec, "style", style);
+            page.section.style = numbering_from(style);
+            get(sec, "start", page.section.start);
+            get(sec, "prefix", page.section.prefix);
+            get(sec, "name", page.section.name);
+        }
+        page.guides = read_guides(field(po, "guides"));
+        const DictValue *items = field(po, "items");
         for (size_t k = 0; k < count(items); ++k) {
             Item it;
             if (read_item(at(items, k), it))
@@ -1416,7 +1560,37 @@ OpenResult open_document(const std::string &path, const FontLibrary &installed,
             else
                 ++unknown;
         }
-        d.pages.push_back(std::move(page));
+        return page;
+    };
+    for (size_t i = 0; i < count(pages); ++i)
+        d.pages.push_back(read_page(at(pages, i)));
+    if (const DictValue *ms = field(root, "masters")) {
+        for (size_t i = 0; i < count(ms); ++i) {
+            const DictValue *mo = at(ms, i);
+            MasterPage m;
+            get(mo, "id", m.id);
+            get(mo, "prefix", m.prefix);
+            get(mo, "name", m.name);
+            get(mo, "based_on", m.based_on);
+            float mg[4] = {0, 0, 0, 0};
+            if (floats(mo, "margins", mg, 4) >= 4) {
+                m.own_margins = true;
+                m.margin_top = mg[0];
+                m.margin_bottom = mg[1];
+                m.margin_inside = mg[2];
+                m.margin_outside = mg[3];
+                get(mo, "columns", m.columns);
+                get(mo, "gutter", m.gutter);
+            }
+            const DictValue *mp = field(mo, "pages");
+            for (size_t k = 0; k < count(mp) && k < 2; ++k)
+                m.pages.push_back(read_page(at(mp, k)));
+            if (m.pages.empty())
+                m.pages.resize(1);
+            d.masters.push_back(std::move(m));
+        }
+        get(root, "default_master", d.default_master);
+        get(root, "next_master", d.next_master);
     }
     if (unknown)
         r.warnings.push_back(std::to_string(unknown) + " items of kinds this version doesn't know were left out");
