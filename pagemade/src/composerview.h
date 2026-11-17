@@ -127,7 +127,9 @@ public:
     bool ruler_mapping(nanogui::Vector2f &origin, float &scale) const;
 
     /* The toolbox. */
-    enum class Tool { Pointer, Crop, Rotate, Text, Line, Rect, Ellipse, Polygon };
+    /* Pen draws a path point by point (click a corner, drag a curve) and
+     * edits a selected path's points. */
+    enum class Tool { Pointer, Crop, Rotate, Text, Line, Rect, Ellipse, Polygon, Pen };
     void set_tool(Tool t);
     Tool tool() const { return m_tool; }
     bool editing() const { return edit_story() != nullptr; }
@@ -519,6 +521,14 @@ public:
     bool update_doc_swatch(pagemade::SwatchId id, const std::string &name,
                            pagemade::Color rgb, pagemade::Cmyk cmyk);
     bool remove_doc_swatch(pagemade::SwatchId id);
+    /* Named gradients (PageDoc::gradients), each one undo step. Adding one
+     * also fills the selected shapes (or new shapes) with it; changing one
+     * changes every shape filled with it; removing one leaves those shapes
+     * their gradient, unnamed. */
+    pagemade::GradientId add_doc_gradient(const std::string &name, const pagemade::Gradient &g);
+    void update_doc_gradient(pagemade::GradientId id, const std::string &name,
+                             const pagemade::Gradient &g);
+    void remove_doc_gradient(pagemade::GradientId id);
 
     /* Character attributes for the control palette's type view. With a text
      * selection, the selection; at a caret, the style about to be typed;
@@ -854,6 +864,38 @@ private:
     void update_creation(pagemade::Point pt, bool constrain);
     void finish_creation();
 
+    /* ---- The pen tool ---------------------------------------------- */
+    /* A path being drawn: its points so far on the page (page space), not
+     * yet in the document. pen_commit() adds it as one undo step (two
+     * points or more), closed or open; pen_cancel() drops it. */
+    struct PenDraw {
+        bool active = false;
+        size_t page = 0;
+        std::vector<pagemade::PathNode> nodes;
+        bool dragging = false;           // the press that put the last point down
+        pagemade::Point down;            // ... and where it was
+        pagemade::Point hover;           // the pointer, for the rubber band
+    };
+    /* Editing a selected path's points with the pen: what the drag holds. */
+    enum class PenGrab { None, Node, In, Out };
+    struct PenEdit {
+        pagemade::ItemId item = 0;
+        int node = -1;                   // the chosen point, or -1
+        PenGrab grab = PenGrab::None;
+        bool saved = false;              // the drag's undo step is pushed
+    };
+    bool pen_press(const pagemade::Point &pt, int modifiers);
+    void pen_drag(const pagemade::Point &pt, bool shift);
+    void pen_release();
+    bool pen_key(int key);
+    void pen_commit(bool close);
+    void pen_cancel();
+    /* The path the pen edits: the single selected path item. */
+    pagemade::Item *pen_target();
+    /* Which point or handle of `it` is under `pt` (page space). */
+    PenGrab pen_grab_at(const pagemade::Item &it, const pagemade::Point &pt, int &node) const;
+    void draw_pen(NVGcontext *ctx, float px, size_t page);
+
     /* A new frame of `asset` at print size, at the margin. Caller recorded
      * the undo step and added the asset. */
     /* A picture's frame: at the margin of the current page, or with its
@@ -918,6 +960,9 @@ private:
     pagemade::LayerId m_layer_before_linked = 0;
     /* A pointer double-click on a master copy: Edit Master Here */
     double m_copy_click_time = -1.0;
+    /* A double-click on a path with the pointer: edit its points (pen) */
+    double m_path_click_time = -1.0;
+    pagemade::ItemId m_path_click = 0;
     pagemade::ItemId m_copy_click = 0;
     /* Dragging a margin guide of the master being edited */
     struct MarginDrag {
@@ -1051,6 +1096,8 @@ private:
     bool m_creating = false;              // a drawing tool's drag in progress
     pagemade::ItemId m_created = 0;
     pagemade::PageDoc m_creation_saved;   // pre-drawing state, pushed if something is drawn
+    PenDraw m_pen;
+    PenEdit m_pen_edit;
     pagemade::Shape m_default_shape;      // fill and stroke for new shapes
     pagemade::CharStyle m_default_type;   // type for a new text block
     bool m_typing_on = false;             // caret: the next insert uses m_typing

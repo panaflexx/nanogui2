@@ -1312,7 +1312,13 @@ std::vector<std::string> pdf_preflight(const PageDoc &doc, const std::vector<Com
                 continue;
             if (const Shape *sh = it.shape()) {
                 const Color f = doc.resolve(sh->fill), st = doc.resolve(sh->stroke.paint);
-                if ((!sh->fill.none() && f.a < 0.999f) || (!sh->stroke.none() && st.a < 0.999f))
+                bool see_through = (!sh->fill.none() && f.a < 0.999f) ||
+                                   (!sh->stroke.none() && st.a < 0.999f);
+                if (sh->filled() && sh->gradient.on())
+                    for (const GradientPoint &gp : sh->gradient.points)
+                        see_through = see_through || gp.opacity < 99.95f ||
+                                      doc.resolve(gp.paint).a < 0.999f;
+                if (see_through)
                     transparent.insert(pi + 1);
             }
             if (const PlacedImage *im = it.image(); im && !im->asset) {

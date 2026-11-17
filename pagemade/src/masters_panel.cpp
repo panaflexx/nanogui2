@@ -9,6 +9,7 @@
 
 #include "composerview.h"
 #include "dialogs.h"
+#include "drawlist.h"
 
 #include <nanogui/opengl.h>
 #include <nanogui/button.h>
@@ -73,11 +74,26 @@ void draw_master_page(NVGcontext *ctx, const PageDoc &doc, const Page &page) {
                 nvgLineTo(ctx, it.w, it.h);
             } else if (sh->kind == Shape::Kind::Ellipse) {
                 nvgEllipse(ctx, it.w * 0.5f, it.h * 0.5f, std::fabs(it.w) * 0.5f, std::fabs(it.h) * 0.5f);
+            } else if (sh->kind == Shape::Kind::Path) {
+                bool first = true;
+                for (const PathCmd &c : shape_path(it)) {
+                    if (c.kind == PathCmd::Close)
+                        nvgClosePath(ctx);
+                    else if (first || c.kind == PathCmd::Move)
+                        nvgMoveTo(ctx, c.x, c.y);
+                    else if (c.kind == PathCmd::Cubic)
+                        nvgBezierTo(ctx, c.cx1, c.cy1, c.cx2, c.cy2, c.x, c.y);
+                    else
+                        nvgLineTo(ctx, c.x, c.y);
+                    first = false;
+                }
             } else {
                 nvgRoundedRect(ctx, 0, 0, it.w, it.h, sh->corner_radius);
             }
-            if (!sh->fill.none() && sh->kind != Shape::Kind::Line) {
-                nvgFillColor(ctx, nvg_color(doc.resolve(sh->fill)));
+            if (sh->filled()) {
+                pagemade::Color c = doc.resolve(sh->fill);
+                shape_gradient(doc, sh->gradient, it.w, it.h, &c);   // its middle, small
+                nvgFillColor(ctx, nvg_color(c));
                 nvgFill(ctx);
             }
             if (!sh->stroke.none()) {

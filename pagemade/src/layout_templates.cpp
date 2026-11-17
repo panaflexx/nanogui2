@@ -914,7 +914,8 @@ LayoutTemplate layout_from_items(const PageDoc &doc, const VectorStore *vectors,
             stroke_of(im->stroke);
         } else if (const Shape *sh = it.shape()) {
             e.kind = LayoutElement::Kind::Shape;
-            e.shape = sh->kind == Shape::Kind::Polygon ? Shape::Kind::Rect : sh->kind;
+            e.shape = sh->kind == Shape::Kind::Polygon || sh->kind == Shape::Kind::Path
+                          ? Shape::Kind::Rect : sh->kind;
             e.corner_radius = sh->corner_radius;
             if (!sh->fill.none()) {
                 e.fill_swatch = swatch_name(doc, sh->fill.swatch);

@@ -7178,6 +7178,175 @@ static void test_import_editable(const FontLibrary &fonts) {
  * page labels, the markers composing per page, and the file. */
 /* Edit Master Here: a page's copies of its master's items are edited in
  * place, and the edits go into the master and every page that uses it. */
+static void test_gradients_and_paths(const FontLibrary &fonts) {
+    PageDoc doc = new_publication(PageSetup(), 1);
+    auto near = [](float a, float b) { return std::fabs(a - b) < 1e-3f; };
+
+    /* A gradient fill: two points, the second half see-through */
+    Item box;
+    box.w = 200;
+    box.h = 100;
+    box.xf = Transform::translate(50, 50);
+    Shape sh;
+    sh.kind = Shape::Kind::Rect;
+    sh.gradient = default_gradient(Paint{});
+    sh.gradient.points[1].opacity = 50.f;
+    box.content = sh;
+    CHECK(sh.filled() && sh.fill.none(), "a gradient fills a shape with no solid fill");
+    const ItemId bid = doc.add_item(0, box);
+    {
+        const DrawList l = build_page(doc, 0, {});
+        const DrawFill *f = nullptr;
+        for (const DrawOp &op : l)
+            if (const DrawFill *x = std::get_if<DrawFill>(&op))
+                f = x;
+        CHECK(f && f->gradient && f->gradient->stops.size() == 2, "a gradient fill is drawn");
+        if (f && f->gradient) {
+            const DrawGradient &g = *f->gradient;
+            CHECK(!g.radial && near(g.stops[0].color.a, 1.f) && near(g.stops[1].color.a, 0.5f),
+                  "each point keeps its opacity");
+            const Point s = g.xf.apply({0, 0}), e = g.xf.apply({1, 0});
+            CHECK(near(s.x, 0) && near(s.y, 50) && near(e.x, 200) && near(e.y, 50),
+                  "a 0 degree ramp runs edge to edge across the box (%g,%g)-(%g,%g)", s.x, s.y,
+                  e.x, e.y);
+        }
+    }
+    doc.find_item(bid)->shape()->gradient.angle = 90.f;
+    doc.find_item(bid)->shape()->gradient.kind = Gradient::Kind::Linear;
+    {
+        const DrawGradientRef g = shape_gradient(doc, doc.find_item(bid)->shape()->gradient, 200, 100);
+        const Point s = g->xf.apply({0, 0}), e = g->xf.apply({1, 0});
+        CHECK(near(s.x, 100) && near(s.y, 0) && near(e.x, 100) && near(e.y, 100),
+              "90 degrees runs top to bottom");
+        Gradient r = doc.find_item(bid)->shape()->gradient;
+        r.kind = Gradient::Kind::Radial;
+        const DrawGradientRef rg = shape_gradient(doc, r, 200, 100);
+        const Point c = rg->xf.apply({0, 0}), edge = rg->xf.apply({1, 0});
+        CHECK(rg->radial && near(c.x, 100) && near(c.y, 50) && near(edge.x, 200),
+              "a radial ramp runs from the middle to the edges");
+    }
+    /* Four points, out of order: drawn sorted */
+    {
+        Gradient g = default_gradient(Paint{});
+        g.points.push_back({Paint{kBlack, 50.f}, 75.f, 100.f});
+        g.points.push_back({Paint{kBlack, 20.f}, 25.f, 100.f});
+        const DrawGradientRef d = shape_gradient(doc, g, 10, 10);
+        bool sorted = d && d->stops.size() == 4;
+        for (size_t i = 1; sorted && i < d->stops.size(); ++i)
+            sorted = d->stops[i - 1].offset <= d->stops[i].offset;
+        CHECK(sorted, "four points are drawn in order along the ramp");
+    }
+
+    /* A path: a corner, a curve, a corner, closed */
+    std::vector<PathNode> nodes(3);
+    nodes[0].p = {100, 300};
+    corner_node(nodes[0]);
+    nodes[1].p = {200, 250};
+    smooth_node(nodes[1], nodes[0].p, Point{300, 300});
+    nodes[2].p = {300, 300};
+    corner_node(nodes[2]);
+    CHECK(nodes[1].curve && nodes[1].in.x < 200 && nodes[1].out.x > 200 &&
+          near(nodes[1].in.y, 250) && near(nodes[1].out.y, 250),
+          "a curve point's handles line up along its neighbors");
+    Item path;
+    Shape ps;
+    ps.kind = Shape::Kind::Path;
+    ps.fill = {kBlack, 100.f};
+    path.content = ps;
+    set_path_item_nodes(path, nodes);
+    CHECK(near(path.xf.e, 100) && std::fabs(path.xf.f - 250.f) < 0.1f && near(path.w, 200) &&
+              std::fabs(path.h - 50.f) < 0.1f,
+          "the box fits the outline (y %g, w %g, h %g)", path.xf.f, path.w, path.h);
+    const std::vector<PathNode> back = path_item_nodes(path);
+    CHECK(back.size() == 3 && near(path.xf.apply(back[1].p).x, 200) &&
+          near(path.xf.apply(back[1].p).y, 250), "the points stay put on the page");
+    const Path outline = shape_path(path);
+    CHECK(outline.size() == 5 && outline[1].kind == PathCmd::Cubic &&
+          outline[3].kind == PathCmd::Line && outline[4].kind == PathCmd::Close,
+          "curved segments are cubics, the corner to corner one a line, then closed");
+    /* Stretched: the points scale with the box */
+    path.w *= 2;
+    CHECK(near(path_item_nodes(path)[2].p.x, 400), "a stretched path's points stretch too");
+    path.w /= 2;
+    /* A point added on a curve leaves the outline where it was */
+    {
+        std::vector<PathNode> n = path_item_nodes(path);
+        float t = 0.f;
+        const Point mid{50, 5};
+        nearest_on_segment(n, 0, mid, t);
+        const Path before = node_path(n, true);
+        const size_t at = split_segment(n, true, 0, 0.5f);
+        CHECK(at == 1 && n.size() == 4, "a point goes in after the segment's start");
+        const std::vector<Polyline> a = flatten(before, 0.01f), b = flatten(node_path(n, true), 0.01f);
+        float worst = 0.f;
+        for (const Point &q : b[0].pts) {
+            float best = 1e30f;
+            for (size_t k = 0; k + 1 < a[0].pts.size(); ++k) {
+                const Point u = a[0].pts[k], v = a[0].pts[k + 1];
+                const float vx = v.x - u.x, vy = v.y - u.y, len2 = vx * vx + vy * vy;
+                const float tt = len2 > 0 ? std::clamp(((q.x - u.x) * vx + (q.y - u.y) * vy) / len2, 0.f, 1.f) : 0.f;
+                best = std::min(best, std::hypot(q.x - (u.x + tt * vx), q.y - (u.y + tt * vy)));
+            }
+            worst = std::max(worst, best);
+        }
+        CHECK(worst < 0.2f, "splitting a curve keeps its shape (%g)", worst);
+    }
+    Shape open = ps;
+    open.closed = false;
+    CHECK(!open.filled(), "an open path isn't filled");
+
+    /* Named gradients: copies follow the named one */
+    {
+        Gradient g = default_gradient(Paint{});
+        CHECK(gradient_auto_name(g, doc.swatches) == "Black Paper",
+              "a name from the colors (%s)", gradient_auto_name(g, doc.swatches).c_str());
+        g.points[0].paint.tint = 40.f;
+        CHECK(gradient_auto_name(g, doc.swatches) == "Black 40% Paper", "with tints");
+    }
+    const GradientId named = doc.add_gradient("Sunset", default_gradient(Paint{}));
+    doc.find_item(bid)->shape()->gradient = doc.find_gradient(named)->gradient;
+    Gradient changed = doc.find_gradient(named)->gradient;
+    changed.angle = 45.f;
+    doc.set_gradient(named, "Dusk", changed);
+    CHECK(doc.find_gradient(named)->name == "Dusk" &&
+          near(doc.find_item(bid)->shape()->gradient.angle, 45.f) &&
+          doc.find_item(bid)->shape()->gradient.id == named,
+          "changing a named gradient changes the shapes filled with it");
+
+    /* Saved and opened again */
+    Item g2 = path;
+    g2.shape()->gradient = default_gradient(Paint{kBlack, 60.f});
+    g2.shape()->gradient.kind = Gradient::Kind::Radial;
+    g2.shape()->gradient.points[0].opacity = 25.f;
+    const ItemId pid = doc.add_item(0, g2);
+    const std::string file = "/tmp/pagemade-gradient-path.pagemade";
+    std::string error;
+    CHECK(save_document(doc, fonts, file, SaveOptions{}, &error), "save (%s)", error.c_str());
+    OpenResult opened = open_document(file, fonts);
+    CHECK(opened.ok, "open (%s)", opened.error.c_str());
+    if (opened.ok) {
+        const Item *p2 = opened.doc.find_item(pid);
+        const Shape *s2 = p2 ? p2->shape() : nullptr;
+        CHECK(s2 && s2->kind == Shape::Kind::Path && s2->nodes.size() == 3 && s2->closed &&
+              s2->nodes[1].curve && !s2->nodes[0].curve && near(s2->nodes[1].out.x, g2.shape()->nodes[1].out.x),
+              "a path's points come back, corners and curves");
+        CHECK(s2 && s2->gradient.kind == Gradient::Kind::Radial && s2->gradient.points.size() == 2 &&
+              near(s2->gradient.points[0].opacity, 25.f) && near(s2->gradient.points[0].paint.tint, 60.f) &&
+              near(s2->gradient.points[1].pos, 100.f),
+              "a gradient comes back: kind, points, tints and opacities");
+        const Item *b2 = opened.doc.find_item(bid);
+        CHECK(b2 && b2->shape() && b2->shape()->gradient.on() &&
+              near(b2->shape()->gradient.angle, 45.f) && b2->shape()->gradient.id == named,
+              "and the angle, and its name");
+        CHECK(opened.doc.find_gradient(named) && opened.doc.find_gradient(named)->name == "Dusk",
+              "named gradients come back");
+        opened.doc.remove_gradient(named);
+        const Item *b3 = opened.doc.find_item(bid);
+        CHECK(b3 && b3->shape()->gradient.on() && b3->shape()->gradient.id == 0,
+              "removing a named gradient leaves its shapes their gradient, unnamed");
+    }
+}
+
 static void test_linked_edit() {
     PageDoc doc = new_publication(PageSetup(), 3);
     const MasterId a = doc.add_master("Body", "", false);
@@ -7710,6 +7879,7 @@ int main(int argc, char **argv) {
     test_page_markers(fonts);
     test_masters(fonts);
     test_linked_edit();
+    test_gradients_and_paths(fonts);
     test_layers(fonts);
     test_document_setup(fonts);
     test_pdf_settings(fonts);

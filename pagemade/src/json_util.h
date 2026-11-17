@@ -226,12 +226,14 @@ inline const char *shape_name(Shape::Kind k) {
     case Shape::Kind::Ellipse: return "ellipse";
     case Shape::Kind::Line: return "line";
     case Shape::Kind::Polygon: return "polygon";
+    case Shape::Kind::Path: return "path";
     }
     return "rectangle";
 }
 inline Shape::Kind shape_from(const std::string &s) {
     return s == "ellipse" ? Shape::Kind::Ellipse : s == "line" ? Shape::Kind::Line :
-           s == "polygon" ? Shape::Kind::Polygon : Shape::Kind::Rect;
+           s == "polygon" ? Shape::Kind::Polygon : s == "path" ? Shape::Kind::Path :
+           Shape::Kind::Rect;
 }
 
 /* ---- Reading ------------------------------------------------------------- */

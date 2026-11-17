@@ -59,6 +59,7 @@
 #include "composer/hyphenator.h"
 #include "composerview.h"
 #include "dialogs.h"
+#include "gradient_dialog.h"
 #include "image_assets.h"
 #include "layouts_panel.h"
 #include "masters_panel.h"
@@ -941,6 +942,13 @@ public:
         tool_btn(Tool::Rect, FA_SQUARE, "Rectangle tool (Shift: square)");
         tool_btn(Tool::Ellipse, FA_CIRCLE, "Ellipse tool (Shift: circle)");
         tool_btn(Tool::Polygon, FA_DRAW_POLYGON, "Polygon tool (Shift: regular)");
+        tool_btn(Tool::Pen, FA_PEN_NIB,
+                 "Pen tool: click for a corner, drag for a curve (Shift: 45\u00B0 steps); "
+                 "click the first point to close, the last (or Return, Esc) to end open; "
+                 "Delete takes back a point. On a selected path: drag points and handles, "
+                 "click the outline to add a point, Alt+click a point to switch corner and "
+                 "curve, Delete removes the chosen point. Double-click a path with the "
+                 "pointer to edit it.");
         m_tool_btns.front().second->set_pushed(true);
 
         /* Not a tool: puts an empty picture frame down, as a placed
@@ -1735,14 +1743,21 @@ public:
 
     void refill_paint_menu(ColorDropdown *menu, SwatchId current,
                            const std::function<void(SwatchId)> &pick) {
+        const bool fill = menu == m_fill;
+        const Gradient grad = fill ? m_view->shape_style().gradient : Gradient();
         if (menu->popup()->visible()) {
-            show_paint_face(menu, current);
+            if (grad.on())
+                menu->set_gradient(gradient_label(grad), gradient_ramp(grad));
+            else
+                show_paint_face(menu, current);
             return;
         }
         SwatchMenuView view;
         view.swatches = m_view->document().swatches;
         view.current = current;
         view.none_row = true;
+        if (fill)
+            add_gradient_rows(view, grad);
         refill_swatch_menu(menu, view, pick, [this](SwatchId id) { edit_color(id); },
                            [this] { add_color(); });
     }
@@ -1754,10 +1769,88 @@ public:
             menu->set_none();
     }
 
+    /* The selection's gradient fill (or the one new shapes take) */
+    /* The fill menus' gradient rows: the named ones, then New */
+    void add_gradient_rows(SwatchMenuView &view, const Gradient &current) {
+        for (const GradientSwatch &g : m_view->document().gradients)
+            view.gradients.push_back({g.id, g.name, gradient_ramp(g.gradient),
+                                      g.gradient.kind == Gradient::Kind::Radial});
+        if (current.on()) {
+            view.ramp = gradient_ramp(current);
+            view.current_gradient = current.id;
+        }
+        view.new_gradient = [this] { new_gradient(); };
+        view.pick_gradient = [this](GradientId id) { pick_gradient(id); };
+        view.edit_gradient = [this](GradientId id) { edit_gradient(id); };
+    }
+
+    /* A shape's gradient on a menu face: its name, or "Gradient" unnamed */
+    std::string gradient_label(const Gradient &g) const {
+        const GradientSwatch *gs = m_view->document().find_gradient(g.id);
+        return gs ? gs->name : std::string("Gradient");
+    }
+
+    void pick_gradient(GradientId id) {
+        const GradientSwatch *gs = m_view->document().find_gradient(id);
+        if (!gs)
+            return;
+        const Gradient g = gs->gradient;
+        m_view->apply_shape_style([g](Shape &s) { s.gradient = g; });
+    }
+
+    /* A new named gradient, from the selection's fill; it fills the
+     * selection (or new shapes) */
+    void new_gradient() {
+        close_color_menus();
+        async([this] {
+            const Shape sh = m_view->shape_style();
+            Gradient init = sh.gradient.on() ? sh.gradient : default_gradient(sh.fill);
+            init.id = 0;
+            ask_gradient(this, m_view->document().swatches, init, "",
+                         [this](const std::string &name, const Gradient &g) {
+                             m_view->add_doc_gradient(name, g);
+                         });
+        });
+    }
+
+    void edit_gradient(GradientId id) {
+        close_color_menus();
+        async([this, id] {
+            const GradientSwatch *gs = m_view->document().find_gradient(id);
+            if (!gs)
+                return;
+            ask_gradient(
+                this, m_view->document().swatches, gs->gradient, gs->name,
+                [this, id](const std::string &name, const Gradient &g) {
+                    m_view->update_doc_gradient(id, name, g);
+                },
+                [this, id] { m_view->remove_doc_gradient(id); });
+        });
+    }
+
+    /* A gradient's colors in order along the ramp, for a menu's chip */
+    std::vector<pagemade::Color> gradient_ramp(const Gradient &g) const {
+        std::vector<GradientPoint> pts = g.points;
+        std::stable_sort(pts.begin(), pts.end(), [](const GradientPoint &a, const GradientPoint &b) {
+            return a.pos < b.pos;
+        });
+        std::vector<pagemade::Color> out;
+        for (const GradientPoint &p : pts) {
+            pagemade::Color c = m_view->document().resolve(p.paint);
+            c.a *= std::clamp(p.opacity, 0.f, 100.f) / 100.f;
+            out.push_back(c);
+        }
+        return out;
+    }
+
     /* Pictures take the stroke as a border on the frame; their fill stays
-     * None (the fill tint is their opacity). */
+     * None (the fill tint is their opacity). A solid fill (or None) takes
+     * over from a gradient. */
     void pick_fill(SwatchId id) {
-        m_view->apply_shape_style([id](Shape &sh) { sh.fill.swatch = id; });
+        m_view->apply_shape_style([id](Shape &sh) {
+            sh.fill.swatch = id;
+            sh.gradient = Gradient();
+        });
     }
     void pick_stroke(SwatchId id) {
         m_view->apply_item_style([id](Shape &sh) { sh.stroke.paint.swatch = id; },
@@ -1781,6 +1874,8 @@ public:
         SwatchMenuView view;
         view.swatches = m_view->document().swatches;
         view.current = current_paint();
+        if (m_view->shapes_selected())   // shapes take the fill, so a gradient too
+            add_gradient_rows(view, m_view->shape_style().gradient);
         refill_swatch_menu(
             m_colors, view, [this](SwatchId id) { pick_color(id); },
             [this](SwatchId id) { edit_color(id); }, [this] { add_color(); });
@@ -1816,10 +1911,16 @@ public:
             return;
         }
         if (m_view->shapes_selected()) {
-            m_view->apply_shape_style([id](Shape &sh) { sh.fill.swatch = id; });
+            m_view->apply_shape_style([id](Shape &sh) {
+                sh.fill.swatch = id;
+                sh.gradient = Gradient();
+            });
             return;
         }
-        m_view->apply_item_style([id](Shape &sh) { sh.fill.swatch = id; }, nullptr);
+        m_view->apply_item_style([id](Shape &sh) {
+            sh.fill.swatch = id;
+            sh.gradient = Gradient();
+        }, nullptr);
         m_view->apply_type([id](CharStyle &cs) { cs.swatch = id; });
     }
 
@@ -3097,7 +3198,10 @@ public:
                     best = i;
             return best;
         };
-        show_paint_face(m_fill, sh.fill.swatch);
+        if (sh.gradient.on())
+            m_fill->set_gradient(gradient_label(sh.gradient), gradient_ramp(sh.gradient));
+        else
+            show_paint_face(m_fill, sh.fill.swatch);
         m_fill->set_enabled(m_view->shapes_selected() || !m_view->pictures_selected());
         m_fill_tint->set_selected_index(nearest(kTints, (int) std::size(kTints), sh.fill.tint));
         show_paint_face(m_stroke, sh.stroke.paint.swatch);
@@ -4083,7 +4187,7 @@ public:
                 {"text", ComposerView::Tool::Text},
                 {"rotate", ComposerView::Tool::Rotate},   {"line", ComposerView::Tool::Line},
                 {"rect", ComposerView::Tool::Rect},       {"ellipse", ComposerView::Tool::Ellipse},
-                {"polygon", ComposerView::Tool::Polygon},
+                {"polygon", ComposerView::Tool::Polygon}, {"pen", ComposerView::Tool::Pen},
             };
             for (const auto &t : tools)
                 if (f[0] == t.first)

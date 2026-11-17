@@ -43,6 +43,18 @@ float Transform::rotation() const {
 
 /* ---- Swatches ----------------------------------------------------------- */
 
+Gradient default_gradient(const Paint &from) {
+    Gradient g;
+    g.kind = Gradient::Kind::Linear;
+    GradientPoint a, b;
+    a.paint = from.none() ? Paint{kBlack, 100.f} : from;
+    a.pos = 0.f;
+    b.paint = {kPaper, 100.f};
+    b.pos = 100.f;
+    g.points = {a, b};
+    return g;
+}
+
 Color cmyk_to_rgb(const Cmyk &cmyk) {
     const float c = std::clamp(cmyk.c, 0.f, 100.f) * 0.01f;
     const float m = std::clamp(cmyk.m, 0.f, 100.f) * 0.01f;
@@ -436,6 +448,90 @@ SwatchId PageDoc::add_swatch(const std::string &name, Color rgb) {
     s.cmyk = rgb_to_cmyk(rgb);
     swatches.push_back(s);
     return s.id;
+}
+
+std::string gradient_auto_name(const Gradient &g, const std::vector<Swatch> &swatches) {
+    std::vector<GradientPoint> pts = g.points;
+    std::stable_sort(pts.begin(), pts.end(),
+                     [](const GradientPoint &a, const GradientPoint &b) { return a.pos < b.pos; });
+    std::string out;
+    for (const GradientPoint &p : pts) {
+        std::string name = "None";
+        for (const Swatch &sw : swatches)
+            if (sw.id == p.paint.swatch)
+                name = sw.name;
+        /* "[Paper]" reads as "Paper" */
+        if (name.size() > 2 && name.front() == '[' && name.back() == ']')
+            name = name.substr(1, name.size() - 2);
+        if (p.paint.tint < 99.95f)
+            name += " " + std::to_string((int) std::lround(p.paint.tint)) + "%";
+        out += (out.empty() ? "" : " ") + name;
+    }
+    if (g.kind == Gradient::Kind::Radial)
+        out += " Radial";
+    return out.empty() ? std::string("Gradient") : out;
+}
+
+const GradientSwatch *PageDoc::find_gradient(GradientId id) const {
+    if (!id)
+        return nullptr;
+    for (const GradientSwatch &g : gradients)
+        if (g.id == id)
+            return &g;
+    return nullptr;
+}
+
+GradientId PageDoc::add_gradient(const std::string &name, Gradient g) {
+    GradientId id = 0;
+    for (const GradientSwatch &s : gradients)
+        id = std::max(id, s.id);
+    GradientSwatch s;
+    s.id = id + 1;
+    s.name = name;
+    g.id = s.id;
+    s.gradient = std::move(g);
+    gradients.push_back(std::move(s));
+    return id + 1;
+}
+
+void PageDoc::for_each_shape(const std::function<void(Shape &)> &fn) {
+    for (Page &p : pages)
+        for (Item &it : p.items)
+            if (Shape *sh = it.shape())
+                fn(*sh);
+    for (MasterPage &m : masters)
+        for (Page &p : m.pages)
+            for (Item &it : p.items)
+                if (Shape *sh = it.shape())
+                    fn(*sh);
+}
+
+void PageDoc::set_gradient(GradientId id, const std::string &name, Gradient g) {
+    for (GradientSwatch &s : gradients)
+        if (s.id == id) {
+            s.name = name;
+            g.id = id;
+            s.gradient = g;
+        }
+    sync_gradients();
+}
+
+void PageDoc::remove_gradient(GradientId id) {
+    gradients.erase(std::remove_if(gradients.begin(), gradients.end(),
+                                   [id](const GradientSwatch &s) { return s.id == id; }),
+                    gradients.end());
+    sync_gradients();
+}
+
+void PageDoc::sync_gradients() {
+    for_each_shape([this](Shape &sh) {
+        if (!sh.gradient.id)
+            return;
+        if (const GradientSwatch *s = find_gradient(sh.gradient.id))
+            sh.gradient = s->gradient;
+        else
+            sh.gradient.id = 0;          // its name is gone; the look stays
+    });
 }
 
 /* ---- Lookups ------------------------------------------------------------ */

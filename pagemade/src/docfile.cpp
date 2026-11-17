@@ -157,6 +157,26 @@ void write_paint(JsonOut &j, const Paint &p) {
     j.end_object();
 }
 
+/* {"type": "linear" | "radial", "angle": degrees, "id": named gradient,
+ *  "points": [{"swatch", "tint", "at": percent, "opacity": percent}]} */
+void write_gradient(JsonOut &j, const Gradient &g) {
+    j.begin_object();
+    j.key("type").value(g.kind == Gradient::Kind::Radial ? "radial" : "linear");
+    if (g.angle != 0.f) j.key("angle").value(g.angle);
+    if (g.id) j.key("id").value(g.id);
+    j.key("points").begin_array();
+    for (const GradientPoint &gp : g.points) {
+        j.begin_object();
+        j.key("swatch").value(gp.paint.swatch);
+        if (gp.paint.tint != 100.f) j.key("tint").value(gp.paint.tint);
+        j.key("at").value(gp.pos);
+        if (gp.opacity != 100.f) j.key("opacity").value(gp.opacity);
+        j.end_object();
+    }
+    j.end_array();
+    j.end_object();
+}
+
 void write_stroke(JsonOut &j, const Stroke &s) {
     j.begin_object();
     j.key("swatch").value(s.paint.swatch);
@@ -212,6 +232,26 @@ void write_item(JsonOut &j, const Item &it) {
         write_paint(j, sh->fill);
         j.key("stroke");
         write_stroke(j, sh->stroke);
+        /* {"type": "linear" | "radial", "angle": degrees,
+         *  "points": [{"swatch", "tint", "at": percent, "opacity": percent}]} */
+        if (sh->gradient.on()) {
+            j.key("gradient");
+            write_gradient(j, sh->gradient);
+        }
+        /* A path's points: [x, y] for a corner, [x, y, in x, in y, out x,
+         * out y] for a curve, at the "ref" box size */
+        if (sh->kind == Shape::Kind::Path) {
+            if (!sh->closed) j.key("open").value(true);
+            j.key("ref").numbers({sh->ref_w, sh->ref_h});
+            j.key("nodes").begin_array();
+            for (const PathNode &n : sh->nodes) {
+                if (n.curve)
+                    j.numbers({n.p.x, n.p.y, n.in.x, n.in.y, n.out.x, n.out.y});
+                else
+                    j.numbers({n.p.x, n.p.y});
+            }
+            j.end_array();
+        }
     } else if (const PlacedImage *im = it.image()) {
         j.key("type").value("image");
         j.key("asset").value(im->asset);
@@ -625,6 +665,19 @@ std::string make_json(const PageDoc &doc, const SaveOptions &opts, const std::ve
     }
     j.end_array();
 
+    if (!doc.gradients.empty()) {
+        j.key("gradients").begin_array();
+        for (const GradientSwatch &g : doc.gradients) {
+            j.begin_object();
+            j.key("id").value(g.id);
+            j.key("name").value(g.name);
+            j.key("gradient");
+            write_gradient(j, g.gradient);
+            j.end_object();
+        }
+        j.end_array();
+    }
+
     j.key("styles").begin_array();
     for (const StyleDef &st : doc.styles) {
         j.begin_object();
@@ -900,6 +953,26 @@ Paint read_paint(const DictValue *o, Paint p) {
     return p;
 }
 
+Gradient read_gradient(const DictValue *g) {
+    Gradient out;
+    std::string type;
+    get(g, "type", type);
+    out.kind = type == "radial" ? Gradient::Kind::Radial : Gradient::Kind::Linear;
+    get(g, "angle", out.angle);
+    get(g, "id", out.id);
+    const DictValue *pts = field(g, "points");
+    for (size_t i = 0; i < count(pts) && out.points.size() < kMaxGradientPoints; ++i) {
+        GradientPoint gp;
+        gp.paint = read_paint(at(pts, i), gp.paint);
+        get(at(pts, i), "at", gp.pos);
+        get(at(pts, i), "opacity", gp.opacity);
+        out.points.push_back(gp);
+    }
+    if (!out.on())
+        out = Gradient();
+    return out;
+}
+
 Stroke read_stroke(const DictValue *o, Stroke s) {
     if (!o)
         return s;
@@ -1018,6 +1091,38 @@ bool read_item(const DictValue *o, Item &it) {
     get(o, "star_inset", sh.star_inset);
     sh.fill = read_paint(field(o, "fill"), Paint{});
     sh.stroke = read_stroke(field(o, "stroke"), sh.stroke);
+    if (const DictValue *g = field(o, "gradient"))
+        sh.gradient = read_gradient(g);
+    if (sh.kind == Shape::Kind::Path) {
+        bool open = false;
+        get(o, "open", open);
+        sh.closed = !open;
+        float ref[2] = {0, 0};
+        floats(o, "ref", ref, 2);
+        sh.ref_w = std::isfinite(ref[0]) ? ref[0] : 0.f;
+        sh.ref_h = std::isfinite(ref[1]) ? ref[1] : 0.f;
+        const DictValue *nodes = field(o, "nodes");
+        for (size_t i = 0; i < count(nodes); ++i) {
+            const DictValue *a = at(nodes, i);
+            float v[6] = {0, 0, 0, 0, 0, 0};
+            size_t m = std::min<size_t>(6, count(a));
+            for (size_t k = 0; k < m; ++k) {
+                double d;
+                if (number(at(a, k), d) && std::isfinite(d))
+                    v[k] = (float) d;
+            }
+            if (m < 2)
+                continue;
+            PathNode n;
+            n.p = {v[0], v[1]};
+            n.curve = m >= 6;
+            n.in = n.curve ? Point{v[2], v[3]} : n.p;
+            n.out = n.curve ? Point{v[4], v[5]} : n.p;
+            sh.nodes.push_back(n);
+        }
+        if (sh.nodes.size() < 2)
+            return false;                // nothing to draw
+    }
     it.content = sh;
     return true;
 }
@@ -1072,6 +1177,7 @@ void repair(PageDoc &d, std::vector<std::string> &warnings) {
     if (!d.masters.empty() && !d.master_layer())
         d.ensure_master_layer();
     d.sync_masters();
+    d.sync_gradients();                  // the table is the truth for named ones
 }
 
 void repair_pages(PageDoc &d, std::vector<std::string> &warnings) {
@@ -1460,6 +1566,19 @@ OpenResult open_document(const std::string &path, const FontLibrary &installed,
                 s.cmyk = rgb_to_cmyk(s.rgb);
             if (s.id != kNoPaint && !d.find_swatch(s.id))
                 d.swatches.push_back(s);
+        }
+    }
+
+    if (const DictValue *gs = field(root, "gradients")) {
+        d.gradients.clear();
+        for (size_t i = 0; i < count(gs); ++i) {
+            GradientSwatch g;
+            get(at(gs, i), "id", g.id);
+            get(at(gs, i), "name", g.name);
+            g.gradient = read_gradient(field(at(gs, i), "gradient"));
+            g.gradient.id = g.id;
+            if (g.id && g.gradient.on() && !d.find_gradient(g.id))
+                d.gradients.push_back(std::move(g));
         }
     }
 

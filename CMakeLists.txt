@@ -1160,6 +1160,7 @@ if (NANOGUI_BUILD_EXAMPLES)
         pagemade/src/layout_templates.cpp
         pagemade/src/layouts_panel.cpp
         pagemade/src/masters_panel.cpp
+        pagemade/src/gradient_dialog.cpp
         pagemade/src/plugin/svg_export.cpp
         pagemade/src/tool_tabs.cpp
         pagemade/src/dock_window.cpp

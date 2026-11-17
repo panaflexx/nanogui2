@@ -5,6 +5,7 @@
 #include "vector.h"
 
 #include <algorithm>
+#include <cmath>
 
 namespace pagemade {
 
@@ -48,6 +49,37 @@ void add_stroke(DrawList &out, const PageDoc &doc, const Path &path, const Strok
 
 } // namespace
 
+DrawGradientRef shape_gradient(const PageDoc &doc, const Gradient &g, float w, float h,
+                               Color *fallback) {
+    if (!g.on())
+        return nullptr;
+    auto out = std::make_shared<DrawGradient>();
+    std::vector<GradientPoint> pts = g.points;
+    std::stable_sort(pts.begin(), pts.end(),
+                     [](const GradientPoint &a, const GradientPoint &b) { return a.pos < b.pos; });
+    for (const GradientPoint &p : pts) {
+        Color c = doc.resolve(p.paint);
+        c.a *= std::clamp(p.opacity, 0.f, 100.f) / 100.f;
+        out->stops.push_back({std::clamp(p.pos, 0.f, 100.f) / 100.f, c});
+    }
+    if (fallback)
+        *fallback = out->stops[out->stops.size() / 2].color;
+    const float cx = w * 0.5f, cy = h * 0.5f;
+    if (g.kind == Gradient::Kind::Radial) {
+        out->radial = true;              // the unit circle fills the box
+        out->xf = {std::max(w * 0.5f, 1e-3f), 0, 0, std::max(h * 0.5f, 1e-3f), cx, cy};
+    } else {
+        /* From edge to edge of the box along the angle */
+        const float a = g.angle * 3.14159265358979f / 180.f;
+        const float dx = std::cos(a), dy = std::sin(a);
+        const float half = std::max((std::fabs(w * dx) + std::fabs(h * dy)) * 0.5f, 1e-3f);
+        const Point s{cx - dx * half, cy - dy * half};
+        const float len = half * 2.f;
+        out->xf = {dx * len, dy * len, -dy * len, dx * len, s.x, s.y};
+    }
+    return out;
+}
+
 DrawList build_page(const PageDoc &doc, size_t page, const std::vector<Composition> &comps,
                     const std::vector<ItemId> *which, bool only, const VectorStore *vectors) {
     DrawList out;
@@ -58,8 +90,11 @@ DrawList build_page(const PageDoc &doc, size_t page, const std::vector<Compositi
             continue;                    // a hidden layer is neither shown nor printed
         if (const Shape *sh = it.shape()) {
             const Path path = shape_path(it);
-            if (!sh->fill.none() && sh->kind != Shape::Kind::Line)
-                out.push_back(DrawFill{path, doc.resolve(sh->fill), it.xf});
+            if (sh->filled()) {
+                DrawFill f{path, doc.resolve(sh->fill), it.xf};
+                f.gradient = shape_gradient(doc, sh->gradient, it.w, it.h, &f.color);
+                out.push_back(std::move(f));
+            }
             if (!sh->stroke.none())
                 add_stroke(out, doc, path, sh->stroke, it.xf);
             continue;

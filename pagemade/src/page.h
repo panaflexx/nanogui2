@@ -32,6 +32,7 @@
 #include <algorithm>
 #include <atomic>
 #include <cstdint>
+#include <functional>
 #include <string>
 #include <variant>
 #include <vector>
@@ -215,19 +216,77 @@ struct TextFrame {
     VAlign valign = VAlign::Top;
 };
 
+/* A gradient fill: two to four color points along a ramp. A linear ramp
+ * runs across the shape's box at `angle` degrees (0 is left to right, 90
+ * top to bottom), end to end of the box along that direction; a radial one
+ * runs from the box's middle out to its edges. Each point is a swatch at a
+ * tint, a place along the ramp and its own opacity, both percent. Between
+ * points the color blends; past the ends it holds. */
+struct GradientPoint {
+    Paint paint{kBlack, 100.f};
+    float pos = 0.f;                 // percent along the ramp
+    float opacity = 100.f;           // percent
+};
+constexpr size_t kMinGradientPoints = 2, kMaxGradientPoints = 4;
+using GradientId = uint32_t;
+struct Gradient {
+    enum class Kind { None, Linear, Radial };
+    Kind  kind = Kind::None;
+    float angle = 0.f;               // degrees, linear
+    std::vector<GradientPoint> points;
+    /* The named gradient (PageDoc::gradients) this is a copy of; 0 for
+     * none. Editing that one rewrites every copy. */
+    GradientId id = 0;
+    bool on() const { return kind != Kind::None && points.size() >= kMinGradientPoints; }
+};
+/* A named gradient in the Colors menus, as a swatch is a named color. */
+struct GradientSwatch {
+    GradientId  id = 0;
+    std::string name;
+    Gradient    gradient;
+};
+/* A name from the points' colors, in order along the ramp: "Red Blue". */
+std::string gradient_auto_name(const Gradient &g, const std::vector<Swatch> &swatches);
+
+/* Black to white, left to right: what a fill takes when a gradient is first
+ * turned on (from `from`, its solid fill, when it has one). */
+Gradient default_gradient(const Paint &from);
+
+/* A point of a drawn path (the pen tool): where it is, and its two curve
+ * handles, the control points of the segments into and out of it. A corner
+ * has none (both at the point), so its segments leave it straight unless
+ * the neighbor bends them; a curve point keeps its handles in line, so the
+ * path runs through it smoothly. */
+struct PathNode {
+    Point p, in, out;
+    bool  curve = false;
+};
+
 /* PageMaker's drawn elements, filling the item's box. A line runs from
  * (0, 0) to (w, h) in item space, so either may be negative. A polygon is
  * inscribed in the box; with a star inset, every other vertex is pulled
  * that percentage of the way toward the center. As in PageMaker, a new
  * shape has no fill and a 1 pt black stroke. */
 struct Shape {
-    enum class Kind { Rect, Ellipse, Line, Polygon };
+    enum class Kind { Rect, Ellipse, Line, Polygon, Path };
     Kind   kind = Kind::Rect;
     float  corner_radius = 0.f;      // rectangles
     int    sides = 6;                // polygons, 3 and up
     float  star_inset = 0.f;         // polygons, percent
     Paint  fill;
     Stroke stroke;
+    /* When on, the fill is this gradient instead of the solid `fill`. */
+    Gradient gradient;
+    /* A path (Kind::Path): its points in item space as they were drawn at a
+     * box of ref_w by ref_h; the box stretches them to the item's w by h.
+     * An open path is stroked but not filled. */
+    std::vector<PathNode> nodes;
+    bool   closed = true;
+    float  ref_w = 0.f, ref_h = 0.f;
+    bool filled() const {
+        return kind != Kind::Line && (kind != Kind::Path || closed) &&
+               (!fill.none() || gradient.on());
+    }
 };
 
 /* A picture from the publication's asset table. The frame, the item's
@@ -535,6 +594,7 @@ struct PageDoc {
     std::vector<Page>       pages{1};
     std::vector<StoryEntry> stories;
     std::vector<Swatch>     swatches = default_swatches();
+    std::vector<GradientSwatch> gradients;   // named gradients, menu order
     std::vector<StyleDef>   styles = default_styles();
     std::vector<CharStyleDef> char_styles = default_char_styles();
     std::vector<ImageAsset> images;        // the publication's pictures
@@ -601,6 +661,20 @@ struct PageDoc {
     Color text_color(uint32_t swatch, float tint, const Color &rgb) const;
     /* Adds a swatch (ids above the built-ins) and returns its id. */
     SwatchId add_swatch(const std::string &name, Color rgb);
+
+    const GradientSwatch *find_gradient(GradientId id) const;
+    /* Adds a named gradient; returns its id (the gradient's own id set). */
+    GradientId add_gradient(const std::string &name, Gradient g);
+    /* Renames and redefines one, and every shape's copy of it (pages and
+     * master pages alike). */
+    void set_gradient(GradientId id, const std::string &name, Gradient g);
+    /* Takes one out of the menus. Shapes keep their copies, unnamed. */
+    void remove_gradient(GradientId id);
+    /* Every shape's gradient that names one from the table, made its copy
+     * again (an opened file, an undo); one naming a gone one is unlinked. */
+    void sync_gradients();
+    /* Calls fn on every shape, on pages and master pages. */
+    void for_each_shape(const std::function<void(Shape &)> &fn);
 
     const ImageAsset *find_image(uint32_t id) const;
     ImageAsset       *find_image(uint32_t id);

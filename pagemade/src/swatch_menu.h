@@ -38,6 +38,22 @@ struct SwatchMenuView {
     SwatchId current = 0;
     /* A "None" row first (no fill, no stroke); picking it passes kNoPaint. */
     bool none_row = false;
+    /* Fill menus: the named gradients after the colors (chip is the
+     * ramp), each with an edit mark, then a "New gradient..." row. With
+     * `ramp` set the paint is a gradient: `current_gradient` (if named) is
+     * checked instead of a swatch and the face shows the ramp and name. */
+    struct GradientEntry {
+        GradientId id = 0;
+        std::string name;
+        std::vector<Color> ramp;
+        bool radial = false;
+    };
+    std::vector<GradientEntry> gradients;
+    GradientId current_gradient = 0;
+    std::vector<Color> ramp;
+    std::function<void()> new_gradient;          // null: no gradient rows
+    std::function<void(GradientId)> pick_gradient;
+    std::function<void(GradientId)> edit_gradient;
 };
 
 /* Rebuild the dropdown from the view. `pick` paints the selection with
@@ -58,6 +74,8 @@ public:
     void set_swatch(const std::string &name, const Color &color);
     /* "None", with a slashed chip. */
     void set_none();
+    /* A gradient: the chip shows the ramp (its colors, evenly spaced). */
+    void set_gradient(const std::string &name, const std::vector<Color> &ramp);
     void clear_swatch();
 
     nanogui::Vector2i preferred_size(NVGcontext *ctx) const override;
@@ -67,6 +85,7 @@ private:
     Color m_chip{1, 1, 1, 1};
     bool m_has_chip = false;
     bool m_none = false;                 // the chip is slashed: no paint
+    std::vector<Color> m_ramp;           // a gradient's chip, when not empty
 };
 
 struct SwatchEdit {

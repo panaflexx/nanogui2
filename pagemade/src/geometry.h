@@ -38,6 +38,30 @@ Path polygon_path(float w, float h, int sides, float star_inset);
 /* The outline of a shape item in its own space; empty for text frames. */
 Path shape_path(const Item &it);
 
+/* A drawn path through `nodes` (see PathNode), each point and handle
+ * scaled by (sx, sy). A segment whose handles both sit on its ends is a
+ * straight line, otherwise a cubic. */
+Path node_path(const std::vector<PathNode> &nodes, bool closed, float sx = 1.f, float sy = 1.f);
+/* A path item's points in its own space, at its current size. */
+std::vector<PathNode> path_item_nodes(const Item &it);
+/* Give a path item new points (in its own space) and fit its box to them:
+ * the box becomes the outline's bounds (curves and all), the transform
+ * moves so nothing moves on the page, and the points are kept at that
+ * size (ref_w by ref_h). */
+void set_path_item_nodes(Item &it, std::vector<PathNode> nodes);
+/* Handles for a curve point between its neighbors: in line with the
+ * direction from `prev` to `next`, each a third of the way to its
+ * neighbor. An end of an open path (no neighbor) passes its own point. */
+void smooth_node(PathNode &n, Point prev, Point next);
+/* The corner version: both handles back on the point. */
+void corner_node(PathNode &n);
+/* The nearest point on segment i (node i to the next) to `pt`: the
+ * curve's parameter there and the distance. */
+float nearest_on_segment(const std::vector<PathNode> &nodes, size_t i, Point pt, float &t);
+/* Insert a point on segment i at parameter t, splitting the curve so the
+ * outline doesn't change. Returns the new node's index. */
+size_t split_segment(std::vector<PathNode> &nodes, bool closed, size_t i, float t);
+
 /* The item's box corners on the page (a line's two ends). */
 Bounds item_bounds(const Item &it);
 Bounds path_bounds(const Path &p);

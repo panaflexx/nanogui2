@@ -107,6 +107,11 @@ struct DrawImage {
 using DrawOp = std::variant<DrawFill, DrawStroke, DrawGlyphs, DrawImage>;
 using DrawList = std::vector<DrawOp>;
 
+/* A shape's gradient fill over its w by h box, or null when it has none.
+ * `fallback`, when set, gets the middle point's color. */
+DrawGradientRef shape_gradient(const PageDoc &doc, const Gradient &g, float w, float h,
+                               Color *fallback = nullptr);
+
 /* `comps` holds one composition per story, in PageDoc::stories order.
  * `which`, when set, skips those items, or draws only them when `only`
  * is set. A null list draws the whole page. */

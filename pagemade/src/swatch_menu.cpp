@@ -47,6 +47,33 @@ void draw_chip(NVGcontext *ctx, float x, float y, float size, const pagemade::Co
     }
 }
 
+/* A gradient's chip: its colors evenly along, over white */
+void draw_ramp_chip(NVGcontext *ctx, float x, float y, float size,
+                    const std::vector<pagemade::Color> &ramp) {
+    nvgBeginPath(ctx);
+    nvgRoundedRect(ctx, x, y, size, size, 3.f);
+    nvgFillColor(ctx, nvgRGB(255, 255, 255));
+    nvgFill(ctx);
+    if (ramp.size() >= 2) {
+        const float step = size / (float) (ramp.size() - 1);
+        for (size_t i = 0; i + 1 < ramp.size(); ++i) {
+            const pagemade::Color &a = ramp[i], &b = ramp[i + 1];
+            const float x0 = x + step * (float) i;
+            nvgBeginPath(ctx);
+            nvgRect(ctx, x0, y, step + 0.5f, size);
+            nvgFillPaint(ctx, nvgLinearGradient(ctx, x0, y, x0 + step, y,
+                                                nvgRGBAf(a.r, a.g, a.b, a.a),
+                                                nvgRGBAf(b.r, b.g, b.b, b.a)));
+            nvgFill(ctx);
+        }
+    }
+    nvgBeginPath(ctx);
+    nvgRoundedRect(ctx, x, y, size, size, 3.f);
+    nvgStrokeWidth(ctx, 1.f);
+    nvgStrokeColor(ctx, nvgRGBA(0, 0, 0, 90));
+    nvgStroke(ctx);
+}
+
 /* A swatch row: color chip, name, and the CMYK definition right-aligned.
  * Built-ins draw a lock in the mark zone; custom rows a pencil. The mark
  * machinery swallows the press so editing never chooses the row. */
@@ -87,7 +114,10 @@ public:
             nvgText(ctx, cx + 14.f, cy + h * 0.5f, utf8(FA_CHECK).data(), nullptr);
             chip_x += 20.f;
         }
-        draw_chip(ctx, chip_x, cy + 5.f, chip, m_color, m_none);
+        if (m_ramp.size() >= 2)
+            draw_ramp_chip(ctx, chip_x, cy + 5.f, chip, m_ramp);
+        else
+            draw_chip(ctx, chip_x, cy + 5.f, chip, m_color, m_none);
 
         nvgFontSize(ctx, (float) font_size);
         nvgFontFace(ctx, "sans");
@@ -118,6 +148,8 @@ public:
     }
 
     void set_tag(const std::string &tag) { m_tag = tag; }
+    /* A gradient row: the chip shows the ramp */
+    void set_ramp(const std::vector<pagemade::Color> &ramp) { m_ramp = ramp; }
 
     /* Wide enough for chip, name and the CMYK tag: the base measure sees
      * only the caption, which clips the tag. */
@@ -138,6 +170,7 @@ public:
 
 private:
     pagemade::Color m_color;
+    std::vector<pagemade::Color> m_ramp;
     std::string m_tag;
     bool m_locked = false;
     bool m_none = false;
@@ -173,17 +206,29 @@ void ColorDropdown::set_swatch(const std::string &name, const pagemade::Color &c
     m_chip = color;
     m_has_chip = true;
     m_none = false;
+    m_ramp.clear();
 }
 
 void ColorDropdown::set_none() {
     set_caption("None");
     m_has_chip = true;
     m_none = true;
+    m_ramp.clear();
+}
+
+void ColorDropdown::set_gradient(const std::string &name, const std::vector<Color> &ramp) {
+    set_caption(name);
+    m_has_chip = true;
+    m_none = false;
+    m_ramp = ramp;
+    if (!ramp.empty())
+        m_chip = ramp[ramp.size() / 2];
 }
 
 void ColorDropdown::clear_swatch() {
     m_has_chip = false;
     m_none = false;
+    m_ramp.clear();
     set_caption("");
 }
 
@@ -253,7 +298,11 @@ void ColorDropdown::draw(NVGcontext *ctx) {
 
         /* The chip. */
         const float chip = (float) m_size.y() - 10.f;
-        draw_chip(ctx, m_pos.x() + 8.f, center.y() - chip * 0.5f, chip, m_chip, m_none);
+        if (m_ramp.size() >= 2) {
+            draw_ramp_chip(ctx, m_pos.x() + 8.f, center.y() - chip * 0.5f, chip, m_ramp);
+        } else {
+            draw_chip(ctx, m_pos.x() + 8.f, center.y() - chip * 0.5f, chip, m_chip, m_none);
+        }
 
         nvgFontSize(ctx, (float) font_size);
         nvgFontFace(ctx, "sans");
@@ -328,13 +377,51 @@ void refill_swatch_menu(Dropdown *menu, const SwatchMenuView &view,
         else
             row->set_mark(false, {});
     }
+    const std::string *gradient_name = nullptr;
+    if (view.new_gradient) {
+        if (!view.ramp.empty()) {
+            current_index = -1;          // a gradient: no swatch is the paint
+            current = nullptr;
+        }
+        for (const SwatchMenuView::GradientEntry &g : view.gradients) {
+            Swatch face;
+            face.name = g.name;
+            auto *row = new SwatchRow(menu->popup(), face, false);
+            row->set_ramp(g.ramp);
+            row->set_tag(g.radial ? "Radial" : "Linear");
+            row->set_flags(Button::RadioButton);
+            const int index = menu->popup()->child_count() - 1;
+            const GradientId id = g.id;
+            if (!view.ramp.empty() && id == view.current_gradient) {
+                current_index = index;
+                gradient_name = &g.name;
+            }
+            row->set_callback([menu, fn = view.pick_gradient, id, index] {
+                if (fn)
+                    fn(id);
+                menu->set_selected_index(index);
+            });
+            if (view.edit_gradient)
+                row->set_mark(false, [fn = view.edit_gradient, id] { fn(id); });
+            else
+                row->set_mark(false, {});
+        }
+        MenuItem *g = menu->add_item("New gradient...", FA_FILL_DRIP);
+        if (g) {
+            g->set_tooltip("A named gradient: two to four colors, each with its opacity");
+            g->set_callback([fn = view.new_gradient] { fn(); });
+        }
+    }
     MenuItem *plus = menu->add_item("Add color...", FA_PLUS);
     if (plus && add)
         plus->set_callback([add] { add(); });
     /* The check follows the current paint; the button face shows it. */
     menu->popup()->set_selected_index(current_index);
     if (auto *colors = dynamic_cast<ColorDropdown *>(menu)) {
-        if (current)
+        if (!view.ramp.empty())
+            colors->set_gradient(gradient_name ? *gradient_name : std::string("Gradient"),
+                                 view.ramp);
+        else if (current)
             colors->set_swatch(current->name, current->rgb);
         else if (view.none_row && view.current == kNoPaint)
             colors->set_none();

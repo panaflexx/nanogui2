@@ -84,11 +84,171 @@ Path polygon_path(float w, float h, int sides, float star_inset) {
     return p;
 }
 
+Path node_path(const std::vector<PathNode> &nodes, bool closed, float sx, float sy) {
+    Path p;
+    if (nodes.empty())
+        return p;
+    auto at = [&](Point q) { return Point{q.x * sx, q.y * sy}; };
+    auto seg = [&](const PathNode &a, const PathNode &b) {
+        const Point c1 = at(a.out), c2 = at(b.in), e = at(b.p);
+        const bool straight = a.out.x == a.p.x && a.out.y == a.p.y && b.in.x == b.p.x &&
+                              b.in.y == b.p.y;
+        p.push_back(straight ? line(e.x, e.y) : cubic(c1.x, c1.y, c2.x, c2.y, e.x, e.y));
+    };
+    const Point s = at(nodes.front().p);
+    p.push_back(move(s.x, s.y));
+    for (size_t i = 0; i + 1 < nodes.size(); ++i)
+        seg(nodes[i], nodes[i + 1]);
+    if (closed && nodes.size() > 1) {
+        seg(nodes.back(), nodes.front());
+        p.push_back(close());
+    }
+    return p;
+}
+
+std::vector<PathNode> path_item_nodes(const Item &it) {
+    const Shape *sh = it.shape();
+    if (!sh)
+        return {};
+    const float sx = sh->ref_w > 0.f ? it.w / sh->ref_w : 1.f;
+    const float sy = sh->ref_h > 0.f ? it.h / sh->ref_h : 1.f;
+    std::vector<PathNode> out = sh->nodes;
+    for (PathNode &n : out) {
+        for (Point *q : {&n.p, &n.in, &n.out}) {
+            q->x *= sx;
+            q->y *= sy;
+        }
+    }
+    return out;
+}
+
+void set_path_item_nodes(Item &it, std::vector<PathNode> nodes) {
+    Shape *sh = it.shape();
+    if (!sh)
+        return;
+    Bounds b;
+    for (const Polyline &l : flatten(node_path(nodes, sh->closed), 0.05f))
+        for (Point q : l.pts)
+            b.add(q);
+    if (b.empty())
+        for (const PathNode &n : nodes)
+            b.add(n.p);
+    if (b.empty())
+        b.add(Point{0, 0});
+    for (PathNode &n : nodes)
+        for (Point *q : {&n.p, &n.in, &n.out}) {
+            q->x -= b.x0;
+            q->y -= b.y0;
+        }
+    it.xf = it.xf * Transform::translate(b.x0, b.y0);
+    /* A flat path (a straight run along one axis) keeps a sliver of box,
+     * so stretching it later has something to scale */
+    it.w = std::max(b.x1 - b.x0, 0.01f);
+    it.h = std::max(b.y1 - b.y0, 0.01f);
+    sh->nodes = std::move(nodes);
+    sh->ref_w = it.w;
+    sh->ref_h = it.h;
+}
+
+void smooth_node(PathNode &n, Point prev, Point next) {
+    n.curve = true;
+    Point d{next.x - prev.x, next.y - prev.y};
+    const float len = std::hypot(d.x, d.y);
+    if (len < 1e-4f) {
+        corner_node(n);
+        n.curve = true;
+        return;
+    }
+    d = {d.x / len, d.y / len};
+    const float a = dist(prev, n.p) / 3.f, b = dist(n.p, next) / 3.f;
+    n.in = {n.p.x - d.x * a, n.p.y - d.y * a};
+    n.out = {n.p.x + d.x * b, n.p.y + d.y * b};
+}
+
+void corner_node(PathNode &n) {
+    n.curve = false;
+    n.in = n.out = n.p;
+}
+
+namespace {
+
+Point bezier(Point p0, Point p1, Point p2, Point p3, float t) {
+    const float u = 1.f - t;
+    const float a = u * u * u, b = 3 * u * u * t, c = 3 * u * t * t, d = t * t * t;
+    return {a * p0.x + b * p1.x + c * p2.x + d * p3.x, a * p0.y + b * p1.y + c * p2.y + d * p3.y};
+}
+
+Point lerp(Point a, Point b, float t) { return {a.x + (b.x - a.x) * t, a.y + (b.y - a.y) * t}; }
+
+} // namespace
+
+float nearest_on_segment(const std::vector<PathNode> &nodes, size_t i, Point pt, float &t) {
+    t = 0.f;
+    if (nodes.empty())
+        return 1e30f;
+    const PathNode &a = nodes[i % nodes.size()], &b = nodes[(i + 1) % nodes.size()];
+    constexpr int kSteps = 64;
+    float best = 1e30f;
+    for (int k = 0; k <= kSteps; ++k) {
+        const float u = (float) k / kSteps;
+        const float d = dist(bezier(a.p, a.out, b.in, b.p, u), pt);
+        if (d < best) {
+            best = d;
+            t = u;
+        }
+    }
+    /* Narrow in around the best sample */
+    float lo = std::max(0.f, t - 1.f / kSteps), hi = std::min(1.f, t + 1.f / kSteps);
+    for (int k = 0; k < 20; ++k) {
+        const float m1 = lo + (hi - lo) / 3.f, m2 = hi - (hi - lo) / 3.f;
+        if (dist(bezier(a.p, a.out, b.in, b.p, m1), pt) < dist(bezier(a.p, a.out, b.in, b.p, m2), pt))
+            hi = m2;
+        else
+            lo = m1;
+    }
+    const float u = (lo + hi) * 0.5f;
+    const float d = dist(bezier(a.p, a.out, b.in, b.p, u), pt);
+    if (d < best) {
+        best = d;
+        t = u;
+    }
+    return best;
+}
+
+size_t split_segment(std::vector<PathNode> &nodes, bool closed, size_t i, float t) {
+    if (nodes.size() < 2 || (!closed && i + 1 >= nodes.size()))
+        return SIZE_MAX;
+    const size_t j = (i + 1) % nodes.size();
+    PathNode &a = nodes[i], &b = nodes[j];
+    PathNode n;
+    const bool straight = a.out.x == a.p.x && a.out.y == a.p.y && b.in.x == b.p.x &&
+                          b.in.y == b.p.y;
+    if (straight) {
+        n.p = lerp(a.p, b.p, t);
+        corner_node(n);
+    } else {
+        /* de Casteljau: the two halves have the same shape as the whole */
+        const Point p01 = lerp(a.p, a.out, t), p12 = lerp(a.out, b.in, t), p23 = lerp(b.in, b.p, t);
+        const Point q0 = lerp(p01, p12, t), q1 = lerp(p12, p23, t);
+        n.p = lerp(q0, q1, t);
+        n.in = q0;
+        n.out = q1;
+        n.curve = true;
+        a.out = p01;
+        b.in = p23;
+    }
+    nodes.insert(nodes.begin() + (long) i + 1, n);
+    return i + 1;
+}
+
 Path shape_path(const Item &it) {
     const Shape *sh = it.shape();
     if (!sh)
         return {};
     switch (sh->kind) {
+    case Shape::Kind::Path:
+        return node_path(sh->nodes, sh->closed, sh->ref_w > 0.f ? it.w / sh->ref_w : 1.f,
+                         sh->ref_h > 0.f ? it.h / sh->ref_h : 1.f);
     case Shape::Kind::Rect:    return rect_path(0, 0, it.w, it.h, sh->corner_radius);
     case Shape::Kind::Ellipse: return ellipse_path(it.w * 0.5f, it.h * 0.5f, it.w * 0.5f, it.h * 0.5f);
     case Shape::Kind::Line:    return {move(0, 0), line(it.w, it.h)};

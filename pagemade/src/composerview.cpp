@@ -139,6 +139,22 @@ bool is_line(const Item &it) {
     return sh && sh->kind == Shape::Kind::Line;
 }
 
+bool is_path(const Item &it) {
+    const Shape *sh = it.shape();
+    return sh && sh->kind == Shape::Kind::Path;
+}
+
+float pdist(Point a, Point b) { return std::hypot(b.x - a.x, b.y - a.y); }
+
+/* `p` turned onto the nearest 45 degree step from `from` */
+Point constrain_45(Point from, Point p) {
+    const float dx = p.x - from.x, dy = p.y - from.y;
+    const float ang = std::round(std::atan2(dy, dx) / (kPi / 4)) * (kPi / 4);
+    const float len = std::hypot(dx, dy);
+    return {from.x + len * std::cos(ang), from.y + len * std::sin(ang)};
+}
+
+
 /* The handle's position in item space. */
 Point handle_point(const Item &it, int h) {
     switch (h) {
@@ -256,6 +272,8 @@ void ComposerView::set_document(PageDoc doc) {
     m_load_failed.clear();
     m_probing.clear();
     m_last_live.clear();
+    m_pen = PenDraw();
+    m_pen_edit = PenEdit();
     m_doc = std::move(doc);
     m_doc.end_master_edit();             // never opened mid-edit
     m_doc.end_linked_edit();
@@ -469,6 +487,9 @@ void ComposerView::mark_clean() {
 }
 
 void ComposerView::restore_snapshot() {
+    m_pen = PenDraw();                   // an unfinished path goes with the undo
+    m_pen_edit.grab = PenGrab::None;
+    m_pen_edit.node = -1;
     m_burst_open = false;
     m_selecting = false;
     m_placing = false;
@@ -602,6 +623,8 @@ void ComposerView::set_tool(Tool t) {
     end_placement(false);
     if (m_creating)
         finish_creation();
+    pen_commit(false);                   // a path being drawn is kept, open
+    m_pen_edit = PenEdit();
     m_tool = t;
     if (m_hover_snap) {                  // the drawing tool's preview goes with it
         m_hover_snap = false;
@@ -994,7 +1017,8 @@ void ComposerView::hover_creation_point(const Point &pt, size_t page) {
         m_smart.clear();
     m_hover_snap = false;
     const bool draws = m_tool == Tool::Line || m_tool == Tool::Rect || m_tool == Tool::Ellipse ||
-                       m_tool == Tool::Polygon || (m_tool == Tool::Text && !text_frame_at(pt, page));
+                       m_tool == Tool::Polygon || m_tool == Tool::Pen ||
+                       (m_tool == Tool::Text && !text_frame_at(pt, page));
     if (draws && page == m_page && m_snap && !m_pointer_down && !m_placing) {
         m_hover_pt = snap_point(pt);
         note_point_alignments(m_hover_pt);
@@ -1269,7 +1293,7 @@ bool ComposerView::hits_item(const Item &it, const Point &pt) const {
     case Shape::Kind::Polygon: {
         const float t = tol + half;
         const bool near = l.x >= -t && l.x <= it.w + t && l.y >= -t && l.y <= it.h + t;
-        if (!sh->fill.none())
+        if (sh->filled())
             return near;
         const bool deep = l.x > t && l.x < it.w - t && l.y > t && l.y < it.h - t;
         return near && !deep;            // an unfilled shape is picked by its outline
@@ -1281,8 +1305,30 @@ bool ComposerView::hits_item(const Item &it, const Point &pt) const {
         const float nx = (l.x - rx) / rx, ny = (l.y - ry) / ry;
         const float d = std::sqrt(nx * nx + ny * ny);
         const float r = std::min(rx, ry);
-        return !sh->fill.none() ? d <= 1.f + (tol + half) / r
+        return sh->filled() ? d <= 1.f + (tol + half) / r
                                 : std::fabs(d - 1.f) * r <= tol + half;
+    }
+    case Shape::Kind::Path: {
+        /* Near the outline, or inside it when it is filled */
+        bool in = false;
+        for (const Polyline &pl : flatten(shape_path(it), std::max(tol * 0.25f, 0.01f))) {
+            const size_t n = pl.pts.size();
+            for (size_t i = 0; i + 1 < n; ++i)
+                if (dist_to_segment(l, pl.pts[i], pl.pts[i + 1]) <= tol + half)
+                    return true;
+            if (pl.closed && n > 1 &&
+                dist_to_segment(l, pl.pts[n - 1], pl.pts[0]) <= tol + half)
+                return true;
+            if (!pl.closed)
+                continue;
+            for (size_t i = 0, j = n - 1; i < n; j = i++) {
+                const Point a = pl.pts[i], b = pl.pts[j];
+                if ((a.y > l.y) != (b.y > l.y) &&
+                    l.x < (b.x - a.x) * (l.y - a.y) / (b.y - a.y) + a.x)
+                    in = !in;
+            }
+        }
+        return in && sh->filled();
     }
     }
     return false;
@@ -1526,6 +1572,10 @@ bool ComposerView::mouse_button_event(const Vector2i &p, int button, bool down, 
         m_pointer_down = false;
         flush_deferred();                // the drag's last move, before it ends
         m_smart.clear();
+        if (m_tool == Tool::Pen) {
+            pen_release();
+            return true;
+        }
         if (m_creating) {
             finish_creation();
         } else if (m_marquee) {
@@ -1649,6 +1699,8 @@ bool ComposerView::mouse_button_event(const Vector2i &p, int button, bool down, 
     m_drag_target = 0;
     m_drag_group = 0;
 
+    if (m_tool == Tool::Pen)
+        return pen_press(pt, modifiers);
     if (m_tool == Tool::Line || m_tool == Tool::Rect || m_tool == Tool::Ellipse ||
         m_tool == Tool::Polygon) {
         begin_creation(pt);
@@ -1669,6 +1721,25 @@ bool ComposerView::mouse_button_event(const Vector2i &p, int button, bool down, 
         }
     }
     Hit hit = hit_test(pt, m_page);
+    if (m_tool == Tool::Pointer && hit.item && hit.handle == Handle::Move && !shift) {
+        /* Double-click a path: the pen, to edit its points */
+        const Item *h = m_doc.find_item(hit.item);
+        const double now = glfwGetTime();
+        if (h && is_path(*h) && hit.item == m_path_click && now - m_path_click_time < 0.4) {
+            const ItemId id = hit.item;
+            m_path_click = 0;
+            m_pointer_down = false;
+            set_tool(Tool::Pen);
+            m_sel = {id};
+            m_pen_edit = PenEdit{id};
+            selection_changed();
+            if (screen())
+                screen()->redraw();
+            return true;
+        }
+        m_path_click = h && is_path(*h) ? hit.item : 0;
+        m_path_click_time = now;
+    }
     if (m_tool == Tool::Pointer && !hit.item && !shift && !master_mode()) {
         /* Double-click a master item: Edit Master Here */
         const ItemId copy = master_copy_at(pt, m_page);
@@ -1771,6 +1842,10 @@ bool ComposerView::mouse_drag_event(const Vector2i &p, const Vector2i &, int, in
     const bool shift = (modifiers & GLFW_MOD_SHIFT) != 0;
     if (m_margin_drag.active) {
         margin_drag_to(pt);
+        return true;
+    }
+    if (m_tool == Tool::Pen) {
+        pen_drag(pt, shift);
         return true;
     }
     if (m_selecting && editing()) {
@@ -2057,6 +2132,12 @@ bool ComposerView::mouse_motion_event(const Vector2i &p, const Vector2i &rel, in
     const Point pt = page_point_from_local(Vector2f((float) p.x(), (float) p.y()) - Vector2f(m_pos));
     const size_t page = m_point_page;
     hover_creation_point(pt, page);
+    if (m_pen.active && !m_pen.dragging) {
+        m_pen.hover = (modifiers & GLFW_MOD_SHIFT) && !m_pen.nodes.empty()
+                          ? constrain_45(m_pen.nodes.back().p, pt) : pt;
+        if (screen())
+            screen()->redraw();
+    }
     switch (m_tool) {
     case Tool::Text:
         set_cursor(text_frame_at(pt, page) ? Cursor::IBeam : Cursor::Crosshair);
@@ -2227,6 +2308,450 @@ void ComposerView::finish_creation() {
     selection_changed();
     if (screen())
         screen()->redraw();
+}
+
+/* ---- The pen tool --------------------------------------------------------- */
+
+namespace {
+
+/* A point's neighbors along the path; an open path's end has itself. */
+void node_neighbors(const std::vector<PathNode> &nodes, bool closed, size_t i, Point &prev,
+                    Point &next) {
+    const size_t n = nodes.size();
+    prev = i > 0 ? nodes[i - 1].p : closed ? nodes[n - 1].p : nodes[i].p;
+    next = i + 1 < n ? nodes[i + 1].p : closed ? nodes[0].p : nodes[i].p;
+}
+
+} // namespace
+
+Item *ComposerView::pen_target() {
+    if (m_sel.size() != 1)
+        return nullptr;
+    Item *it = m_doc.find_item(m_sel.front());
+    if (!it || !is_path(*it) || !m_doc.item_editable(*it))
+        return nullptr;
+    if (m_pen_edit.item != it->id)
+        m_pen_edit = PenEdit{it->id};
+    return it;
+}
+
+ComposerView::PenGrab ComposerView::pen_grab_at(const Item &it, const Point &pt, int &node) const {
+    const Point l = it.xf.inverse().apply(pt);
+    const float tol = kHandlePx / (zoom() * item_scale(it.xf));
+    const std::vector<PathNode> nodes = path_item_nodes(it);
+    for (size_t i = 0; i < nodes.size(); ++i)
+        if (pdist(l, nodes[i].p) <= tol) {
+            node = (int) i;
+            return PenGrab::Node;
+        }
+    for (size_t i = 0; i < nodes.size(); ++i) {
+        if (!nodes[i].curve)
+            continue;
+        if (pdist(l, nodes[i].in) <= tol) {
+            node = (int) i;
+            return PenGrab::In;
+        }
+        if (pdist(l, nodes[i].out) <= tol) {
+            node = (int) i;
+            return PenGrab::Out;
+        }
+    }
+    node = -1;
+    return PenGrab::None;
+}
+
+bool ComposerView::pen_press(const Point &pt, int modifiers) {
+    const bool shift = (modifiers & GLFW_MOD_SHIFT) != 0;
+    const bool alt = (modifiers & GLFW_MOD_ALT) != 0;
+    const float tol = kHandlePx / zoom();
+    if (m_pen.active && m_pen.page != m_page)
+        pen_commit(false);               // drawn on another page: keep it there
+    auto redraw = [this] {
+        if (screen())
+            screen()->redraw();
+    };
+
+    if (m_pen.active) {
+        /* On the first point: close the path. On the last: end it open. */
+        if (m_pen.nodes.size() >= 2 && pdist(pt, m_pen.nodes.front().p) <= tol) {
+            pen_commit(true);
+            return true;
+        }
+        if (m_pen.nodes.size() >= 2 && pdist(pt, m_pen.nodes.back().p) <= tol) {
+            pen_commit(false);
+            return true;
+        }
+        Point p = snap_point(pt);
+        if (shift && !m_pen.nodes.empty())
+            p = constrain_45(m_pen.nodes.back().p, p);
+        PathNode n;
+        n.p = p;
+        corner_node(n);
+        m_pen.nodes.push_back(n);
+        m_pen.dragging = true;
+        m_pen.down = m_pen.hover = p;
+        redraw();
+        return true;
+    }
+
+    /* The selected path: its points and handles, or a new point on it */
+    if (Item *it = pen_target()) {
+        int node = -1;
+        const PenGrab grab = pen_grab_at(*it, pt, node);
+        if (grab == PenGrab::Node && alt) {
+            /* Alt+click: a corner becomes a curve, a curve a corner */
+            push_undo();
+            std::vector<PathNode> nodes = path_item_nodes(*it);
+            PathNode &n = nodes[(size_t) node];
+            if (n.curve) {
+                corner_node(n);
+            } else {
+                Point prev, next;
+                node_neighbors(nodes, it->shape()->closed, (size_t) node, prev, next);
+                smooth_node(n, prev, next);
+            }
+            set_path_item_nodes(*it, std::move(nodes));
+            m_pen_edit.node = node;
+            selection_changed();
+            if (on_document_change)
+                on_document_change();
+            redraw();
+            return true;
+        }
+        if (grab != PenGrab::None) {
+            m_pen_edit.node = node;
+            m_pen_edit.grab = grab;
+            m_pen_edit.saved = false;
+            m_drag_start = pt;
+            redraw();
+            return true;
+        }
+        std::vector<PathNode> nodes = path_item_nodes(*it);
+        const bool closed = it->shape()->closed;
+        const Point l = it->xf.inverse().apply(pt);
+        const float ltol = kPickPx / (zoom() * item_scale(it->xf));
+        const size_t segs = closed ? nodes.size() : nodes.size() - 1;
+        size_t best = SIZE_MAX;
+        float best_d = 1e30f, best_t = 0.f;
+        for (size_t i = 0; i < segs; ++i) {
+            float t = 0.f;
+            const float d = nearest_on_segment(nodes, i, l, t);
+            if (d < best_d) {
+                best_d = d;
+                best = i;
+                best_t = t;
+            }
+        }
+        if (best != SIZE_MAX && best_d <= ltol + 1e-3f) {
+            /* On the outline: a new point there, ready to drag */
+            push_undo();
+            const size_t at = split_segment(nodes, closed, best, best_t);
+            set_path_item_nodes(*it, std::move(nodes));
+            m_pen_edit.node = (int) at;
+            m_pen_edit.grab = PenGrab::Node;
+            m_pen_edit.saved = true;
+            m_drag_start = pt;
+            selection_changed();
+            redraw();
+            return true;
+        }
+    }
+
+    /* A path under the pointer: pick it up for editing */
+    const Hit hit = hit_test(pt, m_page);
+    if (const Item *h = hit.item ? m_doc.find_item(hit.item) : nullptr; h && is_path(*h)) {
+        m_sel = {h->id};
+        m_pen_edit = PenEdit{h->id};
+        selection_changed();
+        redraw();
+        return true;
+    }
+
+    /* Empty space: a new path's first point */
+    if (!check_active_layer())
+        return true;
+    m_sel.clear();
+    m_pen_edit = PenEdit();
+    m_pen = PenDraw();
+    m_pen.active = true;
+    m_pen.page = m_page;
+    PathNode n;
+    n.p = snap_point(pt);
+    corner_node(n);
+    m_pen.nodes.push_back(n);
+    m_pen.dragging = true;
+    m_pen.down = m_pen.hover = n.p;
+    selection_changed();
+    redraw();
+    return true;
+}
+
+void ComposerView::pen_drag(const Point &pt, bool shift) {
+    if (m_pen.active) {
+        m_pen.hover = pt;
+        if (m_pen.dragging && !m_pen.nodes.empty()) {
+            /* Dragging out of a new point pulls its handles: a curve */
+            PathNode &n = m_pen.nodes.back();
+            Point h = pt;
+            if (shift)
+                h = constrain_45(n.p, h);
+            if (pdist(h, n.p) * zoom() > 3.f) {
+                n.curve = true;
+                n.out = h;
+                n.in = {2 * n.p.x - h.x, 2 * n.p.y - h.y};
+            } else {
+                corner_node(n);
+            }
+        }
+        if (screen())
+            screen()->redraw();
+        return;
+    }
+    if (m_pen_edit.grab == PenGrab::None || m_pen_edit.node < 0)
+        return;
+    Item *it = m_doc.find_item(m_pen_edit.item);
+    if (!it || !is_path(*it))
+        return;
+    std::vector<PathNode> nodes = path_item_nodes(*it);
+    if ((size_t) m_pen_edit.node >= nodes.size())
+        return;
+    if (!m_pen_edit.saved) {
+        push_undo();                     // one undo step for the drag
+        m_pen_edit.saved = true;
+    }
+    PathNode &n = nodes[(size_t) m_pen_edit.node];
+    const Transform inv = it->xf.inverse();
+    if (m_pen_edit.grab == PenGrab::Node) {
+        Point to = snap_point(pt);
+        if (shift)                       // straight across or down from where it was
+            to = constrain_45(m_drag_start, to);
+        const Point l = inv.apply(to);
+        const Point d{l.x - n.p.x, l.y - n.p.y};
+        for (Point *q : {&n.p, &n.in, &n.out}) {
+            q->x += d.x;
+            q->y += d.y;
+        }
+    } else {
+        const bool out = m_pen_edit.grab == PenGrab::Out;
+        Point h = pt;
+        const Point onpage = it->xf.apply(n.p);
+        if (shift)
+            h = constrain_45(onpage, h);
+        const Point l = inv.apply(h);
+        Point &mine = out ? n.out : n.in;
+        Point &other = out ? n.in : n.out;
+        mine = l;
+        /* A curve point stays smooth: the other handle turns to stay in
+         * line, keeping its length */
+        const float len = pdist(n.p, other);
+        const float dl = pdist(n.p, mine);
+        if (dl > 1e-4f) {
+            other = {n.p.x - (mine.x - n.p.x) / dl * len, n.p.y - (mine.y - n.p.y) / dl * len};
+        }
+    }
+    set_path_item_nodes(*it, std::move(nodes));
+    defer_selection_changed();           // the palette's X, Y, W, H
+    if (screen())
+        screen()->redraw();
+}
+
+void ComposerView::pen_release() {
+    if (m_pen.active) {
+        m_pen.dragging = false;
+        return;
+    }
+    const bool saved = m_pen_edit.saved;
+    m_pen_edit.grab = PenGrab::None;
+    m_pen_edit.saved = false;
+    if (saved) {
+        selection_changed();
+        if (on_document_change)
+            on_document_change();
+    }
+    if (screen())
+        screen()->redraw();
+}
+
+bool ComposerView::pen_key(int key) {
+    const bool del = key == GLFW_KEY_DELETE || key == GLFW_KEY_BACKSPACE;
+    if (m_pen.active) {
+        if (key == GLFW_KEY_ENTER || key == GLFW_KEY_KP_ENTER || key == GLFW_KEY_ESCAPE) {
+            pen_commit(false);
+            return true;
+        }
+        if (del) {
+            /* Take back the last point */
+            m_pen.nodes.pop_back();
+            m_pen.dragging = false;
+            if (m_pen.nodes.empty())
+                pen_cancel();
+            if (screen())
+                screen()->redraw();
+            return true;
+        }
+        return false;
+    }
+    Item *it = pen_target();
+    if (!it || m_pen_edit.node < 0)
+        return false;
+    if (key == GLFW_KEY_ESCAPE) {
+        m_pen_edit.node = -1;            // let go of the point, then (again) the path
+        if (screen())
+            screen()->redraw();
+        return true;
+    }
+    if (del) {
+        std::vector<PathNode> nodes = path_item_nodes(*it);
+        if (nodes.size() <= 2 || (size_t) m_pen_edit.node >= nodes.size())
+            return false;                // too few to keep: Delete takes the path
+        push_undo();
+        nodes.erase(nodes.begin() + m_pen_edit.node);
+        set_path_item_nodes(*it, std::move(nodes));
+        m_pen_edit.node = -1;
+        selection_changed();
+        if (on_document_change)
+            on_document_change();
+        if (screen())
+            screen()->redraw();
+        return true;
+    }
+    return false;
+}
+
+void ComposerView::pen_commit(bool close) {
+    if (!m_pen.active)
+        return;
+    PenDraw pen = std::move(m_pen);
+    m_pen = PenDraw();
+    /* A last click on top of the one before adds nothing */
+    while (pen.nodes.size() >= 2 &&
+           pdist(pen.nodes.back().p, pen.nodes[pen.nodes.size() - 2].p) < 0.01f &&
+           !pen.nodes.back().curve)
+        pen.nodes.pop_back();
+    if (pen.nodes.size() < 2 || pen.page >= m_doc.pages.size() || !check_active_layer()) {
+        if (screen())
+            screen()->redraw();
+        return;
+    }
+    push_undo();
+    Item it;
+    Shape sh = m_default_shape;
+    sh.kind = Shape::Kind::Path;
+    sh.closed = close && pen.nodes.size() >= 3;
+    it.content = sh;
+    set_path_item_nodes(it, std::move(pen.nodes));
+    const ItemId id = m_doc.add_item(pen.page, it);
+    m_sel = {id};
+    m_pen_edit = PenEdit{id};
+    selection_changed();
+    if (on_document_change)
+        on_document_change();
+    if (screen())
+        screen()->redraw();
+}
+
+void ComposerView::pen_cancel() {
+    m_pen = PenDraw();
+    if (screen())
+        screen()->redraw();
+}
+
+void ComposerView::draw_pen(NVGcontext *ctx, float px, size_t page) {
+    const NVGcolor ink = nvgRGBA(40, 110, 255, 230);
+    auto box = [&](Point p, float s, bool filled) {
+        nvgBeginPath(ctx);
+        nvgRect(ctx, p.x - s * 0.5f, p.y - s * 0.5f, s, s);
+        nvgFillColor(ctx, filled ? ink : nvgRGB(255, 255, 255));
+        nvgFill(ctx);
+        nvgStrokeColor(ctx, ink);
+        nvgStroke(ctx);
+    };
+    auto handle = [&](Point from, Point h, float r) {
+        nvgBeginPath(ctx);
+        nvgMoveTo(ctx, from.x, from.y);
+        nvgLineTo(ctx, h.x, h.y);
+        nvgStrokeColor(ctx, ink);
+        nvgStroke(ctx);
+        nvgBeginPath(ctx);
+        nvgCircle(ctx, h.x, h.y, r);
+        nvgFillColor(ctx, ink);
+        nvgFill(ctx);
+    };
+    auto outline = [&](const Path &path) {
+        nvgBeginPath(ctx);
+        for (const PathCmd &c : path) {
+            switch (c.kind) {
+            case PathCmd::Move: nvgMoveTo(ctx, c.x, c.y); break;
+            case PathCmd::Line: nvgLineTo(ctx, c.x, c.y); break;
+            case PathCmd::Quad: nvgQuadTo(ctx, c.cx1, c.cy1, c.x, c.y); break;
+            case PathCmd::Cubic: nvgBezierTo(ctx, c.cx1, c.cy1, c.cx2, c.cy2, c.x, c.y); break;
+            case PathCmd::Close: nvgClosePath(ctx); break;
+            }
+        }
+        nvgStrokeColor(ctx, ink);
+        nvgStroke(ctx);
+    };
+
+    if (m_pen.active && m_pen.page == page && !m_pen.nodes.empty()) {
+        nvgSave(ctx);
+        nvgStrokeWidth(ctx, px);
+        const std::vector<PathNode> &nodes = m_pen.nodes;
+        outline(node_path(nodes, false));
+        if (!m_pen.dragging) {
+            /* The rubber band to where the next click would go */
+            const PathNode &last = nodes.back();
+            nvgBeginPath(ctx);
+            nvgMoveTo(ctx, last.p.x, last.p.y);
+            nvgBezierTo(ctx, last.out.x, last.out.y, m_pen.hover.x, m_pen.hover.y,
+                        m_pen.hover.x, m_pen.hover.y);
+            nvgStrokeColor(ctx, nvgRGBA(40, 110, 255, 120));
+            nvgStroke(ctx);
+        }
+        const float hs = kHandlePx * px;
+        const bool closing = nodes.size() >= 2 && !m_pen.dragging &&
+                             pdist(m_pen.hover, nodes.front().p) <= hs;
+        for (size_t i = 0; i < nodes.size(); ++i)
+            box(nodes[i].p, i == 0 && closing ? hs * 1.6f : hs, i + 1 == nodes.size());
+        const PathNode &last = nodes.back();
+        if (last.curve) {
+            handle(last.p, last.in, hs * 0.4f);
+            handle(last.p, last.out, hs * 0.4f);
+        }
+        nvgRestore(ctx);
+    }
+
+    if (m_tool != Tool::Pen || m_sel.size() != 1)
+        return;
+    size_t on = 0;
+    const Item *it = m_doc.find_item(m_sel.front(), &on);
+    if (!it || on != page || !is_path(*it))
+        return;
+    nvgSave(ctx);
+    apply_transform(ctx, it->xf);
+    const float lpx = px / item_scale(it->xf);
+    nvgStrokeWidth(ctx, lpx);
+    outline(shape_path(*it));
+    const std::vector<PathNode> nodes = path_item_nodes(*it);
+    const float hs = kHandlePx * lpx;
+    for (size_t i = 0; i < nodes.size(); ++i)
+        if (nodes[i].curve) {
+            handle(nodes[i].p, nodes[i].in, hs * 0.4f);
+            handle(nodes[i].p, nodes[i].out, hs * 0.4f);
+        }
+    for (size_t i = 0; i < nodes.size(); ++i) {
+        const bool chosen = m_pen_edit.item == it->id && (int) i == m_pen_edit.node;
+        if (nodes[i].curve) {            // curve points round, corners square
+            nvgBeginPath(ctx);
+            nvgCircle(ctx, nodes[i].p.x, nodes[i].p.y, hs * 0.55f);
+            nvgFillColor(ctx, chosen ? ink : nvgRGB(255, 255, 255));
+            nvgFill(ctx);
+            nvgStrokeColor(ctx, ink);
+            nvgStroke(ctx);
+        } else {
+            box(nodes[i].p, hs, chosen);
+        }
+    }
+    nvgRestore(ctx);
 }
 
 /* ---- Control palette ----------------------------------------------------- */
@@ -2762,6 +3287,55 @@ void ComposerView::define_style(const std::string &name) {
 
 /* ---- Colors palette ------------------------------------------------------ */
 
+GradientId ComposerView::add_doc_gradient(const std::string &name, const Gradient &g) {
+    push_undo();
+    const GradientId id = m_doc.add_gradient(name, g);
+    const Gradient named = m_doc.find_gradient(id)->gradient;
+    bool any = false;
+    for (ItemId sid : m_sel)
+        if (Item *it = m_doc.find_item(sid))
+            if (Shape *sh = it->shape(); sh && m_doc.item_editable(*it)) {
+                sh->gradient = named;
+                any = true;
+            }
+    if (!any && !pictures_selected())
+        m_default_shape.gradient = named;   // nothing selected: new shapes take it
+    selection_changed();
+    if (on_document_change)
+        on_document_change();
+    if (screen())
+        screen()->redraw();
+    return id;
+}
+
+void ComposerView::update_doc_gradient(GradientId id, const std::string &name, const Gradient &g) {
+    if (!m_doc.find_gradient(id))
+        return;
+    push_undo();
+    m_doc.set_gradient(id, name, g);
+    if (m_default_shape.gradient.id == id)
+        m_default_shape.gradient = m_doc.find_gradient(id)->gradient;
+    selection_changed();
+    if (on_document_change)
+        on_document_change();
+    if (screen())
+        screen()->redraw();
+}
+
+void ComposerView::remove_doc_gradient(GradientId id) {
+    if (!m_doc.find_gradient(id))
+        return;
+    push_undo();
+    m_doc.remove_gradient(id);
+    if (m_default_shape.gradient.id == id)
+        m_default_shape.gradient.id = 0;
+    selection_changed();
+    if (on_document_change)
+        on_document_change();
+    if (screen())
+        screen()->redraw();
+}
+
 SwatchId ComposerView::add_doc_swatch(const std::string &name, pagemade::Color rgb,
                                      pagemade::Cmyk cmyk) {
     if (editing())
@@ -2846,13 +3420,20 @@ bool ComposerView::remove_doc_swatch(SwatchId id) {
             if (Shape *sh = item.shape()) {
                 blacken(sh->fill);
                 blacken(sh->stroke.paint);
+                for (GradientPoint &gp : sh->gradient.points)
+                    blacken(gp.paint);
             } else if (PlacedImage *im = item.image()) {
                 blacken(im->stroke.paint);
             } else if (PlacedVector *pv = item.vector()) {
                 blacken(pv->stroke.paint);
             }
         }
+    for (GradientSwatch &g : m_doc.gradients)
+        for (GradientPoint &gp : g.gradient.points)
+            blacken(gp.paint);
     blacken(m_default_shape.fill);
+    for (GradientPoint &gp : m_default_shape.gradient.points)
+        blacken(gp.paint);
     blacken(m_default_shape.stroke.paint);
     if (m_default_type.swatch == id)
         m_default_type.swatch = kBlack;
@@ -3616,6 +4197,21 @@ void ComposerView::paste_items(const Point *at) {
         it.layer = 0;                    // the active layer
         it.master_item = 0;              // a pasted master item is the page's own
         it.overridden = false;
+        if (Shape *sh = it.shape(); sh && sh->gradient.id) {
+            /* Named here only if this publication's gradient of that id is
+             * the same one (copied from another, it may not be) */
+            const GradientSwatch *gs = m_doc.find_gradient(sh->gradient.id);
+            Gradient a = sh->gradient, b = gs ? gs->gradient : Gradient();
+            bool same = gs && a.kind == b.kind && a.angle == b.angle &&
+                        a.points.size() == b.points.size();
+            for (size_t k = 0; same && k < a.points.size(); ++k)
+                same = a.points[k].paint.swatch == b.points[k].paint.swatch &&
+                       a.points[k].paint.tint == b.points[k].paint.tint &&
+                       a.points[k].pos == b.points[k].pos &&
+                       a.points[k].opacity == b.points[k].opacity;
+            if (!same)
+                sh->gradient.id = 0;
+        }
         auto remap_group = [&](uint32_t g) {
             if (!g)
                 return 0u;
@@ -4897,6 +5493,14 @@ bool ComposerView::keyboard_event(int key, int, int action, int modifiers) {
         return true;
     }
     if (!editing()) {
+        if (m_tool == Tool::Pen && !cmd) {
+            /* The pen's keys: Return or Esc ends a path, Delete takes back
+             * a point (or removes the chosen one) */
+            if ((action == GLFW_PRESS || action == GLFW_REPEAT) && pen_key(key))
+                return true;
+            if (action == GLFW_RELEASE && m_pen.active)
+                return true;
+        }
         if (key == GLFW_KEY_ESCAPE && master_mode() && !cmd) {
             /* Editing a master: Esc lets go of the selection, then is Done */
             if (action == GLFW_PRESS) {
@@ -5470,7 +6074,8 @@ void ComposerView::draw_chrome(NVGcontext *ctx, float px, size_t page,
                 tab(it.w * 0.5f, it.h, last ? (overset ? Overset : Empty) : Plus);
         }
 
-        if (selected && !it.group && !boxed) {   // a group's (or the selection's) box has corners
+        if (selected && !it.group && !boxed &&
+            !(m_tool == Tool::Pen && is_path(it))) {   // a group's (or the selection's) box has corners; the pen shows points
             const float hs = kHandlePx * lpx;
             nvgBeginPath(ctx);
             std::vector<Point> corners;
@@ -5511,6 +6116,9 @@ void ComposerView::draw_chrome(NVGcontext *ctx, float px, size_t page,
             nvgFill(ctx);
         }
     }
+
+    if (!only)
+        draw_pen(ctx, px, page);
 
     if (!only && m_marquee && page == m_page) {
         Bounds b;
