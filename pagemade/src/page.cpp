@@ -919,6 +919,13 @@ void PageDoc::set_items_layer(const std::vector<ItemId> &ids, LayerId layer) {
     if (!find_layer(layer))
         return;
     for (Page &p : pages) {
+        /* Only pages holding a moved item are touched: the split below
+         * moves every item out of the page, and a page left half-way
+         * keeps moved-from items (empty gradients, paths, groups). */
+        if (std::none_of(p.items.begin(), p.items.end(), [&](const Item &it) {
+                return std::find(ids.begin(), ids.end(), it.id) != ids.end();
+            }))
+            continue;
         /* The moved items go on top of their new layer, in their order */
         std::vector<Item> moved, rest;
         for (Item &it : p.items) {

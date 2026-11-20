@@ -3387,6 +3387,26 @@ static void test_layers(const FontLibrary &fonts) {
     doc.set_items_layer({b}, other);
     doc.group_items({a, b});
     CHECK(doc.find_item(a)->layer == doc.find_item(b)->layer, "a group is on one layer");
+
+    /* Moving an item leaves the other pages' items whole (a gradient's
+     * points used to be moved out of every page not holding a moved item) */
+    PageDoc two = new_publication(PageSetup(), 2);
+    const LayerId l2 = two.add_layer("Layer 2");
+    auto gradient_rect = [&](size_t page) {
+        Item it;
+        it.w = it.h = 50;
+        Shape sh;
+        sh.fill = {kBlack, 100.f};
+        sh.gradient = default_gradient(sh.fill);
+        sh.gradient.kind = Gradient::Kind::Linear;
+        it.content = sh;
+        return two.add_item(page, it);
+    };
+    const ItemId ra = gradient_rect(0), rb = gradient_rect(1);
+    two.set_items_layer({ra}, two.layers.front().id);
+    const Shape *sb = two.find_item(rb) ? two.find_item(rb)->shape() : nullptr;
+    CHECK(sb && sb->gradient.on() && two.find_item(rb)->layer == l2,
+          "moving an item to a layer leaves another page's gradient alone");
 }
 
 static std::string run_cmd(const std::string &cmd, bool *ok) {
@@ -7821,6 +7841,8 @@ static void test_masters(const FontLibrary &fonts) {
               after_e);
     }
 }
+
+
 
 int main(int argc, char **argv) {
     bool verbose = argc > 1 && std::strcmp(argv[1], "-v") == 0;

@@ -957,7 +957,7 @@ public:
 
         /* Not a tool: puts an empty picture frame down, as a placed
          * picture goes down, for templates */
-        auto *frame_btn = new Button(toolbar, "", FA_IMAGE);
+        auto *frame_btn = m_frame_btn = new Button(toolbar, "", FA_IMAGE);
         frame_btn->set_tooltip("Empty picture frame (placed like a picture; fill it with "
                                "right-click > Place Picture, or Ctrl+drag a picture onto it)");
         frame_btn->set_callback([this] { m_view->place_empty_frame(); });
@@ -1321,6 +1321,10 @@ public:
             tb.second->set_enabled(tools);
         if (m_mode_btn)
             m_mode_btn->set_enabled(tools);
+        if (m_frame_btn)
+            m_frame_btn->set_enabled(tools);
+        if (m_frame_item)
+            m_frame_item->set_enabled(tools);
         redraw();
     }
 
@@ -2060,7 +2064,8 @@ public:
         add_cmd(file, "Open...", {{SYSTEM_COMMAND_MOD, GLFW_KEY_O}}, [this] { open_document_dialog(); });
         add_cmd(file, "Import...", {}, [this] { import_dialog(); });
         add_cmd(file, "Place...", {{SYSTEM_COMMAND_MOD, GLFW_KEY_D}}, [this] { place_dialog(); });
-        add_cmd(file, "Place Empty Picture Frame", {}, [this] { m_view->place_empty_frame(); });
+        m_frame_item = add_cmd(file, "Place Empty Picture Frame", {},
+                               [this] { m_view->place_empty_frame(); });
         new Separator(file->popup());
         add_cmd(file, "Save", {{SYSTEM_COMMAND_MOD, GLFW_KEY_S}}, [this] { save(); });
         add_cmd(file, "Save As...", {{SYSTEM_COMMAND_MOD | GLFW_MOD_SHIFT, GLFW_KEY_S}},
@@ -3732,6 +3737,8 @@ public:
             m_pages->set_visible(!on);
         if (m_mode_btn)
             m_mode_btn->set_enabled(!on && !m_view->preview());
+        if (m_frame_btn)
+            m_frame_btn->set_enabled(!on && !m_view->preview());
         if (on)
             show_type_palette(true);
         /* Layers, masters, pictures and frames wait: Cancel would undo
@@ -3872,6 +3879,33 @@ public:
 
     /* Center the spread, or the current page (its spread when facing) when
      * the pages are stacked. */
+    /* Page Up / Page Down turn to the previous or next page (the spread,
+     * in Spread view); Ctrl with them, or Home and End, go to the first or
+     * last. Not while text is being edited: there they belong to the text. */
+    bool page_key(int key, int modifiers) {
+        if (m_view->editing() || m_view->story_mode() || m_view->editing_master())
+            return false;
+        const bool cmd = (modifiers & SYSTEM_COMMAND_MOD) != 0;
+        const size_t n = m_view->page_count();
+        if (n == 0)
+            return false;
+        bool turned = false;
+        if ((key == GLFW_KEY_PAGE_UP && cmd) || key == GLFW_KEY_HOME) {
+            turned = m_view->page_index() != 0;
+            m_view->show_page(0);
+        } else if ((key == GLFW_KEY_PAGE_DOWN && cmd) || key == GLFW_KEY_END) {
+            turned = m_view->page_index() != n - 1;
+            m_view->show_page(n - 1);
+        } else if (key == GLFW_KEY_PAGE_UP || key == GLFW_KEY_PAGE_DOWN) {
+            turned = m_view->step_page(key == GLFW_KEY_PAGE_UP ? -1 : 1);
+        } else {
+            return false;
+        }
+        if (turned && m_view->page_view() != PageView::One)
+            frame_view();                // the stack or spread scrolls to it
+        return true;
+    }
+
     void frame_view() {
         perform_layout();
         double z = m_scroll->zoom();
@@ -4441,6 +4475,8 @@ public:
             return false;                // no menu shortcuts behind a dialog
         if (action == GLFW_PRESS && m_menubar && m_menubar->process_shortcuts(modifiers, key))
             return true;
+        if ((action == GLFW_PRESS || action == GLFW_REPEAT) && page_key(key, modifiers))
+            return true;
         if (action != GLFW_PRESS || !(modifiers & (GLFW_MOD_CONTROL | GLFW_MOD_SUPER)))
             return false;
         switch (key) {
@@ -4622,6 +4658,8 @@ private:
     MenuItem        *m_lock_guides_item = nullptr;
     MenuItem        *m_dark_item = nullptr;
     MenuItem        *m_preview_item = nullptr;
+    MenuItem        *m_frame_item = nullptr;
+    Button          *m_frame_btn = nullptr;
     MenuItem        *m_print_view_item = nullptr;
     ComposerView    *m_view = nullptr;
     PageIconStrip   *m_pages = nullptr;

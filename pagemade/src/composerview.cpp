@@ -5264,6 +5264,28 @@ void ComposerView::show_page(size_t i) {
     page_changed();
 }
 
+bool ComposerView::step_page(int dir) {
+    if (m_doc.pages.empty() || dir == 0)
+        return false;
+    size_t lo = m_page, hi = m_page;
+    if (m_page_view == PageView::Spread) {
+        /* Past the pages now side by side, not onto the other half */
+        std::vector<PageSlot> slots;
+        float aw, ah;
+        arrangement(page_gap(), m_doc, m_page, m_page_view, slots, aw, ah);
+        for (const PageSlot &sl : slots) {
+            lo = std::min(lo, sl.index);
+            hi = std::max(hi, sl.index);
+        }
+    }
+    if (dir < 0 && lo == 0)
+        return false;
+    if (dir > 0 && hi + 1 >= m_doc.pages.size())
+        return false;
+    show_page(dir < 0 ? lo - 1 : hi + 1);
+    return true;
+}
+
 void ComposerView::insert_page(bool after) {
     end_placement(false);
     if (m_creating)
@@ -7239,7 +7261,7 @@ bool same_rect(const PlacedImage &a, const PlacedImage &b) {
 } // namespace
 
 void ComposerView::place_empty_frame() {
-    if (m_page >= m_doc.pages.size() || !check_active_layer())
+    if (m_preview || m_story_mode || m_page >= m_doc.pages.size() || !check_active_layer())
         return;
     /* 3 x 2.25 in, as a 72 ppi "picture": place_frame sizes it the way it
      * sizes a picture (a column wide with Fit to Columns) */

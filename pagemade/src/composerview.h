@@ -309,6 +309,9 @@ public:
      * page_origin() for view-local). */
     nanogui::Vector2f fit_center() const;
     void show_page(size_t i);
+    /* Page Up / Page Down: the page (or spread, in Spread view) before or
+     * after the one in view. False at the first or last. */
+    bool step_page(int dir);
     void insert_page(bool after);          // one undo step
     /* Copy the current page, or with facing pages the two-page spread that
      * holds it, right after itself, and turn to the (first) copy. One undo
