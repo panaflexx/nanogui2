@@ -268,6 +268,16 @@ bool decode_rgba(const uint8_t *data, size_t n, int orient, DecodedImage *out, s
         return false;
     }
     int w = 0, h = 0, comp = 0;
+    if (!stbi_info_from_memory(data, (int) n, &w, &h, &comp)) {
+        if (error)
+            *error = stbi_failure_reason() ? stbi_failure_reason() : "couldn't decode the picture";
+        return false;
+    }
+    if (!image_size_allowed(w, h)) {
+        if (error) *error = "picture is too large to decode (" + std::to_string(w) + " x " +
+                            std::to_string(h) + " pixels)";
+        return false;
+    }
     stbi_set_unpremultiply_on_load(1);
     stbi_convert_iphone_png_to_rgb(1);
     unsigned char *img = stbi_load_from_memory(data, (int) n, &w, &h, &comp, 4);
@@ -481,6 +491,11 @@ bool jpeg_decode_scaled(const uint8_t *data, size_t n, int long_edge, std::vecto
     const int comps = 3;
 #endif
     cinfo.dct_method = JDCT_ISLOW;
+    jpeg_calc_output_dimensions(&cinfo);
+    if (!image_size_allowed(cinfo.output_width, cinfo.output_height)) {
+        jpeg_destroy_decompress(&cinfo);
+        return false;                    // the full decode refuses it too, and says why
+    }
     jpeg_start_decompress(&cinfo);
     const size_t ow = cinfo.output_width, oh = cinfo.output_height;
     buf = (uint8_t *) std::malloc(ow * oh * 4);
@@ -535,7 +550,7 @@ bool exif_thumbnail_view(const uint8_t *data, size_t n, const ImageMetadata &met
                 return false;
             int tw = 0, th = 0, comp = 0;
             if (!stbi_info_from_memory(thumb, (int) tlen, &tw, &th, &comp) ||
-                std::max(tw, th) < long_edge)
+                !image_size_allowed(tw, th) || std::max(tw, th) < long_edge)
                 return false;
             /* The stored (unrotated) photo's proportions */
             const double sw = meta.stored_width_px > 0 ? meta.stored_width_px : meta.width_px;
@@ -996,6 +1011,12 @@ public:
 private:
     static bool decode_handle(heif_image_handle *handle, ImageMetadata meta, DecodedImage *out,
                               std::string *error) {
+        const int hw = heif_image_handle_get_width(handle), hh = heif_image_handle_get_height(handle);
+        if (!image_size_allowed(hw, hh)) {
+            if (error) *error = "picture is too large to decode (" + std::to_string(hw) + " x " +
+                                std::to_string(hh) + " pixels)";
+            return false;
+        }
         heif_image *img = nullptr;
         heif_error e = heif_decode_image(handle, &img, heif_colorspace_RGB,
                                          heif_chroma_interleaved_RGBA, nullptr);

@@ -6336,6 +6336,47 @@ static void test_pdf_import(const FontLibrary &fonts) {
     std::string rows = std::string("\x02\x01\x02\x02\x01\x01", 6);   // PNG Up filter, two rows of two
     pdf::unpredict(rows, 12, 1, 8, 2);
     CHECK(rows == std::string("\x01\x02\x02\x03", 4), "PNG predictor (Up)");
+    std::string short_row = "x";
+    CHECK(!pdf::unpredict(short_row, 15, 1, 8, 100) && short_row == "x",
+          "a predictor row bigger than the stream is refused");
+
+    /* A subsection that starts at the top of the object-number range. The
+     * next entry must not wrap onto a negative key, and a number the table
+     * never lists must stay missing (a rebuild would have found it). */
+    {
+        std::string pdf = "%PDF-1.4\n";
+        const size_t o1 = pdf.size();
+        pdf += "1 0 obj << /Type /Catalog /Pages 2 0 R >> endobj\n";
+        const size_t o2 = pdf.size();
+        pdf += "2 0 obj << /Type /Pages /Kids [3 0 R] /Count 1 >> endobj\n";
+        const size_t o3 = pdf.size();
+        pdf += "3 0 obj << /Type /Page /Parent 2 0 R /MediaBox [0 0 10 10] >> endobj\n";
+        const size_t hi = pdf.size();
+        pdf += "2147483647 0 obj << /Hi true >> endobj\n";
+        const size_t wrapped = pdf.size();
+        pdf += "5 0 obj << /Wrapped true >> endobj\n";
+        auto ten = [](size_t n) {
+            const std::string s = std::to_string(n);
+            return std::string(10 - s.size(), '0') + s;
+        };
+        const size_t xref = pdf.size();
+        pdf += "xref\n0 4\n0000000000 65535 f \n";
+        pdf += ten(o1) + " 00000 n \n" + ten(o2) + " 00000 n \n" + ten(o3) + " 00000 n \n";
+        pdf += "2147483647 2\n" + ten(hi) + " 00000 n \n" + ten(wrapped) + " 00000 n \n";
+        pdf += "trailer << /Size 6 /Root 1 0 R >>\nstartxref\n" + std::to_string(xref) + "\n%%EOF\n";
+        pdf::Document xdoc;
+        std::string xerr;
+        const bool opened = xdoc.open((const uint8_t *) pdf.data(), pdf.size(), &xerr);
+        CHECK(opened, "xref at the top of the int range still opens: %s", xerr.c_str());
+        if (opened) {
+            const pdf::Object *mark = xdoc.object(2147483647).get("Hi");
+            CHECK(mark && mark->boolean, "the last in-range object is kept");
+            CHECK(xdoc.object(5).type == pdf::Type::Null, "an object the table skips stays missing");
+            CHECK(xdoc.object(-2147483647 - 1).type == pdf::Type::Null,
+                  "the next number is not stored under a wrapped key");
+            CHECK(xdoc.page_count() == 1, "the page tree is intact (%d)", xdoc.page_count());
+        }
+    }
 
     /* Our own export, read back: the sample page, every glyph embedded */
     PageDoc doc = sample_document();
@@ -6441,6 +6482,72 @@ static void test_pdf_import(const FontLibrary &fonts) {
         CHECK(hs.texts[0].runs[0].ink_set && !hs.texts[0].runs[0].ink.empty(), "and outlined on this thread");
     }
     CHECK(!vector_loader().decode((const uint8_t *) "%PDF-1.4\nnothing", 16, &hs, &err), "junk is refused");
+
+    /* Numbers at the top of the range: an indexed /Hival, a sampled Size,
+     * and a CID /W that sits on the last code. Each used to overflow an int
+     * or wrap a uint32 and paint the low codes. */
+    {
+        std::string pdf = "%PDF-1.4\n";
+        std::vector<size_t> at;
+        auto add = [&](const std::string &body) {
+            at.push_back(pdf.size());
+            pdf += body;
+        };
+        auto ten = [](size_t n) {
+            const std::string s = std::to_string(n);
+            return std::string(10 - s.size(), '0') + s;
+        };
+        add("1 0 obj << /Type /Catalog /Pages 2 0 R >> endobj\n");
+        add("2 0 obj << /Type /Pages /Kids [3 0 R] /Count 1 >> endobj\n");
+        add("3 0 obj << /Type /Page /Parent 2 0 R /MediaBox [0 0 100 100] "
+            "/Resources << /ColorSpace << /Idx [/Indexed /DeviceRGB 2147483647 <ff0000>] "
+            "/Sep [/Separation /Spot /DeviceRGB 4 0 R] >> "
+            "/Font << /F1 6 0 R >> >> /Contents 5 0 R >> endobj\n");
+        add("4 0 obj << /FunctionType 0 /Domain [0 1] /Range [0 1 0 1 0 1] "
+            "/Size [2147483647] /BitsPerSample 8 /Length 1 >>\nstream\n" +
+            std::string(1, '\0') + "\nendstream\nendobj\n");
+        const std::string content =
+            "/Idx cs 2147483647 sc 0 0 10 10 re f\n"
+            "/Sep cs 1 sc 10 0 10 10 re f\n"
+            "BT /F1 1000 Tf <00000001> Tj ET\n";
+        add("5 0 obj << /Length " + std::to_string(content.size()) + " >>\nstream\n" + content +
+            "endstream\nendobj\n");
+        add("6 0 obj << /Type /Font /Subtype /Type0 /BaseFont /X /Encoding /Identity-H "
+            "/DescendantFonts [7 0 R] /ToUnicode 8 0 R >> endobj\n");
+        add("7 0 obj << /Type /Font /Subtype /CIDFontType2 /BaseFont /X "
+            "/CIDSystemInfo << /Registry (A) /Ordering (I) /Supplement 0 >> /DW 1000 "
+            "/W [4294967295 [200 50] 4294967295 4294967295 100] /FontDescriptor 9 0 R >> endobj\n");
+        const std::string cmap =
+            "2 beginbfchar\n<0000> <0041>\n<0001> <0042>\nendbfchar\n";
+        add("8 0 obj << /Length " + std::to_string(cmap.size()) + " >>\nstream\n" + cmap +
+            "endstream\nendobj\n");
+        add("9 0 obj << /Type /FontDescriptor /FontName /X /Flags 32 >> endobj\n");
+        const size_t xref = pdf.size();
+        pdf += "xref\n0 10\n0000000000 65535 f \n";
+        for (size_t off : at)
+            pdf += ten(off) + " 00000 n \n";
+        pdf += "trailer << /Size 10 /Root 1 0 R >>\nstartxref\n" + std::to_string(xref) + "\n%%EOF\n";
+        const std::vector<uint8_t> raw(pdf.begin(), pdf.end());
+        VectorScene big;
+        CHECK(vector_loader().decode(raw.data(), raw.size(), &big, &err),
+              "numbers at the top of the range still open: %s", err.c_str());
+        CHECK(big.shapes.size() == 2, "the two fills are drawn (%zu)", big.shapes.size());
+        if (big.shapes.size() == 2) {
+            CHECK(near_color(big.shapes[0].fill.color, 1, 0, 0, 1),
+                  "indexed /Hival is held to the table (red)");
+            CHECK(near_color(big.shapes[1].fill.color, 0, 0, 0, 1),
+                  "a sampled Size of 2^31-1 is refused, and the spot falls back to black");
+        }
+        bool noted = false;
+        for (const std::string &s : big.skipped)
+            noted = noted || s == "color functions";
+        CHECK(noted, "the refused function is named");
+        CHECK(big.texts.size() == 1 && big.texts[0].runs.size() == 2, "the two CIDs are shown (%zu)",
+              big.texts.size());
+        if (big.texts.size() == 1 && big.texts[0].runs.size() == 2)
+            CHECK(near(big.texts[0].runs[1].x, 1000.f),
+                  "the width on the last CID does not wrap onto CID 0 (%g)", big.texts[0].runs[1].x);
+    }
 
     /* Gradients and spot colors: an axial shading painted with sh, a
      * radial shading pattern as a fill, and a Separation whose tint
@@ -7844,6 +7951,134 @@ static void test_masters(const FontLibrary &fonts) {
 
 
 
+/* Hostile or odd input in the parsers: nesting, LZW, JSON escapes and
+ * numbers, and the decoded-picture budget. */
+static void test_parser_hardening() {
+    /* PDF: nesting past the limit ends the parse instead of the stack */
+    {
+        const std::string deep(200000, '[');
+        pdf::Lexer lx((const uint8_t *) deep.data(), deep.size());
+        pdf::Object o;
+        lx.next(o);
+        CHECK(o.is(pdf::Type::Array) && lx.pos() == deep.size(),
+              "200000 nested PDF arrays stop at the depth limit");
+        const std::string ok = "[[[[1 2] /A] << /K [3] >>]]";
+        pdf::Lexer lx2((const uint8_t *) ok.data(), ok.size());
+        pdf::Object o2;
+        CHECK(lx2.next(o2) && o2.is(pdf::Type::Array) && o2.size() == 1 && o2[0].size() == 2 && o2[0][0].size() == 2,
+              "ordinary nesting still parses");
+    }
+    /* PDF numbers past int: saturated, not undefined */
+    {
+        pdf::Object big;
+        big.type = pdf::Type::Real;
+        big.number = 3e9;
+        CHECK(big.as_int() == 2147483647 && big.as_u32() == 3000000000u, "3e9 saturates as an int");
+        big.number = -3e9;
+        CHECK(big.as_int() == -2147483647 - 1 && big.as_size(7) == 7 && big.as_u32() == 0,
+              "-3e9: int minimum, no size, uint32 0");
+        big.number = 1e30;
+        CHECK(big.as_size() == SIZE_MAX, "1e30 saturates as a size");
+    }
+    /* LZW: a stream that fills the table and never clears decodes as an
+     * encoder that stops adding codes at 4096 wrote it */
+    {
+        std::string text;
+        for (int i = 0; i < 60000; ++i)
+            text += (char) ('a' + (i * 7 + i / 13) % 26);
+        std::map<std::string, int> dict;
+        for (int i = 0; i < 256; ++i)
+            dict[std::string(1, (char) i)] = i;
+        int width = 9;
+        std::string bits;
+        uint64_t acc = 0;
+        int nacc = 0;
+        auto emit = [&](int code) {
+            acc = (acc << width) | (uint64_t) code;
+            nacc += width;
+            while (nacc >= 8) {
+                bits += (char) ((acc >> (nacc - 8)) & 0xFF);
+                nacc -= 8;
+            }
+        };
+        /* After its j-th code the decoder holds 258 + j entries (at most
+         * 4096), and widens the next code when that reaches 2^width - 1 */
+        size_t j = 0;
+        auto after_code = [&] {
+            const size_t held = std::min<size_t>(258 + j, 4096);
+            if ((int) held >= (1 << width) - 1 && width < 12)
+                ++width;
+            ++j;
+        };
+        std::string w;
+        for (char c : text) {
+            const std::string wc = w + c;
+            if (w.empty() || dict.count(wc)) {
+                w = wc;
+                continue;
+            }
+            emit(dict[w]);
+            if (258 + j < 4096)
+                dict[wc] = (int) (258 + j);
+            after_code();
+            w = std::string(1, c);
+        }
+        emit(dict[w]);
+        after_code();
+        emit(257);
+        if (nacc > 0)
+            bits += (char) ((acc << (8 - nacc)) & 0xFF);
+        std::string out;
+        const bool decoded = pdf::lzw_decode(bits, out, true);
+        CHECK(decoded && out.size() >= text.size() && out.compare(0, text.size(), text) == 0,
+              "LZW round-trips past a full table (%zu of %zu bytes)", out.size(), text.size());
+    }
+    /* JSON: \u escapes as UTF-8, pairs joined, nulls and lone halves
+     * replaced, "" as a key, and no infinity */
+    {
+        std::string jerr;
+        DictValue *v = json::parse(
+            "{\"a\": \"caf\\u00e9 \\ud83d\\ude00\", \"b\": \"x\\u0000y\", \"\": 1, \"lone\": \"\\ud800z\"}",
+            &jerr);
+        CHECK(v, "JSON with escapes parses: %s", jerr.c_str());
+        if (v) {
+            auto str = [&](const char *k) {
+                const DictValue *f = json::field(v, k);
+                return f && f->type == DICT_STRING ? std::string(f->string_value) : std::string("<none>");
+            };
+            CHECK(str("a") == "caf\xC3\xA9 \xF0\x9F\x98\x80", "\\u00e9 and a surrogate pair become UTF-8");
+            CHECK(str("b") == "x\xEF\xBF\xBDy", "\\u0000 is the replacement character, not an end");
+            CHECK(str("lone") == "\xEF\xBF\xBDz", "a lone surrogate is replaced");
+            double one = 0;
+            CHECK(json::number(json::field(v, ""), one) && one == 1.0, "\"\" is a key");
+            dict_destroy(v);
+        }
+        CHECK(!json::parse("{\"n\": 1e309}", &jerr), "1e309 is refused");
+        DictValue *inf = dict_create_number(1e308 * 10.0);
+        char buf[64];
+        CHECK(inf && dict_serialize_json(inf, buf, sizeof buf, 0) && std::string(buf) == "null",
+              "an infinite number is written as null (%s)", buf);
+        dict_destroy(inf);
+    }
+    /* Pictures: the header's size is checked before any pixels exist */
+    {
+        CHECK(image_size_allowed(16384, 16384) && !image_size_allowed(17000, 17000) &&
+                  !image_size_allowed(0, 10) && !image_size_allowed(1LL << 40, 1),
+              "the pixel budget is 2^28");
+        auto be32 = [](uint32_t v) {
+            return std::string{(char) (v >> 24), (char) (v >> 16), (char) (v >> 8), (char) v};
+        };
+        const std::string png = std::string("\x89PNG\r\n\x1a\n", 8) + be32(13) + "IHDR" + be32(17000) +
+                                be32(17000) + std::string("\x08\x02\x00\x00\x00", 5) + be32(0) +
+                                be32(0) + "IEND" + be32(0);
+        DecodedImage di;
+        std::string ierr;
+        CHECK(!image_loader().decode((const uint8_t *) png.data(), png.size(), &di, &ierr) &&
+                  ierr.find("too large") != std::string::npos && di.rgba.empty(),
+              "a 17000 x 17000 PNG header is refused before decoding (%s)", ierr.c_str());
+    }
+}
+
 int main(int argc, char **argv) {
     bool verbose = argc > 1 && std::strcmp(argv[1], "-v") == 0;
     FontLibrary fonts;
@@ -7922,6 +8157,7 @@ int main(int argc, char **argv) {
     test_svg_export(fonts);
     test_svg_paste(fonts);
     test_pdf_import(fonts);
+    test_parser_hardening();
     test_parser_depth();
     test_pdf_cid_keyed(fonts);
     test_pdf_picture_flags();

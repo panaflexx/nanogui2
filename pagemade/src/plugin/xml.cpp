@@ -379,6 +379,8 @@ bool xml_parse(const uint8_t *data, size_t n, XmlNode *root, std::string *error)
     if (!root)
         return false;
     *root = XmlNode();
+    if (!data)
+        n = 0;                           // no bytes: nothing past the empty literal is read
     Reader r{data ? (const char *) data : "", data ? (const char *) data + n : "", {}};
     if (n >= 3 && (unsigned char) r.p[0] == 0xEF && (unsigned char) r.p[1] == 0xBB &&
         (unsigned char) r.p[2] == 0xBF)

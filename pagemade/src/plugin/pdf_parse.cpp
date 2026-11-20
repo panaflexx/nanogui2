@@ -229,7 +229,18 @@ bool Lexer::next(Object &out) {
     if (!raw(out))
         return false;
     if (out.type == Type::Keyword) {
+        if ((out.str == "[" || out.str == "<<") && m_depth >= kMaxPdfNesting) {
+            m_pos = m_n;                 // too deep: the rest is not read
+            m_ahead.clear();
+            return false;
+        }
+        struct Level {
+            int &d;
+            explicit Level(int &x) : d(x) { ++d; }
+            ~Level() { --d; }
+        };
         if (out.str == "[") {
+            const Level level(m_depth);
             auto a = std::make_shared<Array>();
             Object e;
             while (next(e)) {
@@ -241,6 +252,7 @@ bool Lexer::next(Object &out) {
             out.type = Type::Array;
             out.array = std::move(a);
         } else if (out.str == "<<") {
+            const Level level(m_depth);
             auto d = std::make_shared<Dict>();
             Object k;
             while (next(k)) {
@@ -271,8 +283,8 @@ bool Lexer::next(Object &out) {
                     if (b.type == Type::Keyword && b.str == "R") {
                         Object r;
                         r.type = Type::Ref;
-                        r.num = (int) out.number;
-                        r.gen = (int) a.number;
+                        r.num = out.as_int();
+                        r.gen = a.as_int();
                         out = r;
                         return true;
                     }
@@ -294,25 +306,42 @@ bool flate_decode(const std::string &in, std::string &out) {
     if (in.empty())
         return true;
     /* zlib, else a raw deflate stream (some writers leave the header off).
-     * A damaged stream keeps what came out before the damage. */
+     * A damaged stream keeps what came out before the damage, and so does
+     * one that would decode past kMaxDecodedStream. The input goes in in
+     * pieces: avail_in is 32 bits wide. */
     for (int bits : {MZ_DEFAULT_WINDOW_BITS, -MZ_DEFAULT_WINDOW_BITS}) {
         mz_stream zs;
         std::memset(&zs, 0, sizeof zs);
         if (mz_inflateInit2(&zs, bits) != MZ_OK)
             continue;
-        zs.next_in = (const unsigned char *) in.data();
-        zs.avail_in = (unsigned int) in.size();
+        const unsigned char *next = (const unsigned char *) in.data();
+        size_t left = in.size();
+        constexpr size_t kPiece = (size_t) 1 << 30;
         std::string got;
         unsigned char buf[65536];
         int rc = MZ_OK;
+        bool capped = false;
         do {
+            if (zs.avail_in == 0 && left > 0) {
+                const size_t take = std::min(left, kPiece);
+                zs.next_in = next;
+                zs.avail_in = (unsigned int) take;
+                next += take;
+                left -= take;
+            }
             zs.next_out = buf;
             zs.avail_out = sizeof buf;
             rc = mz_inflate(&zs, MZ_SYNC_FLUSH);
-            got.append((const char *) buf, sizeof buf - zs.avail_out);
-        } while (rc == MZ_OK && (zs.avail_in > 0 || zs.avail_out == 0));
+            const size_t made = sizeof buf - zs.avail_out;
+            if (got.size() + made > kMaxDecodedStream) {
+                got.append((const char *) buf, kMaxDecodedStream - got.size());
+                capped = true;
+                break;
+            }
+            got.append((const char *) buf, made);
+        } while (rc == MZ_OK && (zs.avail_in > 0 || left > 0 || zs.avail_out == 0));
         mz_inflateEnd(&zs);
-        if (rc == MZ_STREAM_END || !got.empty()) {
+        if (rc == MZ_STREAM_END || capped || !got.empty()) {
             out = std::move(got);
             return true;
         }
@@ -350,16 +379,24 @@ bool lzw_decode(const std::string &in, std::string &out, bool early_change) {
             }
             if (code == 257)
                 return true;
+            /* 12-bit codes reach 4096 entries; a stream that never clears
+             * gets no more (each would be a longer copy that no code can
+             * name), as other readers do */
+            constexpr size_t kMaxEntries = 4096;
             std::string entry;
             if (code < (int) table.size()) {
                 entry = table[(size_t) code];
-                if (have_prev)
+                if (have_prev && table.size() < kMaxEntries)
                     table.push_back(prev + entry[0]);
-            } else if (have_prev && code == (int) table.size()) {
+            } else if (have_prev && code == (int) table.size() && table.size() < kMaxEntries) {
                 entry = prev + prev[0];
                 table.push_back(entry);
             } else {
                 return !out.empty();     // damaged
+            }
+            if (out.size() + entry.size() > kMaxDecodedStream) {
+                out.append(entry, 0, kMaxDecodedStream - out.size());
+                return true;             // as much as a stream may decode to
             }
             out += entry;
             prev = entry;
@@ -435,11 +472,16 @@ bool run_length_decode(const std::string &in, std::string &out) {
         const int len = (unsigned char) in[i++];
         if (len == 128)
             break;
+        /* A run repeats one byte up to 128 times: capped like Flate */
         if (len < 128) {
             const size_t n = std::min<size_t>((size_t) len + 1, in.size() - i);
+            if (out.size() + n > kMaxDecodedStream)
+                break;
             out.append(in, i, n);
             i += n;
         } else if (i < in.size()) {
+            if (out.size() + (size_t) (257 - len) > kMaxDecodedStream)
+                break;
             out.append((size_t) (257 - len), in[i++]);
         }
     }
@@ -449,9 +491,11 @@ bool run_length_decode(const std::string &in, std::string &out) {
 bool unpredict(std::string &data, int predictor, int colors, int bpc, int columns) {
     if (predictor < 2)
         return true;
-    colors = std::max(1, colors);
-    bpc = std::max(1, bpc);
-    columns = std::max(1, columns);
+    /* The file's numbers, held to what a picture row can be, so the row
+     * size below can't overflow */
+    colors = std::clamp(colors, 1, 32);
+    bpc = std::clamp(bpc, 1, 16);
+    columns = std::clamp(columns, 1, 1 << 24);
     const size_t row = ((size_t) colors * bpc * columns + 7) / 8;
     const size_t bpp = std::max<size_t>(1, ((size_t) colors * bpc + 7) / 8);
     if (predictor == 2) {                // TIFF: 8-bit components only
@@ -462,7 +506,10 @@ bool unpredict(std::string &data, int predictor, int colors, int bpc, int column
                 data[r + i] = (char) ((unsigned char) data[r + i] + (unsigned char) data[r + i - bpp]);
         return true;
     }
-    /* PNG: a filter byte before each row */
+    /* PNG: a filter byte before each row. A row bigger than the decoded
+     * bytes cannot be real, and the two row buffers would be that big. */
+    if (row > data.size())
+        return false;
     std::string out;
     out.reserve(data.size());
     std::vector<unsigned char> prev(row, 0), cur(row, 0);
@@ -540,7 +587,7 @@ bool Document::open(const uint8_t *data, size_t n, std::string *error) {
         Lexer lx(data, n, tail + sx + 9);
         Object off;
         if (lx.next(off) && off.is(Type::Int) && off.number > 0 && off.number < (double) n)
-            ok = read_xref((size_t) off.number, nullptr, 0);
+            ok = read_xref(off.as_size(), nullptr, 0);
     }
     if (!ok || !m_trailer.get("Root") || resolve(*m_trailer.get("Root")).type != Type::Dict)
         if (!rebuild()) {
@@ -599,17 +646,24 @@ bool Document::read_xref_table(size_t at, std::string *error, int depth) {
         if (!a.is(Type::Int) || !lx.next(count) || !count.is(Type::Int))
             return false;
         const int first = a.as_int(), n = count.as_int();
-        for (int i = 0; i < n; ++i) {
+        for (int64_t i = 0; i < n; ++i) {
             Object off, gen, kind;
             if (!lx.next(off) || !lx.next(gen) || !lx.next(kind))
                 return false;
-            if (!m_xref.count(first + i)) {
+            /* Object numbers are ints in the map. Past either end of that
+             * range the entry is skipped, not wrapped onto another key. */
+            const int64_t num = (int64_t) first + i;
+            if (num < 0 || num > 2147483647)
+                continue;
+            const int key = (int) num;
+            if (!m_xref.count(key)) {
                 Entry e;
-                if (kind.is(Type::Keyword) && kind.str == "n" && off.number > 0) {
+                if (kind.is(Type::Keyword) && kind.str == "n" && off.number > 0 &&
+                    off.as_size() < m_bytes.size()) {
                     e.kind = Entry::Plain;
-                    e.offset = (size_t) off.number;
+                    e.offset = off.as_size();
                 }
-                m_xref[first + i] = e;
+                m_xref[key] = e;
             }
         }
     }
@@ -619,10 +673,10 @@ bool Document::read_xref_table(size_t at, std::string *error, int depth) {
     merge_trailer(trailer);
     if (const Object *stm = trailer.get("XRefStm"))
         if (stm->is_number())
-            read_xref_stream((size_t) stm->number, error, depth + 1);
+            read_xref_stream(stm->as_size(), error, depth + 1);
     if (const Object *prev = trailer.get("Prev"))
         if (prev->is_number())
-            read_xref((size_t) prev->number, error, depth + 1);
+            read_xref(prev->as_size(), error, depth + 1);
     return true;
 }
 
@@ -634,6 +688,11 @@ bool Document::read_xref_stream(size_t at, std::string *error, int depth) {
     if (w.size() < 3)
         return false;
     const int w1 = w[0].as_int(), w2 = w[1].as_int(), w3 = w[2].as_int();
+    /* Each field is at most 8 bytes (64 bits); anything else is not an
+     * xref stream this reader understands */
+    for (const int f : {w1, w2, w3})
+        if (f < 0 || f > 8)
+            return false;
     std::string bytes;
     if (!stream_bytes(xs, bytes))
         return false;
@@ -658,7 +717,10 @@ bool Document::read_xref_stream(size_t at, std::string *error, int depth) {
     size_t pos = 0;
     for (const auto &r : ranges)
         for (int i = 0; i < r.second && pos + row <= bytes.size(); ++i, pos += row) {
-            const int num = r.first + i;
+            const int64_t num64 = (int64_t) r.first + i;
+            if (num64 < 0 || num64 > 2147483647)
+                continue;
+            const int num = (int) num64;
             const uint64_t type = field(pos, w1, 1);
             const uint64_t f2 = field(pos + (size_t) w1, w2, 0);
             const uint64_t f3 = field(pos + (size_t) w1 + (size_t) w2, w3, 0);
@@ -678,7 +740,7 @@ bool Document::read_xref_stream(size_t at, std::string *error, int depth) {
     merge_trailer(xs);
     if (const Object *prev = xs.get("Prev"))
         if (prev->is_number())
-            read_xref((size_t) prev->number, error, depth + 1);
+            read_xref(prev->as_size(), error, depth + 1);
     return true;
 }
 
@@ -712,8 +774,8 @@ bool Document::parse_at(size_t offset, int num, Object &out) const {
     bool have = false;
     if (const Object *l = out.get("Length")) {
         const Object &lv = l->is(Type::Ref) && l->num != num ? resolve(*l) : *l;
-        if (lv.is_number() && lv.number >= 0 && start + (size_t) lv.number <= m_bytes.size()) {
-            len = (size_t) lv.number;
+        if (lv.is_number() && lv.as_size() <= m_bytes.size() - start) {
+            len = lv.as_size();
             /* The length is right only if endstream follows it */
             Lexer check(m_bytes.data(), m_bytes.size(), start + len);
             Object e;
@@ -748,7 +810,8 @@ bool Document::load_object_stream(int num) const {
         Object on, off;
         if (!head.next(on) || !head.next(off) || !on.is(Type::Int) || !off.is(Type::Int))
             break;
-        objs.emplace_back(on.as_int(), (size_t) first + (size_t) off.number);
+        const size_t at = off.as_size();   // past the data (or negative): skipped below
+        objs.emplace_back(on.as_int(), at > data.size() - (size_t) first ? data.size() : (size_t) first + at);
     }
     for (const auto &o : objs) {
         auto e = m_xref.find(o.first);
@@ -927,9 +990,10 @@ bool Document::stream_bytes(const Object &stream, std::string &out, std::string 
                 return false;
             if (parm.dict) {
                 const int pred = get(parm, "Predictor").as_int(1);
-                if (pred > 1)
-                    unpredict(next, pred, get(parm, "Colors").as_int(1),
-                              get(parm, "BitsPerComponent").as_int(8), get(parm, "Columns").as_int(1));
+                if (pred > 1 &&
+                    !unpredict(next, pred, get(parm, "Colors").as_int(1),
+                               get(parm, "BitsPerComponent").as_int(8), get(parm, "Columns").as_int(1)))
+                    return false;
             }
         } else if (name == "ASCIIHexDecode" || name == "AHx") {
             ascii_hex_decode(out, next);

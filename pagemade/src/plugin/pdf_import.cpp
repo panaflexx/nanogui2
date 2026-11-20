@@ -310,12 +310,12 @@ void parse_cmap(const std::string &s, PdfFont &f, bool to_unicode) {
         } else if (k == "endcidchar" && !to_unicode) {
             for (size_t i = 0; i + 1 < args.size(); i += 2)
                 if (args[i].is(Type::String) && args[i + 1].is_number())
-                    f.cid_of[code_value(args[i].str)] = (uint32_t) args[i + 1].number;
+                    f.cid_of[code_value(args[i].str)] = args[i + 1].as_u32();
         } else if (k == "endcidrange" && !to_unicode) {
             for (size_t i = 0; i + 2 < args.size(); i += 3)
                 if (args[i].is(Type::String) && args[i + 1].is(Type::String) && args[i + 2].is_number())
                     f.cid_ranges.push_back({code_value(args[i].str),
-                                            {code_value(args[i + 1].str), (uint32_t) args[i + 2].number}});
+                                            {code_value(args[i + 1].str), args[i + 2].as_u32()}});
         }
         args.clear();
     }
@@ -468,7 +468,9 @@ public:
             size_t cells = 1;
             for (size_t i = 0; i < m; ++i) {
                 dims[i] = size[i].as_int(0);
-                if (dims[i] < 1 || cells > (size_t) 1 << 26)
+                /* The product is the sample count, checked before multiplying.
+                 * Size - 1 is an int below: it is the top of this axis. */
+                if (dims[i] < 1 || (size_t) dims[i] > ((size_t) 1 << 26) / cells)
                     return false;
                 cells *= (size_t) dims[i];
             }
@@ -481,7 +483,7 @@ public:
                 const float e1 = encode.size() >= 2 * i + 2 ? (float) encode[2 * i + 1].as_number(0)
                                                             : (float) (dims[i] - 1);
                 float e = d1 != d0 ? e0 + (in_at(i) - d0) * (e1 - e0) / (d1 - d0) : e0;
-                e = std::clamp(e, 0.f, (float) (dims[i] - 1));
+                e = e == e ? std::clamp(e, 0.f, (float) (dims[i] - 1)) : 0.f;   // NaN: the first sample
                 base[i] = std::min((int) std::floor(e), std::max(0, dims[i] - 2));
                 frac[i] = dims[i] > 1 ? e - (float) base[i] : 0.f;
             }
@@ -1053,12 +1055,17 @@ private:
             cs->kind = ColorSpace::Indexed;
             cs->n = 1;
             cs->base = color_space(spec[1], res, depth + 1);
-            cs->hival = m_doc.resolve(spec[2]).as_int(0);
             const Object &lut = m_doc.resolve(spec[3]);
             if (lut.is(Type::String))
                 cs->lookup = lut.str;
             else if (lut.is(Type::Stream))
                 m_doc.stream_bytes(lut, cs->lookup);
+            /* /Hival past the table is not an index. A float of one near
+             * 2^31 rounds to a value that does not fit back in an int. */
+            const int ncomp = cs->base ? std::max(1, cs->base->n) : 1;
+            const size_t entries = cs->lookup.size() / (size_t) ncomp;
+            const int max_i = entries == 0 ? 0 : (int) std::min(entries - 1, (size_t) 2147483647);
+            cs->hival = std::clamp(m_doc.resolve(spec[2]).as_int(0), 0, max_i);
             return cs;
         }
         if (fam == "Separation" || fam == "DeviceN") {
@@ -1093,7 +1100,12 @@ private:
         case ColorSpace::Indexed: {
             if (!cs.base || depth > 4)
                 return {0, 0, 0, 1};
-            const int idx = std::clamp((int) std::lround(at(0, 0)), 0, std::max(0, cs.hival));
+            const float iv = at(0, 0);   // NaN: index 0. The bound is an int the table holds.
+            int idx = 0;
+            if (iv == iv) {
+                const double hi = (double) std::max(0, cs.hival);
+                idx = (int) std::lround(std::clamp((double) iv, 0.0, hi));
+            }
             const int n = std::max(1, cs.base->n);
             std::vector<float> bc;
             for (int i = 0; i < n; ++i) {
@@ -1278,13 +1290,21 @@ private:
                 const Object &a = m_doc.resolve(w[i]);
                 const Object &b = m_doc.resolve(w[i + 1]);
                 if (a.is_number() && b.is(Type::Array)) {
-                    for (size_t k = 0; k < b.size(); ++k)
-                        f.widths[(uint32_t) a.number + (uint32_t) k] = (float) m_doc.resolve(b[k]).as_number();
+                    const uint32_t start = a.as_u32();
+                    for (size_t k = 0; k < b.size(); ++k) {
+                        if ((uint64_t) start + (uint64_t) k > 4294967295ull)
+                            break;
+                        f.widths[start + (uint32_t) k] = (float) m_doc.resolve(b[k]).as_number();
+                    }
                     i += 2;
                 } else if (a.is_number() && b.is_number() && i + 2 < w.size()) {
                     const float width = (float) m_doc.resolve(w[i + 2]).as_number();
-                    for (uint32_t c = (uint32_t) a.number; c <= (uint32_t) b.number && c - (uint32_t) a.number < 65536; ++c)
+                    const uint32_t lo = a.as_u32(), hi = b.as_u32();
+                    for (uint32_t c = lo; c <= hi && c - lo < 65536; ++c) {
                         f.widths[c] = width;
+                        if (c == 4294967295u)   // ++c would wrap and paint the low CIDs
+                            break;
+                    }
                     i += 3;
                 } else {
                     break;
@@ -1301,7 +1321,7 @@ private:
             const int first = m_doc.get(fd, "FirstChar").as_int(0);
             const Object &w = m_doc.get(fd, "Widths");
             for (size_t i = 0; i < w.size(); ++i)
-                f.widths[(uint32_t) (first + (int) i)] = (float) m_doc.resolve(w[i]).as_number();
+                f.widths[(uint32_t) ((int64_t) first + (int64_t) i)] = (float) m_doc.resolve(w[i]).as_number();
         }
         const Object &desc = m_doc.get(desc_holder, "FontDescriptor");
         f.missing_width = (float) m_doc.get(desc, "MissingWidth").as_number(0);

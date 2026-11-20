@@ -1579,7 +1579,8 @@ void apply_clip(VectorScene &scene, size_t first, size_t text0, const std::strin
         const int old = scene.shapes[i].clip;
         auto m = made.find(old);
         if (m == made.end()) {
-            ClipLayers layers = old >= 0 ? scene.clips[(size_t) old] : ClipLayers();
+            ClipLayers layers = old >= 0 && (size_t) old < scene.clips.size() ? scene.clips[(size_t) old]
+                                                                              : ClipLayers();
             layers.insert(layers.end(), add.begin(), add.end());
             int idx = -1;
             for (size_t k = 0; k < scene.clips.size() && idx < 0; ++k)

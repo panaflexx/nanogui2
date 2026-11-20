@@ -283,7 +283,7 @@ static size_t dict_object_find_key(const DictObject *obj, const char *key) {
 static int dict_object_set(DictValue *obj_val, const char *key, DictValue *new_val) {
     if (!obj_val || obj_val->type != DICT_OBJECT || !key || !new_val) return 0;
 	size_t key_len = strnlen(key, MAX_KEY_LEN);
-    if (key_len == 0 || key_len >= MAX_KEY_LEN) return 0;
+    if (key_len >= MAX_KEY_LEN) return 0;   // "" is a valid JSON key
 
     DictObject *obj = &obj_val->object_value;
     size_t idx = dict_object_find_key(obj, key);
@@ -436,6 +436,9 @@ static int dict_serialize_value_pretty(const DictValue *val, char **cursor, size
         case DICT_BOOL:
             return dict_append_to_buffer(cursor, remaining, val->bool_value ? "true" : "false");
         case DICT_NUMBER: {
+            // JSON has no infinity or NaN: such a number is written as null
+            if (val->number_value - val->number_value != 0.0)
+                return dict_append_to_buffer(cursor, remaining, "null");
             char numbuf[64];
             int n = snprintf(numbuf, sizeof(numbuf), "%.17g", val->number_value);
             if (n < 0 || (size_t)n >= sizeof(numbuf)) return 0;
@@ -649,6 +652,56 @@ static int dict_parse_literal(DictJsonParser *p, const char *literal) {
     return 0;
 }
 
+// Four hex digits of a \u escape. 0 (and an error) when they aren't.
+static int dict_parse_hex4(DictJsonParser *p, unsigned int *out_cp) {
+    if (p->pos + 4 > p->buffer_len) {
+        dict_parser_error(p, "Incomplete unicode escape");
+        return 0;
+    }
+    unsigned int cp = 0;
+    for (int i = 0; i < 4; i++) {
+        char h = p->buffer[p->pos++];
+        unsigned int val = 0;
+        if (h >= '0' && h <= '9') val = (unsigned int) (h - '0');
+        else if (h >= 'a' && h <= 'f') val = (unsigned int) (h - 'a' + 10);
+        else if (h >= 'A' && h <= 'F') val = (unsigned int) (h - 'A' + 10);
+        else {
+            dict_parser_error(p, "Invalid hex digit in unicode escape");
+            return 0;
+        }
+        cp = (cp << 4) | val;
+    }
+    *out_cp = cp;
+    return 1;
+}
+
+// Room for `need` bytes in a string being parsed, doubling; refuses a size
+// that would wrap. On failure the buffer is freed and the error set.
+static int dict_string_reserve(DictJsonParser *p, char **out, size_t *capacity, size_t need) {
+    if (need <= *capacity)
+        return 1;
+    size_t cap = *capacity;
+    while (cap < need) {
+        if (cap > (size_t) -1 / 2) {
+            free(*out);
+            *out = NULL;
+            dict_parser_error(p, "String too long");
+            return 0;
+        }
+        cap *= 2;
+    }
+    char *tmp = (char *) realloc(*out, cap);
+    if (!tmp) {
+        free(*out);
+        *out = NULL;
+        dict_parser_error(p, "Out of memory");
+        return 0;
+    }
+    *out = tmp;
+    *capacity = cap;
+    return 1;
+}
+
 // Parse JSON string with escapes, returns newly allocated C string or NULL on error
 // Advances p->pos beyond the string's closing quote if successful.
 static char *dict_parse_json_string(DictJsonParser *p) {
@@ -690,43 +743,65 @@ static char *dict_parse_json_string(DictJsonParser *p) {
                 return NULL;
             }
             char esc = p->buffer[p->pos++];
-            char decoded = 0;
+            char enc[4];
+            size_t enc_len = 1;
             switch (esc) {
-                case '"': decoded = '"'; break;
-                case '\\': decoded = '\\'; break;
-                case '/': decoded = '/'; break;
-                case 'b': decoded = '\b'; break;
-                case 'f': decoded = '\f'; break;
-                case 'n': decoded = '\n'; break;
-                case 'r': decoded = '\r'; break;
-                case 't': decoded = '\t'; break;
+                case '"': enc[0] = '"'; break;
+                case '\\': enc[0] = '\\'; break;
+                case '/': enc[0] = '/'; break;
+                case 'b': enc[0] = '\b'; break;
+                case 'f': enc[0] = '\f'; break;
+                case 'n': enc[0] = '\n'; break;
+                case 'r': enc[0] = '\r'; break;
+                case 't': enc[0] = '\t'; break;
                 case 'u': {
-                    // Unicode escape; parse 4 hex digits
-                    if (p->pos + 4 > p->buffer_len) {
+                    // \uXXXX, a surrogate pair joined; written as UTF-8
+                    unsigned int codepoint = 0;
+                    if (!dict_parse_hex4(p, &codepoint)) {
                         free(out);
-                        dict_parser_error(p, "Incomplete unicode escape");
                         return NULL;
                     }
-                    unsigned int codepoint = 0;
-                    for (int i = 0; i < 4; i++) {
-                        char h = p->buffer[p->pos++];
-                        unsigned int val = 0;
-                        if (h >= '0' && h <= '9') val = h - '0';
-                        else if (h >= 'a' && h <= 'f') val = h - 'a' + 10;
-                        else if (h >= 'A' && h <= 'F') val = h - 'A' + 10;
-                        else {
-                            free(out);
-                            dict_parser_error(p, "Invalid hex digit in unicode escape");
-                            return NULL;
+                    if (codepoint >= 0xD800 && codepoint <= 0xDBFF) {
+                        unsigned int low = 0;
+                        size_t back = p->pos;
+                        if (p->pos + 6 <= p->buffer_len && p->buffer[p->pos] == '\\' &&
+                            p->buffer[p->pos + 1] == 'u') {
+                            p->pos += 2;
+                            if (!dict_parse_hex4(p, &low)) {
+                                free(out);
+                                return NULL;
+                            }
                         }
-                        codepoint = (codepoint << 4) | val;
+                        if (low >= 0xDC00 && low <= 0xDFFF) {
+                            codepoint = 0x10000 + ((codepoint - 0xD800) << 10) + (low - 0xDC00);
+                        } else {
+                            p->pos = back;          // a lone high surrogate
+                            codepoint = 0xFFFD;
+                        }
+                    } else if (codepoint >= 0xDC00 && codepoint <= 0xDFFF) {
+                        codepoint = 0xFFFD;         // a lone low surrogate
                     }
-                    // For simplicity, only support codepoints <= 0x7F (ASCII)
-                    if (codepoint <= 0x7F) {
-                        decoded = (char)codepoint;
+                    // Strings are C strings: a null can't be kept, so it is
+                    // the replacement character rather than an end
+                    if (codepoint == 0)
+                        codepoint = 0xFFFD;
+                    if (codepoint < 0x80) {
+                        enc[0] = (char) codepoint;
+                    } else if (codepoint < 0x800) {
+                        enc[0] = (char) (0xC0 | (codepoint >> 6));
+                        enc[1] = (char) (0x80 | (codepoint & 0x3F));
+                        enc_len = 2;
+                    } else if (codepoint < 0x10000) {
+                        enc[0] = (char) (0xE0 | (codepoint >> 12));
+                        enc[1] = (char) (0x80 | ((codepoint >> 6) & 0x3F));
+                        enc[2] = (char) (0x80 | (codepoint & 0x3F));
+                        enc_len = 3;
                     } else {
-                        // Replace non-ASCII with '?'
-                        decoded = '?';
+                        enc[0] = (char) (0xF0 | (codepoint >> 18));
+                        enc[1] = (char) (0x80 | ((codepoint >> 12) & 0x3F));
+                        enc[2] = (char) (0x80 | ((codepoint >> 6) & 0x3F));
+                        enc[3] = (char) (0x80 | (codepoint & 0x3F));
+                        enc_len = 4;
                     }
                     break;
                 }
@@ -735,18 +810,10 @@ static char *dict_parse_json_string(DictJsonParser *p) {
                     dict_parser_error(p, "Invalid escape sequence");
                     return NULL;
             }
-            if (out_length + 1 >= out_capacity) {
-                size_t new_capacity = out_capacity * 2;
-                char *tmp = (char *)realloc(out, new_capacity);
-                if (!tmp) {
-                    free(out);
-                    dict_parser_error(p, "Out of memory");
-                    return NULL;
-                }
-                out = tmp;
-                out_capacity = new_capacity;
-            }
-            out[out_length++] = decoded;
+            if (!dict_string_reserve(p, &out, &out_capacity, out_length + enc_len + 1))
+                return NULL;
+            memcpy(out + out_length, enc, enc_len);
+            out_length += enc_len;
         } else {
             // Normal char
             if ((unsigned char)c < 0x20) {
@@ -754,17 +821,8 @@ static char *dict_parse_json_string(DictJsonParser *p) {
                 dict_parser_error(p, "Unescaped control character in string");
                 return NULL;
             }
-            if (out_length + 1 >= out_capacity) {
-                size_t new_capacity = out_capacity * 2;
-                char *tmp = (char *)realloc(out, new_capacity);
-                if (!tmp) {
-                    free(out);
-                    dict_parser_error(p, "Out of memory");
-                    return NULL;
-                }
-                out = tmp;
-                out_capacity = new_capacity;
-            }
+            if (!dict_string_reserve(p, &out, &out_capacity, out_length + 2))
+                return NULL;
             out[out_length++] = c;
         }
     }
@@ -825,6 +883,11 @@ static int dict_parse_number(DictJsonParser *p, double *out_num) {
     double val = strtod(numbuf, &endptr);
     if (endptr != numbuf + num_len) {
         dict_parser_error(p, "Invalid number format");
+        return 0;
+    }
+    // 1e309 reads as infinity, which JSON can't write back: refused
+    if (val - val != 0.0) {
+        dict_parser_error(p, "Number out of range");
         return 0;
     }
 
@@ -932,7 +995,9 @@ static DictValue *dict_parse_array(DictJsonParser *p) {
         }
         if (length == capacity) {
             size_t new_capacity = capacity * 2;
-            DictValue **tmp = (DictValue **)realloc(items, new_capacity * sizeof(DictValue *));
+            DictValue **tmp = new_capacity > (size_t) -1 / sizeof(DictValue *) / 2
+                                  ? NULL   // would wrap: as if out of memory
+                                  : (DictValue **)realloc(items, new_capacity * sizeof(DictValue *));
             if (!tmp) {
                 for (size_t i = 0; i < length; i++) {
                     dict_destroy(items[i]);

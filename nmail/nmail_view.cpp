@@ -49,6 +49,7 @@
 #include <unordered_set>
 #define STB_IMAGE_WRITE_IMPLEMENTATION
 #include "../ext/glfw/deps/stb_image_write.h"
+#include "attachment_copy.h"
 
 using namespace nanogui;
 
@@ -366,6 +367,13 @@ public:
             if (write_temp_attachment(att, path, err))
                 desktop_open_file(path);
         });
+        if (attachment_can_copy_image(att)) {
+            auto *copy_item = new MenuItem(m_att_popup, "Copy");
+            copy_item->set_callback([this, att] {
+                if (m_att_popup) m_att_popup->set_visible(false);
+                copy_attachment_image(glfw_window(), att);
+            });
+        }
         auto *save_item = new MenuItem(m_att_popup, "Save As\u2026");
         save_item->set_callback([this, att] {
             if (m_att_popup) m_att_popup->set_visible(false);

@@ -47,6 +47,51 @@ inline bool nmail_heif_sniff(const uint8_t *d, size_t n) {
     return false;
 }
 
+/* Upright pixel size. libheif applies irot/imir to the handle size, which
+ * is the size pagemade's HEIF probe reports. False when this build has no
+ * libheif or the file has no primary image. */
+inline bool nmail_heif_size(const uint8_t *data, size_t n, int &out_w, int &out_h) {
+#ifdef NMAIL_HAVE_HEIF
+    if (!nmail_heif_sniff(data, n))
+        return false;
+    static const bool init = (heif_init(nullptr), true);
+    (void) init;
+    heif_context *ctx = heif_context_alloc();
+    if (!ctx)
+        return false;
+    heif_error e = heif_context_read_from_memory_without_copy(ctx, data, n,
+                                                              nullptr);
+    heif_image_handle *handle = nullptr;
+    if (e.code == heif_error_Ok)
+        e = heif_context_get_primary_image_handle(ctx, &handle);
+    bool ok = false;
+    if (e.code == heif_error_Ok && handle) {
+        const int w = heif_image_handle_get_width(handle);
+        const int h = heif_image_handle_get_height(handle);
+        if (w > 0 && h > 0) {
+            out_w = w;
+            out_h = h;
+            ok = true;
+        }
+    }
+    if (handle)
+        heif_image_handle_release(handle);
+    heif_context_free(ctx);
+    return ok;
+#else
+    (void) data; (void) n; (void) out_w; (void) out_h;
+    return false;
+#endif
+}
+
+/* image/avif when the major brand says so, else image/heic. */
+inline const char *nmail_heif_mime(const uint8_t *d, size_t n) {
+    if (n >= 12 && (std::memcmp(d + 8, "avif", 4) == 0 ||
+                    std::memcmp(d + 8, "avis", 4) == 0))
+        return "image/avif";
+    return "image/heic";
+}
+
 /* Decode a HEIC/AVIF file to straight 8-bit RGBA, top row first. False
  * when the build has no libheif or the decode fails. libheif applies the
  * irot/imir rotation itself, so the pixels come out upright. */

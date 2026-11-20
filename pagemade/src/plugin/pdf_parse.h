@@ -43,7 +43,37 @@ struct Object {
     bool is_number() const { return type == Type::Int || type == Type::Real; }
     bool is_name(const char *n) const { return type == Type::Name && str == n; }
     double as_number(double fallback = 0) const { return is_number() ? number : fallback; }
-    int as_int(int fallback = 0) const { return is_number() ? (int) number : fallback; }
+    /* An integer, saturated to int's range (NaN: the fallback). A file can
+     * hold any number; casting one past int straight is undefined. */
+    int as_int(int fallback = 0) const {
+        if (!is_number() || number != number)
+            return fallback;
+        if (number >= 2147483647.0)
+            return 2147483647;
+        if (number <= -2147483648.0)
+            return -2147483647 - 1;
+        return (int) number;
+    }
+    /* A byte offset or length: the fallback when negative or NaN, saturated
+     * at SIZE_MAX (callers check it against the file's size). */
+    size_t as_size(size_t fallback = SIZE_MAX) const {
+        if (!is_number() || !(number >= 0.0))
+            return fallback;
+        if (number >= 18446744073709549568.0)   // the largest double below 2^64
+            return SIZE_MAX;
+        const unsigned long long v = (unsigned long long) number;
+        return v > (unsigned long long) SIZE_MAX ? SIZE_MAX : (size_t) v;
+    }
+    /* A character code or glyph id: clamped to 0 ... UINT32_MAX. */
+    uint32_t as_u32(uint32_t fallback = 0) const {
+        if (!is_number() || number != number)
+            return fallback;
+        if (number <= 0.0)
+            return 0;
+        if (number >= 4294967295.0)
+            return 4294967295u;
+        return (uint32_t) number;
+    }
     /* A Dict's or Stream's entry, unresolved; null when absent. */
     const Object *get(const char *key) const;
     size_t size() const { return array ? array->size() : 0; }
@@ -73,7 +103,16 @@ private:
     const uint8_t *m_d;
     size_t m_n, m_pos;
     std::vector<Object> m_ahead;         // looked-ahead objects (for "n g R")
+    int m_depth = 0;                     // arrays and dictionaries open around next()
 };
+
+/* Arrays and dictionaries nested deeper than this end the parse: each
+ * level recurses, so hostile input could exhaust the stack (JSON and XML
+ * stop at the same depth). */
+constexpr int kMaxPdfNesting = 256;
+/* No stream decodes to more than this (a few kilobytes of Flate can claim
+ * gigabytes); the rest of it is dropped as damage. */
+constexpr size_t kMaxDecodedStream = (size_t) 1 << 30;
 
 class Document {
 public:

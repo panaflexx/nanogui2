@@ -93,6 +93,18 @@
 #include <stb_image.h>
 #include "nmail_icon.h"
 #include "heif_decode.h"
+#define STB_IMAGE_WRITE_STATIC
+#define STB_IMAGE_WRITE_IMPLEMENTATION
+#if defined(__GNUC__)
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wunused-function"
+#pragma GCC diagnostic ignored "-Wmissing-field-initializers"
+#endif
+#include "../ext/glfw/deps/stb_image_write.h"
+#if defined(__GNUC__)
+#pragma GCC diagnostic pop
+#endif
+#include "attachment_copy.h"
 #include "nmail_config.h"
 #include "mail_worker.h"
 #include "mail_widgets.h"
@@ -2602,6 +2614,22 @@ public:
                 if (*alive) open_attachment_in_browser(att);
             });
         });
+        /* Image attachments only. The clipboard carries an SVG pagemade
+         * pastes as a picture; other files keep the menu they had. */
+        if (attachment_can_copy_image(att)) {
+            auto *copy_item = new MenuItem(m_att_popup, "Copy");
+            copy_item->set_callback([this, att, alive] {
+                hide_att_popup();
+                nanogui::async([this, att, alive] {
+                    if (!*alive) return;
+                    if (copy_attachment_image(glfw_window(), att))
+                        set_status("Copied " + att_display_name(att));
+                    else
+                        set_status("Couldn't copy the image");
+                    redraw();
+                });
+            });
+        }
         auto *save_item = new MenuItem(m_att_popup, "Save As\u2026");
         save_item->set_callback([this, att, alive] {
             hide_att_popup();
