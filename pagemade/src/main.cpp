@@ -65,6 +65,7 @@
 #include "masters_panel.h"
 #include "tool_tabs.h"
 #include "layers_panel.h"
+#include "styles_panel.h"
 #include "find_panel.h"
 #include "ruler.h"
 #include "uri.h"
@@ -91,6 +92,7 @@
 
 #include <algorithm>
 #include <fstream>
+#include <set>
 #include <array>
 #include <atomic>
 #include <chrono>
@@ -944,10 +946,12 @@ public:
         tool_btn(Tool::Polygon, FA_DRAW_POLYGON, "Polygon tool (Shift: regular)");
         tool_btn(Tool::Pen, FA_PEN_NIB,
                  "Pen tool: click for a corner, drag for a curve (Shift: 45\u00B0 steps); "
-                 "click the first point to close, the last (or Return, Esc) to end open; "
+                 "click the first point or double-click the last to close, click the last "
+                 "again (or Return, Esc) to end open, or right-click for Close Path; "
                  "Delete takes back a point. On a selected path: drag points and handles, "
-                 "click the outline to add a point, Alt+click a point to switch corner and "
-                 "curve, Delete removes the chosen point. Double-click a path with the "
+                 "click the outline to add a point, Ctrl+drag a point to pull curve handles "
+                 "out of it, Ctrl+click a point to switch corner and curve, Delete removes "
+                 "the chosen point. Double-click a path with the "
                  "pointer to edit it.");
         m_tool_btns.front().second->set_pushed(true);
 
@@ -1110,6 +1114,8 @@ public:
         seed_swatches(doc);
         build_palette(window, doc);
 
+        build_story_bar(window);
+
         /* The pages, with the rulers along the top and left (View > Rulers) */
         m_rulers = new RulerFrame(window);
         m_rulers->set_height_flex(SizeMode::Expanding);
@@ -1134,6 +1140,7 @@ public:
         m_view->on_tool_change = [this](ComposerView::Tool t) {
             sync_tool_buttons(t);
             show_type_palette(t == ComposerView::Tool::Text);
+            sync_palette();              // with nothing selected the tool picks the fields
         };
         m_view->on_selection_change = [this] {
             sync_palette();
@@ -1141,6 +1148,8 @@ public:
             update_status();
             if (ToolTabsWindow *w = ToolTabsWindow::host_of(m_layers); w && w->visible())
                 w->refresh();            // Move Selection Here follows the selection
+            if (ToolTabsWindow *w = ToolTabsWindow::host_of(m_styles_panel); w && w->visible())
+                m_styles_panel->refresh();   // the caret's style, use counts
         };
         m_view->on_note = [this](const std::string &note) { set_note(note); };
         m_view->on_setup_change = [this] {
@@ -1150,6 +1159,8 @@ public:
         };
         m_view->on_context_menu = [this](const Vector2i &at) { show_context_menu(at); };
         m_view->on_page_change = [this] { update_status(); };
+        m_view->on_story_mode_change = [this] { sync_story_mode(); };
+        m_view->on_view_mode_change = [this] { sync_view_modes(); };
         /* Editing a master or done: the Masters tab's Edit/Done, the banner */
         m_view->on_master_edit_change = [this] {
             for (ToolTabsWindow *w : ToolTabsWindow::live())
@@ -1279,6 +1290,7 @@ public:
         m_layouts_panel = nullptr;
         m_masters_panel = nullptr;
         m_layers = nullptr;
+        m_styles_panel = nullptr;
         m_type_panel = nullptr;
         m_frame_panel = nullptr;
         if (s_instance == this)
@@ -1294,6 +1306,22 @@ public:
 
     void update_title() {
         set_caption((m_view->modified() ? "*" : "") + doc_name() + " \u2014 pagemade");
+        if (m_view)
+            m_view->set_print_label(m_doc_path.empty() ? doc_name() : nanogui::fs::filename(m_doc_path));
+    }
+
+    /* View > Preview and Print View: their checks, and no tools in Preview */
+    void sync_view_modes() {
+        if (m_preview_item)
+            m_preview_item->set_icon(m_view->preview() ? FA_CHECK : 0);
+        if (m_print_view_item)
+            m_print_view_item->set_icon(m_view->print_view() ? FA_CHECK : 0);
+        const bool tools = !m_view->story_mode() && !m_view->preview();
+        for (auto &tb : m_tool_btns)
+            tb.second->set_enabled(tools);
+        if (m_mode_btn)
+            m_mode_btn->set_enabled(tools);
+        redraw();
     }
 
     /* Run `then` once the open publication may go: it's unchanged, or saved,
@@ -1313,6 +1341,7 @@ public:
 
     /* Save where it was last saved, or ask where the first time. */
     void save(std::function<void(bool)> done = {}) {
+        m_view->commit_story_edit();     // the story editor's draft is what is saved
         if (m_doc_path.empty()) {
             save_as(std::move(done));
             return;
@@ -1323,6 +1352,7 @@ public:
     }
 
     void save_as(std::function<void(bool)> done = {}) {
+        m_view->commit_story_edit();
         ask_save_as(this, m_doc_path, m_embed_assets,
                     [this, done](const std::string &path, bool embed) {
                         const bool ok = write_to(path, embed);
@@ -2001,8 +2031,24 @@ public:
     MenuItem *add_cmd(Dropdown *menu, const char *caption, const std::vector<Shortcut> &keys,
                       const std::function<void()> &fn) {
         MenuItem *item = menu->add_item(caption, 0, keys);
-        item->set_callback(fn);
+        item->set_callback([this, fn, menu, cap = std::string(caption)] {
+            if (m_view && m_view->story_mode() && !story_allows(menu, cap)) {
+                set_note("Not in the story editor: Update Story or Cancel Edit first");
+                return;
+            }
+            fn();
+        });
         return item;
+    }
+
+    /* The story editor keeps to the text: the Edit, View and Type menus,
+     * saving and quitting. The rest waits for Update or Cancel. */
+    bool story_allows(Dropdown *menu, const std::string &caption) const {
+        if (caption == "Save" || caption == "Save As..." || caption == "Quit")
+            return true;
+        if (caption.rfind("Clear ", 0) == 0)
+            return false;                // guides belong to the pages
+        return m_story_menus.count(menu) != 0;
     }
 
     void build_menus(Widget *window) {
@@ -2051,6 +2097,10 @@ public:
         add_cmd(edit, "Find & Replace...", {{SYSTEM_COMMAND_MOD, GLFW_KEY_F},
                                             {SYSTEM_COMMAND_MOD, GLFW_KEY_H}},
                 [this] { show_find(); });
+        new Separator(edit->popup());
+        add_cmd(edit, "Edit Story", {{SYSTEM_COMMAND_MOD | GLFW_MOD_SHIFT, GLFW_KEY_E}},
+                [this] { toggle_story_edit(); });
+        m_story_menus.insert(edit);
 
         /* Type: typographer's quotes, and the characters a keyboard lacks.
          * Shortcuts follow InDesign's where it has them. Line and frame
@@ -2079,16 +2129,28 @@ public:
         add_cmd(view, "Clear Page Guides", {}, [this] { m_view->clear_guides(false); });
         add_cmd(view, "Clear All-Pages Guides", {}, [this] { m_view->clear_guides(true); });
         new Separator(view->popup());
+        /* Preview hides the screen's marks and takes no edits; Print View
+         * puts printer's marks round the pages. Either, or both. */
+        m_preview_item = add_cmd(view, "Preview", {{SYSTEM_COMMAND_MOD | GLFW_MOD_SHIFT, GLFW_KEY_W}},
+                                 [this] { m_view->set_preview(!m_view->preview()); });
+        m_print_view_item = add_cmd(view, "Print View", {},
+                                    [this] { m_view->set_print_view(!m_view->print_view()); });
+        new Separator(view->popup());
         m_dark_item = add_cmd(view, "Dark Mode", {},
                               [this] { set_dark_mode(theme_mode() != ThemeMode::Dark); });
         m_dark_item->set_icon(theme_mode() == ThemeMode::Dark ? FA_CHECK : 0);
 
+        m_story_menus.insert(view);
         Dropdown *type = m_menubar->add_menu("Type");
+        m_story_menus.insert(type);
         m_smart_quotes = add_cmd(type, "Smart Quotes", {}, [this] {
             m_view->set_smart_quotes(!m_view->smart_quotes());
             m_smart_quotes->set_icon(m_view->smart_quotes() ? FA_CHECK : 0);
         });
         m_smart_quotes->set_icon(FA_CHECK);
+        new Separator(type->popup());
+        add_cmd(type, "Paragraph Styles...", {}, [this] { show_styles(false); });
+        add_cmd(type, "Character Styles...", {}, [this] { show_styles(true); });
         new Separator(type->popup());
         const int C = SYSTEM_COMMAND_MOD, S = GLFW_MOD_SHIFT, A = GLFW_MOD_ALT;
         struct Special { const char *caption, *text; std::vector<Shortcut> keys; };
@@ -2122,6 +2184,7 @@ public:
         }
         new Separator(type->popup());
         Dropdown *methods = type->add_submenu("Leading Method");
+        m_story_menus.insert(methods);
         for (int i = 0; i < 3; ++i) {
             const auto m = (LeadingMethod) i;
             m_lead_items[i] = add_cmd(methods, kLeadingMethodNames[i], {}, [this, m] { set_leading_method(m); });
@@ -2304,7 +2367,7 @@ public:
             d->set_tooltip(tip);
             return d;
         };
-        new Label(bar, " Fill", "sans-bold");
+        m_fill_label = new Label(bar, " Fill", "sans-bold");
         m_fill = paint_menu("Fill color for shapes (and new shapes); add and edit swatches");
         m_fill->set_open_callback([this] {
             refill_paint_menu(m_fill, m_view->shape_style().fill.swatch,
@@ -2327,7 +2390,7 @@ public:
             if (im.stroke.paint.none())
                 im.stroke.paint = {kBlack, 100.f};
         };
-        new Label(bar, " Stroke", "sans-bold");
+        m_stroke_label = new Label(bar, " Stroke", "sans-bold");
         m_stroke = paint_menu("Stroke color for shapes, or a picture's border; add and edit swatches");
         m_stroke->set_open_callback([this] {
             refill_paint_menu(m_stroke, m_view->shape_style().stroke.paint.swatch,
@@ -2353,7 +2416,7 @@ public:
                                      });
         });
 
-        new Label(bar, " Sides", "sans-bold");
+        m_sides_label = new Label(bar, " Sides", "sans-bold");
         m_sides = new IntSpin(bar, 6, 1, 3, 100);
         m_sides->set_fixed_size(Vector2i(52, 26));
         m_sides->set_callback([this](int v) {
@@ -2361,7 +2424,7 @@ public:
                 m_view->apply_shape_style([v](Shape &sh) { sh.sides = std::max(3, v); });
             });
         });
-        new Label(bar, "Star", "sans-bold");
+        m_star_label = new Label(bar, "Star", "sans-bold");
         m_star = new IntSpin(bar, 0, 5, 0, 100);
         m_star->set_units("%");
         m_star->set_fixed_size(Vector2i(62, 26));
@@ -2387,6 +2450,19 @@ public:
             box->set_fixed_size(Vector2i(width, 26));
             return box;
         };
+
+        /* The paragraph style, quick: the Paragraph panel's menu. "Name+"
+         * when the paragraphs differ from it. */
+        new Label(type, "Para", "sans-bold");
+        m_para_style = new Dropdown(type, {"Normal"}, {}, Dropdown::ComboBox, "Normal");
+        m_para_style->set_min_size(Vector2i(120, 30));
+        m_para_style->set_max_size(Vector2i(200, 40));
+        m_para_style->set_tooltip("Paragraph style. Define and edit styles in the Paragraph panel.");
+        m_para_style->set_selected_callback([this](int i) {
+            if (m_syncing_para_style || i < 0 || i >= (int) m_para_style_names.size())
+                return;
+            m_view->apply_style(m_para_style_names[(size_t) i]);
+        });
 
         new Label(type, "Font", "sans-bold");
         m_font = new Dropdown(type, Dropdown::ComboBox, "Serif");
@@ -2904,7 +2980,35 @@ public:
         auto section = [&] { need_sep = true; };
 
         ComposerView *v = m_view;
+        if (v->story_mode()) {
+            item("Cut", FA_CUT, v->can_copy(), {{C, GLFW_KEY_X}}, [v] { v->edit_cut(); });
+            item("Copy", FA_COPY, v->can_copy(), {{C, GLFW_KEY_C}}, [v] { v->edit_copy(); });
+            item("Paste", FA_PASTE, v->can_paste(), {{C, GLFW_KEY_V}}, [v] { v->edit_paste(); });
+            section();
+            item("Paragraph...", FA_PARAGRAPH, true, {}, [this] { toggle_paragraph_panel(); });
+            section();
+            item("Update Story", FA_CHECK, true, {}, [v] { v->end_story_edit(true); });
+            item("Cancel Edit", FA_TIMES, true, {}, [this] { cancel_story_edit(); });
+            open_context_popup(at);
+            return;
+        }
         const Point here = v->context_point();
+        if (v->pen_drawing()) {
+            /* A path being drawn: how it ends */
+            item("Close Path", FA_DRAW_POLYGON, v->pen_points() >= 3, {}, [v] { v->pen_finish(true); });
+            item("End Path Open", FA_PEN_NIB, v->pen_points() >= 2, {{0, GLFW_KEY_ENTER}},
+                 [v] { v->pen_finish(false); });
+            item("Cancel Path", FA_TIMES, true, {}, [v] { v->pen_abandon(); });
+            open_context_popup(at);
+            return;
+        }
+        if (const Item *path = v->selected_path()) {
+            const bool closed = path->shape()->closed;
+            item(closed ? "Open Path" : "Close Path", FA_DRAW_POLYGON,
+                 closed || path->shape()->nodes.size() >= 3, {},
+                 [v, closed] { v->set_selected_path_closed(!closed); });
+            section();
+        }
         if (const ItemId copy = v->context_master_copy()) {
             /* A master item under the pointer: edit its master right here */
             item("Edit Master Here", FA_PEN, true, {}, [v, copy] { v->edit_master_here(copy); });
@@ -2917,6 +3021,8 @@ public:
             item("Cut", FA_CUT, v->can_copy(), {{C, GLFW_KEY_X}}, [v] { v->edit_cut(); });
             item("Copy", FA_COPY, v->can_copy(), {{C, GLFW_KEY_C}}, [v] { v->edit_copy(); });
             item("Paste", FA_PASTE, v->can_paste(), {{C, GLFW_KEY_V}}, [v] { v->edit_paste(); });
+            section();
+            item("Edit Story", FA_FILE_ALT, true, {{C | S, GLFW_KEY_E}}, [this] { toggle_story_edit(); });
         } else if (v->selection().empty()) {
             item("Paste Here", FA_PASTE, v->can_paste(), {}, [v, here] { v->edit_paste(&here); });
             if (v->clipboard_has_text())
@@ -2937,6 +3043,15 @@ public:
                      [v, here] { v->edit_paste(&here, ComposerView::PasteAs::Svg); });
             item("Remove", FA_TRASH_ALT, true, {}, [v] { v->remove_selection(); });
             section();
+            /* A text block among the selection: its story in the editor */
+            bool story = false;
+            for (ItemId id : v->selection())
+                story |= v->document().story_of(id) != nullptr;
+            if (story) {
+                item("Edit Story", FA_FILE_ALT, true, {{C | S, GLFW_KEY_E}},
+                     [this] { toggle_story_edit(); });
+                section();
+            }
             if (v->can_group())
                 item("Group", FA_OBJECT_GROUP, true, {{C, GLFW_KEY_G}}, [v] { v->group_selection(); });
             if (v->can_ungroup())
@@ -3012,6 +3127,30 @@ public:
         w->request_focus();
         perform_layout();
         m_find_panel->focus_find();
+    }
+
+    /* Type > Styles…: the paragraph and character styles, made once and
+     * hidden when closed. Usable in the story editor. */
+    void show_styles(bool character = false) {
+        ensure_tool_hooks();
+        if (!m_styles_panel) {
+            auto *w = new ToolTabsWindow(this, "Styles");
+            m_styles_panel = w->add_panel<StylesPanel>(m_view, m_fonts, m_font_menu);
+            w->set_size(Vector2i(380, 620));
+            w->center();
+        }
+        ToolTabsWindow *w = ToolTabsWindow::host_of(m_styles_panel);
+        if (!w)
+            return;
+        if (!w->visible()) {
+            w->set_visible(true);
+            apply_docks();
+        }
+        move_window_to_front(w);
+        w->show_panel(m_styles_panel);
+        m_styles_panel->show_kind(character);
+        w->request_focus();
+        perform_layout();
     }
 
     /* The Layers window, like Image Assets: made once, hidden when closed. */
@@ -3211,11 +3350,128 @@ public:
             m_sides->set_value(sh.sides);
         if (!m_star->focused())
             m_star->set_value((int) sh.star_inset);
+        show_relevant_fields();
         sync_type();
         sync_spacing();
         if (m_para_panel)
             m_para_panel->load(m_view->selected_paragraphs(), m_view->document().styles);
         sync_character_panel();
+    }
+
+    /* The object palette shows only what changes the selection: Sides and
+     * Star for polygons, Fill for shapes that can hold one (not lines), the
+     * tint as Opacity for pictures alone, Stroke for shapes and pictures.
+     * With nothing selected the fields are the defaults for new shapes, so
+     * the tool decides (Polygon shows Sides and Star; Line has no fill). */
+    void show_relevant_fields() {
+        bool fill = false, picture = false, stroke = false, polygon = false, any = false;
+        const PageDoc &doc = m_view->document();
+        for (ItemId id : m_view->selection())
+            if (const Item *it = doc.find_item(id)) {
+                any = true;
+                if (const Shape *sh = it->shape()) {
+                    stroke = true;
+                    fill |= sh->kind != Shape::Kind::Line &&
+                            (sh->kind != Shape::Kind::Path || sh->nodes.size() >= 3);
+                    polygon |= sh->kind == Shape::Kind::Polygon;
+                } else if (it->image() || it->vector()) {
+                    picture = stroke = true;
+                }
+            }
+        if (!any) {
+            const ComposerView::Tool t = m_view->tool();
+            stroke = true;
+            fill = t != ComposerView::Tool::Line;
+            polygon = t == ComposerView::Tool::Polygon;
+        }
+        const char *fill_caption = fill || !picture ? " Fill" : " Opacity";
+        bool changed = m_fill_label->caption() != fill_caption;
+        m_fill_label->set_caption(fill_caption);
+        auto show = [&changed](Widget *w, bool on) {
+            if (w->visible() != on) {
+                w->set_visible(on);
+                changed = true;
+            }
+        };
+        show(m_fill_label, fill || picture);
+        show(m_fill, fill);
+        show(m_fill_tint, fill || picture);
+        m_fill_tint->set_tooltip(fill ? "Fill tint. For a picture, its opacity." : "Picture opacity");
+        for (Widget *w : {(Widget *) m_stroke_label, (Widget *) m_stroke, (Widget *) m_weight,
+                          (Widget *) m_style})
+            show(w, stroke);
+        for (Widget *w : {(Widget *) m_sides_label, (Widget *) m_sides, (Widget *) m_star_label,
+                          (Widget *) m_star})
+            show(w, polygon);
+        if (changed)
+            perform_layout();
+    }
+
+    /* The status bar's account of the selection: what it is and its layer
+     * ("Polygon on layer "Layer 2""), or how many items on how many layers */
+    std::string selection_status() const {
+        const PageDoc &doc = m_view->document();
+        std::vector<const Item *> items;
+        for (ItemId id : m_view->selection())
+            if (const Item *it = doc.find_item(id))
+                items.push_back(it);
+        if (items.empty())
+            return {};
+        auto layer_name = [&doc](const Item &it) {
+            const Layer *l = doc.find_layer(doc.layer_of(it));
+            return l ? l->name : std::string("?");
+        };
+        std::vector<LayerId> layers;
+        for (const Item *it : items)
+            if (std::find(layers.begin(), layers.end(), doc.layer_of(*it)) == layers.end())
+                layers.push_back(doc.layer_of(*it));
+        if (items.size() > 1) {
+            std::string s = "   |   " + std::to_string(items.size()) + " items selected on ";
+            if (layers.size() == 1)
+                s += "layer \"" + layer_name(*items.front()) + "\"";
+            else
+                s += std::to_string(layers.size()) + " layers";
+            return s;
+        }
+        const Item &it = *items.front();
+        std::string what;
+        if (it.is_text()) {
+            what = "Text block";
+        } else if (const Shape *sh = it.shape()) {
+            switch (sh->kind) {
+            case Shape::Kind::Rect: what = "Rectangle"; break;
+            case Shape::Kind::Ellipse: what = "Ellipse"; break;
+            case Shape::Kind::Line: what = "Line"; break;
+            case Shape::Kind::Polygon:
+                what = (sh->star_inset > 0 ? "Star, " : "Polygon, ") + std::to_string(sh->sides) +
+                       (sh->star_inset > 0 ? " points" : " sides");
+                break;
+            case Shape::Kind::Path:
+                what = std::string(sh->closed ? "Closed path, " : "Open path, ") +
+                       std::to_string(sh->nodes.size()) + " points";
+                break;
+            }
+            if (sh->gradient.on())
+                what += ", gradient fill";
+        } else if (const PlacedImage *im = it.image()) {
+            what = "Picture";
+            if (const ImageAsset *a = doc.find_image(im->asset)) {
+                const int ppi = a->meta.ppi_x > 0 ? (int) std::lround(a->meta.ppi_x) : 72;
+                what += " " + a->name + "  " + std::to_string(a->meta.width_px) + "\u00D7" +
+                        std::to_string(a->meta.height_px) + " px  " + std::to_string(ppi) + " ppi";
+            }
+        } else if (const PlacedVector *pv = it.vector()) {
+            what = "Graphic";
+            if (const VectorAsset *a = doc.find_vector(pv->asset))
+                what += " " + a->name;
+        }
+        if (it.group)
+            what += " (grouped)";
+        if (it.master_copy())
+            what += " (master item)";
+        else if (it.master_item)
+            what += " (master item, changed here)";
+        return "   |   " + what + " on layer \"" + layer_name(it) + "\"";
     }
 
     void sync_character_panel() {
@@ -3249,10 +3505,47 @@ public:
         m_view->apply_para([m](ParaStyle &ps) { ps.leading_method = m; });
     }
 
+    void sync_para_style(const std::vector<const Paragraph *> &paras) {
+        if (!m_para_style || (m_para_style->popup() && m_para_style->popup()->visible()))
+            return;
+        const std::vector<StyleDef> &styles = m_view->document().styles;
+        std::vector<std::string> names;
+        for (const StyleDef &d : styles)
+            names.push_back(d.name);
+        m_syncing_para_style = true;
+        if (names != m_para_style_names) {
+            m_para_style_names = names;
+            m_para_style->set_items(names.empty() ? std::vector<std::string>{"No style"} : names);
+        }
+        bool same = !paras.empty();
+        for (const Paragraph *p : paras)
+            same &= p->style.name == paras.front()->style.name;
+        int index = -1;
+        std::string caption = "\u2014";
+        if (same) {
+            const std::string &name = paras.front()->style.name;
+            auto it = std::find(names.begin(), names.end(), name);
+            if (it != names.end()) {
+                index = (int) (it - names.begin());
+                bool over = false;
+                for (const Paragraph *p : paras)
+                    over |= style_overridden(*p, styles[(size_t) index]);
+                caption = over ? name + "+" : name;
+            } else {
+                caption = "No style";
+            }
+        }
+        m_para_style->set_selected_index(index);
+        m_para_style->set_caption(caption);
+        m_para_style->set_enabled(!paras.empty() && !names.empty());
+        m_syncing_para_style = false;
+    }
+
     void sync_spacing() {
         if (!m_spacing)
             return;
         const auto paras = m_view->selected_paragraphs();
+        sync_para_style(paras);
         {
             bool mixed = false;
             for (const Paragraph *p : paras)
@@ -3362,6 +3655,91 @@ public:
     void apply_tool(ComposerView::Tool t) {
         m_view->set_tool(t);
         sync_tool_buttons(t);
+    }
+
+    /* ---- Story edit mode ---------------------------------------------- */
+
+    void build_story_bar(Widget *window) {
+        m_story_bar = new Widget(window);
+        m_story_bar->set_min_height(36);
+        m_story_bar->set_height(36);
+        m_story_bar->set_height_flex(SizeMode::Fixed);
+        auto *flex = new FlexLayout(FlexDirection::Row, JustifyContent::FlexStart,
+                                    AlignItems::Stretch, 0, 8);
+        m_story_bar->set_layout(flex);
+        Widget *left = new Widget(m_story_bar);
+        left->set_layout(new BoxLayout(Orientation::Horizontal, Alignment::Middle, 8, 6));
+        new Label(left, "Story Editor", "sans-bold");
+        m_story_label = new Label(left, "", "sans");
+        Widget *spacer = new Widget(m_story_bar);
+        flex->set_flex_item(spacer, FlexLayout::FlexItem(1.0f));
+        Widget *right = new Widget(m_story_bar);
+        right->set_layout(new BoxLayout(Orientation::Horizontal, Alignment::Middle, 8, 6));
+        m_story_simple = new Button(right, "Simple");
+        m_story_simple->set_flags(Button::RadioButton);
+        m_story_simple->set_tooltip("One screen face at the window's width, styles named at the left");
+        m_story_simple->set_callback([this] { m_view->set_story_view(ComposerView::StoryView::Simple); });
+        m_story_column = new Button(right, "Column");
+        m_story_column->set_flags(Button::RadioButton);
+        m_story_column->set_tooltip("The story's own type at its blocks' widths: lines break as "
+                                    "in the layout. Each block is marked, then the overset text.");
+        m_story_column->set_callback([this] { m_view->set_story_view(ComposerView::StoryView::Column); });
+        new Label(right, "  ", "sans");
+        auto *cancel = new Button(right, "Cancel Edit", FA_TIMES);
+        cancel->set_tooltip("Put the story back as it was");
+        cancel->set_callback([this] { cancel_story_edit(); });
+        m_story_update = new Button(right, "Update Story", FA_CHECK);
+        m_story_update->set_tooltip("Keep the edits (one undo step) and go back to the layout");
+        m_story_update->set_callback([this] { m_view->end_story_edit(true); });
+        m_story_bar->set_visible(false);
+    }
+
+    /* Edit > Edit Story: in, or out keeping the edits */
+    void toggle_story_edit() {
+        if (m_view->story_mode()) {
+            m_view->end_story_edit(true);
+            return;
+        }
+        if (!m_view->begin_story_edit())
+            set_note("Click in a story, or select a text block, to edit its story");
+    }
+
+    void cancel_story_edit() {
+        if (!m_view->story_changed()) {
+            m_view->end_story_edit(false);
+            return;
+        }
+        ask_confirm(this, "Discard the changes to this story?",
+                    "The story goes back to how it was before the story editor opened.",
+                    "Discard", [this] { m_view->end_story_edit(false); });
+    }
+
+    /* The editor takes the view: its bar shows; the tools, pages strip
+     * and object palette, which act on the layout, step aside */
+    void sync_story_mode() {
+        const bool on = m_view->story_mode();
+        if (m_story_bar) {
+            m_story_bar->set_visible(on);
+            if (m_story_label)
+                m_story_label->set_caption(on ? "—  “" + m_view->story_title() + "”" : "");
+            const bool simple = m_view->story_view() == ComposerView::StoryView::Simple;
+            m_story_simple->set_pushed(simple);
+            m_story_column->set_pushed(!simple);
+        }
+        for (auto &tb : m_tool_btns)
+            tb.second->set_enabled(!on && !m_view->preview());
+        if (m_pages)
+            m_pages->set_visible(!on);
+        if (m_mode_btn)
+            m_mode_btn->set_enabled(!on && !m_view->preview());
+        if (on)
+            show_type_palette(true);
+        /* Layers, masters, pictures and frames wait: Cancel would undo
+         * what they did to the pages */
+        ToolPanel::set_story_lock(on);
+        sync_tool_buttons(m_view->tool());
+        update_status();
+        perform_layout();
     }
 
     void sync_tool_buttons(ComposerView::Tool t) {
@@ -3541,7 +3919,11 @@ public:
         /* Which page: its label when its section numbers it otherwise, the
          * master it follows; or the master being edited */
         std::string where;
-        if (const MasterPage *em = doc.find_master(doc.editing_master)) {
+        if (m_view->story_mode()) {
+            where = std::string("Story editor (") +
+                    (m_view->story_view() == ComposerView::StoryView::Simple ? "simple" : "column") +
+                    (m_view->story_changed() ? "), edited" : ")");
+        } else if (const MasterPage *em = doc.find_master(doc.editing_master)) {
             where = "Master " + em->label();
             if (em->spread())
                 where += page == 0 ? " (left)" : " (right)";
@@ -3558,17 +3940,7 @@ public:
                       "  %s%s   |   %zu items, %zu stories, %zu lines, composed in %.2f ms%s   |   zoom %.0f%%",
                       where.c_str(), hidden ? " (hidden)" : "", nitems, comps.size(), lines, ms,
                       overset ? "   |   story overset (red arrow)" : "", m_scroll->zoom() * 100.0);
-        std::string picture;
-        if (m_view->selection().size() == 1)
-            if (const Item *it = doc.find_item(m_view->selection().front()))
-                if (const PlacedImage *im = it->image())
-                    if (const ImageAsset *a = doc.find_image(im->asset)) {
-                        const int ppi = a->meta.ppi_x > 0 ? (int) std::lround(a->meta.ppi_x) : 72;
-                        picture = "   |   " + a->name + "  " + std::to_string(a->meta.width_px) +
-                                  "\u00D7" + std::to_string(a->meta.height_px) + " px  " +
-                                  std::to_string(ppi) + " ppi";
-                    }
-        m_status->set_caption(std::string(buf) + picture + m_note);
+        m_status->set_caption(std::string(buf) + selection_status() + m_note);
         if (m_remove_page) {
             const bool master = doc.editing_master != 0;
             m_remove_page->set_enabled(np > 1 && !master);
@@ -4241,8 +4613,16 @@ private:
     ZoomScrollPanel *m_scroll = nullptr;
     RulerFrame      *m_rulers = nullptr;
     MenuItem        *m_rulers_item = nullptr, *m_guides_item = nullptr, *m_snap_item = nullptr;
+    /* Story edit mode: its bar over the view, and the menus that work in it */
+    Widget          *m_story_bar = nullptr;
+    Label           *m_story_label = nullptr;
+    Button          *m_story_simple = nullptr, *m_story_column = nullptr;
+    Button          *m_story_update = nullptr;
+    std::set<Dropdown *> m_story_menus;
     MenuItem        *m_lock_guides_item = nullptr;
     MenuItem        *m_dark_item = nullptr;
+    MenuItem        *m_preview_item = nullptr;
+    MenuItem        *m_print_view_item = nullptr;
     ComposerView    *m_view = nullptr;
     PageIconStrip   *m_pages = nullptr;
     Dropdown        *m_zoom_menu = nullptr;
@@ -4255,9 +4635,14 @@ private:
     Dropdown        *m_fill_tint = nullptr;
     Dropdown        *m_weight = nullptr, *m_style = nullptr;
     IntSpin         *m_sides = nullptr, *m_star = nullptr;
+    Label           *m_fill_label = nullptr, *m_stroke_label = nullptr;
+    Label           *m_sides_label = nullptr, *m_star_label = nullptr;
     Button          *m_mode_btn = nullptr;
     Widget          *m_object_box = nullptr, *m_type_box = nullptr;
     bool            m_type_mode = false;
+    Dropdown       *m_para_style = nullptr;      // the type palette's paragraph style
+    std::vector<std::string> m_para_style_names;
+    bool            m_syncing_para_style = false;
     FontMenuModel   m_font_menu;
     SwatchLibrary   m_swatch_lib;
     ColorDropdown   *m_colors = nullptr;
@@ -4282,6 +4667,7 @@ private:
     LayoutsPanel     *m_layouts_panel = nullptr;
     MastersPanel     *m_masters_panel = nullptr;
     LayersPanel      *m_layers = nullptr;
+    StylesPanel      *m_styles_panel = nullptr;
     FindPanel        *m_find_panel = nullptr;
     Window           *m_root_window = nullptr;
     PopupMenu        *m_context_popup = nullptr;   // the page's right-click menu

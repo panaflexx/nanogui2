@@ -24,6 +24,7 @@
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
+#include <ctime>
 #include "bg_worker.h"
 
 using namespace nanogui;
@@ -45,6 +46,7 @@ constexpr float kPi         = 3.14159265f;
 
 const NVGcolor kPasteboardColor = nvgRGB(214, 214, 214);
 const NVGcolor kMasterPasteboardColor = nvgRGB(228, 214, 188);
+const NVGcolor kPreviewPasteboard = nvgRGB(118, 118, 122);   // Preview: neutral, darker
 const NVGcolor kMasterAmber = nvgRGB(220, 140, 20);
 
 size_t page_under(const std::vector<PageSlot> &slots, float x, float y,
@@ -66,14 +68,14 @@ size_t page_under(const std::vector<PageSlot> &slots, float x, float y,
     return best;
 }
 
-void arrangement(const PageDoc &doc, size_t current, PageView view,
+void arrangement(float gap, const PageDoc &doc, size_t current, PageView view,
                  std::vector<PageSlot> &slots, float &w, float &h) {
     if (doc.editing_master) {
         /* A master: its one page, or its spread side by side (meeting at
          * the spine with facing pages), whatever the view */
         slots.clear();
         const float pw = std::max(1.f, doc.setup.width), ph = std::max(1.f, doc.setup.height);
-        const float split = doc.setup.facing ? 0.f : kPageGap;
+        const float split = doc.setup.facing ? 0.f : gap;
         slots.push_back({0, 0.f, 0.f});
         w = pw;
         h = ph;
@@ -85,7 +87,7 @@ void arrangement(const PageDoc &doc, size_t current, PageView view,
         (void) view;
         return;
     }
-    arrange_pages(doc.setup, doc.pages.size(), current, view, slots, w, h);
+    arrange_pages(doc.setup, doc.pages.size(), current, view, slots, w, h, gap);
 }
 
 /* Styles of the runs that overlap [a, b). An empty paragraph contributes
@@ -255,6 +257,14 @@ BackgroundWorker &ComposerView::importer() {
 }
 
 void ComposerView::set_document(PageDoc doc) {
+    if (m_story_mode) {                  // a new document: no draft of the old one
+        m_story_mode = false;
+        m_story_saved = PageDoc();
+        m_story_comp = Composition();
+        m_story_segs.clear();
+        if (on_story_mode_change)
+            on_story_mode_change();
+    }
     /* Reads and imports asked for by the previous document are dropped when
        they come back: its picture ids mean other pictures now. */
     ++m_doc_epoch;
@@ -326,6 +336,28 @@ bool ComposerView::show_text(StoryId story, TextPos a, TextPos b) {
     const StoryEntry &se = m_doc.stories[si];
     a = clamp(se.story, a);
     b = clamp(se.story, b);
+    if (m_story_mode) {
+        /* Found in this story or another: the column shows that one, the
+         * draft taking in its edits too */
+        const bool other = story != m_edit_story;
+        m_edit_story = story;
+        m_anchor = a;
+        m_caret = b;
+        m_typing_on = false;
+        m_goal_x = -1.f;
+        m_burst_open = false;
+        if (other) {
+            layout_story_view();
+            story_panel_relayout();
+            if (on_story_mode_change)
+                on_story_mode_change();      // the bar names the story
+        }
+        m_story_follow = true;
+        selection_changed();
+        if (screen())
+            screen()->redraw();
+        return true;
+    }
     /* The frame the range starts in, and its page */
     ItemId frame = se.thread.empty() ? 0 : se.thread.front();
     Caret at;
@@ -389,8 +421,14 @@ void ComposerView::selection_changed() {
         /* Edit Master Here began or ended under an operation (a page
          * change syncs the masters): the mode bar follows */
         m_shown_linked = m_doc.linked_editing();
-        if (!m_shown_linked)
+        if (!m_shown_linked) {
             m_mode_snapshot_valid = m_doc.editing_master != 0 && m_mode_snapshot_valid;
+            /* It put new items on the Master layer; ended by the way (a page
+             * change, a master applied), the layer before comes back too */
+            if (!m_doc.editing_master && m_doc.active_layer == m_doc.master_layer() &&
+                m_doc.find_layer(m_layer_before_linked))
+                m_doc.active_layer = m_layer_before_linked;
+        }
         if (on_master_edit_change)
             on_master_edit_change();
     }
@@ -420,6 +458,8 @@ void ComposerView::flush_deferred() {
             if (si < m_doc.stories.size())
                 m_comp[si] = compose_entry(m_doc.stories[si]);
         m_pending_stories.clear();
+        if (m_story_mode)
+            layout_story_view();
         if (on_recompose)
             on_recompose();
     }
@@ -455,7 +495,7 @@ void ComposerView::bump_version() {
 
 void ComposerView::push_snapshot(PageDoc doc, uint64_t version) {
     m_undo.push_back({std::move(doc), version});
-    if (m_undo.size() > 100)
+    if (m_undo.size() > 100 && !m_story_mode)   // a story draft keeps its base
         m_undo.pop_front();
     m_redo.clear();
     bump_version();
@@ -590,8 +630,8 @@ void ComposerView::follow_page(uint32_t uid) {
 }
 
 void ComposerView::undo() {
-    if (m_undo.empty())
-        return;
+    if (m_undo.empty() || (m_story_mode && m_undo.size() <= m_story_undo_base))
+        return;                          // a story draft undoes only its own edits
     const uint32_t uid = page_uid(m_page);
     m_redo.push_back({std::move(m_doc), m_version});
     m_doc = std::move(m_undo.back().doc);
@@ -601,6 +641,22 @@ void ComposerView::undo() {
     restore_snapshot();
     if (on_document_change)
         on_document_change();
+}
+
+bool ComposerView::revert_run(const void *key) {
+    if (!key || m_merged_key != key || m_version != m_merged_version || m_undo.empty() ||
+        (m_story_mode && m_undo.size() <= m_story_undo_base))
+        return false;
+    const uint32_t uid = page_uid(m_page);
+    m_doc = std::move(m_undo.back().doc);
+    m_version = m_undo.back().version;
+    m_undo.pop_back();
+    m_merged_key = nullptr;
+    follow_page(uid);
+    restore_snapshot();
+    if (on_document_change)
+        on_document_change();
+    return true;
 }
 
 void ComposerView::redo() {
@@ -618,6 +674,8 @@ void ComposerView::redo() {
 }
 
 void ComposerView::set_tool(Tool t) {
+    if (m_story_mode && t != Tool::Text)
+        return;                          // the story editor is all text
     if (m_tool == t)
         return;
     end_placement(false);
@@ -664,6 +722,8 @@ void ComposerView::recompose() {
     m_comp.clear();
     for (const StoryEntry &s : m_doc.stories)
         m_comp.push_back(compose_entry(s));
+    if (m_story_mode)
+        layout_story_view();
     if (on_recompose)
         on_recompose();
 }
@@ -683,9 +743,17 @@ Vector2f ComposerView::page_origin() const {
 }
 
 Vector2i ComposerView::preferred_size(NVGcontext *) const {
+    if (m_story_mode) {
+        /* At least the viewport's height: a short story sits at the top,
+         * not centered by the scroll panel */
+        float h = m_story_h;
+        if (const auto *zp = dynamic_cast<const nanogui::ZoomScrollPanel *>(parent()))
+            h = std::max(h, (float) zp->height() / (float) std::max(1e-3, zp->zoom()));
+        return Vector2i((int) std::ceil(m_story_w), (int) std::floor(h));
+    }
     std::vector<PageSlot> slots;
     float w, h;
-    arrangement(m_doc, m_page, m_page_view, slots, w, h);
+    arrangement(page_gap(), m_doc, m_page, m_page_view, slots, w, h);
     return Vector2i((int) std::ceil(w + 2 * kPasteboard),
                     (int) std::ceil(h + 2 * kPasteboard));
 }
@@ -698,7 +766,7 @@ void ComposerView::set_page_view(PageView view) {
      * edit must not reach what can't be seen */
     std::vector<PageSlot> slots;
     float aw, ah;
-    arrangement(m_doc, m_page, m_page_view, slots, aw, ah);
+    arrangement(page_gap(), m_doc, m_page, m_page_view, slots, aw, ah);
     const size_t before = m_sel.size();
     m_sel.erase(std::remove_if(m_sel.begin(), m_sel.end(), [&](ItemId id) {
         size_t pg = 0;
@@ -720,7 +788,7 @@ void ComposerView::set_page_view(PageView view) {
 Vector2f ComposerView::page_slot_offset(size_t index) const {
     std::vector<PageSlot> slots;
     float w, h;
-    arrangement(m_doc, m_page, m_page_view, slots, w, h);
+    arrangement(page_gap(), m_doc, m_page, m_page_view, slots, w, h);
     for (const PageSlot &sl : slots)
         if (sl.index == index)
             return {sl.x, sl.y};
@@ -731,13 +799,13 @@ void ComposerView::fit_extent(float &width, float &height) const {
     if (m_page_view == PageView::Stack) {
         std::vector<PageSlot> slots;
         float aw, ah;
-        arrangement(m_doc, m_page, m_page_view, slots, aw, ah);
+        arrangement(page_gap(), m_doc, m_page, m_page_view, slots, aw, ah);
         width = aw;              // a page, or a facing spread
         height = m_doc.setup.height > 1.f ? m_doc.setup.height : 1.f;
         return;
     }
     std::vector<PageSlot> slots;
-    arrangement(m_doc, m_page, m_page_view, slots, width, height);
+    arrangement(page_gap(), m_doc, m_page, m_page_view, slots, width, height);
 }
 
 Vector2f ComposerView::fit_center() const {
@@ -773,7 +841,7 @@ Point ComposerView::page_point_from_local(const Vector2f &local_in) const {
     Vector2f local = local_in - page_origin();
     std::vector<PageSlot> slots;
     float aw, ah;
-    arrangement(m_doc, m_page, m_page_view, slots, aw, ah);
+    arrangement(page_gap(), m_doc, m_page, m_page_view, slots, aw, ah);
     size_t page = m_page;
     if (m_pointer_down)
         page = m_gesture_page;
@@ -835,7 +903,7 @@ Point ComposerView::page_shift(size_t from, size_t to) const {
         return {0.f, 0.f};
     std::vector<PageSlot> slots;
     float aw, ah;
-    arrangement(m_doc, m_page, m_page_view, slots, aw, ah);
+    arrangement(page_gap(), m_doc, m_page, m_page_view, slots, aw, ah);
     const PageSlot *a = nullptr, *b = nullptr;
     for (const PageSlot &sl : slots) {
         if (sl.index == from) a = &sl;
@@ -1107,11 +1175,271 @@ void ComposerView::set_show_guides(bool on) {
         screen()->redraw();
 }
 
+void ComposerView::set_preview(bool on) {
+    if (m_preview == on)
+        return;
+    if (on) {
+        /* Put down whatever was in hand: nothing is edited in Preview */
+        end_placement(false);
+        if (m_creating)
+            finish_creation();
+        pen_commit(false);
+        if (editing())
+            set_tool(Tool::Pointer);
+        m_marquee = false;
+        m_drag = Handle::None;
+        m_hover_snap = false;
+        m_smart.clear();
+        if (!m_sel.empty()) {
+            m_sel.clear();
+            selection_changed();
+        }
+    }
+    m_preview = on;
+    m_pan_drag = false;
+    if (on_view_mode_change)
+        on_view_mode_change();
+    if (screen())
+        screen()->redraw();
+}
+
+void ComposerView::set_print_view(bool on) {
+    if (m_print_view == on)
+        return;
+    m_print_view = on;
+    if (on_view_mode_change)
+        on_view_mode_change();
+    if (screen()) {
+        screen()->perform_layout();      // the pages spread apart, or close up
+        screen()->redraw();
+    }
+}
+
+/* Print View's sheet: the bleed, then room for the crop marks (3 pt off
+ * the bleed, 15 pt long, as the PDF export draws them) and the slug */
+float ComposerView::sheet_margin() const {
+    return std::max(0.f, m_doc.setup.bleed) + 27.f;
+}
+
+float ComposerView::page_gap() const {
+    return m_print_view ? 2.f * sheet_margin() + 18.f : kPageGap;
+}
+
+namespace {
+
+/* Pages that meet (a facing spread) share one sheet */
+struct SheetGroup {
+    float x0, y0, x1, y1;                // the trim, view space
+    std::vector<float> spines;           // where pages meet
+    std::vector<size_t> pages;
+};
+
+std::vector<SheetGroup> sheet_groups(const std::vector<PageSlot> &slots, const Vector2f &o,
+                                     float pw, float ph) {
+    std::vector<PageSlot> sorted = slots;
+    std::sort(sorted.begin(), sorted.end(), [](const PageSlot &a, const PageSlot &b) {
+        return a.y != b.y ? a.y < b.y : a.x < b.x;
+    });
+    std::vector<SheetGroup> out;
+    for (const PageSlot &sl : sorted) {
+        const float x = o.x() + sl.x, y = o.y() + sl.y;
+        if (!out.empty() && std::fabs(out.back().y0 - y) < 0.01f &&
+            std::fabs(out.back().x1 - x) < 0.01f) {
+            out.back().spines.push_back(x);
+            out.back().x1 = x + pw;
+            out.back().pages.push_back(sl.index);
+            continue;
+        }
+        out.push_back({x, y, x + pw, y + ph, {}, {sl.index}});
+    }
+    return out;
+}
+
+/* A drop shadow to the right of and below a box, the PageMaker slab */
+void shadow_strips(NVGcontext *ctx, float x0, float y0, float x1, float y1, float d) {
+    nvgBeginPath(ctx);
+    nvgRect(ctx, x1, y0 + d, d, y1 - y0);
+    nvgRect(ctx, x0 + d, y1, x1 - x0 - d, d);
+    nvgFillColor(ctx, nvgRGBA(0, 0, 0, 110));
+    nvgFill(ctx);
+}
+
+std::string today_text() {
+    const std::time_t t = std::time(nullptr);
+    char buf[32] = {0};
+    if (const std::tm *tm = std::localtime(&t))
+        std::strftime(buf, sizeof buf, "%Y-%m-%d %H:%M", tm);
+    return buf;
+}
+
+} // namespace
+
+/* The sheets (marks false: drawn under the pages) or their printer's
+ * marks (marks true: drawn over everything) */
+void ComposerView::draw_print_sheets(NVGcontext *ctx, float px, const std::vector<PageSlot> &slots,
+                                     const Vector2f &o, bool marks) {
+    const PageSetup &s = m_doc.setup;
+    const float bleed = std::max(0.f, s.bleed), m = sheet_margin();
+    const std::vector<SheetGroup> groups = sheet_groups(slots, o, s.width, s.height);
+    if (!marks) {
+        for (const SheetGroup &g : groups) {
+            nvgBeginPath(ctx);
+            nvgRect(ctx, g.x0 - m + 4 * px, g.y0 - m + 4 * px, g.x1 - g.x0 + 2 * m, g.y1 - g.y0 + 2 * m);
+            nvgFillColor(ctx, nvgRGBA(0, 0, 0, 110));
+            nvgFill(ctx);
+            nvgBeginPath(ctx);
+            nvgRect(ctx, g.x0 - m, g.y0 - m, g.x1 - g.x0 + 2 * m, g.y1 - g.y0 + 2 * m);
+            nvgFillColor(ctx, nvgRGB(255, 255, 255));
+            nvgFill(ctx);
+        }
+        return;
+    }
+    const float lw = std::max(0.25f, px);          // a hairline, but always seen
+    const float gap = bleed + 3.f, len = 15.f;
+    const NVGcolor reg = nvgRGB(0, 0, 0);
+    const std::string when = today_text();
+    for (const SheetGroup &g : groups) {
+        /* Crop marks at the trim's corners, outside the bleed */
+        nvgBeginPath(ctx);
+        for (const float x : {g.x0, g.x1})
+            for (const float y : {g.y0, g.y1}) {
+                const float dx = x == g.x0 ? -1.f : 1.f, dy = y == g.y0 ? -1.f : 1.f;
+                nvgMoveTo(ctx, x + dx * gap, y);
+                nvgLineTo(ctx, x + dx * (gap + len), y);
+                nvgMoveTo(ctx, x, y + dy * gap);
+                nvgLineTo(ctx, x, y + dy * (gap + len));
+            }
+        /* Bleed marks: short ticks where the bleed ends, when there is one */
+        if (bleed > 0.f)
+            for (const float x : {g.x0 - bleed, g.x1 + bleed})
+                for (const float y : {g.y0 - bleed, g.y1 + bleed}) {
+                    const float dx = x < g.x0 ? -1.f : 1.f, dy = y < g.y0 ? -1.f : 1.f;
+                    nvgMoveTo(ctx, x + dx * 3.f, y);
+                    nvgLineTo(ctx, x + dx * 9.f, y);
+                    nvgMoveTo(ctx, x, y + dy * 3.f);
+                    nvgLineTo(ctx, x, y + dy * 9.f);
+                }
+        nvgStrokeWidth(ctx, lw);
+        nvgStrokeColor(ctx, reg);
+        nvgStroke(ctx);
+
+        /* Fold marks at the spine: dashes above and below the sheet's pages */
+        if (!g.spines.empty()) {
+            nvgBeginPath(ctx);
+            for (const float x : g.spines)
+                for (float t = 0.f; t < len; t += 4.f) {
+                    nvgMoveTo(ctx, x, g.y0 - gap - t);
+                    nvgLineTo(ctx, x, g.y0 - gap - std::min(len, t + 2.f));
+                    nvgMoveTo(ctx, x, g.y1 + gap + t);
+                    nvgLineTo(ctx, x, g.y1 + gap + std::min(len, t + 2.f));
+                }
+            nvgStrokeWidth(ctx, lw);
+            nvgStrokeColor(ctx, reg);
+            nvgStroke(ctx);
+        }
+
+        /* Registration targets centred on each side, in the marks' band */
+        const float r = 4.5f, off = gap + len * 0.5f;
+        const float cx = (g.x0 + g.x1) * 0.5f, cy = (g.y0 + g.y1) * 0.5f;
+        /* On a spread the top and bottom targets sit on each page, clear of the fold */
+        std::vector<float> xs;
+        if (g.spines.empty())
+            xs.push_back(cx);
+        else
+            for (size_t i = 0; i < g.pages.size(); ++i)
+                xs.push_back(g.x0 + s.width * (i + 0.5f));
+        std::vector<Point> targets = {{g.x0 - off, cy}, {g.x1 + off, cy}};
+        for (const float x : xs) {
+            targets.push_back({x, g.y0 - off});
+            targets.push_back({x, g.y1 + off});
+        }
+        for (const Point &c : targets) {
+            nvgBeginPath(ctx);
+            nvgCircle(ctx, c.x, c.y, r);
+            nvgCircle(ctx, c.x, c.y, r * 0.5f);
+            nvgMoveTo(ctx, c.x - r - 2.5f, c.y);
+            nvgLineTo(ctx, c.x + r + 2.5f, c.y);
+            nvgMoveTo(ctx, c.x, c.y - r - 2.5f);
+            nvgLineTo(ctx, c.x, c.y + r + 2.5f);
+            nvgStrokeWidth(ctx, lw);
+            nvgStrokeColor(ctx, reg);
+            nvgStroke(ctx);
+        }
+
+        /* A color bar along the top, left of the first target */
+        const NVGcolor bar[] = {nvgRGB(0, 174, 239), nvgRGB(236, 0, 140), nvgRGB(255, 242, 0),
+                                nvgRGB(0, 0, 0), nvgRGB(237, 28, 36), nvgRGB(0, 166, 81),
+                                nvgRGB(46, 49, 146), nvgRGB(64, 64, 64), nvgRGB(128, 128, 128),
+                                nvgRGB(191, 191, 191)};
+        const float cell = 7.f, bx = g.x0 + 20.f, by = g.y0 - off - cell * 0.5f;
+        if (bx + cell * 10 < xs.front() - r - 6.f) {
+            for (int i = 0; i < 10; ++i) {
+                nvgBeginPath(ctx);
+                nvgRect(ctx, bx + i * cell, by, cell, cell);
+                nvgFillColor(ctx, bar[i]);
+                nvgFill(ctx);
+            }
+            nvgBeginPath(ctx);
+            nvgRect(ctx, bx, by, cell * 10, cell);
+            nvgStrokeWidth(ctx, lw);
+            nvgStrokeColor(ctx, reg);
+            nvgStroke(ctx);
+        }
+
+        /* The slug: file, page, date, below the trim beside the corner mark */
+        std::string slug = m_print_label.empty() ? std::string("Untitled") : m_print_label;
+        for (size_t i = 0; i < g.pages.size(); ++i) {
+            if (g.pages[i] >= m_doc.pages.size())
+                continue;
+            slug += (i == 0 ? "  —  Page " : ", ") + m_doc.page_label(g.pages[i]);
+        }
+        slug += "  —  " + when;
+        nvgFontFace(ctx, "sans");
+        nvgFontSize(ctx, 6.f);
+        nvgTextAlign(ctx, NVG_ALIGN_LEFT | NVG_ALIGN_MIDDLE);
+        nvgFillColor(ctx, reg);
+        nvgSave(ctx);
+        nvgIntersectScissor(ctx, g.x0 + 6.f, g.y1 + gap, xs.front() - r - 10.f - g.x0, len + 6.f);
+        nvgText(ctx, g.x0 + 8.f, g.y1 + off, slug.c_str(), nullptr);
+        nvgRestore(ctx);
+    }
+}
+
+/* Preview: the pasteboard over everything outside the trim, or with Print
+ * View outside the sheets (white past the bleed), so what hangs off a
+ * page is hidden as it is in print */
+void ComposerView::draw_preview_mask(NVGcontext *ctx, float px, const std::vector<PageSlot> &slots,
+                                     const Vector2f &o) {
+    const PageSetup &s = m_doc.setup;
+    const float bleed = std::max(0.f, s.bleed), m = m_print_view ? sheet_margin() : 0.f;
+    const std::vector<SheetGroup> groups = sheet_groups(slots, o, s.width, s.height);
+    nvgBeginPath(ctx);
+    nvgRect(ctx, -1e5f, -1e5f, 2e5f, 2e5f);
+    for (const SheetGroup &g : groups) {
+        nvgRect(ctx, g.x0 - m, g.y0 - m, g.x1 - g.x0 + 2 * m, g.y1 - g.y0 + 2 * m);
+        nvgPathWinding(ctx, NVG_HOLE);
+    }
+    nvgFillColor(ctx, kPreviewPasteboard);
+    nvgFill(ctx);
+    if (m_print_view) {
+        nvgBeginPath(ctx);
+        for (const SheetGroup &g : groups) {
+            nvgRect(ctx, g.x0 - m, g.y0 - m, g.x1 - g.x0 + 2 * m, g.y1 - g.y0 + 2 * m);
+            nvgRect(ctx, g.x0 - bleed, g.y0 - bleed, g.x1 - g.x0 + 2 * bleed, g.y1 - g.y0 + 2 * bleed);
+            nvgPathWinding(ctx, NVG_HOLE);
+        }
+        nvgFillColor(ctx, nvgRGB(255, 255, 255));
+        nvgFill(ctx);
+    }
+    for (const SheetGroup &g : groups)
+        shadow_strips(ctx, g.x0 - m, g.y0 - m, g.x1 + m, g.y1 + m, 4.f * px);
+}
+
 Point ComposerView::point_on_page(const Vector2i &screen_p, size_t page) const {
     const Vector2f local = local_from_screen(screen_p) - page_origin();
     std::vector<PageSlot> slots;
     float aw, ah;
-    arrangement(m_doc, m_page, m_page_view, slots, aw, ah);
+    arrangement(page_gap(), m_doc, m_page, m_page_view, slots, aw, ah);
     for (const PageSlot &sl : slots)
         if (sl.index == page)
             return {local.x() - sl.x, local.y() - sl.y};
@@ -1126,9 +1454,24 @@ bool ComposerView::screen_over_pages(const Vector2i &screen_p) const {
 }
 
 bool ComposerView::ruler_mapping(Vector2f &origin, float &scale) const {
+    if (m_story_mode) {
+        /* The column's left edge and the top of the text */
+        const Vector2f local(132.f + 18.f, 22.f);
+        if (auto *zsp = dynamic_cast<const ZoomScrollPanel *>(parent())) {
+            const double z = zsp->zoom() != 0.0 ? zsp->zoom() : 1.0;
+            const auto pan = zsp->pan_offset();
+            origin = Vector2f(zsp->absolute_position()) + Vector2f((float) pan.x(), (float) pan.y()) +
+                     (local + Vector2f(m_pos)) * (float) z;
+            scale = (float) z;
+        } else {
+            origin = Vector2f(absolute_position()) + local;
+            scale = 1.f;
+        }
+        return width() > 0 && height() > 0;
+    }
     std::vector<PageSlot> slots;
     float aw, ah;
-    arrangement(m_doc, m_page, m_page_view, slots, aw, ah);
+    arrangement(page_gap(), m_doc, m_page, m_page_view, slots, aw, ah);
     Vector2f local = page_origin();
     for (const PageSlot &sl : slots)
         if (sl.index == m_page)
@@ -1167,6 +1510,8 @@ int ComposerView::guide_at(const Point &pt, size_t page, bool &all_pages) const 
 
 void ComposerView::begin_guide_drag(bool vertical) {
     m_guide_drag = GuideDrag();
+    if (m_story_mode || m_preview)
+        return;                          // no pages to put a guide on
     m_guide_drag.active = true;
     m_guide_drag.vertical = vertical;
 }
@@ -1319,8 +1664,7 @@ bool ComposerView::hits_item(const Item &it, const Point &pt) const {
             if (pl.closed && n > 1 &&
                 dist_to_segment(l, pl.pts[n - 1], pl.pts[0]) <= tol + half)
                 return true;
-            if (!pl.closed)
-                continue;
+            /* An open path fills as though closed */
             for (size_t i = 0, j = n - 1; i < n; j = i++) {
                 const Point a = pl.pts[i], b = pl.pts[j];
                 if ((a.y > l.y) != (b.y > l.y) &&
@@ -1396,43 +1740,9 @@ ComposerView::Hit ComposerView::hit_test(const Point &pt, size_t page) const {
         const Item *it = m_doc.find_item(*id, &on);
         if (!it || on != page)           // the selection can span pages
             continue;
-        const Point l = it->xf.inverse().apply(pt);
-        const float s = item_scale(it->xf);
-        const float hs = kHandlePx * px / s;
-        auto near = [&](float x, float y) {
-            return std::fabs(l.x - x) <= hs && std::fabs(l.y - y) <= hs;
-        };
-        Hit hit{*id, Handle::None};
-        if (it->group || boxed) {
-            /* Its group's box, or the selection's, has the corners */
-        } else if (is_line(*it)) {
-            if (near(0, 0))            { hit.handle = Handle::TopLeft;     return hit; }
-            if (near(it->w, it->h))    { hit.handle = Handle::BottomRight; return hit; }
-        } else {
-            if (near(0, 0))            { hit.handle = Handle::TopLeft;     return hit; }
-            if (near(it->w, 0))        { hit.handle = Handle::TopRight;    return hit; }
-            if (near(0, it->h))        { hit.handle = Handle::BottomLeft;  return hit; }
-            if (near(it->w, it->h))    { hit.handle = Handle::BottomRight; return hit; }
-            /* The middles of the edges move one side. A text block's top and
-             * bottom middles are its tabs (checked below) */
-            if (near(0, it->h * 0.5f))      { hit.handle = Handle::Left;   return hit; }
-            if (near(it->w, it->h * 0.5f))  { hit.handle = Handle::Right;  return hit; }
-            if (!it->is_text()) {
-                if (near(it->w * 0.5f, 0))      { hit.handle = Handle::Top;    return hit; }
-                if (near(it->w * 0.5f, it->h))  { hit.handle = Handle::Bottom; return hit; }
-            }
-        }
-        if (it->is_text()) {
-            const float tw = kTabWPx * 0.5f * px / s, th = kTabHPx * px / s;
-            if (std::fabs(l.x - it->w * 0.5f) <= tw && std::fabs(l.y - it->h) <= th) {
-                hit.handle = Handle::Windowshade;
-                return hit;
-            }
-            if (std::fabs(l.x - it->w * 0.5f) <= tw && std::fabs(l.y) <= th) {
-                hit.handle = Handle::TopTab;
-                return hit;
-            }
-        }
+        const Handle h = item_handle_at(*it, pt, !it->group && !boxed);
+        if (h != Handle::None)
+            return {*id, h};
     }
     static const std::vector<Item> none;
     const std::vector<Item> &its =
@@ -1440,6 +1750,66 @@ ComposerView::Hit ComposerView::hit_test(const Point &pt, size_t page) const {
     for (auto it = its.rbegin(); it != its.rend(); ++it)
         if (hits_item(*it, pt))
             return {it->id, Handle::Move};
+    return {};
+}
+
+ComposerView::Handle ComposerView::item_handle_at(const Item &it, const Point &pt,
+                                                  bool corners) const {
+    const float px = 1.f / zoom();
+    const Point l = it.xf.inverse().apply(pt);
+    const float s = item_scale(it.xf);
+    const float hs = kHandlePx * px / s;
+    auto near = [&](float x, float y) {
+        return std::fabs(l.x - x) <= hs && std::fabs(l.y - y) <= hs;
+    };
+    if (!corners) {
+        /* Its group's box, or the selection's, has the corners */
+    } else if (is_line(it)) {
+        if (near(0, 0))            return Handle::TopLeft;
+        if (near(it.w, it.h))      return Handle::BottomRight;
+    } else {
+        if (near(0, 0))            return Handle::TopLeft;
+        if (near(it.w, 0))         return Handle::TopRight;
+        if (near(0, it.h))         return Handle::BottomLeft;
+        if (near(it.w, it.h))      return Handle::BottomRight;
+        /* The middles of the edges move one side. A text block's top and
+         * bottom middles are its tabs (checked below) */
+        if (near(0, it.h * 0.5f))      return Handle::Left;
+        if (near(it.w, it.h * 0.5f))   return Handle::Right;
+        if (!it.is_text()) {
+            if (near(it.w * 0.5f, 0))      return Handle::Top;
+            if (near(it.w * 0.5f, it.h))   return Handle::Bottom;
+        }
+    }
+    if (it.is_text()) {
+        const float tw = kTabWPx * 0.5f * px / s, th = kTabHPx * px / s;
+        if (std::fabs(l.x - it.w * 0.5f) <= tw && std::fabs(l.y - it.h) <= th)
+            return Handle::Windowshade;
+        if (std::fabs(l.x - it.w * 0.5f) <= tw && std::fabs(l.y) <= th)
+            return Handle::TopTab;
+    }
+    return Handle::None;
+}
+
+bool ComposerView::text_handles_on(const Item &it) const {
+    if (m_tool != Tool::Text || !m_edit_story || !it.is_text() || !m_doc.item_editable(it))
+        return false;
+    const StoryEntry *se = m_doc.story_of(it.id);
+    return se && se->id == m_edit_story;
+}
+
+ComposerView::Hit ComposerView::text_handle_at(const Point &pt, size_t page) const {
+    if (m_tool != Tool::Text || !m_edit_story || page >= m_doc.pages.size())
+        return {};
+    const std::vector<Item> &its = m_doc.pages[page].items;
+    for (auto it = its.rbegin(); it != its.rend(); ++it) {
+        if (!text_handles_on(*it))
+            continue;
+        const Handle h = item_handle_at(*it, pt, !it->group);
+        /* The top tab threads, a pointer gesture; here it is just text */
+        if (h != Handle::None && h != Handle::TopTab)
+            return {it->id, h};
+    }
     return {};
 }
 
@@ -1456,6 +1826,8 @@ ItemId ComposerView::text_frame_at(const Point &pt, size_t page) const {
 /* ---- Mouse --------------------------------------------------------------- */
 
 bool ComposerView::scroll_event(const Vector2i &, const Vector2f &rel) {
+    if (m_story_mode || m_preview)
+        return false;                    // the panel scrolls the column
     /* Ctrl + Shift: Alt + wheel is the desktop's (Ubuntu changes
      * workspace), and Ctrl alone zooms the view */
     if (m_tool != Tool::Crop || rel.y() == 0.f || editing() ||
@@ -1516,6 +1888,15 @@ bool ComposerView::key_held(int modifiers, int mod, int key_left, int key_right)
 }
 
 bool ComposerView::mouse_button_event(const Vector2i &p, int button, bool down, int modifiers) {
+    if (m_story_mode)
+        return story_mouse_button(button, down, modifiers);
+    if (m_preview) {
+        /* Nothing to pick up: a left drag pans, as the hand would */
+        if (button == GLFW_MOUSE_BUTTON_1)
+            m_pan_drag = down;
+        request_focus();                 // so Escape reaches us
+        return true;
+    }
     if (m_placing) {
         if (down)
             end_placement(button == GLFW_MOUSE_BUTTON_1);
@@ -1529,7 +1910,7 @@ bool ComposerView::mouse_button_event(const Vector2i &p, int button, bool down, 
             turn_page_keeping_selection(m_point_page);
         const Point at = page_point_from_screen(screen()->mouse_pos());
         m_context_pt = at;
-        if (!editing()) {
+        if (!editing() && !m_pen.active) {   // a path being drawn keeps the pointer's job
             /* An unselected item under the pointer becomes the selection.
              * Empty space keeps it, so a click just beside the selection
              * still offers its commands. */
@@ -1588,7 +1969,7 @@ bool ComposerView::mouse_button_event(const Vector2i &p, int button, bool down, 
             /* Every page in view: the marquee can cross onto the next */
             std::vector<PageSlot> slots;
             float aw, ah;
-            arrangement(m_doc, m_page, m_page_view, slots, aw, ah);
+            arrangement(page_gap(), m_doc, m_page, m_page_view, slots, aw, ah);
             for (const PageSlot &sl : slots) {
                 if (sl.index >= m_doc.pages.size())
                     continue;
@@ -1653,6 +2034,22 @@ bool ComposerView::mouse_button_event(const Vector2i &p, int button, bool down, 
     const bool shift = (modifiers & GLFW_MOD_SHIFT) != 0;
 
     if (m_tool == Tool::Text) {
+        if (const Hit th = text_handle_at(pt, m_page); th.item) {
+            /* A handle of the block being edited: resize it as the pointer
+             * does, the caret staying where it is */
+            m_selecting = false;
+            m_drag_start = pt;
+            m_gesture_saved = false;
+            m_drag = th.handle;
+            m_drag_target = th.item;
+            m_drag_group = 0;
+            m_drag_items.clear();
+            if (const Item *it = m_doc.find_item(th.item))
+                m_drag_items.push_back(*it);
+            m_drag_bounds = m_drag_items.empty() ? Bounds() : item_bounds(m_drag_items.front());
+            m_burst_open = false;        // the resize is its own undo step
+            return true;
+        }
         double now = glfwGetTime();
         bool near = std::fabs(pt.x - m_down_pt.x) + std::fabs(pt.y - m_down_pt.y) <= 4.f;
         ItemId frame = text_frame_at(pt, m_page);
@@ -1830,7 +2227,26 @@ bool ComposerView::mouse_button_event(const Vector2i &p, int button, bool down, 
     return true;
 }
 
-bool ComposerView::mouse_drag_event(const Vector2i &p, const Vector2i &, int, int modifiers) {
+bool ComposerView::mouse_drag_event(const Vector2i &p, const Vector2i &rel, int, int modifiers) {
+    if (m_story_mode) {
+        if (m_selecting && editing()) {
+            m_caret = story_pos_at(local_from_screen(p + parent()->absolute_position()));
+            m_goal_x = -1.f;
+            m_story_follow = true;
+            if (screen())
+                screen()->redraw();
+        }
+        return true;
+    }
+    if (m_preview) {
+        if (m_pan_drag)
+            if (auto *panel = dynamic_cast<ZoomScrollPanel *>(parent())) {
+                const ZoomScrollPanel::Vector2d at = panel->pan_offset();
+                panel->set_pan_offset(ZoomScrollPanel::Vector2d(at.x() + rel.x(), at.y() + rel.y()));
+                panel->set_scroll(panel->scroll());   // lays out and redraws at the new offset
+            }
+        return true;
+    }
     /* Screen hands drags to us relative to our parent and without the
      * panel's zoom. Its mouse_pos() still holds the previous event here, so
      * rebuild this event's screen point instead. */
@@ -2117,6 +2533,15 @@ void ComposerView::resize_group(Point d, int modifiers) {
 
 bool ComposerView::mouse_motion_event(const Vector2i &p, const Vector2i &rel, int button,
                                       int modifiers) {
+    if (m_story_mode) {
+        const float x = (float) p.x() - (float) m_pos.x();
+        set_cursor(x < 132.f ? Cursor::Arrow : Cursor::IBeam);
+        return true;
+    }
+    if (m_preview) {
+        set_cursor(Cursor::Hand);
+        return true;
+    }
     if (m_placing) {
         /* The picked-up story follows the pointer, text flowed in live.
          * Use the event point (the panel already applied the zoom); the
@@ -2140,7 +2565,15 @@ bool ComposerView::mouse_motion_event(const Vector2i &p, const Vector2i &rel, in
     }
     switch (m_tool) {
     case Tool::Text:
-        set_cursor(text_frame_at(pt, page) ? Cursor::IBeam : Cursor::Crosshair);
+        switch (text_handle_at(pt, page).handle) {
+        case Handle::TopLeft: case Handle::TopRight:
+        case Handle::BottomLeft: case Handle::BottomRight:
+            set_cursor(Cursor::HVResize); break;
+        case Handle::Windowshade: set_cursor(Cursor::VResize); break;
+        case Handle::Left: case Handle::Right: set_cursor(Cursor::HResize); break;
+        default:
+            set_cursor(text_frame_at(pt, page) ? Cursor::IBeam : Cursor::Crosshair);
+        }
         break;
     case Tool::Pointer:
         switch (hit_test(pt, page).handle) {
@@ -2362,7 +2795,10 @@ ComposerView::PenGrab ComposerView::pen_grab_at(const Item &it, const Point &pt,
 
 bool ComposerView::pen_press(const Point &pt, int modifiers) {
     const bool shift = (modifiers & GLFW_MOD_SHIFT) != 0;
-    const bool alt = (modifiers & GLFW_MOD_ALT) != 0;
+    /* Ctrl (Cmd on the Mac) converts points; Alt too where the window
+     * manager lets it through (Linux takes Alt+drag to move windows) */
+    const bool convert =
+        (modifiers & (GLFW_MOD_CONTROL | SYSTEM_COMMAND_MOD | GLFW_MOD_ALT)) != 0;
     const float tol = kHandlePx / zoom();
     if (m_pen.active && m_pen.page != m_page)
         pen_commit(false);               // drawn on another page: keep it there
@@ -2378,7 +2814,10 @@ bool ComposerView::pen_press(const Point &pt, int modifiers) {
             return true;
         }
         if (m_pen.nodes.size() >= 2 && pdist(pt, m_pen.nodes.back().p) <= tol) {
-            pen_commit(false);
+            /* A double-click (the point just put down, clicked again) closes
+             * the path; a later click on the last point ends it open */
+            const bool dbl = glfwGetTime() - m_pen.placed_at < 0.4;
+            pen_commit(dbl && m_pen.nodes.size() >= 3);
             return true;
         }
         Point p = snap_point(pt);
@@ -2390,6 +2829,7 @@ bool ComposerView::pen_press(const Point &pt, int modifiers) {
         m_pen.nodes.push_back(n);
         m_pen.dragging = true;
         m_pen.down = m_pen.hover = p;
+        m_pen.placed_at = glfwGetTime();
         redraw();
         return true;
     }
@@ -2398,23 +2838,13 @@ bool ComposerView::pen_press(const Point &pt, int modifiers) {
     if (Item *it = pen_target()) {
         int node = -1;
         const PenGrab grab = pen_grab_at(*it, pt, node);
-        if (grab == PenGrab::Node && alt) {
-            /* Alt+click: a corner becomes a curve, a curve a corner */
-            push_undo();
-            std::vector<PathNode> nodes = path_item_nodes(*it);
-            PathNode &n = nodes[(size_t) node];
-            if (n.curve) {
-                corner_node(n);
-            } else {
-                Point prev, next;
-                node_neighbors(nodes, it->shape()->closed, (size_t) node, prev, next);
-                smooth_node(n, prev, next);
-            }
-            set_path_item_nodes(*it, std::move(nodes));
+        if (grab == PenGrab::Node && convert) {
+            /* Ctrl+drag pulls curve handles out of the point; Ctrl+click
+             * (no drag) switches it between corner and curve (on release) */
             m_pen_edit.node = node;
-            selection_changed();
-            if (on_document_change)
-                on_document_change();
+            m_pen_edit.grab = PenGrab::Pull;
+            m_pen_edit.saved = false;
+            m_drag_start = pt;
             redraw();
             return true;
         }
@@ -2481,6 +2911,7 @@ bool ComposerView::pen_press(const Point &pt, int modifiers) {
     m_pen.nodes.push_back(n);
     m_pen.dragging = true;
     m_pen.down = m_pen.hover = n.p;
+    m_pen.placed_at = glfwGetTime();
     selection_changed();
     redraw();
     return true;
@@ -2515,12 +2946,34 @@ void ComposerView::pen_drag(const Point &pt, bool shift) {
     std::vector<PathNode> nodes = path_item_nodes(*it);
     if ((size_t) m_pen_edit.node >= nodes.size())
         return;
-    if (!m_pen_edit.saved) {
+    if (!m_pen_edit.saved && m_pen_edit.grab != PenGrab::Pull) {
         push_undo();                     // one undo step for the drag
         m_pen_edit.saved = true;
     }
     PathNode &n = nodes[(size_t) m_pen_edit.node];
     const Transform inv = it->xf.inverse();
+    if (m_pen_edit.grab == PenGrab::Pull) {
+        /* Handles out of the point, mirrored: it becomes a smooth curve */
+        Point h = pt;
+        const Point onpage = it->xf.apply(n.p);
+        if (pdist(h, onpage) * zoom() <= 3.f && !m_pen_edit.saved)
+            return;                      // not a drag yet: maybe a click
+        if (!m_pen_edit.saved) {
+            push_undo();
+            m_pen_edit.saved = true;
+        }
+        if (shift)
+            h = constrain_45(onpage, h);
+        const Point l = inv.apply(h);
+        n.curve = true;
+        n.out = l;
+        n.in = {2 * n.p.x - l.x, 2 * n.p.y - l.y};
+        set_path_item_nodes(*it, std::move(nodes));
+        defer_selection_changed();
+        if (screen())
+            screen()->redraw();
+        return;
+    }
     if (m_pen_edit.grab == PenGrab::Node) {
         Point to = snap_point(pt);
         if (shift)                       // straight across or down from where it was
@@ -2561,6 +3014,33 @@ void ComposerView::pen_release() {
         return;
     }
     const bool saved = m_pen_edit.saved;
+    if (m_pen_edit.grab == PenGrab::Pull && !saved) {
+        /* Ctrl+click, no drag: a corner becomes a curve, a curve a corner */
+        m_pen_edit.grab = PenGrab::None;
+        Item *it = m_doc.find_item(m_pen_edit.item);
+        if (it && is_path(*it) && m_pen_edit.node >= 0) {
+            std::vector<PathNode> nodes = path_item_nodes(*it);
+            if ((size_t) m_pen_edit.node < nodes.size()) {
+                push_undo();
+                PathNode &n = nodes[(size_t) m_pen_edit.node];
+                if (n.curve) {
+                    corner_node(n);
+                } else {
+                    Point prev, next;
+                    node_neighbors(nodes, it->shape()->closed, (size_t) m_pen_edit.node, prev,
+                                   next);
+                    smooth_node(n, prev, next);
+                }
+                set_path_item_nodes(*it, std::move(nodes));
+                selection_changed();
+                if (on_document_change)
+                    on_document_change();
+            }
+        }
+        if (screen())
+            screen()->redraw();
+        return;
+    }
     m_pen_edit.grab = PenGrab::None;
     m_pen_edit.saved = false;
     if (saved) {
@@ -2643,6 +3123,43 @@ void ComposerView::pen_commit(bool close) {
     const ItemId id = m_doc.add_item(pen.page, it);
     m_sel = {id};
     m_pen_edit = PenEdit{id};
+    selection_changed();
+    if (on_document_change)
+        on_document_change();
+    if (screen())
+        screen()->redraw();
+}
+
+size_t ComposerView::pen_points() const {
+    return m_pen.active ? m_pen.nodes.size() : 0;
+}
+
+void ComposerView::pen_finish(bool close) {
+    pen_commit(close);
+}
+
+void ComposerView::pen_abandon() {
+    pen_cancel();
+}
+
+const Item *ComposerView::selected_path() const {
+    if (m_sel.size() != 1)
+        return nullptr;
+    const Item *it = m_doc.find_item(m_sel.front());
+    return it && is_path(*it) && m_doc.item_editable(*it) ? it : nullptr;
+}
+
+void ComposerView::set_selected_path_closed(bool closed) {
+    const Item *found = selected_path();
+    if (!found || found->shape()->closed == closed)
+        return;
+    if (closed && found->shape()->nodes.size() < 3)
+        return;
+    push_undo();
+    Item *it = m_doc.find_item(found->id);
+    std::vector<PathNode> nodes = path_item_nodes(*it);
+    it->shape()->closed = closed;
+    set_path_item_nodes(*it, std::move(nodes));   // the box fits the new outline
     selection_changed();
     if (on_document_change)
         on_document_change();
@@ -3465,6 +3982,200 @@ void ComposerView::delete_style(const std::string &name) {
         screen()->redraw();
 }
 
+/* ---- The Styles panel ---------------------------------------------------- */
+
+namespace {
+
+bool style_named(const std::vector<StyleDef> &v, const std::string &name) {
+    return std::any_of(v.begin(), v.end(), [&](const StyleDef &d) { return d.name == name; });
+}
+
+} // namespace
+
+bool ComposerView::update_style(const std::string &old_name, const StyleDef &def_in) {
+    StyleDef *old = m_doc.find_style(old_name);
+    if (!old || def_in.name.empty())
+        return false;
+    if (def_in.name != old_name && (m_doc.find_style(def_in.name) || old_name == "Normal"))
+        return false;                    // taken, or renaming Normal
+    StyleDef def = def_in;
+    def.para.name = def.name;
+    if (def.next == old_name || def.next == def.name)
+        def.next.clear();                // itself: the same style
+    else if (!def.next.empty() && !style_named(m_doc.styles, def.next))
+        def.next.clear();
+    if (def.name == old->name && same_style(def, *old))
+        return false;
+    if (editing())
+        will_edit(false);
+    else
+        push_undo();
+    const StyleDef before = *old;
+    *old = def;
+    for (StoryEntry &se : m_doc.stories)
+        for (Paragraph &p : se.story.paragraphs) {
+            if (p.style.name != old_name)
+                continue;
+            if (!style_overridden(p, before))
+                pagemade::apply_style(p, def, m_doc.char_styles);
+            else
+                p.style.name = def.name;     // keeps its overrides, under the new name
+        }
+    if (def.name != old_name)
+        for (StyleDef &d : m_doc.styles)
+            if (d.next == old_name)
+                d.next = def.name;
+    if (editing())
+        m_typing_on = false;
+    recompose();
+    selection_changed();
+    if (screen())
+        screen()->redraw();
+    return true;
+}
+
+bool ComposerView::add_style(const StyleDef &def_in) {
+    if (def_in.name.empty() || m_doc.find_style(def_in.name))
+        return false;
+    StyleDef def = def_in;
+    def.para.name = def.name;
+    if (!def.next.empty() && !m_doc.find_style(def.next))
+        def.next.clear();
+    if (editing())
+        will_edit(false);
+    else
+        push_undo();
+    m_doc.styles.push_back(def);
+    selection_changed();
+    if (screen())
+        screen()->redraw();
+    return true;
+}
+
+bool ComposerView::merge_style(const std::string &from, const std::string &into) {
+    if (from == "Normal" || from == into || !m_doc.find_style(from))
+        return false;
+    if (into.empty()) {
+        delete_style(from);
+        for (StyleDef &d : m_doc.styles)
+            if (d.next == from)
+                d.next.clear();
+        return true;
+    }
+    const StyleDef *target = m_doc.find_style(into);
+    if (!target)
+        return false;
+    const StyleDef t = *target;
+    if (editing())
+        will_edit(false);
+    else
+        push_undo();
+    for (StoryEntry &se : m_doc.stories)
+        for (Paragraph &p : se.story.paragraphs)
+            if (p.style.name == from)
+                pagemade::apply_style(p, t, m_doc.char_styles);
+    for (StyleDef &d : m_doc.styles)
+        if (d.next == from)
+            d.next = into == d.name ? std::string() : into;
+    m_doc.styles.erase(std::remove_if(m_doc.styles.begin(), m_doc.styles.end(),
+                                      [&](const StyleDef &d) { return d.name == from; }),
+                       m_doc.styles.end());
+    if (editing())
+        m_typing_on = false;
+    recompose();
+    selection_changed();
+    if (screen())
+        screen()->redraw();
+    return true;
+}
+
+bool ComposerView::update_char_style(const std::string &old_name, const CharStyleDef &def_in) {
+    CharStyleDef *old = m_doc.find_char_style(old_name);
+    if (!old || def_in.name.empty())
+        return false;
+    if (def_in.name != old_name && m_doc.find_char_style(def_in.name))
+        return false;
+    CharStyleDef def = def_in;
+    def.type.char_style = def.name;
+    if (def.name == old->name && same_char_style(def, *old))
+        return false;
+    if (editing())
+        will_edit(false);
+    else
+        push_undo();
+    const CharStyleDef before = *old;
+    *old = def;
+    for (StoryEntry &se : m_doc.stories)
+        for (Paragraph &p : se.story.paragraphs) {
+            for (Run &r : p.runs) {
+                if (r.style.char_style != old_name)
+                    continue;
+                if (!char_style_overridden(r.style, before))
+                    pagemade::apply_char_style(r.style, def);
+                else
+                    r.style.char_style = def.name;
+            }
+            normalize(p);
+        }
+    if (m_typing.char_style == old_name)
+        m_typing.char_style = def.name;
+    recompose();
+    selection_changed();
+    if (screen())
+        screen()->redraw();
+    return true;
+}
+
+bool ComposerView::add_char_style(const CharStyleDef &def_in) {
+    if (def_in.name.empty() || m_doc.find_char_style(def_in.name))
+        return false;
+    CharStyleDef def = def_in;
+    def.type.char_style = def.name;
+    if (editing())
+        will_edit(false);
+    else
+        push_undo();
+    m_doc.char_styles.push_back(def);
+    selection_changed();
+    if (screen())
+        screen()->redraw();
+    return true;
+}
+
+bool ComposerView::merge_char_style(const std::string &from, const std::string &into) {
+    if (from == into || !m_doc.find_char_style(from))
+        return false;
+    if (into.empty()) {
+        delete_char_style(from);
+        return true;
+    }
+    const CharStyleDef *target = m_doc.find_char_style(into);
+    if (!target)
+        return false;
+    const CharStyleDef t = *target;
+    if (editing())
+        will_edit(false);
+    else
+        push_undo();
+    for (StoryEntry &se : m_doc.stories)
+        for (Paragraph &p : se.story.paragraphs) {
+            for (Run &r : p.runs)
+                if (r.style.char_style == from)
+                    pagemade::apply_char_style(r.style, t);
+            normalize(p);
+        }
+    if (m_typing.char_style == from)
+        pagemade::apply_char_style(m_typing, t);
+    m_doc.char_styles.erase(std::remove_if(m_doc.char_styles.begin(), m_doc.char_styles.end(),
+                                           [&](const CharStyleDef &d) { return d.name == from; }),
+                            m_doc.char_styles.end());
+    recompose();
+    selection_changed();
+    if (screen())
+        screen()->redraw();
+    return true;
+}
+
 void ComposerView::apply_para(const std::function<void(ParaStyle &)> &fn) {
     if (!continues_run())
         m_run_paras = selected_para_indices();
@@ -3862,7 +4573,7 @@ void ComposerView::select_all() {
      * The all-pages view takes the current page's spread (or page). */
     std::vector<PageSlot> slots;
     float aw, ah;
-    arrangement(m_doc, m_page, m_page_view == PageView::Stack ? PageView::Spread : m_page_view,
+    arrangement(page_gap(), m_doc, m_page, m_page_view == PageView::Stack ? PageView::Spread : m_page_view,
                 slots, aw, ah);
     m_sel.clear();
     for (const PageSlot &sl : slots)
@@ -3877,6 +4588,12 @@ void ComposerView::select_all() {
 }
 
 void ComposerView::deselect_all() {
+    if (m_story_mode) {                  // the story stays: only the text selection goes
+        m_anchor = m_caret;
+        if (screen())
+            screen()->redraw();
+        return;
+    }
     m_edit_story = 0;                    // ends text editing too
     m_typing_on = false;
     m_selecting = false;
@@ -4483,6 +5200,34 @@ void ComposerView::arrange(Stack how) {
         break;
     case Stack::Forward:  m_doc.restack(order, +1); break;
     case Stack::Backward: m_doc.restack(order, -1); break;
+    }
+    if (how == Stack::Front && on_note) {
+        /* Stacking stays inside a layer: say so when a higher one still
+         * has items over it */
+        for (ItemId id : order) {
+            size_t pg = 0;
+            const Item *it = m_doc.find_item(id, &pg);
+            if (!it)
+                continue;
+            const size_t mine = m_doc.layer_index(m_doc.layer_of(*it));
+            const Bounds b = item_bounds(*it);
+            for (const Item &o : m_doc.pages[pg].items) {
+                if (is_selected(o.id) || !m_doc.item_visible(o) ||
+                    m_doc.layer_index(m_doc.layer_of(o)) <= mine)
+                    continue;
+                const Bounds ob = item_bounds(o);
+                if (ob.x0 < b.x1 && ob.x1 > b.x0 && ob.y0 < b.y1 && ob.y1 > b.y0) {
+                    const Layer *l = m_doc.find_layer(m_doc.layer_of(*it));
+                    on_note("At the front of layer \"" + (l ? l->name : std::string()) +
+                            "\": items on higher layers stay over it (Move to another layer "
+                            "to bring it above them)");
+                    id = 0;
+                    break;
+                }
+            }
+            if (!id)
+                break;
+        }
     }
     if (screen())
         screen()->redraw();
@@ -5251,6 +5996,8 @@ const Story *ComposerView::edit_story() const {
 }
 
 const Composition *ComposerView::edit_comp() const {
+    if (m_story_mode)
+        return &m_story_comp;            // the caret moves through the column
     size_t i = m_doc.story_index(m_edit_story);
     return i < m_comp.size() ? &m_comp[i] : nullptr;
 }
@@ -5304,12 +6051,80 @@ void ComposerView::after_edit() {
         m_anchor = clamp(*s, m_anchor);
     }
     m_goal_x = -1.f;
-    if (s)
+    if (s) {
         recompose_story(m_edit_story);
-    else
+        if (m_story_mode) {
+            m_story_follow = true;
+            story_panel_relayout();      // the column may be longer
+        } else {
+            grow_to_fit(m_edit_story);
+        }
+    } else {
         recompose();
+    }
     if (screen())
         screen()->redraw();
+}
+
+void ComposerView::grow_to_fit(StoryId story) {
+    const size_t si = m_doc.story_index(story);
+    if (si >= m_comp.size() || !m_comp[si].overset)
+        return;
+    const StoryEntry &se = m_doc.stories[si];
+    if (se.thread.empty())
+        return;
+    size_t pg = 0;
+    Item *it = m_doc.find_item(se.thread.back(), &pg);
+    TextFrame *tf = it ? it->text_frame() : nullptr;
+    if (!tf || !m_doc.item_editable(*it))
+        return;
+    /* How far down the page the block's foot can go, in its own space */
+    const Point down = it->xf.apply_vector({0.f, 1.f});
+    if (!(down.y > 1e-4f))
+        return;                          // turned on its side or over: leave it
+    const PageSetup ps = m_doc.setup_for(pg);
+    const float top = it->xf.apply({0.f, 0.f}).y;
+    const float foot = it->xf.apply({0.f, it->h}).y;
+    const float margin = ps.height - ps.margin_bottom;
+    const float limit_y = foot < margin - 0.01f ? margin : ps.height;
+    const float limit_h = (limit_y - top) / down.y;
+    if (!(limit_h > it->h + 0.01f))
+        return;                          // already down to it: the overset shows
+    const float was = it->h;
+    it->h = limit_h;
+    /* Measured set from the top, whatever the block's vertical alignment */
+    const VAlign valign = tf->valign;
+    tf->valign = VAlign::Top;
+    recompose_story(story);
+    tf->valign = valign;
+    const Composition &c = m_comp[si];
+    if (c.overset) {
+        if (valign != VAlign::Top)
+            recompose_story(story);
+        defer_selection_changed();
+        return;                          // as long as it goes; the rest is overset
+    }
+    /* Fits: down to the last line, its block's insets kept */
+    const size_t last = se.thread.size() - 1;
+    float first = 0, bottom = 0;
+    bool any = false;
+    for (const ComposedLine &ln : c.lines)
+        if (ln.frame == last) {
+            if (!any)
+                first = ln.top;
+            bottom = std::max(bottom, ln.top + ln.leading);
+            any = true;
+        }
+    if (!any)
+        return;
+    const float need = tf->inset_top + (bottom - first) + tf->inset_bottom;
+    it->h = std::min(limit_h, std::max(was, std::ceil(need * 4.f) / 4.f + 0.5f));
+    recompose_story(story);
+    if (m_comp[si].overset) {            // rounding: give it the room it had
+        it->h = limit_h;
+        recompose_story(story);
+    }
+    defer_selection_changed();           // the palette's H
 }
 
 void ComposerView::recompose_story(StoryId id) {
@@ -5321,6 +6136,8 @@ void ComposerView::recompose_story(StoryId id) {
     m_pending_stories.erase(si);
     const StoryEntry &se = m_doc.stories[si];
     m_comp[si] = compose_entry(se);
+    if (m_story_mode)
+        layout_story_view();
     if (on_recompose)
         on_recompose();
 }
@@ -5407,6 +6224,16 @@ void ComposerView::toggle_style(int key) {
         return;
     will_edit(false);                    // one step per restyle
     /* Like nmail: set when any part of the selection is unset, else clear. */
+    if (key == GLFW_KEY_U) {
+        bool all = true;
+        restyle(*s, m_anchor, m_caret, [&](CharStyle &cs) { all &= cs.underline; });
+        restyle(*s, m_anchor, m_caret, [want = !all](CharStyle &cs) { cs.underline = want; });
+        recompose();
+        selection_changed();
+        if (screen())
+            screen()->redraw();
+        return;
+    }
     auto on = key == GLFW_KEY_B ? +[](const CharStyle &cs) { return cs.bold; }
                                : +[](const CharStyle &cs) { return cs.italic; };
     bool all = true;
@@ -5474,6 +6301,45 @@ void ComposerView::text_clipboard(int key) {
 }
 
 bool ComposerView::keyboard_event(int key, int, int action, int modifiers) {
+    if (m_story_mode) {
+        m_story_follow = true;           // the caret stays in view
+        if (key == GLFW_KEY_ESCAPE) {    // lets go of the selection; Cancel is a button
+            if (action == GLFW_PRESS && has_selection()) {
+                m_caret = m_anchor = m_caret < m_anchor ? m_caret : m_anchor;
+                if (screen())
+                    screen()->redraw();
+            }
+            return true;
+        }
+        if ((key == GLFW_KEY_PAGE_UP || key == GLFW_KEY_PAGE_DOWN) &&
+            (action == GLFW_PRESS || action == GLFW_REPEAT)) {
+            /* A screenful up or down, the caret along */
+            const Story *s = edit_story();
+            const auto *panel = dynamic_cast<const ZoomScrollPanel *>(parent());
+            const Caret at = s ? caret_at(m_story_comp, *s, m_caret) : Caret();
+            const StorySeg *sg = at.valid() ? story_seg_of_line(at.line) : nullptr;
+            if (s && panel && sg) {
+                const float z = panel->zoom() > 0.0 ? (float) panel->zoom() : 1.f;
+                const float step = (float) panel->height() / z * 0.9f;
+                const Vector2f to(at.x + sg->x, (at.top + at.bottom) * 0.5f + sg->shift +
+                                                    (key == GLFW_KEY_PAGE_UP ? -step : step));
+                place_caret(story_pos_at(to), (modifiers & GLFW_MOD_SHIFT) != 0);
+                m_burst_open = false;
+                selection_changed();
+                if (screen())
+                    screen()->redraw();
+            }
+            return true;
+        }
+    }
+    if (m_preview && !m_story_mode) {
+        /* No edits; Escape leaves Preview. Menu shortcuts still work. */
+        if (key != GLFW_KEY_ESCAPE)
+            return false;
+        if (action == GLFW_PRESS)
+            set_preview(false);
+        return true;
+    }
     if (m_placing) {
         if (key == GLFW_KEY_ESCAPE) {
             if (action == GLFW_PRESS)
@@ -5568,6 +6434,12 @@ bool ComposerView::keyboard_event(int key, int, int action, int modifiers) {
             if (action != GLFW_PRESS)
                 return true;             // swallow the release
             break;
+        case GLFW_KEY_U:                 // underline; Snap to Guides outside
+            if (!m_story_mode)
+                return false;
+            if (action != GLFW_PRESS)
+                return true;             // swallow the release
+            break;
         default:
             return false;                // app-level zoom shortcuts etc.
         }
@@ -5587,7 +6459,7 @@ bool ComposerView::keyboard_event(int key, int, int action, int modifiers) {
             m_burst_open = false;
             if (screen()) screen()->redraw();
             return true;
-        case GLFW_KEY_B: case GLFW_KEY_I:
+        case GLFW_KEY_B: case GLFW_KEY_I: case GLFW_KEY_U:
             toggle_style(key);
             return true;
         case GLFW_KEY_ENTER: case GLFW_KEY_KP_ENTER:
@@ -5661,8 +6533,19 @@ bool ComposerView::keyboard_event(int key, int, int action, int modifiers) {
         if (modifiers & GLFW_MOD_SHIFT)
             insert_string("\xE2\x80\xA8", true);  // U+2028: break, same paragraph
         else {
+            const size_t from = m_caret.para;
+            const bool at_end = m_caret.byte >= para_length(s->paragraphs[from]);
             m_caret = split_paragraph(*s, m_caret);
             m_anchor = m_caret;
+            /* Return at the end of a paragraph whose style names a next
+             * style: the new paragraph is in that style */
+            if (at_end)
+                if (const StyleDef *d = m_doc.find_style(s->paragraphs[from].style.name);
+                    d && !d->next.empty() && d->next != d->name)
+                    if (const StyleDef *n = m_doc.find_style(d->next)) {
+                        pagemade::apply_style(s->paragraphs[m_caret.para], *n, m_doc.char_styles);
+                        m_typing_on = false;
+                    }
             after_edit();
         }
         return true;
@@ -5712,16 +6595,21 @@ bool ComposerView::keyboard_character_event(unsigned int codepoint) {
 void ComposerView::draw_page(NVGcontext *ctx, float px, size_t page) {
     const PageSetup &s = m_doc.setup;
 
-    /* Classic PageMaker drop shadow: a solid offset slab. */
-    nvgBeginPath(ctx);
-    nvgRect(ctx, 4 * px, 4 * px, s.width, s.height);
-    nvgFillColor(ctx, nvgRGBA(0, 0, 0, 110));
-    nvgFill(ctx);
+    /* Classic PageMaker drop shadow: a solid offset slab. Print View's
+     * sheet has its own; Preview's mask draws one round what shows. */
+    if (!m_print_view && !m_preview) {
+        nvgBeginPath(ctx);
+        nvgRect(ctx, 4 * px, 4 * px, s.width, s.height);
+        nvgFillColor(ctx, nvgRGBA(0, 0, 0, 110));
+        nvgFill(ctx);
+    }
 
     nvgBeginPath(ctx);
     nvgRect(ctx, 0, 0, s.width, s.height);
     nvgFillColor(ctx, nvgRGB(255, 255, 255));
     nvgFill(ctx);
+    if (m_preview)
+        return;                          // the paper alone, as it prints
     nvgStrokeWidth(ctx, px);
     nvgStrokeColor(ctx, nvgRGB(0, 0, 0));
     nvgStroke(ctx);
@@ -5915,7 +6803,7 @@ void ComposerView::lifted_ids(std::vector<ItemId> &ids) const {
 void ComposerView::adopt_moved_items() {
     std::vector<PageSlot> slots;
     float aw, ah;
-    arrangement(m_doc, m_page, m_page_view, slots, aw, ah);
+    arrangement(page_gap(), m_doc, m_page, m_page_view, slots, aw, ah);
     if (slots.size() < 2)
         return;
     const float pw = m_doc.setup.width > 1.f ? m_doc.setup.width : 1.f;
@@ -6042,7 +6930,7 @@ void ComposerView::draw_chrome(NVGcontext *ctx, float px, size_t page,
     for (const Item &it : page_items) {
         if (!keep_item(which, only, it.id) || !m_doc.item_visible(it))
             continue;
-        const bool selected = is_selected(it.id);
+        const bool selected = is_selected(it.id) || text_handles_on(it);
         nvgSave(ctx);
         apply_transform(ctx, it.xf);
         lpx = px / item_scale(it.xf);
@@ -7279,6 +8167,8 @@ std::vector<size_t> ComposerView::master_drop_pages(int modifiers) const {
 }
 
 bool ComposerView::drag_motion_event(const Vector2i &, DragEvent &e) {
+    if (m_story_mode || m_preview)
+        return false;
     MasterId master = 0;
     if (dragged_master(e.data, master)) {
         if (m_placing || m_doc.editing_master || !e.accept(this, DropCopy)) {
@@ -7336,6 +8226,8 @@ void ComposerView::drag_leave_event() {
 
 bool ComposerView::drag_drop_event(const Vector2i &, DragEvent &e) {
     drag_leave_event();
+    if (m_story_mode || m_preview)
+        return false;
     MasterId master = 0;
     if (dragged_master(e.data, master)) {
         if (m_placing || m_doc.editing_master)
@@ -7570,18 +8462,26 @@ void ComposerView::draw(NVGcontext *ctx) {
 
     nvgSave(ctx);
     nvgTranslate(ctx, (float) m_pos.x(), (float) m_pos.y());
+    if (m_story_mode) {
+        draw_story_view(ctx, px);
+        nvgRestore(ctx);
+        return;
+    }
 
     /* The panel scissors to its viewport, so an oversized fill covers it. */
     nvgBeginPath(ctx);
     nvgRect(ctx, -1e5f, -1e5f, 2e5f, 2e5f);
     /* Editing a master, either way: a warm pasteboard says so everywhere */
-    nvgFillColor(ctx, master_mode() ? kMasterPasteboardColor : kPasteboardColor);
+    nvgFillColor(ctx, m_preview ? kPreviewPasteboard
+                                : master_mode() ? kMasterPasteboardColor : kPasteboardColor);
     nvgFill(ctx);
 
     std::vector<PageSlot> slots;
     float aw, ah;
-    arrangement(m_doc, m_page, m_page_view, slots, aw, ah);
+    arrangement(page_gap(), m_doc, m_page, m_page_view, slots, aw, ah);
     const Vector2f o = page_origin();
+    if (m_print_view)
+        draw_print_sheets(ctx, px, slots, o, false);
     sync_textures(ctx);
     release_unused_ramps(ctx);
     std::vector<ItemId> lifted;
@@ -7629,14 +8529,17 @@ void ComposerView::draw(NVGcontext *ctx) {
             continue;
         nvgSave(ctx);
         nvgTranslate(ctx, o.x() + sl.x, o.y() + sl.y);
-        if (sl.index < m_doc.pages.size() && m_doc.pages[sl.index].hidden) {
+        if (m_preview) {
+            /* no labels or rings: the page alone */
+        } else if (sl.index < m_doc.pages.size() && m_doc.pages[sl.index].hidden) {
             nvgFontFace(ctx, "sans");
             nvgFontSize(ctx, 11.f * px);
             nvgTextAlign(ctx, NVG_ALIGN_LEFT | NVG_ALIGN_BOTTOM);
             nvgFillColor(ctx, nvgRGB(140, 40, 40));
             nvgText(ctx, 0, -4.f * px, "Hidden \u2014 not printed", nullptr);
         }
-        if (const MasterPage *em = m_doc.find_master(m_doc.editing_master)) {
+        if (m_preview) {
+        } else if (const MasterPage *em = m_doc.find_master(m_doc.editing_master)) {
             /* A master on the pasteboard: say so above it, and ring it */
             std::string what = "Master " + em->label();
             if (em->spread())
@@ -7684,6 +8587,10 @@ void ComposerView::draw(NVGcontext *ctx) {
             nvgTranslate(ctx, o.x() + sl.x, o.y() + sl.y);
             draw_list(ctx, build_page(m_doc, sl.index, m_comp, hand, only, m_vectors), px,
                       [&](const DrawImage &im) { return texture_for(ctx, im, px); });
+            if (m_preview) {             // what prints, nothing more
+                nvgRestore(ctx);
+                continue;
+            }
             if (sl.index < m_doc.pages.size())
                 for (const Item &it : m_doc.pages[sl.index].items)
                     if (it.is_text() && keep_item(hand, only, it.id) && m_doc.item_visible(it))
@@ -7699,6 +8606,17 @@ void ComposerView::draw(NVGcontext *ctx) {
     paint_items(false);
     if (hand)
         paint_items(true);               // the item in hand, above both pages
+    if (m_preview)
+        draw_preview_mask(ctx, px, slots, o);
+    if (m_print_view)
+        draw_print_sheets(ctx, px, slots, o, true);
+    if (m_preview) {
+        nvgRestore(ctx);
+        update_live_images();
+        if (g_frame_stats.on)
+            g_frame_stats.frame(stats_t0, glfwGetTime(), (int) std::count(shown.begin(), shown.end(), 1));
+        return;
+    }
     if ((m_pointer_down || m_hover_snap) && !m_smart.empty())
         for (const PageSlot &sl : slots)
             if (sl.index == m_page) {

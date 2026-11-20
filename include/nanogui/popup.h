@@ -69,6 +69,10 @@ NAMESPACE_BEGIN(nanogui)
         Window* parent_window() { return m_parent_window; }
         /// Return the parent window of the popup
         const Window* parent_window() const { return m_parent_window; }
+        /// Anchor to another window: the button that opens it moved there
+        /// (a tool panel dragged into another tab window). A popup whose
+        /// window is gone never shows again otherwise.
+        void set_parent_window(Window *window) { m_parent_window = window; }
 
         /// Invoke the associated layout generator to properly place child widgets, if any
         virtual void perform_layout(NVGcontext* ctx) override;

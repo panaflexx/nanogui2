@@ -7291,9 +7291,11 @@ static void test_gradients_and_paths(const FontLibrary &fonts) {
         }
         CHECK(worst < 0.2f, "splitting a curve keeps its shape (%g)", worst);
     }
-    Shape open = ps;
+    Shape open = *path.shape();
     open.closed = false;
-    CHECK(!open.filled(), "an open path isn't filled");
+    CHECK(open.filled(), "an open path fills as though closed");
+    open.nodes.resize(2);
+    CHECK(!open.filled(), "two points have nothing to fill");
 
     /* Named gradients: copies follow the named one */
     {

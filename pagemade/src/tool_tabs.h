@@ -51,6 +51,23 @@ public:
     virtual int preferred_content_height(NVGcontext *, int) { return -1; }
 
     nanogui::Vector2i preferred_size(NVGcontext *) const override { return floor_size(); }
+
+    /* The story editor locks the panels that work on the pages (layers,
+     * masters, pictures, frames): they grey out under a note and take no
+     * clicks until it closes. Panels that edit text say story_safe. */
+    virtual bool story_safe() const { return false; }
+    static void set_story_lock(bool on);
+    static bool story_lock();
+    bool locked() const { return story_lock() && !story_safe(); }
+
+    void draw(NVGcontext *ctx) override;
+    bool mouse_button_event(const nanogui::Vector2i &p, int button, bool down,
+                            int modifiers) override;
+    bool mouse_drag_event(const nanogui::Vector2i &p, const nanogui::Vector2i &rel,
+                          int button, int modifiers) override;
+    bool mouse_motion_event(const nanogui::Vector2i &p, const nanogui::Vector2i &rel,
+                            int button, int modifiers) override;
+    bool scroll_event(const nanogui::Vector2i &p, const nanogui::Vector2f &rel) override;
 };
 
 class ToolTabsWindow : public DockableWindow {

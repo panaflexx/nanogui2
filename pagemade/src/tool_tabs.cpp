@@ -7,10 +7,72 @@
 #include <nanogui/screen.h>
 #include <nanogui/split.h>
 #include <nanogui/tabwidget.h>
+#include <nanogui/theme.h>
+#include <nanovg.h>
 
 #include <algorithm>
 
 using namespace nanogui;
+
+/* ---- ToolPanel: the story editor's lock --------------------------------- */
+
+namespace {
+bool g_story_lock = false;
+}
+
+void ToolPanel::set_story_lock(bool on) { g_story_lock = on; }
+bool ToolPanel::story_lock() { return g_story_lock; }
+
+void ToolPanel::draw(NVGcontext *ctx) {
+    Widget::draw(ctx);
+    if (!locked())
+        return;
+    const float x = (float) m_pos.x(), y = (float) m_pos.y();
+    const float w = (float) m_size.x(), h = (float) m_size.y();
+    const bool dark = theme() && theme()->mode() == ThemeMode::Dark;
+    nvgSave(ctx);
+    nvgBeginPath(ctx);
+    nvgRect(ctx, x, y, w, h);
+    nvgFillColor(ctx, dark ? nvgRGBA(30, 30, 34, 200) : nvgRGBA(240, 240, 240, 200));
+    nvgFill(ctx);
+    nvgFontFace(ctx, "sans");
+    nvgFontSize(ctx, 15.f);
+    nvgTextAlign(ctx, NVG_ALIGN_CENTER | NVG_ALIGN_TOP);
+    nvgFillColor(ctx, dark ? nvgRGB(200, 200, 205) : nvgRGB(80, 80, 80));
+    const float pad = 16.f;
+    nvgTextBox(ctx, x + pad, y + std::max(pad, h * 0.3f), std::max(20.f, w - 2 * pad),
+               "Not available in the story editor. Update Story or Cancel Edit to use it.",
+               nullptr);
+    nvgRestore(ctx);
+}
+
+bool ToolPanel::mouse_button_event(const Vector2i &p, int button, bool down, int modifiers) {
+    if (locked())
+        return true;
+    return Widget::mouse_button_event(p, button, down, modifiers);
+}
+
+bool ToolPanel::mouse_drag_event(const Vector2i &p, const Vector2i &rel, int button,
+                                 int modifiers) {
+    if (locked())
+        return true;
+    return Widget::mouse_drag_event(p, rel, button, modifiers);
+}
+
+bool ToolPanel::mouse_motion_event(const Vector2i &p, const Vector2i &rel, int button,
+                                   int modifiers) {
+    if (locked())
+        return true;
+    return Widget::mouse_motion_event(p, rel, button, modifiers);
+}
+
+bool ToolPanel::scroll_event(const Vector2i &p, const Vector2f &rel) {
+    if (locked())
+        return true;
+    return Widget::scroll_event(p, rel);
+}
+
+/* ---- ToolTabsWindow ------------------------------------------------------ */
 
 std::vector<ToolTabsWindow *> ToolTabsWindow::s_live;
 std::function<void(ToolTabsWindow *)> ToolTabsWindow::s_on_born;

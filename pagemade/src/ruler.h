@@ -16,6 +16,9 @@
 #include <nanogui/widget.h>
 
 #include <functional>
+#include <vector>
+
+#include "composer/story.h"
 
 class ComposerView;
 
@@ -30,13 +33,45 @@ public:
     bool mouse_drag_event(const nanogui::Vector2i &p, const nanogui::Vector2i &rel,
                           int button, int modifiers) override;
 
+    bool mouse_motion_event(const nanogui::Vector2i &p, const nanogui::Vector2i &rel,
+                            int button, int modifiers) override;
+
+    /* The story editor's top ruler: the kind of tab a click adds (the
+     * corner square shows it and cycles it) */
+    pagemade::TabAlign new_tab() const { return m_new_tab; }
+    void cycle_new_tab();
+
 private:
     /* Shift as it is now: the screen only refreshes its modifiers on clicks */
     bool shift_down(int modifiers) const;
 
+    /* Story mode: the indent and tab markers. Positions in points from the
+     * column's left edge; `zero` and `scale` map them to the parent's
+     * coordinates, as draw() does. */
+    enum class Mark { None, First, Left, Right, Tab };
+    bool story_map(float &zero, float &scale) const;
+    Mark mark_at(const nanogui::Vector2i &p, int &tab) const;
+    bool story_press(const nanogui::Vector2i &p, int modifiers);
+    void story_drag(const nanogui::Vector2i &p, int modifiers);
+    void story_release();
+    void apply_tabs(const std::vector<pagemade::TabStop> &tabs);
+
     ComposerView *m_view = nullptr;
     bool m_horizontal;
     bool m_dragging = false;
+
+    pagemade::TabAlign m_new_tab = pagemade::TabAlign::Left;
+    Mark  m_mark = Mark::None;           // the marker being dragged
+    int   m_tab = -1;                    // its index in m_tabs
+    bool  m_tab_off = false;             // dragged off the ruler: removed
+    float m_grab = 0.f;                  // pointer minus marker, in points
+    std::vector<pagemade::TabStop> m_tabs;   // the stops as the drag began
+    /* The marker shown enlarged: in hand, or settling back after a drop */
+    Mark   m_flash = Mark::None;
+    int    m_flash_tab = -1;
+    double m_flash_t0 = 0.0;
+    double m_last_click = -1.0;
+    int    m_last_tab = -1;
 };
 
 class RulerFrame : public nanogui::Widget {
@@ -59,8 +94,12 @@ public:
     nanogui::Vector2i preferred_size(NVGcontext *ctx) const override;
     void perform_layout(NVGcontext *ctx) override;
     void draw(NVGcontext *ctx) override;
+    /* In the story editor the corner square picks the kind of tab */
+    bool mouse_button_event(const nanogui::Vector2i &p, int button, bool down,
+                            int modifiers) override;
 
 private:
+    ComposerView *m_view = nullptr;
     Ruler *m_top = nullptr, *m_left = nullptr;
     nanogui::Widget *m_content = nullptr;
     bool m_shown = true;

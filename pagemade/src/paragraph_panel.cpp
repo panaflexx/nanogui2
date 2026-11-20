@@ -666,6 +666,7 @@ ParagraphPanel::ParagraphPanel(Widget *parent, Hooks hooks)
 
     /* Paragraph [style] */
     Widget *head = new Widget(this);
+    m_head = head;
     head->set_layout(new BoxLayout(Orientation::Horizontal, Alignment::Middle, 0, 10));
     new Label(head, "Paragraph", "sans-bold");
     m_style = new Dropdown(head, std::vector<std::string>{"Normal"}, {}, Dropdown::ComboBox,
@@ -841,8 +842,9 @@ ParagraphPanel::ParagraphPanel(Widget *parent, Hooks hooks)
         m_flags.push_back(b);
     }
 
-    new Rule(this);
+    m_bottom_rule = new Rule(this);
     RightRow *bottom = new RightRow(this, 6);
+    m_bottom = bottom;
     m_delete = new Button(bottom, "Remove");
     m_delete->set_fixed_size(Vector2i(84, 28));
     m_delete->set_tooltip("Delete this style (its paragraphs keep their formatting)");
@@ -1079,6 +1081,14 @@ void ParagraphPanel::add_int_field(Widget *grid, ParaIcon icon, const char *tip,
                           f.box->spinning() ? f.box : nullptr);
         return true;
     });
+}
+
+void ParagraphPanel::set_style_controls(bool shown) {
+    for (Widget *w : {m_head, m_bottom_rule, m_bottom})
+        if (w)
+            w->set_visible(shown);
+    if (!shown && m_naming)
+        m_naming->set_visible(false);
 }
 
 void ParagraphPanel::load(const std::vector<const Paragraph *> &paras,

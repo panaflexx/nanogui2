@@ -17,7 +17,7 @@ Paragraph para(const ParaStyle &ps, std::initializer_list<Run> runs) {
 /* Define (or redefine) the style a sample paragraph uses, from the sample's
  * own formatting, so the sample shows no overrides. */
 void define(PageDoc &doc, const ParaStyle &ps, const CharStyle &cs) {
-    StyleDef d{ps.name, ps, cs};
+    StyleDef d{ps.name, ps, cs, {}};
     d.type.color = Color();
     if (StyleDef *old = doc.find_style(ps.name))
         *old = d;

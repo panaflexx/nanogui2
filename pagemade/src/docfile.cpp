@@ -682,6 +682,8 @@ std::string make_json(const PageDoc &doc, const SaveOptions &opts, const std::ve
     for (const StyleDef &st : doc.styles) {
         j.begin_object();
         j.key("name").value(st.name);
+        if (!st.next.empty())
+            j.key("next").value(st.next);
         j.key("para");
         write_para_style(j, st.para);
         j.key("type");
@@ -1614,6 +1616,7 @@ OpenResult open_document(const std::string &path, const FontLibrary &installed,
             get(at(styles, i), "name", st.name);
             if (st.name.empty() || d.find_style(st.name))
                 continue;
+            get(at(styles, i), "next", st.next);
             st.para = read_para_style(field(at(styles, i), "para"));
             st.para.name = st.name;
             st.type = read_char_style(field(at(styles, i), "type"));

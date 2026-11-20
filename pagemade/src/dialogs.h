@@ -92,6 +92,9 @@ void ask_save_as(nanogui::Screen *screen, const std::string &current_path, bool 
 void ask_replace(nanogui::Screen *screen, const std::string &path, std::function<void(bool)> done);
 
 void show_alert(nanogui::Screen *screen, const std::string &title, const std::string &message);
+/* A warning with `action` (which runs `done`) and Cancel, the default */
+void ask_confirm(nanogui::Screen *screen, const std::string &title, const std::string &message,
+                 const std::string &action, std::function<void()> done);
 
 /* A one-field prompt ("New Style", "Name:"). `done` gets the trimmed text;
  * it isn't called on Cancel or when the text is empty. */
@@ -153,6 +156,7 @@ struct CharStyle;
  * the selection had when it was chosen. */
 class TypeSpecsPanel : public ToolPanel {
 public:
+    bool story_safe() const override { return true; }   // edits the text
     TypeSpecsPanel(nanogui::Widget *parent, pagemade::FontLibrary &fonts,
                    pagemade::FontMenuModel &fonts_menu,
                    std::function<void(const pagemade::CharStyle &before,
@@ -172,6 +176,9 @@ public:
               const std::vector<std::string> &document_fonts);
     /* False while there is no text to restyle: the fields are disabled. */
     void set_apply_enabled(bool enabled);
+    /* The size may be Auto (0, unset): for a character style that leaves
+     * the text's size alone. Off by default. */
+    void set_size_auto(bool on);
 
     void perform_layout(NVGcontext *ctx) override;
     int preferred_content_height(NVGcontext *ctx, int width) override;

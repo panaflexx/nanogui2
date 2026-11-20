@@ -92,6 +92,10 @@ public:
      * through the fields. */
     void draw(NVGcontext *ctx) override;
 
+    /* The style menu at the top and Remove/Add at the bottom. The Styles
+     * panel's editor hides them: it edits one style's attributes. */
+    void set_style_controls(bool shown);
+
 private:
     struct Field {
         FloatSpin *box = nullptr;
@@ -129,6 +133,7 @@ private:
     std::vector<IntField> m_int_fields;
     pagemade::ParaStyle m_first;         // the first selected paragraph's
     nanogui::Button *m_delete = nullptr, *m_new = nullptr;
+    nanogui::Widget *m_head = nullptr, *m_bottom_rule = nullptr, *m_bottom = nullptr;
     /* The field whose blur is applying. load() must not write it back:
        focus is already cleared, so the focused() skip would miss it. */
     nanogui::Widget *m_commit_box = nullptr;

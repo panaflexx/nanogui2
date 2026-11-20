@@ -235,6 +235,15 @@ void ask_replace(Screen *screen, const std::string &path, std::function<void(boo
     d->open();
 }
 
+void ask_confirm(Screen *screen, const std::string &title, const std::string &message,
+                 const std::string &action, std::function<void()> done) {
+    auto *d = new ModalDialog(screen, "");
+    message_body(d, d->theme()->m_message_warning_icon, title, message, 330);
+    d->add_button(action, [done] { if (done) done(); });
+    d->add_button("Cancel", {}, ModalDialog::Role::DefaultCancel);
+    d->open();
+}
+
 void show_alert(Screen *screen, const std::string &title, const std::string &message) {
     auto *d = new ModalDialog(screen, "");
     message_body(d, d->theme()->m_message_information_icon, title, message, 330);
@@ -994,6 +1003,9 @@ struct TypeSpecsPanel::State {
     std::vector<WeightRow> rows;
     bool updating = false;
     bool family_unset = false;
+    /* Size may be Auto (0): not set, the text's own size shows through
+     * (a character style that leaves the size alone) */
+    bool size_auto = false;
 };
 
 /* The Type window's margin and the gap above the Reset row. */
@@ -1228,6 +1240,31 @@ TypeSpecsPanel::TypeSpecsPanel(Widget *parent, FontLibrary &fonts, FontMenuModel
         st->style.size = std::clamp(v, 1.f, 720.f);
         refresh_preview();
     });
+    /* With size_auto, "Auto" or 0 leaves the size unset */
+    st->size_box->set_blank_value([] { return 12.f; });
+    st->size_box->TextBox::set_callback([st, refresh_preview](const std::string &s) {
+        FloatSpin *box = st->size_box;
+        const bool word = s.empty() || s == "Auto" || s == "auto";
+        float v = 0.f;
+        if (!word) {
+            char *end = nullptr;
+            v = std::strtof(s.c_str(), &end);
+            if (end == s.c_str())
+                return false;
+        }
+        if (st->size_auto && (word || v <= 0.f)) {
+            st->style.size = 0.f;
+            box->TextBox::set_value("Auto");
+            refresh_preview();
+            return true;
+        }
+        if (word)
+            return false;
+        st->style.size = std::clamp(v, 1.f, 720.f);
+        box->set_value(st->style.size);
+        refresh_preview();
+        return true;
+    });
     new Label(grid, "Leading", "sans-bold");
     auto *leading = new FloatSpin(grid, 0.f, 1.f, 0.f, 1300.f);
     leading->set_blank_value([st] {
@@ -1457,6 +1494,16 @@ void TypeSpecsPanel::set_apply_enabled(bool enabled) {
  * its label. Inner widths, without the margins and the scroll bar. */
 static const int kTypeWide = 460, kTypeNarrow = 260, kTypeScrollBar = 12;
 
+void TypeSpecsPanel::set_size_auto(bool on) {
+    State &st = *m_state;
+    st.size_auto = on;
+    if (!st.size_box)
+        return;
+    st.size_box->set_format(on ? "([Aa]uto)|([-+]?[0-9]*\\.?[0-9]+)" : "[-+]?[0-9]*\\.?[0-9]+([e_e][-+]?[0-9]+)?");
+    st.size_box->set_tooltip(on ? "Type size, in points. Auto (or 0): not set, the text keeps its own size."
+                                : "Type size, in points");
+}
+
 void TypeSpecsPanel::fit_width() {
     State &st = *m_state;
     const int inner = width() > 0 ? width() - 2 * kTypeMargin - kTypeScrollBar : kTypeWide;
@@ -1584,8 +1631,12 @@ void TypeSpecsPanel::load(const CharStyle &style, bool mixed,
     st.query.clear();
     if (st.hint)
         st.hint->set_visible(mixed);
-    if (st.size_box)
-        st.size_box->set_value(style.size);
+    if (st.size_box) {
+        if (st.size_auto && style.size <= 0.f)
+            st.size_box->TextBox::set_value("Auto");
+        else
+            st.size_box->set_value(style.size);
+    }
     if (st.leading) {
         if (style.leading <= 0.f)
             st.leading->TextBox::set_value("Auto");

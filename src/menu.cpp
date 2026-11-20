@@ -1315,6 +1315,9 @@ bool Dropdown::mouse_button_event(const Vector2i &p, int button, bool down, int 
 
         /* Refill before the popup is sized, so a short list is not measured
            as the previous search. The callback must not call set_pushed. */
+        /* Follow the button into the window it is in now */
+        if (opening && m_popup->parent_window() != window())
+            m_popup->set_parent_window(window());
         if (opening && m_open_callback)
             m_open_callback();
 
@@ -1359,6 +1362,8 @@ void Dropdown::set_pushed(bool pushed)
     // window's detachment (see Widget::process_pending_cache_updates), so
     // screen() may legitimately be null here -- just skip the bookkeeping.
     if (pushed) {
+        if (m_popup->parent_window() != window())
+            m_popup->set_parent_window(window());   // the button moved windows
         if (scr) scr->set_popup_visible(m_popup);
     } else {
         if (scr) scr->remove_popup_visible(m_popup);

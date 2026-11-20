@@ -36,6 +36,7 @@ class TextBox;
 
 class FindPanel : public ToolPanel {
 public:
+    bool story_safe() const override { return true; }   // edits the text
     FindPanel(nanogui::Widget *parent, ComposerView *view);
 
     std::string title() const override { return "Find & Replace"; }

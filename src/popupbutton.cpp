@@ -57,6 +57,8 @@ void PopupButton::set_pushed(bool pushed) {
     // outside-click detection can check the panel's own (screen-absolute)
     // bounds rather than this button's.
     if (pushed) {
+        if (m_popup->parent_window() != window())
+            m_popup->set_parent_window(window());   // the button moved windows
         scr->set_popup_visible(m_popup);
         return;
     }

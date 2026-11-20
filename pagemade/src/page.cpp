@@ -8,6 +8,7 @@
 #include <map>
 #include <set>
 #include <cmath>
+#include <cstdlib>
 
 namespace pagemade {
 
@@ -413,6 +414,36 @@ StyleDef style_from(const std::string &name, const Paragraph &p) {
     d.type.tint = 100.f;
     d.type.char_style.clear();
     return d;
+}
+
+bool same_style(const StyleDef &a, const StyleDef &b) {
+    return a.next == b.next && same_format(a.para, b.para) && same_type(a.type, b.type);
+}
+
+bool same_char_style(const CharStyleDef &a, const CharStyleDef &b) {
+    return a.fields == b.fields && (char_differences(a.type, b.type) & a.fields) == 0;
+}
+
+std::string unique_style_name(const std::string &base, const std::vector<std::string> &taken) {
+    auto used = [&](const std::string &n) {
+        return std::find(taken.begin(), taken.end(), n) != taken.end();
+    };
+    if (!base.empty() && !used(base))
+        return base;
+    std::string stem = base.empty() ? std::string("New style") : base;
+    /* "Body text 2" counts on from 2 rather than making "Body text 2 2" */
+    int n = 2;
+    const size_t sp = stem.find_last_of(' ');
+    if (sp != std::string::npos && sp + 1 < stem.size() &&
+        stem.find_first_not_of("0123456789", sp + 1) == std::string::npos) {
+        n = std::atoi(stem.c_str() + sp + 1) + 1;
+        stem.erase(sp);
+    }
+    for (;; ++n) {
+        const std::string name = stem + " " + std::to_string(n);
+        if (!used(name))
+            return name;
+    }
 }
 
 const Swatch *PageDoc::find_swatch(SwatchId id) const {
@@ -1381,11 +1412,10 @@ PageDoc new_publication(PageSetup setup, int page_count) {
 
 void arrange_pages(const PageSetup &setup, size_t page_count, size_t current,
                    PageView view, std::vector<PageSlot> &slots,
-                   float &width, float &height) {
+                   float &width, float &height, float gap) {
     slots.clear();
     const float pw = setup.width > 1.f ? setup.width : 1.f;
     const float ph = setup.height > 1.f ? setup.height : 1.f;
-    const float gap = kPageGap;
     if (page_count == 0) {
         width = pw;
         height = ph;

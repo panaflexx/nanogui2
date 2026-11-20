@@ -103,6 +103,24 @@ public:
     bool strict_loose_tight() const { return m_strict_loose_tight; }
     void set_show_guides(bool on);
     bool show_guides() const           { return m_show_guides; }
+    /* Preview: the pages as they will print, nothing else. Guides, frame
+     * outlines, handles, tabs and other screen marks are hidden, items off
+     * the page are masked by the pasteboard, and the view takes no edits:
+     * a drag pans, Escape leaves. Entering it puts down the selection and
+     * any text being edited. */
+    void set_preview(bool on);
+    bool preview() const               { return m_preview; }
+    /* Print View: each page (or facing spread) on a sheet with printer's
+     * marks: crop marks, registration targets, a fold mark at the spine, a
+     * color bar and a slug with the file, page and date. The pages spread
+     * apart to make room. With Preview, the bleed shows and the rest of
+     * the pasteboard is masked. */
+    void set_print_view(bool on);
+    bool print_view() const            { return m_print_view; }
+    /* The file name the slug prints. */
+    void set_print_label(const std::string &name) { m_print_label = name; }
+    /* Preview or Print View turned on or off here (Escape leaves Preview). */
+    std::function<void()> on_view_mode_change;
     /* Locked ruler guides stay put: the pointer tool no longer picks them
      * up. New ones still come off the rulers, and the Clear commands work. */
     void set_lock_guides(bool on)      { m_lock_guides = on; }
@@ -388,6 +406,44 @@ public:
     /* The Masters panel follows these. */
     std::function<void()> on_master_edit_change;
 
+    /* ---- Story edit mode ------------------------------------------------
+     * The story takes over the view, set as in a word processor: one
+     * column with its paragraph styles named down the left. Simple sets
+     * it in one screen face at the window's width; Column in its own type
+     * at its blocks' widths, so lines break as in the layout, with each
+     * block marked and the overset text after them. Edits are a draft:
+     * Update applies them as one undo step, Cancel puts the story back.
+     * The caret, typing, clipboard and the type and paragraph panels work
+     * as in the layout. */
+    enum class StoryView { Simple, Column };
+    /* The story at the caret, or of the first selected text block. False
+     * when there is none. */
+    bool begin_story_edit();
+    /* `apply`: keep the edits (one undo step); else put them back */
+    void end_story_edit(bool apply);
+    /* Keep the edits so far as an undo step and go on editing (Save) */
+    void commit_story_edit();
+    bool story_mode() const { return m_story_mode; }
+    /* Whether the draft differs from the story as it was */
+    bool story_changed() const { return m_story_mode && m_version != m_story_saved_version; }
+    StoryView story_view() const { return m_story_view; }
+    void set_story_view(StoryView v);
+    /* Simple view's face and size */
+    void set_story_font(const std::string &family, float size);
+    /* The story being edited's first words, for the mode bar */
+    std::string story_title() const;
+    std::function<void()> on_story_mode_change;
+    /* What the rulers measure: the page, or in story mode the text column.
+     * `horizontal` false: the vertical extent. */
+    float ruler_extent(bool horizontal) const;
+    /* Story mode: the caret's paragraph's indents and tab stops along the
+     * top ruler, from the column's left edge. False outside story mode. */
+    struct RulerIndents {
+        float left = 0, first = 0, right = 0;   // right: the right indent's place
+        std::vector<pagemade::TabStop> tabs;
+    };
+    bool ruler_indents(RulerIndents &out) const;
+
     /* ---- Arrange ---------------------------------------------------- */
     enum class Stack { Forward, Backward, Front, Back };
     void arrange(Stack how);
@@ -521,6 +577,17 @@ public:
     bool update_doc_swatch(pagemade::SwatchId id, const std::string &name,
                            pagemade::Color rgb, pagemade::Cmyk cmyk);
     bool remove_doc_swatch(pagemade::SwatchId id);
+    /* The pen: a path being drawn (its points so far), finished closed or
+     * open, or dropped. */
+    bool pen_drawing() const { return m_pen.active; }
+    size_t pen_points() const;
+    void pen_finish(bool close);
+    void pen_abandon();
+    /* The one selected path (editable), or null; Close Path and Open Path
+     * (one undo step; closing needs three points). */
+    const pagemade::Item *selected_path() const;
+    void set_selected_path_closed(bool closed);
+
     /* Named gradients (PageDoc::gradients), each one undo step. Adding one
      * also fills the selected shapes (or new shapes) with it; changing one
      * changes every shape filled with it; removing one leaves those shapes
@@ -598,6 +665,23 @@ public:
     void define_style(const std::string &name);
     void delete_style(const std::string &name);
 
+    /* The Styles panel's edits, each one undo step. False when nothing
+     * was done (the name is taken, or there is no such style).
+     * update_style puts `def` in place of the style `old_name`: renamed,
+     * its paragraphs and the next-style links follow; paragraphs set in
+     * the old definition (without overrides) take the new one.
+     * add_style appends a new style. merge_style sets the paragraphs in
+     * `from` in `into` and drops `from` (links to it go to `into`); an
+     * empty `into` drops it and its paragraphs keep their formatting.
+     * Normal can't be merged away. The character-style forms do the same
+     * for runs. */
+    bool update_style(const std::string &old_name, const pagemade::StyleDef &def);
+    bool add_style(const pagemade::StyleDef &def);
+    bool merge_style(const std::string &from, const std::string &into);
+    bool update_char_style(const std::string &old_name, const pagemade::CharStyleDef &def);
+    bool add_char_style(const pagemade::CharStyleDef &def);
+    bool merge_char_style(const std::string &from, const std::string &into);
+
     /* Undo/redo: whole-document snapshots (the model is small), one per
      * action. A run of typing or deleting coalesces into a single step;
      * caret moves and other actions close the run. View state (zoom) is
@@ -608,6 +692,13 @@ public:
      * last one made with the same key, and nothing else happened between,
      * it joins that undo step. Set it around one change; nullptr after. */
     void set_undo_merge(const void *key) { m_merge_key = key; }
+    /* The next change starts its own undo step even with the same merge
+     * key (a new drag of the same ruler marker). */
+    void break_undo_run() { m_merged_key = nullptr; }
+    /* Take back the newest undo step if it was made under `key` and
+     * nothing changed since (a live style edit cancelled), leaving no redo
+     * for it. False, and nothing done, otherwise. */
+    bool revert_run(const void *key);
     bool can_undo() const { return !m_undo.empty(); }
     bool can_redo() const { return !m_redo.empty(); }
     void undo();
@@ -736,6 +827,16 @@ private:
     Hit hit_test(const pagemade::Point &pt, size_t page) const;
     /* Topmost text block under pt (0 = none). */
     pagemade::ItemId text_frame_at(const pagemade::Point &pt, size_t page) const;
+    /* A frame's handle under `pt` (page space): the corners and side
+     * middles, and a text block's tabs. `corners` false: only the tabs
+     * (a grouped or boxed item, whose box has the corners). */
+    Handle item_handle_at(const pagemade::Item &it, const pagemade::Point &pt, bool corners) const;
+    /* The Text tool: a handle of the story being edited, so its blocks
+     * resize as with the pointer. */
+    Hit text_handle_at(const pagemade::Point &pt, size_t page) const;
+    /* Whether the Text tool shows `it`'s handles: a block of the story
+     * being edited */
+    bool text_handles_on(const pagemade::Item &it) const;
     /* Does pt (page) touch the item? Unfilled shapes only by their outline. */
     bool hits_item(const pagemade::Item &it, const pagemade::Point &pt) const;
 
@@ -875,9 +976,12 @@ private:
         bool dragging = false;           // the press that put the last point down
         pagemade::Point down;            // ... and where it was
         pagemade::Point hover;           // the pointer, for the rubber band
+        double placed_at = -1.0;         // when the last point went down
     };
     /* Editing a selected path's points with the pen: what the drag holds. */
-    enum class PenGrab { None, Node, In, Out };
+    /* Pull: Ctrl on a point, which a drag gives handles and a click
+     * switches between corner and curve */
+    enum class PenGrab { None, Node, In, Out, Pull };
     struct PenEdit {
         pagemade::ItemId item = 0;
         int node = -1;                   // the chosen point, or -1
@@ -1053,6 +1157,9 @@ private:
     /* extend: keep the anchor where it is (grow/shrink the selection). */
     void place_caret(pagemade::TextPos p, bool extend);
     void after_edit();                    // recompose and redraw
+    /* Typing past the end of a story's last block lengthens it, down to
+     * the bottom margin (the page's foot when it already hangs past it) */
+    void grow_to_fit(pagemade::StoryId story);
     /* True when something was erased. `compose` false leaves the layout to
      * the edit that follows (an insert or a split composes once). */
     bool delete_selection(bool compose = true);
@@ -1064,7 +1171,7 @@ private:
     bool m_caption_pictures = false;
     bool m_fit_columns = false;
     void move_caret_key(int key, int modifiers);
-    void toggle_style(int key);           // B -> bold, I -> italic
+    void toggle_style(int key);           // B bold, I italic, U underline
 
     const pagemade::FontLibrary *m_fonts;
     const pagemade::Hyphenator *m_hyphenator;
@@ -1116,6 +1223,44 @@ private:
     void follow_page(uint32_t uid);
     void bump_version();
     std::deque<Snapshot> m_undo, m_redo;
+
+    /* Story edit mode (begin_story_edit). Segments are the column's runs
+     * of lines, one per frame the draft view composes into: a display line
+     * sits at (line x + x, line y + shift). */
+    struct StorySeg {
+        size_t frame = 0;
+        float  x = 0, shift = 0;
+        float  top = 0, bottom = 0;      // display extent of its lines
+        std::string label;               // the divider above it; empty: none
+        bool   overset = false;
+        float  width = 0;                // the frame's measure
+    };
+    bool m_story_mode = false;
+    StoryView m_story_view = StoryView::Simple;
+    pagemade::PageDoc m_story_saved;
+    uint64_t m_story_saved_version = 0;
+    size_t m_story_undo_base = 0;
+    double m_story_layout_zoom = 1.0;
+    nanogui::Array<double, 2> m_story_layout_pan;
+    Tool m_story_tool = Tool::Pointer;
+    std::vector<pagemade::ItemId> m_story_sel;
+    pagemade::Composition m_story_comp;
+    std::vector<StorySeg> m_story_segs;
+    float m_story_w = 0, m_story_h = 0;  // the content's extent
+    float m_story_view_w = 0;            // the viewport width Simple set to
+    float m_story_overset_y = -1.f;      // Simple: where the overset begins
+    std::string m_story_family = "Sans";
+    float m_story_size = 12.f;
+    bool m_story_follow = false;         // scroll the caret into view
+    void layout_story_view();
+    pagemade::Story simple_story(const pagemade::Story &s) const;
+    pagemade::TextPos story_pos_at(const nanogui::Vector2f &local) const;
+    const StorySeg *story_seg_of_line(size_t line) const;
+    void draw_story_view(NVGcontext *ctx, float px);
+    void follow_story_caret();
+    void story_panel_relayout();
+    bool story_mouse_button(int button, bool down, int modifiers);
+    nanogui::Vector2f m_story_down{0.f, 0.f};
     uint64_t m_version = 0, m_clean_version = 0, m_next_version = 0;
     uint64_t m_creation_version = 0, m_placement_version = 0;
     bool m_burst_open = false;            // typing/deleting run in progress
@@ -1141,6 +1286,16 @@ private:
     bool m_show_loose_tight = false;
     bool m_strict_loose_tight = false;
     bool m_show_guides = true;
+    bool m_preview = false;
+    bool m_print_view = false;
+    std::string m_print_label;
+    bool m_pan_drag = false;             // Preview: a left drag pans the view
+    float page_gap() const;              // between pages; wider in Print View
+    float sheet_margin() const;          // Print View: the sheet past the trim
+    void draw_print_sheets(NVGcontext *ctx, float px, const std::vector<pagemade::PageSlot> &slots,
+                           const nanogui::Vector2f &o, bool marks);
+    void draw_preview_mask(NVGcontext *ctx, float px, const std::vector<pagemade::PageSlot> &slots,
+                           const nanogui::Vector2f &o);
     GuideDrag m_guide_drag;
     bool m_lock_guides = false;
 

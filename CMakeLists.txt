@@ -1132,6 +1132,8 @@ if (NANOGUI_BUILD_EXAMPLES)
     add_executable(pagemade_app
         pagemade/src/main.cpp
         pagemade/src/composerview.cpp
+        pagemade/src/story_editor.cpp
+        pagemade/src/styles_panel.cpp
         pagemade/src/render_nvg.cpp
         pagemade/src/raster_nvg.cpp
         pagemade/src/plugin/pdf_export.cpp

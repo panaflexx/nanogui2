@@ -152,7 +152,7 @@ struct PageSlot {
  * stack is a single column. */
 void arrange_pages(const PageSetup &setup, size_t page_count, size_t current,
                    PageView view, std::vector<PageSlot> &slots,
-                   float &width, float &height);
+                   float &width, float &height, float gap = kPageGap);
 
 /* Left and right margins of page `index` (0-based). */
 inline void page_side_margins(const PageSetup &s, size_t index, float &left, float &right) {
@@ -279,12 +279,13 @@ struct Shape {
     Gradient gradient;
     /* A path (Kind::Path): its points in item space as they were drawn at a
      * box of ref_w by ref_h; the box stretches them to the item's w by h.
-     * An open path is stroked but not filled. */
+     * An open path is stroked along its points and filled as though
+     * closed, as drawing programs do. */
     std::vector<PathNode> nodes;
     bool   closed = true;
     float  ref_w = 0.f, ref_h = 0.f;
     bool filled() const {
-        return kind != Kind::Line && (kind != Kind::Path || closed) &&
+        return kind != Kind::Line && (kind != Kind::Path || nodes.size() >= 3) &&
                (!fill.none() || gradient.on());
     }
 };
@@ -527,6 +528,9 @@ struct StyleDef {
     std::string name;
     ParaStyle   para;            // para.name == name
     CharStyle   type;
+    /* The style Return gives the paragraph after this one, typed at the
+     * end of it (a Headline's next is Body first). Empty: the same style. */
+    std::string next;
 };
 
 /* Normal, then PageMaker's predefined styles and a few more. */
@@ -588,6 +592,13 @@ void apply_style(Paragraph &p, const StyleDef &def,
 bool style_overridden(const Paragraph &p, const StyleDef &def);
 /* A style named `name` made from `p`'s formatting. */
 StyleDef style_from(const std::string &name, const Paragraph &p);
+/* Every attribute the style sets, and its next style, are the same (the
+ * name aside). */
+bool same_style(const StyleDef &a, const StyleDef &b);
+/* The same for character styles: the fields set, and their values. */
+bool same_char_style(const CharStyleDef &a, const CharStyleDef &b);
+/* A name not yet used in `taken`: `base`, else "base 2", "base 3", … */
+std::string unique_style_name(const std::string &base, const std::vector<std::string> &taken);
 
 struct PageDoc {
     PageSetup               setup;
