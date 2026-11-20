@@ -691,6 +691,10 @@ struct _GLFWplatform
     const char* (*getClipboardString)(void);
     // nanogui2: offer _glfw.clipFormats (NULL: only their text is offered)
     void (*setClipboardFormats)(void);
+    // nanogui2: the clipboard's offered types, and one of them read (NULL:
+    // not on this platform)
+    const char* const* (*getClipboardTypes)(int*);
+    const void* (*getClipboardData)(const char*,size_t*);
     GLFWbool (*initJoysticks)(void);
     void (*terminateJoysticks)(void);
     GLFWbool (*pollJoystick)(_GLFWjoystick*,int);

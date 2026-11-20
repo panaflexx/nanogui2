@@ -126,16 +126,13 @@ std::string property_bytes(Display *dpy, XWindow window, Atom property, Atom inc
     return out;
 }
 
-/* GLFW's clipboard owner is a 1x1 InputOnly window. A round trip to it
- * cannot complete while we are inside a menu callback, because GLFW answers
- * SelectionRequest on its own poll. The UTF-8 string is read with
- * glfwGetClipboardString, which returns that owned string without a trip. */
-bool owner_is_helper(Display *dpy, XWindow owner) {
-    XWindowAttributes attr;
-    std::memset(&attr, 0, sizeof attr);
-    if (!XGetWindowAttributes(dpy, owner, &attr))
-        return false;
-    return attr.c_class == InputOnly && attr.width <= 1 && attr.height <= 1;
+/* Whether `owner` is this process's own GLFW selection window. A round
+ * trip to it cannot complete while we are inside a menu callback, because
+ * GLFW answers SelectionRequest on its own poll: what it holds is read from
+ * GLFW instead. Another GLFW program's helper window looks the same (1x1,
+ * InputOnly), so only an exact match counts. */
+bool owner_is_ours(XWindow owner) {
+    return owner != None && owner == (XWindow) glfwGetX11SelectionWindow();
 }
 
 void ensure_property_mask(Display *dpy, XWindow window) {
@@ -175,12 +172,46 @@ std::string read_target(Display *dpy, XWindow window, Atom selection, Atom targe
 XWindow clipboard_owner(Display *dpy, bool &ours) {
     const Atom clipboard = XInternAtom(dpy, "CLIPBOARD", False);
     const XWindow owner = XGetSelectionOwner(dpy, clipboard);
-    ours = false;
-    if (owner != None && owner_is_helper(dpy, owner)) {
-        int count = 0;
-        ours = glfwGetClipboardFormats(&count) != nullptr;
-    }
+    ours = owner_is_ours(owner);
     return owner;
+}
+
+/* One named target. Ours: the bytes write_clipboard offered. Another GLFW
+ * program's helper (or our own holding a plain string) answers text only,
+ * through GLFW. */
+std::string read_one_x11(GLFWwindow *window, const std::string &type, int budget_ms) {
+    Display *dpy = glfwGetX11Display();
+    const XWindow xwin = (XWindow) glfwGetX11Window(window);
+    if (!dpy || !xwin)
+        return {};
+    bool ours = false;
+    const XWindow owner = clipboard_owner(dpy, ours);
+    if (owner == None)
+        return {};
+    const bool text = type.rfind("text/plain", 0) == 0 || type == "UTF8_STRING" || type == "STRING";
+    if (ours) {
+        int count = 0;
+        const GLFWclipboardformat *formats = glfwGetClipboardFormats(&count);
+        if (!formats) {                  // ours, a plain string
+            if (!text)
+                return {};
+            const char *s = glfwGetClipboardString(window);
+            return s ? std::string(s) : std::string();
+        }
+        for (int i = 0; i < count; ++i)
+            if (type == formats[i].type)
+                return std::string(static_cast<const char *>(formats[i].data), formats[i].size);
+        if (text)
+            for (int i = 0; i < count; ++i)
+                if (std::strncmp(formats[i].type, "text/plain", 10) == 0)
+                    return std::string(static_cast<const char *>(formats[i].data), formats[i].size);
+        return {};
+    }
+    ensure_property_mask(dpy, xwin);
+    const Atom clipboard = XInternAtom(dpy, "CLIPBOARD", False);
+    const Atom incr = XInternAtom(dpy, "INCR", False);
+    return read_target(dpy, xwin, clipboard, XInternAtom(dpy, type.c_str(), False), next_property(dpy), incr,
+                       budget_ms);
 }
 
 void read_x11(GLFWwindow *window, std::vector<std::pair<std::string, std::string>> &out, int budget_ms) {
@@ -194,24 +225,20 @@ void read_x11(GLFWwindow *window, std::vector<std::pair<std::string, std::string
     if (owner == None)
         return;
     if (ours) {
-        /* Ours: the formats write_clipboard offered, as they were */
+        /* Ours: the formats write_clipboard offered, as they were, or the
+         * plain string GLFW holds */
         int count = 0;
         const GLFWclipboardformat *formats = glfwGetClipboardFormats(&count);
-        for (int i = 0; i < count; ++i)
-            out.emplace_back(formats[i].type,
-                             std::string(static_cast<const char *>(formats[i].data), formats[i].size));
-        return;
-    }
-    /* Another GLFW program's helper answers on its own; our own helper
-     * holding a plain string is read by the caller with glfwGetClipboardString */
-    if (owner_is_helper(dpy, owner)) {
-        int count = 0;
-        if (!glfwGetClipboardFormats(&count)) {
-            const char *s = glfwGetClipboardString(window);   // GLFW's own read
+        if (!formats) {
+            const char *s = glfwGetClipboardString(window);
             if (s && *s)
                 out.emplace_back("text/plain", s);
             return;
         }
+        for (int i = 0; i < count; ++i)
+            out.emplace_back(formats[i].type,
+                             std::string(static_cast<const char *>(formats[i].data), formats[i].size));
+        return;
     }
     ensure_property_mask(dpy, xwin);
     const Atom incr = XInternAtom(dpy, "INCR", False);
@@ -257,18 +284,15 @@ void types_x11(GLFWwindow *window, std::vector<std::string> &out, int budget_ms)
     if (ours) {
         int count = 0;
         const GLFWclipboardformat *formats = glfwGetClipboardFormats(&count);
-        for (int i = 0; i < count; ++i)
-            out.emplace_back(formats[i].type);
-        return;
-    }
-    if (owner_is_helper(dpy, owner)) {
-        int count = 0;
-        if (!glfwGetClipboardFormats(&count)) {
+        if (!formats) {
             const char *s = glfwGetClipboardString(window);
             if (s && *s)
                 out.emplace_back("text/plain");
             return;
         }
+        for (int i = 0; i < count; ++i)
+            out.emplace_back(formats[i].type);
+        return;
     }
     ensure_property_mask(dpy, xwin);
     const Atom clipboard = XInternAtom(dpy, "CLIPBOARD", False);
@@ -306,6 +330,28 @@ void types_x11(GLFWwindow *window, std::vector<std::string> &out, int budget_ms)
 
 #endif
 
+/* Wayland, and any platform whose GLFW lists the clipboard's types: the
+ * first of `names` it offers */
+bool read_glfw_types(std::vector<std::pair<std::string, std::string>> &out) {
+    int count = 0;
+    const char *const *types = glfwGetClipboardTypes(&count);
+    if (!types)
+        return false;
+    const char *names[] = {"image/svg+xml", "image/svg", "text/xml", "text/plain;charset=utf-8",
+                           "text/plain", "UTF8_STRING"};
+    for (const char *name : names)
+        for (int i = 0; i < count; ++i)
+            if (std::strcmp(types[i], name) == 0) {
+                size_t size = 0;
+                if (const void *data = glfwGetClipboardData(name, &size))
+                    if (size) {
+                        out.emplace_back(name, std::string(static_cast<const char *>(data), size));
+                        return true;
+                    }
+            }
+    return true;                         // listed, but none of these
+}
+
 } // namespace
 
 std::vector<std::pair<std::string, std::string>> read_clipboard(GLFWwindow *window, int timeout_ms) {
@@ -313,15 +359,37 @@ std::vector<std::pair<std::string, std::string>> read_clipboard(GLFWwindow *wind
     if (!window)
         return out;
 #if defined(__linux__)
-    read_x11(window, out, timeout_ms);
+    if (glfwGetPlatform() == GLFW_PLATFORM_X11)
+        read_x11(window, out, timeout_ms);
+    else
+        read_glfw_types(out);
 #else
     (void) timeout_ms;
+    read_glfw_types(out);
 #endif
     if (out.empty())
         if (const char *text = glfwGetClipboardString(window))
             if (*text)
                 out.emplace_back("text/plain", std::string(text));
     return out;
+}
+
+std::string read_clipboard_type(GLFWwindow *window, const std::string &type, int timeout_ms) {
+    if (!window || type.empty())
+        return {};
+#if defined(__linux__)
+    if (glfwGetPlatform() == GLFW_PLATFORM_X11)
+        return read_one_x11(window, type, timeout_ms);
+#endif
+    (void) timeout_ms;
+    size_t size = 0;
+    if (const void *data = glfwGetClipboardData(type.c_str(), &size))
+        return std::string(static_cast<const char *>(data), size);
+    /* No typed read on this platform: the text, when text is asked for */
+    if (type.rfind("text/plain", 0) == 0)
+        if (const char *text = glfwGetClipboardString(window))
+            return text;
+    return {};
 }
 
 std::vector<std::string> clipboard_types(GLFWwindow *window, int timeout_ms) {
@@ -335,6 +403,14 @@ std::vector<std::string> clipboard_types(GLFWwindow *window, int timeout_ms) {
     }
 #endif
     (void) timeout_ms;
+    {
+        int n = 0;
+        if (const char *const *types = glfwGetClipboardTypes(&n)) {
+            for (int i = 0; i < n; ++i)
+                out.emplace_back(types[i]);
+            return out;
+        }
+    }
     int count = 0;
     if (const GLFWclipboardformat *formats = glfwGetClipboardFormats(&count)) {
         for (int i = 0; i < count; ++i)

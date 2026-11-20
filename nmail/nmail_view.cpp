@@ -371,7 +371,13 @@ public:
             auto *copy_item = new MenuItem(m_att_popup, "Copy");
             copy_item->set_callback([this, att] {
                 if (m_att_popup) m_att_popup->set_visible(false);
-                copy_attachment_image(glfw_window(), att);
+                /* Written out as Open writes it, so the clipboard can name
+                 * a file (only a real temp path: on Windows this writes
+                 * into the working folder) */
+                std::string path, err;
+                if (!write_temp_attachment(att, path, err) || path.empty() || path[0] != '/')
+                    path.clear();
+                copy_attachment_image(glfw_window(), att, path);
             });
         }
         auto *save_item = new MenuItem(m_att_popup, "Save As\u2026");

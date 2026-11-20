@@ -234,6 +234,22 @@ public:
     /* The picture frame the right-click menu is about: the one selection,
      * when it is a picture frame; else 0. */
     pagemade::ItemId context_picture_frame() const;
+    /* ---- Replace with Paste (Ctrl+Alt+V) ------------------------------ *
+     * The one picture frame or drawing selected (its caption may be
+     * selected with it) takes what the clipboard holds, keeping its box,
+     * place, layer, group and caption, as one undo step:
+     *   a picture (a copied file, PNG/JPEG/HEIC bytes, or the one picture
+     *   an SVG carries) fills it as Replace Picture does, centered and
+     *   cropped; a drawing becomes a picture frame for it;
+     *   a drawing (an SVG, or an SVG or PDF file) is fitted inside the box,
+     *   uncropped; a picture frame becomes a drawing for it.
+     * A picture or drawing copied in this publication is used as it is.
+     * Files are linked, as Place links them, except pictures in a temp
+     * folder, which are embedded. */
+    pagemade::ItemId replace_paste_target() const;
+    /* A target, and the clipboard has a picture, drawing or file to give it. */
+    bool can_replace_with_paste() const;
+    void replace_with_paste();
 
     /* ---- Layout templates (the Layouts tab) ---------------------------- *
      * A template fitted inside the margins of `page` (a spread across the
@@ -512,6 +528,20 @@ public:
     bool clipboard_has_svg() const;
     /* The clipboard holds text (or an SVG), and no story is being edited. */
     bool clipboard_has_text() const;
+    /* The clipboard holds files (a file list) or a picture (PNG, JPEG,
+     * HEIC), and no story is being edited. */
+    bool clipboard_has_files_or_picture() const;
+    /* Paste of files copied in a file manager (text/uri-list, GNOME's
+     * x-special/gnome-copied-files, or text that is only file URIs or
+     * paths): each is placed linked, as a drop places it, at `at` or where
+     * a placed file goes. Network files are found through gvfs. */
+    std::function<void(const std::vector<std::string> &paths, size_t page,
+                       const pagemade::Point *at)> on_paste_files;
+    /* A picture's bytes off the clipboard as an embedded picture (a
+     * screenshot, a browser's Copy Image). False and `error` when it
+     * can't be read. */
+    bool paste_picture_bytes(std::string bytes, const std::string &name, const pagemade::Point *at,
+                             std::string *error);
     bool can_copy() const;
     bool can_paste() const;
     /* Plain text from the clipboard as a new text block (Paste as Text). */
@@ -1093,6 +1123,16 @@ private:
     bool frame_fillable(const pagemade::Item &it) const;
     /* Override `frame` (and its group) when it is a master copy. */
     void override_for_edit(pagemade::ItemId frame);
+    /* Replace with Paste: `target` shows picture `asset` (filling it), or
+     * drawing `pv` (fitted inside it), as that kind. No undo step. */
+    void refill_with_picture(pagemade::ItemId target, uint32_t asset, const pagemade::ImageMetadata &meta);
+    void refill_with_drawing(pagemade::ItemId target, const pagemade::PlacedVector &pv);
+    /* Bytes of an SVG or PDF (a picture alone in one comes out as that
+     * picture) put into `target`. False, the document as it was. */
+    bool replace_from_graphic_bytes(pagemade::ItemId target, std::vector<uint8_t> bytes,
+                                    const std::string &name, const std::string &source, bool paste);
+    bool replace_from_picture_bytes(pagemade::ItemId target, std::string bytes, const std::string &name);
+    void replace_done(pagemade::ItemId target);
     pagemade::LayerId m_layer_before_master = 0;   // active layer before master editing
     size_t m_page_before_master = 0;               // ... and the page on screen
     void check_setup_change();            // tell on_setup_change when it differs

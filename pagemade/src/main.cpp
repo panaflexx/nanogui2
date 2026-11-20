@@ -1179,45 +1179,13 @@ public:
             if (ToolTabsWindow *w = ToolTabsWindow::host_of(m_images_panel); w && w->visible())
                 redraw();                // the asset badges show what is live
         };
-        /* Files dropped on a page are placed at once as stand-ins and read
-         * off the UI thread. A run of files steps down the page so they
-         * don't stack exactly; the size hint is the first file's. */
+        /* Files dropped on a page (see place_files) */
         m_view->on_drop_files = [this](const std::vector<std::string> &paths, size_t page, Point at,
-                                       Vector2i px_hint) {
-            for (size_t i = 0; i < paths.size(); ++i) {
-                Point where = at;
-                where.x += 12.f * (float) i;
-                where.y += 12.f * (float) i;
-                const std::string path = paths[i];
-                const std::string name = nanogui::fs::filename(path);
-                /* A vector file (SVG, PDF) is read and sniffed by place_file;
-                 * pictures go down at once as stand-ins */
-                std::string ext = nanogui::fs::extension(path);
-                if (!ext.empty() && ext[0] == '.')
-                    ext.erase(0, 1);
-                for (char &c : ext)
-                    c = (char) std::tolower((unsigned char) c);
-                bool vector_file = false;
-                for (const auto &t : vector_file_types())
-                    vector_file = vector_file || t.first == ext;
-                if (vector_file) {
-                    m_view->place_file(path, page, &where,
-                                       [this, name](const std::string &error, const std::string &note) {
-                        if (!error.empty())
-                            show_alert(this, "\u201C" + name + "\u201D couldn't be placed.", error);
-                        else
-                            set_note(note.empty() ? "placed " + name : note);
-                    });
-                    continue;
-                }
-                m_view->place_image_file(path, page, &where, [this, name](const std::string &error) {
-                    if (!error.empty())
-                        show_alert(this, "The picture couldn't be placed.", error);
-                    else
-                        set_note("placed " + name);
-                }, i == 0 ? px_hint : Vector2i(0, 0));
-            }
-        };
+                                       Vector2i px_hint) { place_files(paths, page, &at, px_hint); };
+        /* Files copied in a file manager and pasted: placed as a drop places
+         * them, where a placed file goes unless Paste Here gave a point */
+        m_view->on_paste_files = [this](const std::vector<std::string> &paths, size_t page,
+                                        const Point *at) { place_files(paths, page, at, Vector2i(0, 0)); };
 
         m_view->on_choose_page = [this](const std::string &name, int count,
                                         std::function<void(int)> chosen) {
@@ -1298,6 +1266,48 @@ public:
     }
 
     /* ---- Publications: New, Open, Save ------------------------------ */
+
+    /* Files dropped or pasted onto the pages: placed at once as stand-ins
+     * and read off the UI thread. A run of files steps down the page so
+     * they don't stack exactly; the size hint is the first file's. `at`
+     * null: each goes where File > Place puts a file. */
+    void place_files(const std::vector<std::string> &paths, size_t page, const Point *at,
+                     Vector2i px_hint) {
+        for (size_t i = 0; i < paths.size(); ++i) {
+            Point where = at ? *at : Point{0, 0};
+            where.x += 12.f * (float) i;
+            where.y += 12.f * (float) i;
+            const Point *place_at = at ? &where : nullptr;
+            const std::string path = paths[i];
+            const std::string name = nanogui::fs::filename(path);
+            /* A vector file (SVG, PDF) is read and sniffed by place_file;
+             * pictures go down at once as stand-ins */
+            std::string ext = nanogui::fs::extension(path);
+            if (!ext.empty() && ext[0] == '.')
+                ext.erase(0, 1);
+            for (char &c : ext)
+                c = (char) std::tolower((unsigned char) c);
+            bool vector_file = false;
+            for (const auto &t : vector_file_types())
+                vector_file = vector_file || t.first == ext;
+            if (vector_file) {
+                m_view->place_file(path, page, place_at,
+                                   [this, name](const std::string &error, const std::string &note) {
+                    if (!error.empty())
+                        show_alert(this, "\u201C" + name + "\u201D couldn't be placed.", error);
+                    else
+                        set_note(note.empty() ? "placed " + name : note);
+                });
+                continue;
+            }
+            m_view->place_image_file(path, page, place_at, [this, name](const std::string &error) {
+                if (!error.empty())
+                    show_alert(this, "The picture couldn't be placed.", error);
+                else
+                    set_note("placed " + name);
+            }, i == 0 ? px_hint : Vector2i(0, 0));
+        }
+    }
 
     std::string doc_name() const {
         return m_doc_path.empty() ? std::string("Untitled")
@@ -2094,6 +2104,8 @@ public:
         add_cmd(edit, "Paste as Text", {{SYSTEM_COMMAND_MOD | GLFW_MOD_SHIFT, GLFW_KEY_V}},
                 [this] { m_view->edit_paste(nullptr, ComposerView::PasteAs::Text); });
         add_cmd(edit, "Paste as SVG", {}, [this] { m_view->edit_paste(nullptr, ComposerView::PasteAs::Svg); });
+        add_cmd(edit, "Replace with Paste", {{SYSTEM_COMMAND_MOD | GLFW_MOD_ALT, GLFW_KEY_V}},
+                [this] { m_view->replace_with_paste(); });
         new Separator(edit->popup());
         add_cmd(edit, "Select All", {{SYSTEM_COMMAND_MOD, GLFW_KEY_A}}, [this] { m_view->select_all(); });
         add_cmd(edit, "Deselect All", {{SYSTEM_COMMAND_MOD | GLFW_MOD_SHIFT, GLFW_KEY_A}},
@@ -3091,6 +3103,13 @@ public:
                 const bool empty = it && it->image() && !it->image()->asset;
                 item(empty ? "Place Picture\u2026" : "Replace Picture\u2026", FA_IMAGE, true, {},
                      [this, frame] { place_into_frame_dialog(frame); });
+            }
+            /* A picture or drawing: what the clipboard holds, in its place */
+            if (v->replace_paste_target()) {
+                if (!v->context_picture_frame())
+                    section();
+                item("Replace with Paste", FA_PASTE, v->can_replace_with_paste(),
+                     {{C | GLFW_MOD_ALT, GLFW_KEY_V}}, [v] { v->replace_with_paste(); });
             }
             if (v->can_reload_pictures()) {
                 section();

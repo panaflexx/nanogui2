@@ -53,6 +53,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <nanogui/fscompat.h>
+#include <filesystem>
 #include <fstream>
 #include <memory>
 #include <string>
@@ -2184,6 +2185,48 @@ static void test_uri() {
     CHECK(file_path_from_uri("FILE:///tmp/x", path) && path == "/tmp/x", "FILE: scheme");
     CHECK(!file_path_from_uri("file://other/tmp/x", path), "a remote host is not a local path");
     CHECK(!file_path_from_uri("http://example.com/a", path), "http is not a file");
+
+    /* Clipboard file lists: text/uri-list, GNOME's copied files, plain text */
+    {
+        const std::vector<std::string> ul =
+            uri_list_entries("# a comment\r\nfile:///a/b.png\r\n\r\nfile:///c%20d.jpg\r\n");
+        CHECK(ul == (std::vector<std::string>{"file:///a/b.png", "file:///c%20d.jpg"}),
+              "a uri-list loses its comments, blank lines and CRs");
+        const std::vector<std::string> gn = uri_list_entries("copy\nfile:///x.png\nfile:///y.svg");
+        CHECK(gn == (std::vector<std::string>{"file:///x.png", "file:///y.svg"}),
+              "GNOME's copied files lose their action line");
+        CHECK(uri_list_entries("  /tmp/a b.png  \n") == std::vector<std::string>{"/tmp/a b.png"},
+              "a plain path keeps its inner space");
+
+        /* A file through file: and as a path; a network one through a gvfs
+         * mount (a stand-in folder for /run/user/<uid>/gvfs) */
+        namespace stdfs = std::filesystem;
+        const stdfs::path root = stdfs::temp_directory_path() / "pagemade_test_gvfs";
+        stdfs::remove_all(root);
+        const stdfs::path share = root / "smb-share:server=nas,share=photos";
+        const stdfs::path sftp = root / "sftp:host=box,user=me";
+        stdfs::create_directories(share / "2026 trip");
+        stdfs::create_directories(sftp / "home" / "me");
+        std::ofstream(share / "2026 trip" / "a.jpg") << "x";
+        std::ofstream(sftp / "home" / "me" / "b.png") << "x";
+        std::string lp;
+        const std::string local = (share / "2026 trip" / "a.jpg").string();
+        CHECK(local_path_from_uri(file_uri(local), lp) && lp == local, "a file: URI is its path");
+        CHECK(local_path_from_uri(local, lp) && lp == local, "an absolute path is itself");
+        CHECK(!local_path_from_uri(file_uri(local + ".gone"), lp), "a missing file is not a path");
+        CHECK(gvfs_path_from_uri("smb://NAS/Photos/2026%20trip/a.jpg", root.string(), lp) && lp == local,
+              "smb://server/share/... maps to its gvfs mount (case-insensitive server and share)");
+        CHECK(gvfs_path_from_uri("sftp://me@box/home/me/b.png", root.string(), lp) &&
+                  lp == (sftp / "home" / "me" / "b.png").string(),
+              "sftp://user@host/... maps to its mount");
+        CHECK(!gvfs_path_from_uri("sftp://you@box/home/me/b.png", root.string(), lp),
+              "another user's sftp is not this mount");
+        CHECK(!gvfs_path_from_uri("smb://nas/photos/../secret", root.string(), lp),
+              "a .. segment never leaves the mount");
+        CHECK(!gvfs_path_from_uri("smb://other/photos/2026%20trip/a.jpg", root.string(), lp),
+              "an unmounted server is not found");
+        stdfs::remove_all(root);
+    }
     CHECK(is_package_ref("assets/fonts/P052-Roman.otf"), "a package path is a package ref");
     CHECK(package_ref("assets/fonts", "A B.otf") == "assets/fonts/A%20B.otf", "package ref encodes");
     CHECK(package_entry("assets/fonts/A%20B.otf") == "assets/fonts/A B.otf", "package entry decodes");

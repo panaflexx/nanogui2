@@ -3637,6 +3637,19 @@ GLFWAPI Display* glfwGetX11Display(void)
     return _glfw.x11.display;
 }
 
+GLFWAPI Window glfwGetX11SelectionWindow(void)
+{
+    _GLFW_REQUIRE_INIT_OR_RETURN(None);
+
+    if (_glfw.platform.platformID != GLFW_PLATFORM_X11)
+    {
+        _glfwInputError(GLFW_PLATFORM_UNAVAILABLE, "X11: Platform not initialized");
+        return None;
+    }
+
+    return _glfw.x11.helperWindowHandle;
+}
+
 GLFWAPI Window glfwGetX11Window(GLFWwindow* handle)
 {
     _GLFWwindow* window = (_GLFWwindow*) handle;

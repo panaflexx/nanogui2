@@ -6024,6 +6024,49 @@ GLFWAPI void glfwSetClipboardFormats(GLFWwindow* window, const GLFWclipboardform
  */
 GLFWAPI const GLFWclipboardformat* glfwGetClipboardFormats(int* count);
 
+/*! @brief Returns the MIME types the clipboard is offered in.
+ *
+ *  nanogui2 addition (not in upstream GLFW). The types the clipboard's
+ *  owner offers, in its order (`text/uri-list`, `image/png`, ...), without
+ *  reading any of them. While this process owns the clipboard, the types
+ *  @ref glfwSetClipboardFormats offered.
+ *
+ *  Wayland only for now: other platforms return `NULL` (X11 programs can
+ *  ask the selection's `TARGETS` themselves).
+ *
+ *  @param[out] count The number of types; 0 when there are none.
+ *  @return The types, or `NULL`. Valid until the clipboard changes, events
+ *  are next processed, or the library is terminated.
+ *
+ *  @thread_safety This function must only be called from the main thread.
+ *
+ *  @ingroup input
+ */
+GLFWAPI const char* const* glfwGetClipboardTypes(int* count);
+
+/*! @brief Reads the clipboard in one MIME type.
+ *
+ *  nanogui2 addition (not in upstream GLFW). The bytes of the clipboard
+ *  in `type`, which should be one @ref glfwGetClipboardTypes lists. While
+ *  this process owns the clipboard, the bytes @ref glfwSetClipboardFormats
+ *  offered. The read waits for the owner to send everything.
+ *
+ *  Wayland only for now: other platforms return `NULL`.
+ *
+ *  @param[in] type The MIME type.
+ *  @param[out] size The number of bytes (a NUL follows them).
+ *  @return The bytes, or `NULL` when the clipboard is not offered in that
+ *  type. Valid until the next call, or the library is terminated.
+ *
+ *  @errors Possible errors include @ref GLFW_NOT_INITIALIZED, @ref
+ *  GLFW_FORMAT_UNAVAILABLE and @ref GLFW_PLATFORM_ERROR.
+ *
+ *  @thread_safety This function must only be called from the main thread.
+ *
+ *  @ingroup input
+ */
+GLFWAPI const void* glfwGetClipboardData(const char* type, size_t* size);
+
 /*! @brief Returns the GLFW time.
  *
  *  This function returns the current GLFW time, in seconds.  Unless the time

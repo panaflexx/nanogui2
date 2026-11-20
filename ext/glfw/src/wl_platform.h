@@ -337,6 +337,9 @@ typedef struct _GLFWofferWayland
     struct wl_data_offer*       offer;
     GLFWbool                    text_plain_utf8;
     GLFWbool                    text_uri_list;
+    // nanogui2: every MIME type offered, GLFW's copies
+    char**                      types;
+    int                         typeCount;
 } _GLFWofferWayland;
 
 typedef struct _GLFWscaleWayland
@@ -448,6 +451,11 @@ typedef struct _GLFWlibraryWayland
     unsigned int                offerCount;
 
     struct wl_data_offer*       selectionOffer;
+    // nanogui2: the selection offer's MIME types, and the last read of one
+    char**                      selectionTypes;
+    int                         selectionTypeCount;
+    const char**                ownTypes;          // ours, while we own it
+    char*                       clipboardData;
     struct wl_data_source*      selectionSource;
 
     struct wl_data_offer*       dragOffer;
@@ -672,6 +680,10 @@ void _glfwSetCursorWayland(_GLFWwindow* window, _GLFWcursor* cursor);
 void _glfwSetClipboardStringWayland(const char* string);
 const char* _glfwGetClipboardStringWayland(void);
 void _glfwSetClipboardFormatsWayland(void);
+const char* const* _glfwGetClipboardTypesWayland(int* count);
+const void* _glfwGetClipboardDataWayland(const char* type, size_t* size);
+void _glfwFreeOfferTypesWayland(_GLFWofferWayland* offer);
+void _glfwFreeSelectionTypesWayland(void);
 
 EGLenum _glfwGetEGLPlatformWayland(EGLint** attribs);
 EGLNativeDisplayType _glfwGetEGLNativeDisplayWayland(void);

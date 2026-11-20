@@ -1300,9 +1300,11 @@ static void handleEvents(double* timeout)
     }
 }
 
-// Reads the specified data offer as the specified MIME type
+// Reads the specified data offer as the specified MIME type, with its
+// length (nanogui2: binary-safe; a NUL still follows the bytes)
 //
-static char* readDataOfferAsString(struct wl_data_offer* offer, const char* mimeType)
+static char* readDataOffer(struct wl_data_offer* offer, const char* mimeType,
+                           size_t* outLength)
 {
     int fds[2];
 
@@ -1360,8 +1362,25 @@ static char* readDataOfferAsString(struct wl_data_offer* offer, const char* mime
 
     close(fds[0]);
 
+    if (!string)
+    {
+        string = _glfw_calloc(1, 1);
+        if (!string)
+        {
+            _glfwInputError(GLFW_OUT_OF_MEMORY, NULL);
+            return NULL;
+        }
+    }
+
     string[length] = '\0';
+    if (outLength)
+        *outLength = length;
     return string;
+}
+
+static char* readDataOfferAsString(struct wl_data_offer* offer, const char* mimeType)
+{
+    return readDataOffer(offer, mimeType, NULL);
 }
 
 static void pointerHandleEnter(void* userData,
@@ -1932,6 +1951,21 @@ static void dataOfferHandleOffer(void* userData,
             else if (strcmp(mimeType, "text/uri-list") == 0)
                 _glfw.wl.offers[i].text_uri_list = GLFW_TRUE;
 
+            // nanogui2: keep every type, for glfwGetClipboardTypes
+            char** types = _glfw_realloc(_glfw.wl.offers[i].types,
+                                         sizeof(char*) * (_glfw.wl.offers[i].typeCount + 1));
+            char* copy = _glfw_strdup(mimeType);
+            if (!types || !copy)
+            {
+                if (types)
+                    _glfw.wl.offers[i].types = types;
+                _glfw_free(copy);
+                _glfwInputError(GLFW_OUT_OF_MEMORY, NULL);
+                break;
+            }
+
+            _glfw.wl.offers[i].types = types;
+            _glfw.wl.offers[i].types[_glfw.wl.offers[i].typeCount++] = copy;
             break;
         }
     }
@@ -1996,6 +2030,7 @@ static void dataDeviceHandleEnter(void* userData,
                 _glfw.wl.dragSerial = serial;
             }
 
+            _glfwFreeOfferTypesWayland(&_glfw.wl.offers[i]);
             _glfw.wl.offers[i] = _glfw.wl.offers[_glfw.wl.offerCount - 1];
             _glfw.wl.offerCount--;
             break;
@@ -2065,13 +2100,22 @@ static void dataDeviceHandleSelection(void* userData,
         wl_data_offer_destroy(_glfw.wl.selectionOffer);
         _glfw.wl.selectionOffer = NULL;
     }
+    _glfwFreeSelectionTypesWayland();
 
     for (unsigned int i = 0; i < _glfw.wl.offerCount; i++)
     {
         if (_glfw.wl.offers[i].offer == offer)
         {
-            if (_glfw.wl.offers[i].text_plain_utf8)
+            // nanogui2: any offer is kept, not only text (a copied picture
+            // is image/png alone); its types move to the selection
+            if (_glfw.wl.offers[i].typeCount > 0)
+            {
                 _glfw.wl.selectionOffer = offer;
+                _glfw.wl.selectionTypes = _glfw.wl.offers[i].types;
+                _glfw.wl.selectionTypeCount = _glfw.wl.offers[i].typeCount;
+                _glfw.wl.offers[i].types = NULL;
+                _glfw.wl.offers[i].typeCount = 0;
+            }
             else
                 wl_data_offer_destroy(offer);
 
@@ -3285,10 +3329,115 @@ const char* _glfwGetClipboardStringWayland(void)
     if (_glfw.wl.selectionSource)
         return _glfw.wl.clipboardString;
 
+    // nanogui2: the selection may be a picture alone, with no text
+    GLFWbool text = GLFW_FALSE;
+    for (int i = 0;  i < _glfw.wl.selectionTypeCount;  i++)
+        text = text || strcmp(_glfw.wl.selectionTypes[i], "text/plain;charset=utf-8") == 0;
+    if (!text)
+    {
+        _glfwInputError(GLFW_FORMAT_UNAVAILABLE,
+                        "Wayland: The clipboard holds no text");
+        return NULL;
+    }
+
     _glfw_free(_glfw.wl.clipboardString);
     _glfw.wl.clipboardString =
         readDataOfferAsString(_glfw.wl.selectionOffer, "text/plain;charset=utf-8");
     return _glfw.wl.clipboardString;
+}
+
+//////////////////////////////////////////////////////////////////////////
+//////            nanogui2: the clipboard's types, and any one           //////
+//////////////////////////////////////////////////////////////////////////
+
+void _glfwFreeOfferTypesWayland(_GLFWofferWayland* offer)
+{
+    for (int i = 0;  i < offer->typeCount;  i++)
+        _glfw_free(offer->types[i]);
+
+    _glfw_free(offer->types);
+    offer->types = NULL;
+    offer->typeCount = 0;
+}
+
+void _glfwFreeSelectionTypesWayland(void)
+{
+    for (int i = 0;  i < _glfw.wl.selectionTypeCount;  i++)
+        _glfw_free(_glfw.wl.selectionTypes[i]);
+
+    _glfw_free(_glfw.wl.selectionTypes);
+    _glfw.wl.selectionTypes = NULL;
+    _glfw.wl.selectionTypeCount = 0;
+}
+
+const char* const* _glfwGetClipboardTypesWayland(int* count)
+{
+    *count = 0;
+
+    if (_glfw.wl.selectionSource)
+    {
+        // Ours: the formats glfwSetClipboardFormats offered
+        _glfw_free(_glfw.wl.ownTypes);
+        _glfw.wl.ownTypes = NULL;
+        if (_glfw.clipFormatCount == 0)
+            return NULL;
+
+        _glfw.wl.ownTypes = _glfw_calloc(_glfw.clipFormatCount, sizeof(char*));
+        if (!_glfw.wl.ownTypes)
+        {
+            _glfwInputError(GLFW_OUT_OF_MEMORY, NULL);
+            return NULL;
+        }
+
+        for (int i = 0;  i < _glfw.clipFormatCount;  i++)
+            _glfw.wl.ownTypes[i] = _glfw.clipFormats[i].type;
+
+        *count = _glfw.clipFormatCount;
+        return _glfw.wl.ownTypes;
+    }
+
+    if (!_glfw.wl.selectionOffer)
+        return NULL;
+
+    *count = _glfw.wl.selectionTypeCount;
+    return (const char* const*) _glfw.wl.selectionTypes;
+}
+
+const void* _glfwGetClipboardDataWayland(const char* type, size_t* size)
+{
+    *size = 0;
+
+    if (_glfw.wl.selectionSource)
+    {
+        // Ours: no round trip (reading our own offer would wait on itself)
+        const int i = _glfwClipboardFormatIndex(type);
+        if (i < 0)
+            return NULL;
+
+        *size = _glfw.clipFormats[i].size;
+        return _glfw.clipFormats[i].data;
+    }
+
+    if (!_glfw.wl.selectionOffer)
+    {
+        _glfwInputError(GLFW_FORMAT_UNAVAILABLE,
+                        "Wayland: No clipboard data available");
+        return NULL;
+    }
+
+    GLFWbool offered = GLFW_FALSE;
+    for (int i = 0;  i < _glfw.wl.selectionTypeCount;  i++)
+        offered = offered || strcmp(_glfw.wl.selectionTypes[i], type) == 0;
+    if (!offered)
+    {
+        _glfwInputError(GLFW_FORMAT_UNAVAILABLE,
+                        "Wayland: The clipboard is not offered as %s", type);
+        return NULL;
+    }
+
+    _glfw_free(_glfw.wl.clipboardData);
+    _glfw.wl.clipboardData = readDataOffer(_glfw.wl.selectionOffer, type, size);
+    return _glfw.wl.clipboardData;
 }
 
 EGLenum _glfwGetEGLPlatformWayland(EGLint** attribs)

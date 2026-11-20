@@ -446,6 +446,8 @@ GLFWbool _glfwConnectWayland(int platformID, _GLFWplatform* platform)
         .setClipboardString = _glfwSetClipboardStringWayland,
         .getClipboardString = _glfwGetClipboardStringWayland,
         .setClipboardFormats = _glfwSetClipboardFormatsWayland,
+        .getClipboardTypes = _glfwGetClipboardTypesWayland,
+        .getClipboardData = _glfwGetClipboardDataWayland,
 #if defined(GLFW_BUILD_LINUX_JOYSTICK)
         .initJoysticks = _glfwInitJoysticksLinux,
         .terminateJoysticks = _glfwTerminateJoysticksLinux,
@@ -940,9 +942,15 @@ void _glfwTerminateWayland(void)
     }
 
     for (unsigned int i = 0; i < _glfw.wl.offerCount; i++)
+    {
         wl_data_offer_destroy(_glfw.wl.offers[i].offer);
+        _glfwFreeOfferTypesWayland(&_glfw.wl.offers[i]);
+    }
 
     _glfw_free(_glfw.wl.offers);
+    _glfwFreeSelectionTypesWayland();
+    _glfw_free(_glfw.wl.ownTypes);
+    _glfw_free(_glfw.wl.clipboardData);
 
     if (_glfw.wl.cursorSurface)
         wl_surface_destroy(_glfw.wl.cursorSurface);

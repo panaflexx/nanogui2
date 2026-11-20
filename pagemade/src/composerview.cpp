@@ -10,12 +10,14 @@
 #include "vector.h"
 
 #include <nanogui/clipboard.h>
+#include <nanogui/fscompat.h>
 #include <nanogui/screen.h>
 #include <nanogui/zoomscrollpanel.h>
 #include <nanovg.h>
 #include <GLFW/glfw3.h>
 
 #include <algorithm>
+#include <filesystem>
 #include <cctype>
 #include <chrono>
 #include <map>
@@ -24,6 +26,7 @@
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
+#include <cstring>
 #include <ctime>
 #include "bg_worker.h"
 
@@ -4537,6 +4540,136 @@ bool ComposerView::clipboard_has_svg() const {
     return false;
 }
 
+namespace {
+
+bool file_list_type(const std::string &t) {
+    return t == "text/uri-list" || t == "x-special/gnome-copied-files";
+}
+
+/* Pictures the clipboard may carry as bytes, best first, with the name a
+ * pasted one gets */
+struct PictureType {
+    const char *mime, *name;
+};
+const PictureType kPictureTypes[] = {
+    {"image/png", "Pasted picture.png"},   {"image/jpeg", "Pasted picture.jpg"},
+    {"image/jpg", "Pasted picture.jpg"},   {"image/heic", "Pasted picture.heic"},
+    {"image/heif", "Pasted picture.heif"}, {"image/avif", "Pasted picture.avif"},
+};
+
+bool picture_type(const std::string &t) {
+    for (const PictureType &p : kPictureTypes)
+        if (t == p.mime)
+            return true;
+    return false;
+}
+
+/* The placeable local files a clipboard file list names (pictures, SVG,
+ * PDF); `skipped` counts the entries that aren't */
+std::vector<std::string> placeable_paths(const std::string &list, size_t *skipped) {
+    std::vector<std::string> out;
+    size_t skip = 0;
+    for (const std::string &e : uri_list_entries(list)) {
+        std::string path;
+        if (!local_path_from_uri(e, path)) {
+            ++skip;
+            continue;
+        }
+        std::string ext = nanogui::fs::extension(path);
+        if (!ext.empty() && ext[0] == '.')
+            ext.erase(0, 1);
+        for (char &c : ext)
+            c = (char) std::tolower((unsigned char) c);
+        bool ok = image_extension_supported(ext);
+        for (const auto &t : vector_file_types())
+            ok = ok || t.first == ext;
+        if (ok)
+            out.push_back(path);
+        else
+            ++skip;
+    }
+    if (skipped)
+        *skipped = skip;
+    return out;
+}
+
+/* Text that looks like nothing but file URIs or paths, one a line (a
+ * program that copies a file as its URL). The caller still places it as
+ * files only when every line is a file that exists. */
+bool text_looks_like_file_list(const std::string &text) {
+    const std::vector<std::string> entries = uri_list_entries(text);
+    if (entries.empty() || entries.size() > 256)
+        return false;
+    for (const std::string &e : entries) {
+        const size_t scheme = e.find("://");
+        const bool uri = scheme != std::string::npos && scheme > 0 &&
+                         e.find_first_of(" \t") > scheme;   // no space in the scheme
+        if (!uri && e[0] != '/')
+            return false;
+    }
+    return true;
+}
+
+/* A file in a temp folder (an attachment a mail program wrote out to put
+ * on the clipboard): gone when that program quits, so not to be linked */
+bool temp_path(const std::string &path) {
+    std::vector<std::string> roots = {"/tmp/", "/var/tmp/"};
+    if (const char *t = std::getenv("TMPDIR"))
+        if (*t)
+            roots.push_back(std::string(t) + (t[std::strlen(t) - 1] == '/' ? "" : "/"));
+    std::error_code ec;
+    const std::string sys = std::filesystem::temp_directory_path(ec).string();
+    if (!ec && !sys.empty())
+        roots.push_back(sys.back() == '/' ? sys : sys + "/");
+    for (const std::string &r : roots)
+        if (path.compare(0, r.size(), r) == 0)
+            return true;
+    return false;
+}
+
+} // namespace
+
+bool ComposerView::clipboard_has_files_or_picture() const {
+    if (editing())
+        return false;
+    for (const std::string &t : clipboard_types_cached())
+        if (file_list_type(t) || picture_type(t))
+            return true;
+    return false;
+}
+
+bool ComposerView::paste_picture_bytes(std::string bytes, const std::string &name, const Point *at,
+                                       std::string *error) {
+    if (!check_active_layer())
+        return false;
+    if (!m_images) {
+        if (error) *error = "pictures aren't available";
+        return false;
+    }
+    const uint32_t id = m_images->take_id();
+    const uint64_t hash = image_bytes_hash((const uint8_t *) bytes.data(), bytes.size());
+    const size_t size = bytes.size();
+    ImageMetadata meta;
+    std::string err;
+    if (!m_images->add(id, std::vector<uint8_t>(bytes.begin(), bytes.end()), &meta, &err)) {
+        if (error) *error = err.empty() ? std::string("couldn't read the picture") : err;
+        return false;
+    }
+    ImageAsset asset;
+    asset.id = id;
+    asset.name = name;
+    asset.meta = meta;
+    asset.source_size = size;
+    asset.hash = hash;
+    push_undo();
+    m_doc.add_image(std::move(asset));
+    place_frame(id, meta, m_page, at);
+    m_item_paste = false;
+    if (on_document_change)
+        on_document_change();
+    return true;
+}
+
 bool ComposerView::clipboard_has_text() const {
     if (editing())
         return false;
@@ -4554,7 +4687,7 @@ bool ComposerView::can_paste() const {
     }
     if (!m_clip.items.empty())
         return true;
-    return clipboard_has_text();
+    return clipboard_has_text() || clipboard_has_files_or_picture();
 }
 
 void ComposerView::select_all() {
@@ -4791,6 +4924,77 @@ void ComposerView::edit_paste(const Point *at, PasteAs how) {
     const bool own_items = how == PasteAs::Normal && m_item_paste && !m_clip.items.empty() &&
                            now == m_cb_at_copy;
     const bool as_text = how == PasteAs::Text;
+    if (!own_items && how == PasteAs::Normal && win) {
+        /* Files copied in a file manager come first: placed linked, as a
+         * drop places them, so the pictures keep their files and quality.
+         * A picture in a temp folder (a mail program's attachment) would
+         * go when that program quits: it is embedded instead. */
+        auto place_paths = [&](const std::vector<std::string> &paths) {
+            std::vector<std::string> linked;
+            for (const std::string &path : paths) {
+                std::string ext = nanogui::fs::extension(path);
+                if (!ext.empty() && ext[0] == '.')
+                    ext.erase(0, 1);
+                for (char &c : ext)
+                    c = (char) std::tolower((unsigned char) c);
+                std::vector<uint8_t> bytes;
+                std::string err;
+                if (temp_path(path) && image_extension_supported(ext) &&
+                    read_file(path, &bytes, &err)) {
+                    if (!paste_picture_bytes(std::string(bytes.begin(), bytes.end()),
+                                             nanogui::fs::filename(path), at, &err) &&
+                        !err.empty() && on_note)
+                        on_note("the pasted picture couldn't be read: " + err);
+                    continue;
+                }
+                linked.push_back(path);
+            }
+            if (!linked.empty() && on_paste_files)
+                on_paste_files(linked, m_page, at);
+            m_item_paste = false;
+        };
+        const std::vector<std::string> types = nanogui::clipboard_types(win, 300);
+        for (const std::string &t : types) {
+            if (!file_list_type(t))
+                continue;
+            size_t skipped = 0;
+            const std::vector<std::string> paths =
+                placeable_paths(nanogui::read_clipboard_type(win, t), &skipped);
+            if (paths.empty())
+                continue;
+            place_paths(paths);
+            if (skipped && on_note)
+                on_note(std::to_string(skipped) + (skipped == 1 ? " file isn't" : " files aren't") +
+                        " a picture or graphic pagemade can place");
+            return;
+        }
+        /* A picture as bytes (a screenshot, Copy Image): embedded. An SVG
+         * outranks it; drawing programs offer a PNG of the same thing. */
+        if (!is_svg)
+            for (const PictureType &pt : kPictureTypes) {
+                if (std::find(types.begin(), types.end(), pt.mime) == types.end())
+                    continue;
+                std::string bytes = nanogui::read_clipboard_type(win, pt.mime);
+                if (bytes.empty())
+                    continue;
+                std::string err;
+                if (!paste_picture_bytes(std::move(bytes), pt.name, at, &err)) {
+                    if (!err.empty() && on_note)
+                        on_note("the pasted picture couldn't be read: " + err);
+                }
+                return;
+            }
+        /* Text that is only file URLs or paths, from programs that copy a
+         * file as its location: placed as the files, when they all are */
+        if (!is_svg && text_looks_like_file_list(now)) {
+            size_t skipped = 0;
+            const std::vector<std::string> paths = placeable_paths(now, &skipped);
+            if (!paths.empty() && skipped == 0) {
+                place_paths(paths);
+                return;
+            }
+        }
+    }
     if (!own_items && !is_svg) {
         if (now.empty()) {
             /* Nothing read. With nothing on the clipboard at all, Paste
@@ -6376,6 +6580,7 @@ bool ComposerView::keyboard_event(int key, int, int action, int modifiers) {
         if (action == GLFW_PRESS) {
             if (key == GLFW_KEY_C) edit_copy();
             else if (key == GLFW_KEY_X) edit_cut();
+            else if (modifiers & GLFW_MOD_ALT) replace_with_paste();   // Paste Into, as InDesign
             else edit_paste(nullptr, (modifiers & GLFW_MOD_SHIFT) ? PasteAs::Text : PasteAs::Normal);
         }
         return true;
@@ -7375,6 +7580,302 @@ void ComposerView::refill_frame(ItemId frame, uint32_t asset, const ImageMetadat
     para.runs.clear();
     para.runs.push_back(Run{look, caption_name(asset)});
     recompose();
+}
+
+/* ---- Replace with Paste ------------------------------------------------ */
+
+ItemId ComposerView::replace_paste_target() const {
+    if (editing())
+        return 0;
+    ItemId found = 0;
+    for (ItemId id : m_sel) {
+        const Item *it = m_doc.find_item(id);
+        if (!it || !(it->image() || it->vector()))
+            continue;                    // a caption grouped with it, say
+        if (found)
+            return 0;                    // two graphics: which one?
+        if (!frame_fillable(*it))
+            return 0;
+        found = id;
+    }
+    return found;
+}
+
+bool ComposerView::can_replace_with_paste() const {
+    if (!replace_paste_target())
+        return false;
+    for (const Item &it : m_clip.items)
+        if (m_item_paste && (it.image() || it.vector()))
+            return true;
+    for (const std::string &t : clipboard_types_cached())
+        if (file_list_type(t) || picture_type(t) || svg_type(t))
+            return true;
+    return false;
+}
+
+void ComposerView::refill_with_picture(ItemId target, uint32_t asset, const ImageMetadata &meta) {
+    Item *it = m_doc.find_item(target);
+    if (!it)
+        return;
+    if (const PlacedVector *pv = it->vector()) {
+        /* A drawing becomes a frame: same box, border and opacity */
+        PlacedImage im;
+        im.x = pv->x;
+        im.y = pv->y;
+        im.w = pv->w;
+        im.h = pv->h;
+        im.opacity = pv->opacity;
+        im.stroke = pv->stroke;
+        it->content = im;
+    }
+    m_load_failed.erase(asset);
+    m_load_want.erase(asset);
+    refill_frame(target, asset, meta);
+}
+
+void ComposerView::refill_with_drawing(ItemId target, const PlacedVector &pv) {
+    Item *it = m_doc.find_item(target);
+    if (!it)
+        return;
+    PlacedVector out = pv;
+    if (const PlacedImage *im = it->image()) {
+        out.opacity = im->opacity;
+        out.stroke = im->stroke;
+    } else if (const PlacedVector *old = it->vector()) {
+        out.opacity = old->opacity;
+        out.stroke = old->stroke;
+    }
+    /* Inside the box, whole, centered: a drawing is not cropped to fill */
+    const float fw = std::fabs(it->w), fh = std::fabs(it->h);
+    if (pv.w > 0.f && pv.h > 0.f && fw > 0.f && fh > 0.f) {
+        const float k = std::min(fw / pv.w, fh / pv.h);
+        out.w = pv.w * k;
+        out.h = pv.h * k;
+        out.x = (fw - out.w) * 0.5f;
+        out.y = (fh - out.h) * 0.5f;
+    } else {
+        out.x = out.y = 0.f;
+        out.w = fw;
+        out.h = fh;
+    }
+    it->content = out;
+}
+
+void ComposerView::replace_done(ItemId target) {
+    m_sel = with_groups({target});
+    m_edit_story = 0;
+    m_item_paste = false;
+    selection_changed();
+    if (on_document_change)
+        on_document_change();
+    if (screen())
+        screen()->redraw();
+}
+
+bool ComposerView::replace_from_picture_bytes(ItemId target, std::string bytes, const std::string &name) {
+    if (!m_images)
+        return false;
+    const uint32_t id = m_images->take_id();
+    const uint64_t hash = image_bytes_hash((const uint8_t *) bytes.data(), bytes.size());
+    const size_t size = bytes.size();
+    ImageMetadata meta;
+    std::string err;
+    if (!m_images->add(id, std::vector<uint8_t>(bytes.begin(), bytes.end()), &meta, &err)) {
+        if (on_note)
+            on_note("the pasted picture couldn't be read" + (err.empty() ? std::string() : ": " + err));
+        return false;
+    }
+    ImageAsset asset;
+    asset.id = id;
+    asset.name = name;
+    asset.meta = meta;
+    asset.source_size = size;
+    asset.hash = hash;
+    push_undo();
+    override_for_edit(target);
+    m_doc.add_image(std::move(asset));
+    refill_with_picture(target, id, meta);
+    replace_done(target);
+    return true;
+}
+
+bool ComposerView::replace_from_graphic_bytes(ItemId target, std::vector<uint8_t> bytes,
+                                              const std::string &name, const std::string &source,
+                                              bool paste) {
+    size_t page = 0;
+    if (!m_vectors || !m_doc.find_item(target, &page))
+        return false;
+    /* Placed as a paste would place it, then moved into the target: one
+     * undo step, taken back whole if it isn't one graphic */
+    static const char run = 0;
+    set_undo_merge(&run);
+    push_undo();
+    const VectorPlacement placed = place_svg_bytes(m_doc, *m_vectors, std::move(bytes), name, source, page,
+                                                   nullptr, m_images, SvgPaste::Drawing, m_fonts, paste);
+    std::string why;
+    const Item *made = placed.ok && placed.items.size() == 1 ? m_doc.find_item(placed.items.front()) : nullptr;
+    if (!placed.ok)
+        why = placed.error.empty() ? std::string("couldn't read the graphic") : placed.error;
+    else if (!made || !(made->image() || made->vector()))
+        why = "the clipboard holds more than one graphic (paste it, then replace with one piece)";
+    if (!why.empty()) {
+        set_undo_merge(nullptr);
+        revert_run(&run);
+        if (on_note)
+            on_note(why);
+        return false;
+    }
+    const ItemId temp = made->id;
+    if (const PlacedImage *im = made->image()) {
+        const uint32_t asset = im->asset;
+        const ImageAsset *a = m_doc.find_image(asset);
+        const ImageMetadata meta = a ? a->meta : ImageMetadata();
+        m_doc.remove_item(temp);
+        override_for_edit(target);
+        refill_with_picture(target, asset, meta);
+    } else {
+        const PlacedVector pv = *made->vector();
+        m_doc.remove_item(temp);
+        override_for_edit(target);
+        refill_with_drawing(target, pv);
+    }
+    set_undo_merge(nullptr);
+    break_undo_run();
+    if (!placed.note.empty() && on_note)
+        on_note(placed.note);
+    replace_done(target);
+    return true;
+}
+
+void ComposerView::replace_with_paste() {
+    const ItemId target = replace_paste_target();
+    GLFWwindow *win = screen() ? screen()->glfw_window() : nullptr;
+    if (!target) {
+        if (on_note)
+            on_note("select one picture or drawing to replace");
+        return;
+    }
+    if (!win)
+        return;
+    const std::string now = clipboard_now(win);
+    m_cb_cache_time = -1e9;
+    /* A picture or drawing copied here: its asset as it is */
+    if (m_item_paste && !m_clip.items.empty() && now == m_cb_at_copy) {
+        const Item *src = nullptr;
+        for (const Item &it : m_clip.items)
+            if (it.image() || it.vector()) {
+                if (src) {
+                    src = nullptr;       // two: not one to use
+                    break;
+                }
+                src = &it;
+            }
+        if (src && src->image() && src->image()->asset) {
+            const uint32_t asset = src->image()->asset;
+            if (!m_doc.find_image(asset))
+                for (const ImageAsset &a : m_clip.assets)
+                    if (a.id == asset)
+                        m_doc.add_image(a);   // copied from another publication
+            if (const ImageAsset *a = m_doc.find_image(asset)) {
+                const ImageMetadata meta = a->meta;
+                push_undo();
+                override_for_edit(target);
+                refill_with_picture(target, asset, meta);
+                replace_done(target);
+                return;
+            }
+        } else if (src && src->vector() && m_doc.find_vector(src->vector()->asset)) {
+            const PlacedVector pv = *src->vector();
+            push_undo();
+            override_for_edit(target);
+            refill_with_drawing(target, pv);
+            replace_done(target);
+            return;
+        }
+    }
+    const std::vector<std::string> types = nanogui::clipboard_types(win, 300);
+    /* A copied file: the first one that is a picture or a graphic */
+    for (const std::string &t : types) {
+        if (!file_list_type(t))
+            continue;
+        const std::vector<std::string> paths = placeable_paths(nanogui::read_clipboard_type(win, t), nullptr);
+        if (paths.empty())
+            continue;
+        const std::string &path = paths.front();
+        const std::string name = nanogui::fs::filename(path);
+        std::string ext = nanogui::fs::extension(path);
+        if (!ext.empty() && ext[0] == '.')
+            ext.erase(0, 1);
+        for (char &c : ext)
+            c = (char) std::tolower((unsigned char) c);
+        std::vector<uint8_t> bytes;
+        std::string err;
+        if (image_extension_supported(ext)) {
+            if (temp_path(path)) {       // gone when its program quits: embedded
+                if (read_file(path, &bytes, &err))
+                    replace_from_picture_bytes(target, std::string(bytes.begin(), bytes.end()), name);
+                else if (on_note)
+                    on_note("couldn't read " + name + ": " + err);
+                return;
+            }
+            /* Linked, read off the UI thread. A drawing becomes an empty
+             * frame first, in the same undo step. */
+            static const char run = 0;
+            set_undo_merge(&run);
+            if (const Item *it = m_doc.find_item(target); it && it->vector()) {
+                push_undo();
+                override_for_edit(target);
+                Item *w = m_doc.find_item(target);
+                const PlacedVector pv = *w->vector();
+                PlacedImage im;
+                im.x = pv.x;
+                im.y = pv.y;
+                im.w = pv.w;
+                im.h = pv.h;
+                im.opacity = pv.opacity;
+                im.stroke = pv.stroke;
+                w->content = im;
+            }
+            replace_picture_file(target, path, [this, name](const std::string &error) {
+                if (!on_note)
+                    return;
+                on_note(error.empty() ? "replaced with " + name : name + " couldn't be read: " + error);
+            });
+            set_undo_merge(nullptr);
+            break_undo_run();
+            return;
+        }
+        if (!read_file(path, &bytes, &err)) {
+            if (on_note)
+                on_note("couldn't read " + name + ": " + err);
+            return;
+        }
+        replace_from_graphic_bytes(target, std::move(bytes), name, temp_path(path) ? "" : file_uri(path), false);
+        return;
+    }
+    /* An SVG: a drawing, or the one picture it carries */
+    for (const std::string &t : types) {
+        if (!svg_type(t))
+            continue;
+        const std::string svg = nanogui::read_clipboard_type(win, t);
+        if (svg.empty())
+            continue;
+        replace_from_graphic_bytes(target, std::vector<uint8_t>(svg.begin(), svg.end()), "graphic.svg", "",
+                                   true);
+        return;
+    }
+    /* A picture's bytes */
+    for (const PictureType &pt : kPictureTypes) {
+        if (std::find(types.begin(), types.end(), pt.mime) == types.end())
+            continue;
+        std::string bytes = nanogui::read_clipboard_type(win, pt.mime);
+        if (bytes.empty())
+            continue;
+        replace_from_picture_bytes(target, std::move(bytes), pt.name);
+        return;
+    }
+    if (on_note)
+        on_note("the clipboard holds no picture or drawing to replace with");
 }
 
 bool ComposerView::replace_picture(ItemId frame, uint32_t asset) {

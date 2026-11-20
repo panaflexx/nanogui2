@@ -31,6 +31,14 @@ NAMESPACE_BEGIN(nanogui)
 NANOGUI_EXPORT std::vector<std::pair<std::string, std::string>>
 read_clipboard(GLFWwindow *window, int timeout_ms = 3000);
 
+/* The clipboard in one MIME type (or X11 target name), as `clipboard_types`
+ * lists it: `text/uri-list`, `image/png`, ... Empty when it isn't offered
+ * that way, nobody owns the clipboard, or the owner doesn't start answering
+ * within `timeout_ms`. While this application owns the clipboard, the bytes
+ * write_clipboard offered, without a round trip. */
+NANOGUI_EXPORT std::string read_clipboard_type(GLFWwindow *window, const std::string &type,
+                                               int timeout_ms = 3000);
+
 /* The MIME types (and X11 target names) the clipboard offers, without
  * reading any of them: one small round trip, for menus deciding what to
  * enable. Empty when nobody owns the clipboard or the owner doesn't answer

@@ -393,6 +393,23 @@ GLFWAPI RROutput glfwGetX11Monitor(GLFWmonitor* monitor);
  */
 GLFWAPI Window glfwGetX11Window(GLFWwindow* window);
 
+/*! @brief Returns the window that owns this process's selections.
+ *
+ *  nanogui2 addition (not in upstream GLFW). GLFW owns the clipboard and
+ *  primary selection through one hidden helper window. A program reading
+ *  the clipboard compares the selection's owner with this to tell its own
+ *  clipboard from another program's (another GLFW program has a helper
+ *  window of its own, which looks the same).
+ *
+ *  @return The helper window, or `None` if an error occurred.
+ *
+ *  @errors Possible errors include @ref GLFW_NOT_INITIALIZED and @ref
+ *  GLFW_PLATFORM_UNAVAILABLE.
+ *
+ *  @ingroup native
+ */
+GLFWAPI Window glfwGetX11SelectionWindow(void);
+
 /*! @brief Sets the current primary selection to the specified string.
  *
  *  @param[in] string A UTF-8 encoded string.

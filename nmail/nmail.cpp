@@ -2622,7 +2622,12 @@ public:
                 hide_att_popup();
                 nanogui::async([this, att, alive] {
                     if (!*alive) return;
-                    if (copy_attachment_image(glfw_window(), att))
+                    /* Written out as Open writes it, so the clipboard can
+                     * name a file; without one the picture still goes */
+                    std::string path, err;
+                    if (!write_temp_attachment(att, path, err))
+                        path.clear();
+                    if (copy_attachment_image(glfw_window(), att, path))
                         set_status("Copied " + att_display_name(att));
                     else
                         set_status("Couldn't copy the image");

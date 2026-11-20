@@ -124,6 +124,15 @@ AssetStatus asset_status(const struct ImageAsset &asset, const class ImageStore 
 AssetStatus asset_status(const struct ImageAsset &asset,
                          const std::shared_ptr<const std::vector<uint8_t>> &loaded);
 
+/* No picture decodes to more pixels than this: 2^28, 1 GiB of RGBA, which
+ * still holds a 40 x 60 in poster at 300 ppi (216 million). A file of a
+ * few megabytes can claim far more; it is refused before anything is
+ * allocated. */
+constexpr int64_t kMaxImagePixels = (int64_t) 1 << 28;
+inline bool image_size_allowed(int64_t w, int64_t h) {
+    return w > 0 && h > 0 && w <= kMaxImagePixels && h <= kMaxImagePixels && w * h <= kMaxImagePixels;
+}
+
 /* Full upright decode: straight RGBA, top row first, width * height * 4. */
 struct DecodedImage {
     ImageMetadata meta;
@@ -286,12 +295,11 @@ private:
 };
 
 /* The Image Assets library: the folders and image files the user added,
- * kept across sessions in $XDG_CONFIG_HOME/pagemade/assets.conf (else
- * ~/.config/pagemade/assets.conf), one path per line. */
+ * kept across sessions in the per-user config directory (assets.conf),
+ * one path per line. See user_config.h. */
 std::string asset_library_config_path();
 /* False when the file is missing or unreadable; `paths` is then empty. */
 bool asset_library_load(std::vector<std::string> &paths, const std::string &config);
 bool asset_library_save(const std::vector<std::string> &paths, const std::string &config);
 
 } // namespace pagemade
-v

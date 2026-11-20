@@ -12,6 +12,7 @@
 #pragma once
 
 #include <string>
+#include <vector>
 
 namespace pagemade {
 
@@ -26,6 +27,21 @@ std::string file_uri(const std::string &path);
 /* The local path of a file: URI (file:/p, file:///p, file://localhost/p);
  * false for other schemes and remote hosts. */
 bool file_path_from_uri(const std::string &uri, std::string &path);
+
+/* The entries of a file list off the clipboard, in order: a text/uri-list
+ * (RFC 2483: one URI a line, '#' comments), GNOME's
+ * x-special/gnome-copied-files (a "copy" or "cut" line, then URIs), or
+ * plain text with one URI or path a line. Blank lines go; nothing is
+ * decoded. */
+std::vector<std::string> uri_list_entries(const std::string &text);
+/* A network URI (smb://host/share/a.jpg, sftp://user@host/x/y.png, ...) as
+ * the path GNOME's gvfs gives it under `gvfs_root` (a mount named like
+ * "smb-share:server=host,share=share" or "sftp:host=host,user=user").
+ * False when no mount there matches, or the file isn't in it. */
+bool gvfs_path_from_uri(const std::string &uri, const std::string &gvfs_root, std::string &path);
+/* A clipboard entry as a local file that exists: a file: URI, an absolute
+ * path, or (on Linux) a network URI through gvfs in /run/user/<uid>/gvfs. */
+bool local_path_from_uri(const std::string &entry, std::string &path);
 
 /* "file:", "http:", ... (a scheme starts with a letter and ends at ':'). */
 bool uri_has_scheme(const std::string &uri);

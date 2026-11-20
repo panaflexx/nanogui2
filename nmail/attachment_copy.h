@@ -14,6 +14,12 @@
  * GIF, BMP and the other formats stb_image reads are rewritten as PNG,
  * because pagemade's picture loader does not take them.
  *
+ * With `file_path` (the attachment written out, as Open writes it) the
+ * clipboard also names that file, as GNOME Files does: a file manager pastes
+ * a copy of it, and text editors get its path. The file lasts while nmail
+ * runs, so a program that would keep a link to it should copy it instead
+ * (pagemade embeds a picture pasted from a temp folder).
+ *
  * The translation unit includes stb_image_write.h (with
  * STB_IMAGE_WRITE_IMPLEMENTATION) before this header, so
  * stbi_write_png_to_func is available. This header does not include it:
@@ -174,21 +180,48 @@ inline std::string att_image_svg(const AttCopyImage &im) {
 
 } // namespace
 
-/* image/svg+xml first, then the picture bytes. pagemade asks for the SVG.
- * An image editor that asks for the picture type gets the bytes. */
-inline bool copy_attachment_image(GLFWwindow *win, const MailAttachment &a) {
+/* "/tmp/a b.jpg" -> "file:///tmp/a%20b.jpg" (RFC 8089) */
+inline std::string att_file_uri(const std::string &path) {
+    static const char hex[] = "0123456789ABCDEF";
+    std::string out = "file://";
+    for (unsigned char c : path) {
+        const bool keep = (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') ||
+                          std::strchr("-._~/!$&'()*+,;=:@", (int) c) != nullptr;
+        if (keep && c != 0) {
+            out += (char) c;
+        } else {
+            out += '%';
+            out += hex[c >> 4];
+            out += hex[c & 15];
+        }
+    }
+    return out;
+}
+
+/* Richest first: the file (as GNOME Files copies one: its copied-files
+ * list and a uri-list), the picture's own bytes, the SVG pagemade read
+ * before it took files, then text (the file's path, else its name). Each
+ * program takes the kind it understands. */
+inline bool copy_attachment_image(GLFWwindow *win, const MailAttachment &a,
+                                  const std::string &file_path = std::string()) {
     if (!win)
         return false;
     AttCopyImage im;
     if (!att_prepare_copy(a, im))
         return false;
-    std::string svg = att_image_svg(im);
-    if (svg.empty())
-        return false;
     std::vector<std::pair<std::string, std::string>> formats;
-    formats.emplace_back("image/svg+xml", std::move(svg));
+    if (!file_path.empty()) {
+        const std::string uri = att_file_uri(file_path);
+        formats.emplace_back("x-special/gnome-copied-files", "copy\n" + uri);
+        formats.emplace_back("text/uri-list", uri + "\r\n");
+    }
     formats.emplace_back(im.mime, std::string(reinterpret_cast<const char *>(im.bytes),
                                               im.size));
+    std::string svg = att_image_svg(im);
+    if (!svg.empty())
+        formats.emplace_back("image/svg+xml", std::move(svg));
+    formats.emplace_back("text/plain;charset=utf-8",
+                         !file_path.empty() ? file_path : att_display_name(a));
     nanogui::write_clipboard(win, formats);
     return true;
 }

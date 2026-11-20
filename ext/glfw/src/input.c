@@ -1593,6 +1593,31 @@ GLFWAPI const GLFWclipboardformat* glfwGetClipboardFormats(int* count)
     return _glfw.clipFormats;
 }
 
+GLFWAPI const char* const* glfwGetClipboardTypes(int* count)
+{
+    assert(count != NULL);
+    *count = 0;
+
+    _GLFW_REQUIRE_INIT_OR_RETURN(NULL);
+    if (!_glfw.platform.getClipboardTypes)
+        return NULL;
+
+    return _glfw.platform.getClipboardTypes(count);
+}
+
+GLFWAPI const void* glfwGetClipboardData(const char* type, size_t* size)
+{
+    assert(type != NULL);
+    assert(size != NULL);
+    *size = 0;
+
+    _GLFW_REQUIRE_INIT_OR_RETURN(NULL);
+    if (!_glfw.platform.getClipboardData)
+        return NULL;
+
+    return _glfw.platform.getClipboardData(type, size);
+}
+
 GLFWAPI const char* glfwGetClipboardString(GLFWwindow* handle)
 {
     _GLFW_REQUIRE_INIT_OR_RETURN(NULL);
