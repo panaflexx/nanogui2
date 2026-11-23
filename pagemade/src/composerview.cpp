@@ -2095,6 +2095,7 @@ bool ComposerView::mouse_button_event(const Vector2i &p, int button, bool down, 
     m_typing_on = false;
     m_drag_start = pt;
     m_gesture_saved = false;             // a new drag, not yet snapshotted
+    m_press_time = glfwGetTime();
     m_drag = Handle::None;
     m_drag_target = 0;
     m_drag_group = 0;
@@ -2230,6 +2231,9 @@ bool ComposerView::mouse_button_event(const Vector2i &p, int button, bool down, 
     return true;
 }
 
+/* How long a press holds before dragging moves the selection, seconds. */
+static constexpr double kMoveDelay = 0.15;
+
 bool ComposerView::mouse_drag_event(const Vector2i &p, const Vector2i &rel, int, int modifiers) {
     if (m_story_mode) {
         if (m_selecting && editing()) {
@@ -2283,6 +2287,11 @@ bool ComposerView::mouse_drag_event(const Vector2i &p, const Vector2i &rel, int,
         return true;
     }
     if (!m_rotating && (m_drag == Handle::None || m_drag == Handle::TopTab))
+        return true;
+    /* A click that wobbles a hair doesn't move what it selects: a move
+     * starts only once the button has been held a moment */
+    if (m_drag == Handle::Move && !m_rotating && !m_gesture_saved &&
+        glfwGetTime() - m_press_time < kMoveDelay)
         return true;
     if (!m_gesture_saved) {
         push_undo();                     // one undo step for the whole drag
@@ -7343,13 +7352,18 @@ std::string image_leaf_name(const std::string &path) {
 /* The space between a picture and its caption, points. */
 static constexpr float kCaptionGap = 4.f;
 
-float ComposerView::caption_depth() const {
-    if (!m_caption_pictures)
-        return 0.f;
+/* A caption's own depth: two lines of the Caption style. */
+float ComposerView::caption_block_height() const {
     float lead = 12.f;
     if (const StyleDef *def = m_doc.find_style("Caption"))
         lead = def->type.leading > 0.f ? def->type.leading : def->type.size * 1.2f;
-    return kCaptionGap + std::ceil(lead * 2.f + 2.f);
+    return std::ceil(lead * 2.f + 2.f);
+}
+
+float ComposerView::caption_depth() const {
+    if (!m_caption_pictures)
+        return 0.f;
+    return kCaptionGap + caption_block_height();
 }
 
 void ComposerView::column_at(size_t page, const float *x, float &col_x, float &col_w) const {
@@ -7403,25 +7417,28 @@ std::string ComposerView::caption_name(uint32_t asset) const {
 }
 
 ItemId ComposerView::add_caption(size_t page, const Item &picture) {
+    if (!m_caption_pictures)
+        return 0;
+    return make_caption(page, picture);
+}
+
+ItemId ComposerView::make_caption(size_t page, const Item &picture) {
     const PlacedImage *im = picture.image();
-    if (!m_caption_pictures || !im || page >= m_doc.pages.size())
+    if (!im || page >= m_doc.pages.size())
         return 0;
     const std::string text = caption_name(im->asset);
     Paragraph para;
     para.style.name = "Caption";
     para.runs.push_back(Run{m_default_type, text});
-    float lead = 12.f;
-    if (const StyleDef *def = m_doc.find_style("Caption")) {
+    if (const StyleDef *def = m_doc.find_style("Caption"))
         pagemade::apply_style(para, *def, m_doc.char_styles);
-        lead = def->type.leading > 0.f ? def->type.leading : def->type.size * 1.2f;
-    }
     para.style.leading_method = m_doc.setup.leading_method;      // the document's default
     Story story;
     story.paragraphs.push_back(std::move(para));
     const StoryId sid = m_doc.add_story(std::move(story));
     /* Two lines deep, the picture's width, just under it (in the
      * picture's own space, so a turned picture's caption turns with it) */
-    return m_doc.add_text_frame(page, sid, picture.w, std::ceil(lead * 2.f + 2.f),
+    return m_doc.add_text_frame(page, sid, picture.w, caption_block_height(),
                                 picture.xf * Transform::translate(0.f, picture.h + kCaptionGap));
 }
 
@@ -7580,6 +7597,102 @@ void ComposerView::refill_frame(ItemId frame, uint32_t asset, const ImageMetadat
     para.runs.clear();
     para.runs.push_back(Run{look, caption_name(asset)});
     recompose();
+}
+
+/* ---- Add Caption ------------------------------------------------------- */
+
+/* The shortest a picture may become to make room for its caption. */
+static constexpr float kMinCaptionedPicture = 18.f;
+
+ItemId ComposerView::add_caption_target() const {
+    if (editing() || m_preview || m_story_mode)
+        return 0;
+    ItemId found = 0;
+    for (ItemId id : m_sel) {
+        const Item *it = m_doc.find_item(id);
+        if (!it)
+            continue;
+        if (!it->image())
+            return 0;                    // a caption already, or something else
+        if (found)
+            return 0;                    // two pictures: which one?
+        found = id;
+    }
+    const Item *it = found ? m_doc.find_item(found) : nullptr;
+    if (!it || !frame_fillable(*it) || caption_of(found) || !(it->w > 0.f) || !(it->h > 0.f))
+        return 0;
+    return found;
+}
+
+bool ComposerView::can_add_caption() const {
+    const Item *it = m_doc.find_item(add_caption_target());
+    return it && it->h - kCaptionGap - caption_block_height() >= kMinCaptionedPicture;
+}
+
+void ComposerView::add_picture_caption() {
+    const ItemId target = add_caption_target();
+    if (!target) {
+        if (on_note)
+            on_note("select one picture without a caption to add one");
+        return;
+    }
+    if (!can_add_caption()) {
+        if (on_note)
+            on_note("the picture is too short to make room for a caption");
+        return;
+    }
+    push_undo();
+    override_for_edit(target);           // a master's picture becomes the page's
+    size_t page = 0;
+    Item *it = m_doc.find_item(target, &page);
+    PlacedImage *im = it ? it->image() : nullptr;
+    if (!im)
+        return;
+    /* The picture gives up the caption's depth at its bottom, so the two
+     * fill the box the picture had */
+    const float depth = kCaptionGap + caption_block_height();
+    const float fw = it->w, oh = it->h, nh = oh - depth;
+    const float tol = 0.01f;
+    const bool covers = im->x <= tol && im->y <= tol && im->x + im->w >= fw - tol &&
+                        im->y + im->h >= oh - tol;
+    if (!im->asset) {
+        im->x = im->y = 0.f;             // an empty frame: just its box
+        im->w = fw;
+        im->h = nh;
+    } else if (covers) {
+        /* Filled (cropped or not): the same scale, still filling, the crop
+         * taken evenly from top and bottom */
+        im->y = std::min(0.f, std::max(nh - im->h, im->y - depth * 0.5f));
+    } else {
+        /* Fitted inside: kept whole, smaller when it no longer fits */
+        const float cx = im->x + im->w * 0.5f;
+        if (im->h > nh) {
+            const float k = nh / im->h;
+            im->w *= k;
+            im->h = nh;
+            im->x = cx - im->w * 0.5f;
+        }
+        im->y = std::min(std::max(0.f, im->y - depth * 0.5f), nh - im->h);
+    }
+    it->h = nh;
+    const LayerId layer = it->layer;
+    const Item picture = *it;
+    const ItemId cap = make_caption(page, picture);
+    if (Item *c = cap ? m_doc.find_item(cap) : nullptr)
+        c->layer = layer;                // with its picture, not the active layer
+    if (cap)
+        m_doc.group_items({target, cap});   // they move as one
+    recompose();
+    m_sel = with_groups({target});
+    m_edit_story = 0;
+    m_item_paste = false;
+    selection_changed();
+    if (on_document_change)
+        on_document_change();
+    if (on_note)
+        on_note("added a caption below the picture");
+    if (screen())
+        screen()->redraw();
 }
 
 /* ---- Replace with Paste ------------------------------------------------ */

@@ -247,6 +247,15 @@ public:
      * Files are linked, as Place links them, except pictures in a temp
      * folder, which are embedded. */
     pagemade::ItemId replace_paste_target() const;
+    /* Add Caption (right-click): the one picture frame selected, without a
+     * caption, gets one below it in the Caption style, two lines deep, the
+     * picture's width, saying its name. The picture gives up that depth at
+     * its bottom, so picture and caption take the box the picture had; a
+     * filled picture keeps its scale and loses as much from top as from
+     * bottom. The two are grouped. One undo step. */
+    pagemade::ItemId add_caption_target() const;
+    bool can_add_caption() const;        // a target tall enough to share
+    void add_picture_caption();
     /* A target, and the clipboard has a picture, drawing or file to give it. */
     bool can_replace_with_paste() const;
     void replace_with_paste();
@@ -1051,6 +1060,10 @@ private:
     /* The depth a new caption takes below its picture (gap included), or 0
      * when captions are off. */
     float caption_depth() const;
+    /* Two lines of the Caption style: a caption block's height. */
+    float caption_block_height() const;
+    /* add_caption, whether or not Caption Placed Pictures is on. */
+    pagemade::ItemId make_caption(size_t page, const pagemade::Item &picture);
     /* A column of `page`: its left edge and width. `x` picks the column it
      * falls in (the nearest one from a gutter or margin); null, the first. */
     void column_at(size_t page, const float *x, float &col_x, float &col_w) const;
@@ -1321,6 +1334,7 @@ private:
     std::vector<TypeRange> m_run_type;
     std::vector<std::pair<size_t, size_t>> m_run_paras;
     bool m_gesture_saved = false;         // drag pushed its snapshot
+    double m_press_time = 0.0;            // when the drag's button went down
     pagemade::Point m_drag_start;         // page point at press
     std::vector<pagemade::Item> m_drag_items;   // the selected items at press
     pagemade::Bounds m_drag_bounds;       // their page bounds at press

@@ -3111,6 +3111,10 @@ public:
                 item("Replace with Paste", FA_PASTE, v->can_replace_with_paste(),
                      {{C | GLFW_MOD_ALT, GLFW_KEY_V}}, [v] { v->replace_with_paste(); });
             }
+            /* A picture without a caption: room made for one below it */
+            if (v->add_caption_target())
+                item("Add Caption", FA_FONT, v->can_add_caption(), {},
+                     [v] { v->add_picture_caption(); });
             if (v->can_reload_pictures()) {
                 section();
                 item("Reload Picture", FA_SYNC_ALT, true, {}, [v] { v->reload_pictures(); });
